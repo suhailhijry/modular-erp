@@ -1,0 +1,76 @@
+use chrono::Utc;
+use serde_json::json;
+
+use crate::event_sourcing::{
+    aggregate::{Aggregate, DomainEvent},
+    event_bus::EventBus,
+    event_store::{EventEnvelope, EventStore, StoreError},
+};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ContextError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+pub struct Context {
+    queue: Vec<EventEnvelope>,
+}
+
+impl Context {
+    pub fn new() -> Self {
+        Self { queue: Vec::new() }
+    }
+
+    pub fn queue_events<A: Aggregate>(
+        &mut self,
+        aggregate_id: &str,
+        version: u64,
+        events: Vec<A::Event>,
+    ) {
+        for (i, event) in events.into_iter().enumerate() {
+            let payload = serde_json::to_value(&event).expect("event cannot be serialized.");
+            let event_name = event.event_name();
+            self.queue.push(EventEnvelope {
+                id: 0,
+                aggregate_domain: A::domain_name(),
+                aggregate_id: aggregate_id.to_string(),
+                sequence: version + i as u64,
+                event_name,
+                payload,
+                metadata: json!({}),
+                created_at: Utc::now(),
+                published_at: None,
+            });
+        }
+    }
+
+    pub fn discard(&mut self) {
+        self.queue.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub async fn commit(
+        mut self,
+        store: &dyn EventStore,
+        bus: &dyn EventBus,
+    ) -> Result<(), ContextError> {
+        if self.queue.is_empty() {
+            return Ok(());
+        }
+
+        store.save_events(&mut self.queue).await?;
+
+        for envelope in self.queue.drain(..) {
+            bus.publish(envelope).await?;
+        }
+
+        Ok(())
+    }
+}
