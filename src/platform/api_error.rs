@@ -13,6 +13,8 @@ pub enum ApiError {
     Domain(Box<dyn DomainError>),
     Conflict,   // StoreError::Conflict after retries exhausted
     Overloaded, // command queue is full
+    NotFound(Option<String>),
+    BadRequest(Option<String>),
     Internal(anyhow::Error),
 }
 
@@ -40,6 +42,14 @@ impl IntoResponse for ApiError {
                     "internal error".to_string(),
                 )
             }
+            ApiError::NotFound(message) => (
+                StatusCode::NOT_FOUND,
+                message.unwrap_or_else(|| "not found".to_string()),
+            ),
+            ApiError::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                message.unwrap_or_else(|| "bad request".to_string()),
+            ),
         };
         (status, Json(ErrorBody { error: message })).into_response()
     }

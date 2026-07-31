@@ -114,7 +114,10 @@ pub fn derive_aggregate_meta(input: TokenStream) -> TokenStream {
     let mut seq_field = None;
     for field in fields {
         let fname = field.ident.as_ref().unwrap();
-        let has_id_attr = field.attrs.iter().any(|a| a.path().is_ident("id"));
+        let has_id_attr = field
+            .attrs
+            .iter()
+            .any(|a| a.path().is_ident("aggregate_id"));
         let has_seq_attr = field.attrs.iter().any(|a| a.path().is_ident("version"));
 
         if has_id_attr {

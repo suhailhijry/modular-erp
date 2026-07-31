@@ -44,19 +44,31 @@ impl CommandQueue {
     /// shard_count * per_shard_capacity).
     pub fn new(shard_count: usize, per_shard_capacity: usize) -> Self {
         let shards = (0..shard_count)
-            .map(|_| {
-                let (tx, mut rx) = mpsc::channel::<Job>(per_shard_capacity);
-                tokio::spawn(async move {
-                    // One job at a time, strictly in arrival order, for
-                    // this shard - this IS the per-aggregate
-                    // serialization guarantee.
-                    while let Some(job) = rx.recv().await {
-                        job().await;
-                    }
-                });
-                tx
-            })
-            .collect();
+             .map(|_| {
+                 let (tx, mut rx) = mpsc::channel::<Job>(per_shard_capacity);
+                 tokio::spawn(async move {
+                     // One job at a time, strictly in arrival order, for
+                     // this shard - this IS the per-aggregate
+                     // serialization guarantee.
+                     while let Some(job) = rx.recv().await {
+                         // Each job runs in its OWN task, awaited to
+                         // completion (so ordering is preserved), purely
+                         // for panic isolation: a panicking handler
+                         // poisons only its own JoinHandle. Without this,
+                         // a single panic unwinds the shard worker itself
+                         // and every aggregate hashed to this shard gets
+                         // WorkerGone forever - silently.
+                         let handle = tokio::spawn(job());
+                         if let Err(join_err) = handle.await {
+                             if join_err.is_panic() {
+                                 tracing::error!("command handler panicked - shard continues; the submitter sees WorkerGone for this one job only");
+                             }
+                         }
+                     }
+                 });
+                 tx
+             })
+             .collect();
         Self { shards }
     }
 

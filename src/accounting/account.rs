@@ -2,75 +2,202 @@ use serde::{Deserialize, Serialize};
 
 use crate::event_sourcing::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "account_type", rename_all = "lowercase")]
+pub enum AccountType {
+    Asset,
+    Liability,
+    Equity,
+    Revenue,
+    Expense,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "accounting_side", rename_all = "lowercase")]
+pub enum BalanceSide {
+    Debit,
+    Credit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Statement {
+    BalanceSheet,
+    IncomeStatement,
+}
+
+impl AccountType {
+    pub fn default_normal(self) -> BalanceSide {
+        match self {
+            AccountType::Asset | AccountType::Expense => BalanceSide::Debit,
+            AccountType::Liability | AccountType::Equity | AccountType::Revenue => {
+                BalanceSide::Credit
+            }
+        }
+    }
+
+    pub fn statement(self) -> Statement {
+        match self {
+            AccountType::Asset | AccountType::Liability | AccountType::Equity => {
+                Statement::BalanceSheet
+            }
+            AccountType::Revenue | AccountType::Expense => Statement::IncomeStatement,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, DomainEvent)]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[event(prefix = "account")]
-pub enum AccountEvent {
-    Opened { id: String, owner: String },
-    Deposited { amount: u64 },
-    Withdrawn { amount: u64 },
+pub enum LedgerAccountEvent {
+    Created {
+        code: String,
+        name: String,
+        account_type: AccountType,
+        normal: BalanceSide,
+        parent_code: Option<String>,
+    },
+    Renamed {
+        new_name: String,
+    },
+    Deactivated,
+    Reactivated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, AggregateMeta)]
-#[aggregate(type = "account")]
-pub struct Account {
-    #[aggregate_id]
-    pub id: String,
-    pub owner: String,
-    pub balance: u64,
-    #[version]
+#[aggregate(type = "ledger_account")]
+pub struct LedgerAccount {
+    id: String, // the account "id" IS its chart-of-accounts code, e.g. "1000", "4000.01"
     version: u64,
+
+    name: String,
+    account_type: Option<AccountType>, // None until Created applies
+    normal: Option<BalanceSide>,       // None until Created applies
+    parent_code: Option<String>,
+    active: bool,
+}
+
+impl LedgerAccount {
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn parent_code(&self) -> Option<String> {
+        self.parent_code.clone()
+    }
+
+    pub fn account_type(&self) -> AccountType {
+        self.account_type.expect("account_type set on creation")
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn normal(&self) -> BalanceSide {
+        self.normal.expect("account normal set on creation")
+    }
+
+    pub fn is_contra(&self) -> bool {
+        self.normal() != self.account_type().default_normal()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum LedgerAccountCommand {
+    Create {
+        code: String,
+        name: String,
+        account_type: AccountType,
+        normal: BalanceSide,
+        parent_code: Option<String>,
+    },
+    Rename {
+        new_name: String,
+    },
+    Deactivate,
+    Reactivate,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum AccountError {
-    #[error("account is already open")]
-    AlreadyOpen,
-    #[error("insufficient funds: have {balance}, need {requested}")]
-    InsufficientFunds { balance: u64, requested: u64 },
+pub enum LedgerAccountError {
+    #[error("account {0} already exists")]
+    AlreadyExists(String),
+    #[error("account does not exist")]
+    NotYetCreated,
+    #[error("account is inactive")]
+    Inactive,
+    #[error("account is already active")]
+    AlreadyActive,
 }
 
-impl Aggregate for Account {
-    type Event = AccountEvent;
-    type Command = AccountCommand;
-    type Error = AccountError;
+impl Aggregate for LedgerAccount {
+    type Event = LedgerAccountEvent;
+    type Command = LedgerAccountCommand;
+    type Error = LedgerAccountError;
 
     fn apply(&mut self, event: &Self::Event) {
         match event {
-            AccountEvent::Opened { id, owner } => {
-                self.id = id.clone();
-                self.owner = owner.clone();
+            LedgerAccountEvent::Created {
+                code,
+                name,
+                account_type,
+                normal,
+                parent_code,
+            } => {
+                self.id = code.clone();
+                self.name = name.clone();
+                self.account_type = Some(*account_type);
+                self.normal = Some(*normal);
+                self.parent_code = parent_code.clone();
+                self.active = true;
             }
-            AccountEvent::Deposited { amount } => self.balance += amount,
-            AccountEvent::Withdrawn { amount } => self.balance -= amount,
+            LedgerAccountEvent::Renamed { new_name } => self.name = new_name.clone(),
+            LedgerAccountEvent::Deactivated => self.active = false,
+            LedgerAccountEvent::Reactivated => self.active = true,
         }
         self.version += 1;
     }
 
     fn handle(&self, command: Self::Command) -> Result<Vec<Self::Event>, Self::Error> {
         match command {
-            AccountCommand::Open { id, owner } => {
+            LedgerAccountCommand::Create {
+                code,
+                name,
+                account_type,
+                normal,
+                parent_code,
+            } => {
                 if self.version != 0 {
-                    return Err(AccountError::AlreadyOpen);
+                    return Err(LedgerAccountError::AlreadyExists(code));
                 }
-                Ok(vec![AccountEvent::Opened { id, owner }])
+                Ok(vec![LedgerAccountEvent::Created {
+                    code,
+                    name,
+                    account_type,
+                    normal,
+                    parent_code,
+                }])
             }
-            AccountCommand::Deposit { amount } => Ok(vec![AccountEvent::Deposited { amount }]),
-            AccountCommand::Withdraw { amount } => {
-                if amount > self.balance {
-                    return Err(AccountError::InsufficientFunds {
-                        balance: self.balance,
-                        requested: amount,
-                    });
+            LedgerAccountCommand::Rename { new_name } => {
+                if self.account_type.is_none() {
+                    return Err(LedgerAccountError::NotYetCreated);
                 }
-                Ok(vec![AccountEvent::Withdrawn { amount }])
+                Ok(vec![LedgerAccountEvent::Renamed { new_name }])
+            }
+            LedgerAccountCommand::Deactivate => {
+                if !self.active {
+                    return Err(LedgerAccountError::Inactive);
+                }
+                Ok(vec![LedgerAccountEvent::Deactivated])
+            }
+            LedgerAccountCommand::Reactivate => {
+                if self.active {
+                    return Err(LedgerAccountError::AlreadyActive);
+                }
+                Ok(vec![LedgerAccountEvent::Reactivated])
             }
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum AccountCommand {
-    Open { id: String, owner: String },
-    Deposit { amount: u64 },
-    Withdraw { amount: u64 },
 }

@@ -16,7 +16,7 @@ where
     let result = state
         .queue
         .submit(id, move || async move {
-            handle_command::<A>(store.as_ref(), bus.as_ref(), &id_owned, command).await
+            handle_command::<A>(store.as_ref(), bus, &id_owned, command).await
         })
         .await
         .map_err(|_| ApiError::Overloaded)?;

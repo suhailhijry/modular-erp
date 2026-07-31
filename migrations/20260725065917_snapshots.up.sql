@@ -1,5 +1,5 @@
 CREATE TABLE snapshots (
-    id BIGSERIAL PRIMARY KEY,
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     aggregate_domain TEXT NOT NULL,
     aggregate_id TEXT NOT NULL,
     version BIGINT NOT NULL,

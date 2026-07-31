@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::Utc;
 use serde_json::json;
 
@@ -11,6 +13,9 @@ use crate::event_sourcing::{
 pub enum ContextError {
     #[error(transparent)]
     Store(#[from] StoreError),
+
+    #[error("events persisted but post-commit dispatch failed: {0}")]
+    DispatchFailed(anyhow::Error),
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -36,14 +41,13 @@ impl Context {
             let event_name = event.event_name();
             self.queue.push(EventEnvelope {
                 id: 0,
-                aggregate_domain: A::domain_name(),
+                aggregate_domain: A::domain_name().to_string(),
                 aggregate_id: aggregate_id.to_string(),
                 sequence: version + i as u64,
-                event_name,
+                event_name: event_name.to_string(),
                 payload,
                 metadata: json!({}),
                 created_at: Utc::now(),
-                published_at: None,
             });
         }
     }
@@ -59,7 +63,7 @@ impl Context {
     pub async fn commit(
         mut self,
         store: &dyn EventStore,
-        bus: &dyn EventBus,
+        bus: Option<Arc<dyn EventBus>>,
     ) -> Result<(), ContextError> {
         if self.queue.is_empty() {
             return Ok(());
@@ -68,7 +72,12 @@ impl Context {
         store.save_events(&mut self.queue).await?;
 
         for envelope in self.queue.drain(..) {
-            bus.publish(envelope).await?;
+            if let Some(bus) = bus.clone() {
+                let result = bus.publish(envelope).await;
+                if let Err(e) = result {
+                    return Err(ContextError::DispatchFailed(e));
+                }
+            }
         }
 
         Ok(())

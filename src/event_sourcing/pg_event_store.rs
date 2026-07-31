@@ -1,35 +1,24 @@
-use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
-};
-
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::event_sourcing::{EventEnvelope, EventStore, SnapshotEnvelope, StoreError};
+use crate::event_sourcing::{
+    CheckpointStore, EventEnvelope, EventStore, SnapshotEnvelope, StoreError,
+};
 
 const UNIQUE_VIOLATION: &str = "23505";
 
-fn intern(s: &str) -> &'static str {
-    static CACHE: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = cache.lock().unwrap();
-    if let Some(existing) = map.get(s) {
-        return existing;
-    }
-    let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
-    map.insert(s.to_owned(), leaked);
-    leaked
-}
-
 #[derive(Clone)]
 pub struct PgEventStore {
-    pool: sqlx::PgPool,
+    write_pool: sqlx::PgPool,
+    read_pool: sqlx::PgPool,
 }
 
 impl PgEventStore {
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+    pub fn new(write_pool: sqlx::PgPool, read_pool: sqlx::PgPool) -> Self {
+        Self {
+            write_pool,
+            read_pool,
+        }
     }
 }
 
@@ -40,33 +29,48 @@ impl EventStore for PgEventStore {
         aggregate_domain: &str,
         aggregate_id: &str,
     ) -> Result<Vec<EventEnvelope>, StoreError> {
-        let rows = sqlx::query!(
-            "SELECT id, aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at, published_at
-             FROM events
-             WHERE aggregate_domain = $1 AND aggregate_id = $2
-             ORDER BY sequence ASC",
-             aggregate_domain,
-             aggregate_id,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| StoreError::Other(e.into()))?;
+        const PAGE: i64 = 1000;
 
-        rows.iter()
-            .map(|record| {
-                Ok(EventEnvelope {
+        let mut all = Vec::new();
+        let mut after_seq: i64 = 0;
+        loop {
+            let rows = sqlx::query!(
+                "SELECT id, aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at
+                 FROM events
+                 WHERE aggregate_domain = $1 AND aggregate_id = $2 AND sequence > $3
+                 ORDER BY sequence ASC
+                 LIMIT $4",
+                 aggregate_domain,
+                 aggregate_id,
+                 after_seq,
+                 PAGE,
+            )
+            .fetch_all(&self.write_pool)
+            .await
+            .map_err(|e| StoreError::Other(e.into()))?;
+
+            let page_len = rows.len();
+
+            for record in &rows {
+                let envelope = EventEnvelope {
                     id: record.id as u64,
-                    aggregate_domain: intern(&record.aggregate_domain),
+                    aggregate_domain: record.aggregate_domain.to_string(),
                     aggregate_id: record.aggregate_id.to_string(),
-                    event_name: intern(&record.event_name),
+                    event_name: record.event_name.to_string(),
                     sequence: record.sequence as u64,
                     payload: record.payload.clone(),
                     metadata: record.metadata.clone(),
                     created_at: record.created_at,
-                    published_at: record.published_at,
-                })
-            })
-            .collect()
+                };
+                after_seq = envelope.sequence as i64;
+                all.push(envelope);
+            }
+
+            if page_len < PAGE as usize {
+                break;
+            }
+        }
+        Ok(all)
     }
 
     async fn load_snapshot(
@@ -78,13 +82,13 @@ impl EventStore for PgEventStore {
             aggregate_domain,
             aggregate_id,
         )
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.write_pool)
             .await
             .map_err(|e| StoreError::Other(e.into()))?;
 
         let Some(row) = row else { return Ok(None) };
         Ok(Some(SnapshotEnvelope {
-            aggregate_domain: intern(&row.aggregate_domain),
+            aggregate_domain: row.aggregate_domain,
             aggregate_id: row.aggregate_id,
             version: row.version as u64,
             payload: row.payload,
@@ -97,48 +101,54 @@ impl EventStore for PgEventStore {
             return Ok(());
         }
 
-        // Single transaction: either every envelope in this batch lands,
-        // or none do - this is what makes a saga's multi-aggregate
-        // commit atomic.
+        // Single transaction AND single statement: one multi-row insert
+        // via UNNEST instead of one round-trip per event. RETURNING is
+        // ordered by the input arrays (Postgres UNNEST preserves element
+        // order and INSERT...RETURNING yields rows in insertion order
+        // for a plain VALUES/UNNEST source), so positions map back to
+        // envelopes by index.
         let mut tx = self
-            .pool
+            .write_pool
             .begin()
             .await
             .map_err(|e| StoreError::Other(e.into()))?;
 
-        for event in events.iter_mut() {
-            let result = sqlx::query!(
-                "INSERT INTO events (aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 RETURNING id",
-                 event.aggregate_domain,
-                 event.aggregate_id,
-                 event.sequence as i64,
-                 event.event_name,
-                 event.payload,
-                 event.metadata,
-                 event.created_at,
-            )
-            .fetch_one(&mut *tx)
-            .await;
+        let domains: Vec<String> = events
+            .iter()
+            .map(|e| e.aggregate_domain.to_string())
+            .collect();
+        let ids: Vec<String> = events.iter().map(|e| e.aggregate_id.to_string()).collect();
+        let seqs: Vec<i64> = events.iter().map(|e| e.sequence as i64).collect();
+        let names: Vec<String> = events.iter().map(|e| e.event_name.to_string()).collect();
+        let payloads: Vec<serde_json::Value> = events.iter().map(|e| e.payload.clone()).collect();
+        let metadatas: Vec<serde_json::Value> = events.iter().map(|e| e.metadata.clone()).collect();
+        let created: Vec<chrono::DateTime<chrono::Utc>> =
+            events.iter().map(|e| e.created_at).collect();
 
-            match result {
-                Ok(row) => {
-                    event.id = row.id as u64;
+        let result = sqlx::query!("
+            INSERT INTO events (aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at)
+                         SELECT * FROM UNNEST($1::text[], $2::text[], $3::bigint[], $4::text[], $5::jsonb[], $6::jsonb[], $7::timestamptz[])
+                         RETURNING id
+            ", &domains, &ids, &seqs, &names, &payloads, &metadatas, &created,).fetch_all(&mut *tx).await;
+
+        match result {
+            Ok(rows) => {
+                for (event, row) in events.iter_mut().zip(rows.iter()) {
+                    let position: i64 = row.id;
+                    event.id = position as u64;
                 }
-                Err(sqlx::Error::Database(db_err))
-                    if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) =>
-                {
-                    // Whole transaction is abandoned (tx drops without
-                    // commit below) - nothing partially written.
-                    return Err(StoreError::Conflict {
-                        aggregate_domain: event.aggregate_domain,
-                        aggregate_id: event.aggregate_id.clone(),
-                        sequence: event.sequence,
-                    });
-                }
-                Err(e) => return Err(StoreError::Other(e.into())),
             }
+            Err(sqlx::Error::Database(db_err))
+                if db_err.code().as_deref() == Some(UNIQUE_VIOLATION) =>
+            {
+                let first = &events[0];
+                return Err(StoreError::Conflict {
+                    aggregate_domain: first.aggregate_domain.clone(),
+                    aggregate_id: first.aggregate_id.clone(),
+                    sequence: first.sequence,
+                });
+            }
+            Err(e) => return Err(StoreError::Other(e.into())),
         }
 
         tx.commit().await.map_err(|e| StoreError::Other(e.into()))?;
@@ -157,7 +167,7 @@ impl EventStore for PgEventStore {
             snapshot.version as i64,
             snapshot.payload,
         )
-        .execute(&self.pool)
+        .execute(&self.write_pool)
         .await
         .map_err(|e| StoreError::Other(e.into()))?;
         Ok(())
@@ -170,7 +180,7 @@ impl EventStore for PgEventStore {
         after_sequence: u64,
     ) -> Result<Vec<EventEnvelope>, StoreError> {
         let rows = sqlx::query!(
-            "SELECT id, aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at, published_at
+            "SELECT id, aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at
              FROM events
              WHERE aggregate_domain = $1 AND aggregate_id = $2 AND sequence > $3
              ORDER BY sequence ASC",
@@ -178,7 +188,7 @@ impl EventStore for PgEventStore {
              aggregate_id,
              after_sequence as i64,
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.write_pool)
         .await
         .map_err(|e| StoreError::Other(e.into()))?;
 
@@ -186,14 +196,13 @@ impl EventStore for PgEventStore {
             .map(|record| {
                 Ok(EventEnvelope {
                     id: record.id as u64,
-                    aggregate_domain: intern(&record.aggregate_domain),
+                    aggregate_domain: record.aggregate_domain.to_string(),
                     aggregate_id: record.aggregate_id.to_string(),
-                    event_name: intern(&record.event_name),
+                    event_name: record.event_name.to_string(),
                     sequence: record.sequence as u64,
                     payload: record.payload.clone(),
                     metadata: record.metadata.clone(),
                     created_at: record.created_at,
-                    published_at: record.published_at,
                 })
             })
             .collect()
@@ -205,7 +214,7 @@ impl EventStore for PgEventStore {
         limit: u64,
     ) -> Result<Vec<EventEnvelope>, StoreError> {
         let rows = sqlx::query!(
-            "SELECT id, aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at, published_at
+            "SELECT id, aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at
              FROM events
              WHERE id > $1
              ORDER BY id ASC
@@ -213,7 +222,7 @@ impl EventStore for PgEventStore {
              after_position as i64,
              limit as i64
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
         .await
         .map_err(|e| StoreError::Other(e.into()))?;
 
@@ -221,14 +230,13 @@ impl EventStore for PgEventStore {
             .map(|record| {
                 Ok(EventEnvelope {
                     id: record.id as u64,
-                    aggregate_domain: intern(&record.aggregate_domain),
+                    aggregate_domain: record.aggregate_domain.to_string(),
                     aggregate_id: record.aggregate_id.to_string(),
-                    event_name: intern(&record.event_name),
+                    event_name: record.event_name.to_string(),
                     sequence: record.sequence as u64,
                     payload: record.payload.clone(),
                     metadata: record.metadata.clone(),
                     created_at: record.created_at,
-                    published_at: record.published_at,
                 })
             })
             .collect()
@@ -246,7 +254,7 @@ impl EventStore for PgEventStore {
              ) AS position",
             timestamp,
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&self.read_pool)
         .await
         .map_err(|e| StoreError::Other(e.into()))?;
 
@@ -264,7 +272,7 @@ impl EventStore for PgEventStore {
         limit: u64,
     ) -> Result<Vec<EventEnvelope>, StoreError> {
         let rows = sqlx::query!(
-            "SELECT id, aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at, published_at
+            "SELECT id, aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at
              FROM events
              WHERE aggregate_domain = $1 AND id > $2
              ORDER BY id ASC
@@ -273,7 +281,7 @@ impl EventStore for PgEventStore {
              after_position as i64,
              limit as i64,
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
         .await
         .map_err(|e| StoreError::Other(e.into()))?;
 
@@ -281,62 +289,46 @@ impl EventStore for PgEventStore {
             .map(|record| {
                 Ok(EventEnvelope {
                     id: record.id as u64,
-                    aggregate_domain: intern(&record.aggregate_domain),
+                    aggregate_domain: record.aggregate_domain.to_string(),
                     aggregate_id: record.aggregate_id.to_string(),
-                    event_name: intern(&record.event_name),
+                    event_name: record.event_name.to_string(),
                     sequence: record.sequence as u64,
                     payload: record.payload.clone(),
                     metadata: record.metadata.clone(),
                     created_at: record.created_at,
-                    published_at: record.published_at,
                 })
             })
             .collect()
     }
+}
 
-    async fn load_all_unpublished_events(
-        &self,
-        limit: u64,
-    ) -> Result<Vec<EventEnvelope>, StoreError> {
-        let rows = sqlx::query!(
-            "SELECT id, aggregate_domain, aggregate_id, sequence, event_name, payload, metadata, created_at
-             FROM events
-             WHERE published_at IS NULL
-             ORDER BY id ASC
-             LIMIT $1",
-             limit as i64,
+#[async_trait]
+impl CheckpointStore for PgEventStore {
+    async fn load(&self, projector: &str) -> anyhow::Result<Option<u64>> {
+        let row = sqlx::query!(
+            "SELECT global_position FROM projector_checkpoints WHERE projector = $1",
+            projector,
         )
-        .fetch_all(&self.pool)
+        .fetch_optional(&self.write_pool)
         .await
         .map_err(|e| StoreError::Other(e.into()))?;
 
-        rows.iter()
-            .map(|record| {
-                Ok(EventEnvelope {
-                    id: record.id as u64,
-                    aggregate_domain: intern(&record.aggregate_domain),
-                    aggregate_id: record.aggregate_id.to_string(),
-                    event_name: intern(&record.event_name),
-                    sequence: record.sequence as u64,
-                    payload: record.payload.clone(),
-                    metadata: record.metadata.clone(),
-                    created_at: record.created_at,
-                    published_at: None,
-                })
-            })
-            .collect()
+        Ok(row.map(|v| v.global_position as u64))
     }
 
-    async fn publish_event(&self, sequence: u64) -> Result<(), StoreError> {
+    async fn save(&self, projector: &str, position: u64) -> anyhow::Result<()> {
         sqlx::query!(
-            "UPDATE events SET published_at = now()
-             WHERE id = $1", // never regress a snapshot
-            sequence as i64,
+            "INSERT INTO projector_checkpoints (projector, global_position)
+             VALUES ($1, $2)
+             ON CONFLICT (projector)
+             DO UPDATE SET global_position = EXCLUDED.global_position
+             WHERE projector_checkpoints.global_position < EXCLUDED.global_position", // never regress a snapshot
+            projector,
+            position as i64,
         )
-        .execute(&self.pool)
+        .execute(&self.write_pool)
         .await
         .map_err(|e| StoreError::Other(e.into()))?;
-
         Ok(())
     }
 }

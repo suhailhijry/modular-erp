@@ -1,22 +1,22 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub id: u64,
-    pub aggregate_domain: &'static str,
+    pub aggregate_domain: String,
     pub aggregate_id: String,
     pub sequence: u64,
-    pub event_name: &'static str,
+    pub event_name: String,
     pub payload: serde_json::Value,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
-    pub published_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone)]
 pub struct SnapshotEnvelope {
-    pub aggregate_domain: &'static str,
+    pub aggregate_domain: String,
     pub aggregate_id: String,
     pub version: u64,
     pub payload: serde_json::Value,
@@ -29,7 +29,7 @@ pub enum StoreError {
         "Failed to persist {aggregate_domain}/{aggregate_id}: the last persisted version is higher than the current version {sequence}."
     )]
     Conflict {
-        aggregate_domain: &'static str,
+        aggregate_domain: String,
         aggregate_id: String,
         sequence: u64,
     },
@@ -65,7 +65,7 @@ pub trait EventStore: Send + Sync {
     async fn load_events_by_domain_since(
         &self,
         domain_name: &str,
-        sequence: u64,
+        position: u64,
         limit: u64,
     ) -> Result<Vec<EventEnvelope>, StoreError>;
 
@@ -74,13 +74,6 @@ pub trait EventStore: Send + Sync {
         sequence: u64,
         limit: u64,
     ) -> Result<Vec<EventEnvelope>, StoreError>;
-
-    async fn load_all_unpublished_events(
-        &self,
-        limit: u64,
-    ) -> Result<Vec<EventEnvelope>, StoreError>;
-
-    async fn publish_event(&self, sequence: u64) -> Result<(), StoreError>;
 
     async fn position_at_or_after(&self, timestamp: DateTime<Utc>) -> Result<u64, StoreError>;
 }
