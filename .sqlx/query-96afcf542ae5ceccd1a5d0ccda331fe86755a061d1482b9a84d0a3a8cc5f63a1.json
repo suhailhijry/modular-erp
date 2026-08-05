@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT module_id FROM entitlement\n              WHERE tenant_id = $1 AND disabled_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "module_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "entitlement",
+            "name": "module_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "96afcf542ae5ceccd1a5d0ccda331fe86755a061d1482b9a84d0a3a8cc5f63a1"
+}

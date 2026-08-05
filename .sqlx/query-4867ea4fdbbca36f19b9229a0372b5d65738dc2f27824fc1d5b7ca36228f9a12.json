@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO entitlement (tenant_id, module_id) VALUES ($1, $2)\n             ON CONFLICT (tenant_id, module_id)\n             DO UPDATE SET disabled_at = NULL, enabled_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4867ea4fdbbca36f19b9229a0372b5d65738dc2f27824fc1d5b7ca36228f9a12"
+}

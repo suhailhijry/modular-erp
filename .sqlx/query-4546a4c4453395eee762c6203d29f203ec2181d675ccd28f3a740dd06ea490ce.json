@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tenant SET status = 'active', activated_at = now()\n              WHERE id = $1 AND status = 'provisioning'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4546a4c4453395eee762c6203d29f203ec2181d675ccd28f3a740dd06ea490ce"
+}

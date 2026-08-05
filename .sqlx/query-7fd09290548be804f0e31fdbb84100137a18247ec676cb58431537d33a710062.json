@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE membership SET revoked_at = now()\n              WHERE identity_id = $1\n                AND tenant_id IS NOT DISTINCT FROM $2\n                AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7fd09290548be804f0e31fdbb84100137a18247ec676cb58431537d33a710062"
+}

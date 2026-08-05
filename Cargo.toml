@@ -1,39 +1,86 @@
-[[bin]]
-name = "api"
-path = "src/api/main.rs"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
 
-[[bin]]
-name = "workers"
-path = "src/workers/main.rs"
-
-[package]
-name = "spa"
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
+license = "UNLICENSED"
 
-[dependencies]
-anyhow = "1.0.104"
-async-trait = "0.1.91"
-axum = { version = "0.8.9", features = ["multipart", "http2"] }
-chrono = { version = "0.4.45", features = ["serde"] }
-oxana = "2.0.1"
-reqwest = { version = "0.13.4", features = ["native-tls", "json"] }
-serde = { version = "1.0.229", features = ["derive", "std", "alloc"] }
-serde_json = "1.0.151"
-sqlx = { version = "0.9.0", features = ["chrono", "postgres", "runtime-tokio", "sqlx-postgres", "tls-native-tls", "bigdecimal"] }
-thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = ["full", "tracing"] }
-tracing-subscriber = { version = "0.3.23", features = ["serde", "serde_json", "chrono", "tracing"] }
-uuid = { version = "1.24.0", features = ["serde", "v4", "v5", "v7"] }
-spa-macros = { path = "spa-macros" }
-tracing = "0.1.44"
-rdkafka = { version = "0.39.0", features = ["cmake-build", "tracing"] }
-rand = { version = "0.10.2", features = ["std"] }
-argon2 = { version = "0.5.3", features = ["std"] }
-sha2 = "0.11.0"
-subtle = "2.6.1"
-hex = "0.4.3"
-rand_core = "0.10.1"
-getrandom = { version = "0.4.3", features = ["std", "sys_rng"] }
-redis = { version = "1.5.0", features = ["connection-manager"] }
-tower-http = { version = "0.7.0", features = ["full"] }
+[workspace.dependencies]
+# Internal
+spa-types = { path = "crates/spa-types" }
+spa-testkit = { path = "crates/spa-testkit" }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time & identity
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.24", features = ["serde", "v5", "v7"] }
+
+# Async
+async-trait = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Storage
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-native-tls",
+    "chrono",
+    "uuid",
+    "json",
+    "macros",
+    "migrate",
+] }
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Testing
+proptest = "1"
+
+# `warn` rather than `deny` in the manifest: CI runs `clippy -- -D warnings`, so
+# these still fail the build there, while local iteration stays workable.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Signal-to-noise: these fire constantly on correct code.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+# Law L6 — failures stop, they never degrade. Silent unwrapping in library code
+# is exactly the "log a warning and continue" pattern the prototype died of.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+
+# Correctness lints worth escalating past `warn`.
+float_arithmetic = "deny"        # money is integer minor units, always
+mem_forget = "deny"
+
+[profile.dev]
+# Big win on link time for a workspace this shape.
+debug = 1
+
+[profile.test]
+debug = 1

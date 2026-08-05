@@ -1,0 +1,10 @@
+# `unwrap_used` / `expect_used` are warned workspace-wide to enforce architecture
+# law L6 (failures stop, they never degrade). Tests are the exception: there, a
+# panicking unwrap *is* the failure report, and forcing `?` plumbing through test
+# bodies obscures what is being asserted.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+# Money is integer minor units; nothing here should be approximating.
+allow-comparison-to-zero = false

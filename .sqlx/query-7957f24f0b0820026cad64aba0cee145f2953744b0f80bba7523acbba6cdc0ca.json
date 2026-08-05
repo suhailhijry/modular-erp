@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE identity\n                SET status = 'suspended', suspended_reason = $2, suspended_at = now()\n              WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7957f24f0b0820026cad64aba0cee145f2953744b0f80bba7523acbba6cdc0ca"
+}

@@ -1,0 +1,10 @@
+# Builds never open a database connection.
+#
+# `sqlx::query!` validates against the metadata committed in `.sqlx/` rather than
+# a live server, so a fresh checkout and CI both build with no Postgres running —
+# and a query whose SQL drifts from the committed schema fails the build.
+#
+# Regenerate with `just prepare` after changing a migration, and commit the diff.
+# See docs/DATABASE_SETUP.md.
+[env]
+SQLX_OFFLINE = "true"

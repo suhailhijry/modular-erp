@@ -1,0 +1,30 @@
+[package]
+name = "spa-control"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Control plane: identities, memberships, tenants, entitlements, and the TenantDb handle."
+
+[lints]
+workspace = true
+
+[dependencies]
+spa-types = { workspace = true, features = ["sqlx"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+spa-testkit = { workspace = true }
+spa-types = { workspace = true, features = ["sqlx"] }
+sqlx = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

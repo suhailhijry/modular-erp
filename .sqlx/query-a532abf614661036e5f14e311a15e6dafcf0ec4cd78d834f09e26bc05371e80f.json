@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE entitlement SET disabled_at = now()\n              WHERE tenant_id = $1 AND module_id = $2 AND disabled_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a532abf614661036e5f14e311a15e6dafcf0ec4cd78d834f09e26bc05371e80f"
+}
