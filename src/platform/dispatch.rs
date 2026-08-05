@@ -3,7 +3,12 @@ use crate::{
     platform::{ApiError, AppState, DomainError},
 };
 
-pub async fn dispatch<A>(state: &AppState, id: &str, command: A::Command) -> Result<A, ApiError>
+pub async fn dispatch<A>(
+    state: &AppState,
+    id: &str,
+    command: A::Command,
+    metadata: serde_json::Value,
+) -> Result<A, ApiError>
 where
     A: Aggregate,
     A::Error: DomainError,
@@ -16,7 +21,7 @@ where
     let result = state
         .queue
         .submit(id, move || async move {
-            handle_command::<A>(store.as_ref(), bus, &id_owned, command).await
+            handle_command::<A>(store.as_ref(), bus, &id_owned, command, metadata).await
         })
         .await
         .map_err(|_| ApiError::Overloaded)?;

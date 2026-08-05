@@ -7,6 +7,7 @@ use axum::{
 };
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::{
     accounting::*,
@@ -129,6 +130,7 @@ async fn create_account_handler(
             normal: body.normal,
             parent_code: body.parent_code,
         },
+        json!({}),
     )
     .await?;
     Ok(Json(account.into()))
@@ -145,6 +147,7 @@ async fn rename_handler(
         LedgerAccountCommand::Rename {
             new_name: body.name,
         },
+        json!({}),
     )
     .await?;
     Ok(Json(account.into()))
@@ -154,7 +157,8 @@ async fn deactivate_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<AccountResponse>, ApiError> {
-    let account = dispatch::<LedgerAccount>(&state, &id, LedgerAccountCommand::Deactivate).await?;
+    let account =
+        dispatch::<LedgerAccount>(&state, &id, LedgerAccountCommand::Deactivate, json!({})).await?;
     Ok(Json(account.into()))
 }
 
@@ -162,7 +166,8 @@ async fn reactivate_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<AccountResponse>, ApiError> {
-    let account = dispatch::<LedgerAccount>(&state, &id, LedgerAccountCommand::Reactivate).await?;
+    let account =
+        dispatch::<LedgerAccount>(&state, &id, LedgerAccountCommand::Reactivate, json!({})).await?;
     Ok(Json(account.into()))
 }
 
@@ -1015,7 +1020,7 @@ async fn close_period(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    dispatch::<FiscalPeriod>(&state, &id, FiscalPeriodCommand::Close).await?;
+    dispatch::<FiscalPeriod>(&state, &id, FiscalPeriodCommand::Close, json!({})).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1023,7 +1028,7 @@ async fn reopen_period(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    dispatch::<FiscalPeriod>(&state, &id, FiscalPeriodCommand::Reopen).await?;
+    dispatch::<FiscalPeriod>(&state, &id, FiscalPeriodCommand::Reopen, json!({})).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1031,6 +1036,6 @@ async fn lock_period(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    dispatch::<FiscalPeriod>(&state, &id, FiscalPeriodCommand::Lock).await?;
+    dispatch::<FiscalPeriod>(&state, &id, FiscalPeriodCommand::Lock, json!({})).await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -114,6 +114,7 @@ pub async fn handle_command<A: Aggregate>(
     bus: Option<Arc<dyn EventBus>>,
     id: &str,
     command: A::Command,
+    metadata: serde_json::Value,
 ) -> anyhow::Result<A>
 where
     A::Error: Into<anyhow::Error>,
@@ -131,7 +132,7 @@ where
             aggregate.apply(event);
         }
 
-        let mut ctx = Context::new();
+        let mut ctx = Context::with_metadata(metadata.clone());
         ctx.queue_events::<A>(id, version, events);
 
         match ctx.commit(store, bus.clone()).await {

@@ -15,6 +15,7 @@ use spa::{
     platform::{CommandQueue, app_state::AppState},
 };
 use sqlx::postgres::PgPoolOptions;
+use tower_http::cors::{AllowMethods, AllowOrigin, CorsLayer};
 
 pub struct TracingAlertSink();
 
@@ -112,6 +113,10 @@ async fn main() -> anyhow::Result<()> {
         queue,
     };
 
+    let cors = CorsLayer::new()
+        .allow_methods(AllowMethods::any())
+        .allow_origin(AllowOrigin::any());
+
     // build our application with a route
     let app = Router::new()
         // `GET /` goes to `root`
@@ -119,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
         // `POST /users` goes to `create_user`
         .route("/events", get(events))
         .merge(accounting::http::routes())
+        .layer(cors)
         .with_state(app_state);
 
     // run our app with hyper, listening globally on port 3000

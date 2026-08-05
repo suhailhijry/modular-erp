@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde_json::json;
 
 use crate::event_sourcing::{
     aggregate::{Aggregate, DomainEvent},
@@ -23,11 +22,22 @@ pub enum ContextError {
 
 pub struct Context {
     queue: Vec<EventEnvelope>,
+    metadata: serde_json::Value,
 }
 
 impl Context {
     pub fn new() -> Self {
-        Self { queue: Vec::new() }
+        Self {
+            queue: Vec::new(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    pub fn with_metadata(metadata: serde_json::Value) -> Self {
+        Self {
+            queue: Vec::new(),
+            metadata,
+        }
     }
 
     pub fn queue_events<A: Aggregate>(
@@ -46,7 +56,7 @@ impl Context {
                 sequence: version + i as u64,
                 event_name: event_name.to_string(),
                 payload,
-                metadata: json!({}),
+                metadata: self.metadata.clone(),
                 created_at: Utc::now(),
             });
         }
