@@ -63,9 +63,57 @@ pub(crate) const TEMPLATE_DB_PREFIX: &str = "spa_tmpl_";
 /// the check needs no extra bookkeeping.
 pub(crate) const SWEEP_GRACE_MILLIS: u128 = 60 * 1000;
 
-/// Reads `DATABASE_URL`, falling back to a local default so a fresh checkout can
-/// run tests without configuration.
+/// Where to reach Postgres.
+///
+/// Resolution order, first hit wins:
+///
+/// 1. `DATABASE_URL` already in the environment
+/// 2. `DATABASE_URL` in a `.env` file, searched from the current directory up
+/// 3. `postgres://postgres@localhost/postgres`
+///
+/// Step 2 exists because **cargo does not read `.env`**. Without it, a developer
+/// whose Postgres needs a password gets `password authentication failed` from
+/// `cargo test` even though their `.env` is correct — the test binary simply
+/// never saw it. `sqlx-cli` loads `.env` for the same reason.
+///
+/// Only the host and credentials are used. The harness connects to the
+/// `postgres` maintenance database and creates its own, so the database named in
+/// the URL is irrelevant and is never touched.
 pub fn database_url() -> String {
-    std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres@localhost/postgres".to_owned())
+    // Once per process: `.env` does not change mid-run, and this walks the
+    // filesystem.
+    static FROM_DOTENV: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        return url;
+    }
+
+    let found = FROM_DOTENV.get_or_init(|| {
+        // Searches upward from the current directory, so it works whether cargo
+        // runs a test binary from the workspace root or a crate directory.
+        dotenvy::dotenv().ok();
+        std::env::var("DATABASE_URL").ok()
+    });
+
+    found
+        .clone()
+        .unwrap_or_else(|| "postgres://postgres@localhost/postgres".to_owned())
+}
+
+/// A connection URL with its password replaced, safe to put in an error or a log.
+#[must_use]
+pub fn redacted_url(url: &str) -> String {
+    // postgres://user:secret@host/db  ->  postgres://user:***@host/db
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let Some((credentials, host)) = rest.split_once('@') else {
+        return url.to_owned();
+    };
+    let user = credentials.split(':').next().unwrap_or(credentials);
+    if credentials.contains(':') {
+        format!("{scheme}://{user}:***@{host}")
+    } else {
+        url.to_owned()
+    }
 }

@@ -32,14 +32,50 @@ If `just` isn't installed, the equivalent is in the `prepare` recipe of the
 
 ## Running tests
 
-```sh
+```bash
 cargo test --workspace
 ```
 
-`spa-testkit` needs a reachable Postgres. It reads `DATABASE_URL` for host and
-credentials only — it connects to the `postgres` maintenance database and creates
-its own — so any valid URL on the right server works. Without one it falls back
-to `postgres://postgres@localhost/postgres`.
+That is the whole thing. No environment setup, no manual export.
+
+### Where the connection comes from
+
+`spa-testkit` resolves Postgres in this order, first hit wins:
+
+1. `DATABASE_URL` already in the environment
+2. `DATABASE_URL` in a `.env` file, searched from the current directory upward
+3. `postgres://postgres@localhost/postgres`
+
+Step 2 matters because **cargo does not read `.env`**. Without the harness
+loading it, a correct `.env` still produces `password authentication failed`
+from `cargo test`, because the test binary never saw the variable. `sqlx-cli`
+loads `.env` for the same reason.
+
+Only the host and credentials are used. The harness connects to the `postgres`
+maintenance database and creates its own databases, so whatever database the URL
+names is irrelevant and is never touched.
+
+### If a test cannot connect
+
+The failure names what it tried, where the setting came from, and what Postgres
+said — with the password redacted:
+
+```
+could not connect to Postgres.
+  tried:  postgres://nosuchuser:***@localhost/postgres
+  from:   the DATABASE_URL environment variable
+  error:  password authentication failed for user "nosuchuser"
+```
+
+The `from:` line is the useful one. If it says *the built-in default* while you
+have a `.env`, the file is not on the search path from where cargo was invoked.
+
+### Leftover databases
 
 Test databases accumulate during a run and are swept at the start of the next
-one. See `spa-testkit`'s module docs for why cleanup works that way.
+one — see `spa-testkit`'s module docs for why cleanup works that way. To clear
+everything this project created:
+
+```bash
+just clean-databases
+```

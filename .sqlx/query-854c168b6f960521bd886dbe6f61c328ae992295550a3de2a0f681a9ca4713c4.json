@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH reserved AS (\n            UPDATE event_log_position\n               SET next_position = next_position + array_length($4::text[], 1)\n             WHERE id\n            RETURNING next_position - array_length($4::text[], 1) AS base\n        ),\n        incoming AS (\n            SELECT *\n              FROM UNNEST($4::text[], $5::smallint[], $6::jsonb[])\n                   WITH ORDINALITY AS t(event_name, schema_version, payload, idx)\n        )\n        INSERT INTO event (\n            position, stream_domain, stream_id, sequence,\n            event_name, schema_version, payload, metadata\n        )\n        SELECT r.base + i.idx - 1,\n               $1, $2, $3 + i.idx,\n               i.event_name, i.schema_version, i.payload, $7\n          FROM incoming i CROSS JOIN reserved r\n         ORDER BY i.idx\n        RETURNING position, sequence, recorded_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "position",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "event",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "sequence",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "event",
+            "name": "sequence"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "recorded_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "event",
+            "name": "recorded_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "TextArray",
+        "Int2Array",
+        "JsonbArray",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "854c168b6f960521bd886dbe6f61c328ae992295550a3de2a0f681a9ca4713c4"
+}

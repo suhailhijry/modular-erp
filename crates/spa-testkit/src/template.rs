@@ -213,8 +213,36 @@ fn drop_database_sql(name: &str) -> anyhow::Result<String> {
 
 /// A connection to the maintenance database. `CREATE`/`DROP DATABASE` cannot run
 /// from inside the database being operated on, nor inside a transaction.
+///
+/// This is the first thing every test does, so it is where a misconfigured
+/// environment surfaces. The error says what was tried and what to check,
+/// because "password authentication failed" on its own sends people looking at
+/// Postgres when the actual problem is usually that cargo never saw `.env`.
 async fn admin_connection() -> anyhow::Result<sqlx::PgConnection> {
-    Ok(connect_options()?.database("postgres").connect().await?)
+    let url = database_url();
+    connect_options()?
+        .database("postgres")
+        .connect()
+        .await
+        .map_err(|e| {
+            let source = if std::env::var("DATABASE_URL").is_ok() {
+                "the DATABASE_URL environment variable"
+            } else if std::path::Path::new(".env").exists() || dotenvy::dotenv_override().is_ok() {
+                "a .env file"
+            } else {
+                "the built-in default (no DATABASE_URL set, no .env found)"
+            };
+            anyhow::anyhow!(
+                "could not connect to Postgres.\n  \
+                 tried:  {}\n  \
+                 from:   {source}\n  \
+                 error:  {e}\n\n\
+                 The harness only needs host and credentials — it connects to the \
+                 `postgres` maintenance database and creates its own.\n\
+                 See docs/DATABASE_SETUP.md.",
+                crate::redacted_url(&url),
+            )
+        })
 }
 
 fn now_millis() -> u128 {

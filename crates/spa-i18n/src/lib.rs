@@ -30,6 +30,7 @@
 
 mod catalog;
 mod plural;
+pub mod testing;
 
 pub use catalog::{Catalog, StaticCatalog, Template};
 pub use plural::Plural;

@@ -102,15 +102,45 @@ pub trait Catalog {
 
     /// Renders, falling back through the default locale to the bare code.
     ///
-    /// The fallback chain matters for law L6 — failures stop rather than
-    /// degrading silently. A missing translation is caught by the completeness
-    /// test, so reaching the code here means something is genuinely wrong, and
-    /// showing `access.not_a_member` is diagnosable in a bug report. Showing
-    /// nothing, or an empty string, is not.
+    /// # The deliberate exception to law L6
+    ///
+    /// Everywhere else, failures stop rather than degrade. Here they degrade —
+    /// and warn. Refusing to serve a response because one string is untranslated
+    /// would turn a cosmetic gap into an outage, which is plainly the wrong
+    /// trade: a Saudi user reading one English sentence is inconvenienced, a
+    /// Saudi user reading a 500 is blocked.
+    ///
+    /// The gap is still caught, just earlier: `tests/localization.rs` fails the
+    /// build for any code missing a translation. So the two mechanisms are
+    /// complementary — CI is where a missing string is *found*, this is what
+    /// happens if one ever slips past it. Reaching either fallback emits a
+    /// `warn`, because a silent fallback is how English quietly becomes the
+    /// Arabic experience.
     fn render_or_code(&self, locale: Locale, message: &Message) -> String {
-        self.render(locale, message)
-            .or_else(|| self.render(Locale::DEFAULT, message))
-            .unwrap_or_else(|| message.code.as_str().to_owned())
+        if let Some(rendered) = self.render(locale, message) {
+            return rendered;
+        }
+
+        if locale != Locale::DEFAULT
+            && let Some(rendered) = self.render(Locale::DEFAULT, message)
+        {
+            tracing::warn!(
+                code = %message.code,
+                requested = locale.code(),
+                served = Locale::DEFAULT.code(),
+                "no translation; served the default language instead"
+            );
+            return rendered;
+        }
+
+        // Untranslated in every language. Showing the code is diagnosable in a
+        // bug report; an empty string is not.
+        tracing::error!(
+            code = %message.code,
+            requested = locale.code(),
+            "message has no translation in any language; showing the raw code"
+        );
+        message.code.as_str().to_owned()
     }
 }
 

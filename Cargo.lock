@@ -1255,11 +1255,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "spa-eventlog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "spa-i18n",
+ "spa-testkit",
+ "spa-types",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "spa-i18n"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -1267,6 +1283,7 @@ name = "spa-testkit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dotenvy",
  "sqlx",
  "tokio",
  "tracing",

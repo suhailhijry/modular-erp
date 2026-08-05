@@ -12,18 +12,30 @@ Multi-tenant ERP backend. Rust, Postgres, one database per tenant.
 
 ## Getting started
 
-```sh
-cargo build --workspace     # no database needed — queries are checked offline
-cargo test --workspace      # needs a reachable Postgres
+```bash
+cargo build --workspace
 ```
 
-Tests create and drop their own databases. `DATABASE_URL` supplies only the host
-and credentials; without it, `postgres://postgres@localhost/postgres` is assumed.
+Builds need no database — queries are checked against committed offline data.
 
-```sh
-just check                  # fmt, clippy, tests — what CI runs
-just prepare                # after changing a migration; commit the .sqlx diff
+```bash
+cargo test --workspace
 ```
+
+Tests need a reachable Postgres and nothing else. The harness reads
+`DATABASE_URL` from the environment or from `.env` (cargo does not read `.env`
+itself, so the harness does), falling back to
+`postgres://postgres@localhost/postgres`. It uses only the host and credentials,
+creating and dropping its own databases. If it cannot connect, the error names
+what it tried and where the setting came from — see
+[docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md).
+
+```bash
+just check
+```
+
+fmt, clippy and tests — what CI runs. After changing a migration, `just prepare`
+regenerates the offline query data; commit the `.sqlx/` diff alongside it.
 
 ## Layout
 

@@ -11,6 +11,7 @@ license = "UNLICENSED"
 [workspace.dependencies]
 # Internal
 spa-i18n = { path = "crates/spa-i18n" }
+spa-eventlog = { path = "crates/spa-eventlog" }
 spa-types = { path = "crates/spa-types" }
 spa-testkit = { path = "crates/spa-testkit" }
 

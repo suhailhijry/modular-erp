@@ -6,96 +6,16 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use spa_control::{AccessError, CATALOG, Lane, PoolError, TenantStatus, messages};
-use spa_i18n::{Catalog, Locale, Localize, Message, MessageArg, MessageCode, Template};
+use spa_i18n::{Catalog, Locale, Localize, Message, MessageArg};
 
 /// **The load-bearing test.** Every code, in every language, or the build fails.
 ///
-/// Without this, "we'll translate it later" becomes English leaking into an
-/// Arabic UI, discovered by a customer.
+/// Completeness, plural coverage, non-empty rendering, Arabic-is-actually-Arabic
+/// and code well-formedness, all from the shared audit — so every crate checks
+/// the same things and a new module inherits them.
 #[test]
-fn every_code_is_translated_into_every_language() {
-    let mut missing = Vec::new();
-
-    for code in CATALOG.codes() {
-        for locale in Locale::ALL {
-            if CATALOG.template(locale, code).is_none() {
-                missing.push(format!("{code} has no {} translation", locale.code()));
-            }
-        }
-    }
-
-    assert!(
-        missing.is_empty(),
-        "untranslated messages:\n  {}",
-        missing.join("\n  ")
-    );
-}
-
-/// A plural template must cover every category its own language selects — two
-/// for English, six for Arabic. A gap would silently fall back to `other` and
-/// read as broken grammar to a native speaker.
-#[test]
-fn plural_templates_cover_every_category_their_language_uses() {
-    let mut gaps = Vec::new();
-
-    for code in CATALOG.codes() {
-        for locale in Locale::ALL {
-            let Some(template @ Template::Plural { .. }) = CATALOG.template(locale, code) else {
-                continue;
-            };
-            for category in locale.plural_categories() {
-                if template.variant(*category).is_none() {
-                    gaps.push(format!(
-                        "{code} ({}) is missing {category:?}",
-                        locale.code()
-                    ));
-                }
-            }
-        }
-    }
-
-    assert!(
-        gaps.is_empty(),
-        "incomplete plural templates:\n  {}",
-        gaps.join("\n  ")
-    );
-}
-
-/// Nothing renders as an empty string or as its own code — either would reach a
-/// user as a blank space or as `access.denied`.
-#[test]
-fn every_message_renders_to_real_prose() {
-    for code in CATALOG.codes() {
-        for locale in Locale::ALL {
-            let rendered = CATALOG.render_or_code(locale, &Message::new(code.clone()));
-            assert!(
-                !rendered.trim().is_empty(),
-                "{code} ({}) renders empty",
-                locale.code()
-            );
-            assert_ne!(
-                rendered,
-                code.as_str(),
-                "{code} ({}) fell through to its own code",
-                locale.code()
-            );
-        }
-    }
-}
-
-/// Arabic strings must actually be Arabic. Copy-pasting the English row while
-/// filling in a catalog is the easiest possible mistake, and this catches it.
-#[test]
-fn arabic_translations_are_in_arabic_script() {
-    for code in CATALOG.codes() {
-        let rendered = CATALOG.render_or_code(Locale::Arabic, &Message::new(code.clone()));
-        assert!(
-            rendered
-                .chars()
-                .any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)),
-            "{code} has no Arabic characters in its Arabic translation: {rendered:?}"
-        );
-    }
+fn the_catalog_is_complete() {
+    spa_i18n::testing::assert_complete(&CATALOG);
 }
 
 /// Every error variant maps to a code the catalog knows about. A typo'd code
@@ -247,24 +167,18 @@ fn latin_identifiers_are_isolated_inside_arabic_text() {
     assert!(english.contains("acme-trading-co"));
 }
 
-/// Codes are part of the API contract — integrators branch on them. This test
-/// pins the wire format so a rename is a deliberate, visible change.
+/// Codes are the API contract — integrators branch on them, so a rename is a
+/// breaking change. Shape is checked by the shared audit; these pin the exact
+/// strings so drift is deliberate and visible in a diff.
 #[test]
-fn codes_are_stable_and_well_formed() {
-    for code in CATALOG.codes() {
-        let text = code.as_str();
-        assert!(
-            text.contains('.'),
-            "{text} should be namespaced as `domain.thing`"
-        );
-        assert!(
-            text.bytes()
-                .all(|b| b.is_ascii_lowercase() || b == b'.' || b == b'_'),
-            "{text} should be lowercase with underscores"
-        );
+fn published_codes_have_not_drifted() {
+    for (code, expected) in [
+        (&messages::ACCESS_DENIED, "access.denied"),
+        (&messages::OVERLOADED, "system.overloaded"),
+        (&messages::INTERNAL, "system.internal_error"),
+        (&messages::TENANT_PROVISIONING, "access.tenant_provisioning"),
+        (&messages::SLUG_TAKEN, "provisioning.slug_taken"),
+    ] {
+        assert_eq!(code.as_str(), expected, "published code changed");
     }
-
-    // A spot-check that these specific strings have not drifted.
-    assert_eq!(messages::ACCESS_DENIED, MessageCode::new("access.denied"));
-    assert_eq!(messages::OVERLOADED, MessageCode::new("system.overloaded"));
 }

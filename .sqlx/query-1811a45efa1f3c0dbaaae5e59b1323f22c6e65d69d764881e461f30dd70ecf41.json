@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM event)                     AS \"event_count!\",\n                  (SELECT COALESCE(max(position), 0) FROM event)   AS \"highest_position!\",\n                  (SELECT next_position FROM event_log_position)   AS \"next_position!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "highest_position!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "next_position!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "1811a45efa1f3c0dbaaae5e59b1323f22c6e65d69d764881e461f30dd70ecf41"
+}

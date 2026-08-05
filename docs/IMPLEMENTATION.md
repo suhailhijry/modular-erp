@@ -96,9 +96,14 @@ exist, because everything after inherits them.
 Replay guarantees are structural. They cannot be added later without rewriting
 every projection, so they land before the first projection exists.
 
-- [ ] Gapless append with per-tenant `pg_advisory_xact_lock` (L1)
-- [ ] Concurrent-append test asserting contiguity and commit order
-- [ ] `Envelope`, `StreamId`, aggregate load/append
+- [x] Gapless append — **a counter row, not an advisory lock** (see notes)
+- [x] Concurrent-append test asserting contiguity and commit order
+- [x] A test proving the naive implementation *does* lose events, so the one
+      above cannot pass vacuously
+- [x] Append-only enforced by trigger; `integrity()` for the continuous check
+- [x] `Envelope`, `Metadata` with `config_version` (L5), optimistic concurrency
+- [x] Reads: `read_since` (tailer), `read_stream`/`read_stream_since` (rebuild)
+- [ ] Aggregate load/append helpers *(2b)*
 - [ ] Projection groups, one Postgres schema each, `search_path` isolation (L3)
 - [ ] `ProjectionCtx` — no clock, no RNG, no pool (L2)
 - [ ] Checkpoint-in-transaction with `FOR UPDATE` leases (L4)
@@ -199,6 +204,35 @@ deploy.
 ---
 
 ## Running notes
+
+- **`cargo test` did not work from a clean checkout.** Cargo does not read
+  `.env`, so a developer whose Postgres requires a password got
+  `password authentication failed` even with a correct `.env` — the test binary
+  never saw the variable. I had been masking this by exporting `.env` manually in
+  every command, which is exactly how a setup bug survives to the first new
+  contributor. `spa-testkit` now loads `.env` itself, and a connection failure
+  reports what it tried, where the setting came from, and the password redacted.
+
+- **L1 needs a counter row, not an advisory lock.** The architecture said
+  `pg_advisory_xact_lock` per tenant. Two corrections: database-per-tenant means
+  the log is already tenant-scoped, so there is nothing to key a lock on; and an
+  advisory lock over a sequence gives commit *ordering* but not gaplessness,
+  because a rolled-back transaction burns its number. A counter row updated with
+  `UPDATE ... RETURNING` gives both — the row lock serializes, and the counter is
+  transactional so a rollback returns the position. That turns the contiguity
+  check from a warning into a real integrity assertion.
+
+- **Localization completeness is now a shared audit.** `spa_i18n::testing::audit`
+  checks translation coverage, plural categories per language, non-empty
+  rendering, Arabic-actually-in-Arabic, and code shape. Each crate's test is one
+  line, and when `Module` gains `messages()` the registry can run it across every
+  module — which is what makes it impossible to ship a module without
+  translations.
+
+- **Missing translations warn and fall back; they do not fail the request.** The
+  deliberate exception to L6: a Saudi user reading one English sentence is
+  inconvenienced, one reading a 500 is blocked. CI is where a missing string is
+  found; the runtime fallback is what happens if one slips past.
 
 Decisions taken during implementation that amend the architecture are recorded
 here and folded back into ARCHITECTURE.md.
