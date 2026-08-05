@@ -1244,6 +1244,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "spa-i18n",
  "spa-testkit",
  "spa-types",
  "sqlx",
@@ -1251,6 +1252,14 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "spa-i18n"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

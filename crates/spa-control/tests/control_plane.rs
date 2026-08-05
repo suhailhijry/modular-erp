@@ -9,7 +9,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use spa_control::{
-    Actor, ClusterRegistry, ControlPlane, PoolConfig, Scope, TenantPools, TenantStatus,
+    Actor, ClusterRegistry, ControlPlane, Lane, PoolConfig, Scope, TenantPools, TenantStatus,
 };
 use spa_testkit::{Schema, Template};
 use spa_types::{IdentityId, ModuleId, TenantId};
@@ -48,8 +48,22 @@ impl Fixture {
             .with_url("primary", &spa_testkit::database_url())
             .expect("the test database URL parses");
 
+        let control = ControlPlane::new(db.pool().clone(), TenantPools::new(clusters, config));
+        // Tenants are now foreign-keyed to a cluster, so one has to exist.
+        control
+            .register_cluster(
+                "primary",
+                "SPA_CLUSTER_PRIMARY_URL",
+                None,
+                10_000,
+                10_000,
+                Actor::system(),
+            )
+            .await
+            .expect("cluster registers");
+
         Self {
-            control: ControlPlane::new(db.pool().clone(), TenantPools::new(clusters, config)),
+            control,
             _db: db,
             tenant_databases: Vec::new(),
         }
@@ -60,7 +74,7 @@ impl Fixture {
     async fn provision(&mut self, slug: &str) -> TenantId {
         let tenant = self
             .control
-            .register_tenant(slug, slug, "primary", Actor::system())
+            .register_tenant_on(slug, slug, "primary", Actor::system())
             .await
             .expect("tenant registers");
 
@@ -111,31 +125,31 @@ async fn entering_one_tenant_cannot_reach_another() {
     // Each writes into what it believes is its own database.
     let acme_db = fixture
         .control
-        .enter(acme_user, acme)
+        .enter(acme_user, acme, Lane::Interactive)
         .await
         .expect("enters");
     sqlx::query("INSERT INTO marker (whose) VALUES ('acme')")
-        .execute(acme_db.pool())
+        .execute(&mut *acme_db.acquire().await.expect("within budget"))
         .await
         .expect("writes");
 
     let globex_db = fixture
         .control
-        .enter(globex_user, globex)
+        .enter(globex_user, globex, Lane::Interactive)
         .await
         .expect("enters");
     sqlx::query("INSERT INTO marker (whose) VALUES ('globex')")
-        .execute(globex_db.pool())
+        .execute(&mut *globex_db.acquire().await.expect("within budget"))
         .await
         .expect("writes");
 
     // Neither sees the other. Not filtered out — absent.
     let in_acme: Vec<String> = sqlx::query_scalar("SELECT whose FROM marker")
-        .fetch_all(acme_db.pool())
+        .fetch_all(&mut *acme_db.acquire().await.expect("within budget"))
         .await
         .expect("reads");
     let in_globex: Vec<String> = sqlx::query_scalar("SELECT whose FROM marker")
-        .fetch_all(globex_db.pool())
+        .fetch_all(&mut *globex_db.acquire().await.expect("within budget"))
         .await
         .expect("reads");
 
@@ -161,11 +175,14 @@ async fn membership_does_not_carry_across_tenants() {
 
     fixture
         .control
-        .enter(acme_user, acme)
+        .enter(acme_user, acme, Lane::Interactive)
         .await
         .expect("their own tenant opens");
 
-    let refused = fixture.control.enter(acme_user, globex).await;
+    let refused = fixture
+        .control
+        .enter(acme_user, globex, Lane::Interactive)
+        .await;
     assert!(
         matches!(refused, Err(spa_control::AccessError::NotAMember)),
         "a member of one tenant must not enter another, got {refused:?}"
@@ -180,7 +197,11 @@ async fn a_revoked_membership_stops_working_immediately() {
     let tenant = fixture.provision("acme").await;
     let user = fixture.member_of(tenant).await;
 
-    fixture.control.enter(user, tenant).await.expect("opens");
+    fixture
+        .control
+        .enter(user, tenant, Lane::Interactive)
+        .await
+        .expect("opens");
 
     fixture
         .control
@@ -189,7 +210,7 @@ async fn a_revoked_membership_stops_working_immediately() {
         .expect("revokes");
 
     assert!(matches!(
-        fixture.control.enter(user, tenant).await,
+        fixture.control.enter(user, tenant, Lane::Interactive).await,
         Err(spa_control::AccessError::NotAMember)
     ));
 
@@ -202,7 +223,11 @@ async fn a_suspended_identity_cannot_enter_anywhere() {
     let tenant = fixture.provision("acme").await;
     let user = fixture.member_of(tenant).await;
 
-    fixture.control.enter(user, tenant).await.expect("opens");
+    fixture
+        .control
+        .enter(user, tenant, Lane::Interactive)
+        .await
+        .expect("opens");
 
     fixture
         .control
@@ -211,7 +236,7 @@ async fn a_suspended_identity_cannot_enter_anywhere() {
         .expect("suspends");
 
     assert!(matches!(
-        fixture.control.enter(user, tenant).await,
+        fixture.control.enter(user, tenant, Lane::Interactive).await,
         Err(spa_control::AccessError::IdentitySuspended)
     ));
 
@@ -226,7 +251,7 @@ async fn a_tenant_still_provisioning_cannot_be_entered() {
 
     let tenant = fixture
         .control
-        .register_tenant("acme", "Acme", "primary", Actor::system())
+        .register_tenant_on("acme", "Acme", "primary", Actor::system())
         .await
         .expect("registers");
     assert_eq!(tenant.status, TenantStatus::Provisioning);
@@ -247,7 +272,10 @@ async fn a_tenant_still_provisioning_cannot_be_entered() {
         .await
         .expect("grants");
 
-    let refused = fixture.control.enter(identity.id, tenant.id).await;
+    let refused = fixture
+        .control
+        .enter(identity.id, tenant.id, Lane::Interactive)
+        .await;
     assert!(
         matches!(
             refused,
@@ -377,7 +405,11 @@ async fn modules_toggle_and_the_handle_reports_them() {
         .await
         .expect("enabling twice is idempotent");
 
-    let db = fixture.control.enter(user, tenant).await.expect("opens");
+    let db = fixture
+        .control
+        .enter(user, tenant, Lane::Interactive)
+        .await
+        .expect("opens");
     assert!(db.has_module(&ledger));
     assert!(db.has_module(&invoicing));
     assert_eq!(db.modules().len(), 2);
@@ -389,7 +421,11 @@ async fn modules_toggle_and_the_handle_reports_them() {
         .await
         .expect("disables");
 
-    let db = fixture.control.enter(user, tenant).await.expect("opens");
+    let db = fixture
+        .control
+        .enter(user, tenant, Lane::Interactive)
+        .await
+        .expect("opens");
     assert!(db.has_module(&ledger));
     assert!(
         !db.has_module(&invoicing),
@@ -443,12 +479,16 @@ async fn tenants_for_identity_lists_only_live_memberships() {
     fixture.cleanup().await;
 }
 
-/// The connection budget is what makes database-per-tenant survivable, so its
-/// behaviour under exhaustion is asserted rather than assumed.
+/// Holding a handle must cost nothing.
+///
+/// This is the property that makes the design scale to client-facing load: with
+/// permits scoped to the request, 10,000 req/s would need ~400 connections; with
+/// permits scoped to the query, ~120. If this test ever fails, that arithmetic
+/// has silently reverted.
 #[tokio::test]
-async fn exhausting_the_connection_budget_refuses_rather_than_queues() {
+async fn holding_a_handle_costs_no_budget() {
     let mut fixture = Fixture::with_config(PoolConfig {
-        max_concurrent_operations: 1,
+        interactive_operations: 2,
         ..PoolConfig::default()
     })
     .await;
@@ -456,32 +496,260 @@ async fn exhausting_the_connection_budget_refuses_rather_than_queues() {
     let tenant = fixture.provision("acme").await;
     let user = fixture.member_of(tenant).await;
 
-    let held = fixture.control.enter(user, tenant).await.expect("opens");
-    assert_eq!(fixture.control.tenants().available_budget(), 0);
-
-    let refused = fixture.control.enter(user, tenant).await;
-    assert!(
-        matches!(
-            refused,
-            Err(spa_control::AccessError::Pool(
-                spa_control::PoolError::Overloaded
-            ))
-        ),
-        "over budget must fail fast, got {refused:?}"
+    let mut handles = Vec::new();
+    for _ in 0..20 {
+        handles.push(
+            fixture
+                .control
+                .enter(user, tenant, Lane::Interactive)
+                .await
+                .expect("entering is free"),
+        );
+    }
+    assert_eq!(
+        fixture.control.tenants().available(Lane::Interactive),
+        2,
+        "twenty open handles must not have spent any of a budget of two"
     );
 
-    // Dropping the handle returns the permit — the budget tracks concurrent
-    // work, not tenant count.
-    drop(held);
-    assert_eq!(fixture.control.tenants().available_budget(), 1);
-    let reacquired = fixture
-        .control
-        .enter(user, tenant)
-        .await
-        .expect("capacity was returned");
-    assert_eq!(fixture.control.tenants().available_budget(), 0);
+    fixture.cleanup().await;
+}
 
-    drop(reacquired);
+/// Budget is spent per operation, and released when the operation ends.
+#[tokio::test]
+async fn a_query_spends_budget_only_while_it_runs() {
+    let mut fixture = Fixture::with_config(PoolConfig {
+        interactive_operations: 1,
+        ..PoolConfig::default()
+    })
+    .await;
+
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.member_of(tenant).await;
+    let db = fixture
+        .control
+        .enter(user, tenant, Lane::Interactive)
+        .await
+        .expect("opens");
+
+    let conn = db.acquire().await.expect("within budget");
+    assert_eq!(fixture.control.tenants().available(Lane::Interactive), 0);
+
+    let refused = db.acquire().await;
+    assert!(
+        matches!(refused, Err(spa_control::PoolError::Overloaded { .. })),
+        "over budget must fail fast rather than queue, got {refused:?}"
+    );
+
+    drop(conn);
+    assert_eq!(
+        fixture.control.tenants().available(Lane::Interactive),
+        1,
+        "finishing an operation must return its permit"
+    );
+    db.acquire().await.expect("capacity was returned");
+
+    fixture.cleanup().await;
+}
+
+/// Bulkheads: a tenant's customers flooding the booking endpoint must not stop
+/// the employee at the counter from working.
+#[tokio::test]
+async fn client_traffic_cannot_starve_the_counter() {
+    let mut fixture = Fixture::with_config(PoolConfig {
+        client_operations: 2,
+        interactive_operations: 2,
+        ..PoolConfig::default()
+    })
+    .await;
+
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.member_of(tenant).await;
+
+    let client_db = fixture
+        .control
+        .enter(user, tenant, Lane::Client)
+        .await
+        .expect("opens");
+    let counter_db = fixture
+        .control
+        .enter(user, tenant, Lane::Interactive)
+        .await
+        .expect("opens");
+
+    // Saturate the client lane.
+    let mut flood = Vec::new();
+    for _ in 0..2 {
+        flood.push(client_db.acquire().await.expect("within budget"));
+    }
+    assert!(
+        client_db.acquire().await.is_err(),
+        "the client lane should now be exhausted"
+    );
+
+    // The counter is unaffected.
+    let _serving = counter_db
+        .acquire()
+        .await
+        .expect("client saturation must not starve interactive work");
+    assert_eq!(fixture.control.tenants().available(Lane::Interactive), 1);
+
+    fixture.cleanup().await;
+}
+
+/// Transactions hold their permit until they finish, not until the handle drops.
+#[tokio::test]
+async fn a_transaction_holds_its_permit_until_it_commits() {
+    let mut fixture = Fixture::with_config(PoolConfig {
+        interactive_operations: 1,
+        ..PoolConfig::default()
+    })
+    .await;
+
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.member_of(tenant).await;
+    let db = fixture
+        .control
+        .enter(user, tenant, Lane::Interactive)
+        .await
+        .expect("opens");
+
+    let mut tx = db.begin().await.expect("within budget");
+    assert_eq!(fixture.control.tenants().available(Lane::Interactive), 0);
+
+    sqlx::query("INSERT INTO marker (whose) VALUES ('in-transaction')")
+        .execute(&mut *tx)
+        .await
+        .expect("writes");
+    tx.commit().await.expect("commits");
+
+    assert_eq!(
+        fixture.control.tenants().available(Lane::Interactive),
+        1,
+        "committing must return the permit"
+    );
+
+    // And the write landed.
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM marker")
+        .fetch_one(&mut *db.acquire().await.expect("within budget"))
+        .await
+        .expect("reads");
+    assert_eq!(count, 1);
+
+    fixture.cleanup().await;
+}
+
+/// Without a replica, reads go to the primary — so `read()` is always callable
+/// and adding replicas later is configuration, not a code change.
+#[tokio::test]
+async fn reads_fall_back_to_the_primary_when_no_replica_is_configured() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.member_of(tenant).await;
+    let db = fixture
+        .control
+        .enter(user, tenant, Lane::Client)
+        .await
+        .expect("opens");
+
+    assert!(!db.has_replica());
+    let mut conn = db.read().await.expect("read path works without a replica");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM marker")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("reads");
+    assert_eq!(count, 0);
+
+    fixture.cleanup().await;
+}
+
+/// The entry path must not query the control database on every request — at
+/// 10,000 req/s that would be 40,000 queries/second against a single database.
+#[tokio::test]
+async fn entering_repeatedly_does_not_hammer_the_control_database() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.member_of(tenant).await;
+
+    // Warm the cache, then count what a further 200 entries cost.
+    fixture
+        .control
+        .enter(user, tenant, Lane::Client)
+        .await
+        .expect("opens");
+
+    let (_, misses_before) = fixture.control.entry_cache_stats();
+    for _ in 0..200 {
+        fixture
+            .control
+            .enter(user, tenant, Lane::Client)
+            .await
+            .expect("opens");
+    }
+    let (_, misses_after) = fixture.control.entry_cache_stats();
+
+    assert_eq!(
+        misses_after - misses_before,
+        0,
+        "200 warm entries caused {} control-database round trips; the entry path \
+         must be served from cache or the control plane becomes the bottleneck",
+        misses_after - misses_before
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A cold entry costs exactly four lookups — identity, tenant, membership,
+/// entitlements. If that number grows, the arithmetic in `cache`'s docs is
+/// wrong and the TTL needs revisiting.
+#[tokio::test]
+async fn a_cold_entry_costs_four_lookups() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.member_of(tenant).await;
+
+    fixture.control.clear_caches();
+    let (_, before) = fixture.control.entry_cache_stats();
+    fixture
+        .control
+        .enter(user, tenant, Lane::Client)
+        .await
+        .expect("opens");
+    let (_, after) = fixture.control.entry_cache_stats();
+
+    assert_eq!(after - before, 4, "cold entry should cost four lookups");
+
+    fixture.cleanup().await;
+}
+
+/// Revoking access takes effect immediately on the node that performed it,
+/// rather than waiting out the cache TTL.
+#[tokio::test]
+async fn revocation_is_not_delayed_by_the_cache() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.member_of(tenant).await;
+
+    fixture
+        .control
+        .enter(user, tenant, Lane::Client)
+        .await
+        .expect("opens");
+
+    fixture
+        .control
+        .revoke_membership(user, Scope::Tenant(tenant), Actor::system())
+        .await
+        .expect("revokes");
+
+    assert!(
+        matches!(
+            fixture.control.enter(user, tenant, Lane::Client).await,
+            Err(spa_control::AccessError::NotAMember)
+        ),
+        "a revocation on this node must not be masked by its own cache"
+    );
+
     fixture.cleanup().await;
 }
 
@@ -491,7 +759,7 @@ async fn two_tenants_cannot_share_a_database() {
     let fixture = Fixture::new().await;
     let first = fixture
         .control
-        .register_tenant("acme", "Acme", "primary", Actor::system())
+        .register_tenant_on("acme", "Acme", "primary", Actor::system())
         .await
         .expect("registers");
 

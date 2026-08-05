@@ -59,10 +59,35 @@ exist, because everything after inherits them.
 - [x] Two-tenant isolation test: no code path reaches across
 - [x] `cargo test --workspace` green (60 tests), `clippy -- -D warnings` clean,
       `cargo fmt --check` clean
-- [ ] **Soak test at target tenant count and concurrency, before Phase 2 begins.**
-      The connection strategy is the one decision whose failure invalidates work
-      built on top of it. **Blocked:** needs a target tenant count and a
-      concurrency figure to test against — see Running notes.
+- [x] **Soak test** (`spa-control/tests/soak.rs`, run with `--ignored`).
+      Measured: open connections track *active tenants × per-tenant pool*, busy
+      connections track the lane budget, neither tracks request count, entry
+      cache hit rate 99.9%. 22,169 ops/s across 40 tenants with 256 workers.
+- [x] Per-operation connection permits with per-lane bulkheads
+- [x] Entry-path cache (four cold lookups, zero warm)
+- [x] Read-replica seam (`TenantDb::read`, falls back to primary)
+
+### 1g · Localization (D12)
+- [x] `spa-i18n`: `Locale`, `MessageCode`, `MessageArg`, `Message`, `Localize`
+- [x] CLDR plural rules — six categories for Arabic, two for English
+- [x] Bidi isolation of Latin arguments inside RTL text
+- [x] `Accept-Language` negotiation with quality values and regional subtags
+- [x] English + Arabic for every control-plane message
+- [x] Completeness test — a missing translation fails the build (verified by
+      deleting one and watching three tests fail)
+- [x] User-facing messages never leak tenant existence, internal detail, or
+      cluster topology
+
+### 1h · Multi-cluster (D13)
+- [x] `cluster` table; credentials by env-var name, never stored
+- [x] `cluster_load` view — counts from the tenant table, not a drifting counter
+- [x] `ClusterStatus`: available / draining / full / offline
+- [x] `PlacementPolicy`: balanced and packed, deterministic tie-breaking
+- [x] Utilization in integer basis points, max of the two limits
+- [x] `register_tenant` places automatically; `register_tenant_on` pins
+- [x] Foreign key so a tenant cannot be placed on a nonexistent cluster, and a
+      cluster holding tenants cannot be deleted
+- [x] Typed `SlugTaken` — a normal signup outcome, not a database failure
 
 ---
 
@@ -90,27 +115,42 @@ identical by a differ rather than by assertion.
 
 ---
 
-## Phase 3 — Kernel domain and the API contract · 3–4 weeks
+## Phase 3 — Kernel services and the API contract · 3–4 weeks
 
-- [ ] Ledger: accounts, journal entries, fiscal periods
-- [ ] `BalancedLines` as a proof-carrying event payload
-- [ ] Typestate on `JournalEntry` and `FiscalPeriod`
+No business domain here — that is D11. This phase builds what modules are built
+*on*.
+
+- [ ] `Module` trait, registry, and the health-check registry modules contribute to
 - [ ] Capability permits; `Permit<C>` minted only by the authorizer
 - [ ] Tenant-local authorization as a projection, never an aggregate replay (L7)
 - [ ] `spa-config`: declarations, layers, versioned resolution, provenance
+- [ ] Numbering (gapless per-tenant document sequences)
 - [ ] API: problem+json, cursors, `ETag`/`If-Match`, `Idempotency-Key`
 - [ ] OpenAPI generation with CI drift check
-- [ ] Property test: any valid command sequence leaves the ledger balanced
 - [ ] Authorization matrix tests; crash-injection tests
 
-**Exit:** a correct ledger behind an API a third party could integrate against.
+**Exit:** a module can be written, mounted, authorized and called — with nothing
+domain-specific in the kernel.
+
+## Phase 3b — `modules/ledger` · 2–3 weeks
+
+The first real module, and the proof that the module seam works. Built as a
+module from the start rather than extracted from the kernel later.
+
+- [ ] Accounts, journal entries, fiscal periods
+- [ ] `BalancedLines` as a proof-carrying event payload
+- [ ] Typestate on `JournalEntry` and `FiscalPeriod`
+- [ ] Trial-balance invariant contributed to the platform health registry
+- [ ] Property test: any valid command sequence leaves the ledger balanced
+
+**Exit:** a correct ledger behind an API a third party could integrate against —
+and a module a tenant can decline.
 
 ---
 
 ## Phase 4 — Modules, blueprints, provisioning, demo · 4–5 weeks
 
-- [ ] `Module` trait and generated registry
-- [ ] Ledger and one business module ported onto it
+- [ ] A second business module, proving cross-module integration by event
 - [ ] Entitlements → enable/disable durable workflows
 - [ ] `ModuleEnabled<M>` capability tokens
 - [ ] Blueprints: browse → parameterize → materialize → edit → preview → install
@@ -177,8 +217,37 @@ here and folded back into ARCHITECTURE.md.
   Teardown is another ≈140 ms but is off the critical path. Numbers from
   `cargo test -p spa-testkit --test harness cloning_is_fast -- --nocapture`.
 
-- **Open: the Phase 1f soak test needs numbers.** `PoolConfig` currently defaults
-  to 64 concurrent operations and 4 connections per tenant, which are guesses.
-  To size them properly the soak test needs a target tenant count, an expected
-  peak concurrent-request figure, and the cluster's `max_connections`. Until
-  then the defaults are conservative but unvalidated.
+- **The kernel holds no business domain; accounting is a module.** Recorded as
+  D11. The earlier placement confused a universal *invariant* (debits equal
+  credits) with a large *domain* (chart of accounts, statement formats, posting
+  rules, fiscal calendars, multi-GAAP) — and made the most saleable module
+  unremovable. Phase 3 is now kernel services only; the ledger is Phase 3b, built
+  as a module from the start rather than extracted from the kernel later.
+
+- **The connection permit was scoped to the request; it is now scoped to the
+  operation.** Holding a permit across business logic caps *concurrent requests*
+  at the budget, when what needs capping is *concurrent database operations* —
+  ~400 connections at 10k req/s instead of ~120. `TenantDb` now holds only pools;
+  `acquire`/`begin`/`read` take the permit for the duration of the operation.
+
+- **The lane budget does not bound open connections.** The soak test refuted
+  that: with a budget of 32 across 40 tenants, peak open connections was 95. A
+  connection returned to a tenant's pool stays open until the idle timeout, so
+  connections accumulate across every tenant touched in that window. Halving
+  `max_connections_per_tenant` halved the peak; setting it to 1 produced exactly
+  the tenant count. The real rule is
+  `connections_per_cluster ≈ active_tenants × max_connections_per_tenant`, and it
+  means **cluster count is sized by concurrently-active tenants, not by tenant
+  count or request rate**. Defaults changed accordingly (per-tenant 8 → 4, idle
+  timeout 30s → 10s).
+
+- **Throughput rose as the per-tenant pool shrank** — 7.7k → 22.2k ops/s going
+  from 4 connections per tenant to 1 — because connection churn cost more than
+  the extra parallelism bought. A bigger pool is not automatically faster.
+
+- **`enter()` had to be cached before it could serve real load.** Four
+  control-plane queries per request is 40,000 queries/second at 10k req/s against
+  a database that cannot be sharded. A 5-second TTL cache with local invalidation
+  on writes brings that to ~0.1% of requests. The cost is a bounded staleness
+  window on revocation, documented in `cache.rs`; shortening it below a few
+  seconds needs out-of-band invalidation, which is a Phase 3 decision.

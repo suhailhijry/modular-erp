@@ -1,0 +1,98 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT name as \"name!\", status as \"status!\", weight as \"weight!\",\n                      max_active_tenants as \"max_active_tenants!\",\n                      max_databases as \"max_databases!\",\n                      live_tenants as \"live_tenants!\",\n                      active_tenants as \"active_tenants!\"\n                 FROM cluster_load\n                ORDER BY name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cluster_load",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cluster_load",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "weight!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "cluster_load",
+            "name": "weight"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "max_active_tenants!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "cluster_load",
+            "name": "max_active_tenants"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "max_databases!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "cluster_load",
+            "name": "max_databases"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "live_tenants!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "cluster_load",
+            "name": "live_tenants"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "active_tenants!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "cluster_load",
+            "name": "active_tenants"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "96444eeea330f4aceb5da63205af7dc2f916fbb82c69e94c8c4f76f151ecf9ac"
+}

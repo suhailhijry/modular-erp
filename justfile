@@ -31,6 +31,9 @@ prepare:
     DATABASE_URL="{{typecheck_url}}" SQLX_OFFLINE=false cargo sqlx prepare --workspace -- --all-targets
 
 # Drop every database this project creates. Does not touch anything else.
+#
+# Includes `spa_tenant_%`: a soak test that fails an assertion panics before its
+# own cleanup runs, so those leak. Harmless, but they accumulate.
 clean-databases:
-    psql "{{admin_url}}" -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'spa_test_%' OR datname LIKE 'spa_tmpl_%'" \
+    psql "{{admin_url}}" -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'spa_test_%' OR datname LIKE 'spa_tmpl_%' OR datname LIKE 'spa_tenant_%'" \
       | xargs -r -I{} psql "{{admin_url}}" -q -c 'DROP DATABASE IF EXISTS "{}" WITH (FORCE)'

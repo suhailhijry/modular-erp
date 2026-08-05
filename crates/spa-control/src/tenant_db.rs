@@ -1,53 +1,67 @@
 //! The only handle that reaches a tenant's data.
 
+use std::sync::Arc;
+
 use spa_types::{ModuleId, TenantId};
 use sqlx::PgPool;
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::model::EnabledModules;
+use crate::pools::{Conn, Lane, PoolError, TenantPools, Tx};
 
-/// A connection to one tenant's database, plus what is known about that tenant.
+/// A route to one tenant's database, plus what is known about that tenant.
 ///
 /// # Why this type is the security boundary
 ///
 /// There is no public constructor. The only way to obtain a `TenantDb` is
-/// [`ControlPlane::enter`], which checks that the identity is active, the tenant
-/// is enterable, and a live membership joins them. A function that takes
-/// `&TenantDb` has therefore been handed proof that those checks passed.
+/// [`ControlPlane::enter`](crate::ControlPlane::enter), which checks that the
+/// identity is active, the tenant is enterable, and a live membership joins
+/// them. A function taking `&TenantDb` has been handed proof that those checks
+/// passed.
 ///
 /// The consequence worth being explicit about: **there is no ambient pool.** No
 /// `AppState.pool`, no global. A query against the wrong tenant is not prevented
 /// by a `WHERE` clause or a row-level policy — it cannot be written, because no
-/// connection that could serve it is in scope. That is the property
-/// database-per-tenant is bought for.
+/// connection that could serve it is in scope.
 ///
-/// # Lifetime
+/// # Cost
 ///
-/// One handle per unit of work. It carries a budget permit (see
-/// [`TenantPools`](crate::TenantPools)), released on drop, which is what keeps
-/// connection count proportional to concurrency rather than to tenant count.
-/// Holding one across an idle wait is a bug: it spends budget for nothing.
+/// Holding one is free. Budget is spent by [`Self::acquire`], [`Self::begin`]
+/// and [`Self::read`], for exactly as long as the returned guard lives. So a
+/// handle kept across business logic, an HTTP call, or response serialization
+/// costs nothing — which is what keeps connection demand proportional to
+/// concurrent *queries* rather than concurrent *requests*. At 10,000 requests a
+/// second that is the difference between ~120 connections and ~400.
+///
+/// Corollary: **do not hold a `Conn` or `Tx` across an await that isn't
+/// database work.** That is the one way to reintroduce the problem.
 #[derive(Debug)]
 pub struct TenantDb {
     tenant: TenantId,
-    pool: PgPool,
+    write: PgPool,
+    /// `None` when the cluster has no replica; [`Self::read`] then uses the
+    /// primary, so callers need no fallback logic.
+    read: Option<PgPool>,
     modules: EnabledModules,
-    /// Released on drop. Never read — its existence is the point.
-    _budget: OwnedSemaphorePermit,
+    pools: Arc<TenantPools>,
+    lane: Lane,
 }
 
 impl TenantDb {
     pub(crate) const fn new(
         tenant: TenantId,
-        pool: PgPool,
+        write: PgPool,
+        read: Option<PgPool>,
         modules: EnabledModules,
-        budget: OwnedSemaphorePermit,
+        pools: Arc<TenantPools>,
+        lane: Lane,
     ) -> Self {
         Self {
             tenant,
-            pool,
+            write,
+            read,
             modules,
-            _budget: budget,
+            pools,
+            lane,
         }
     }
 
@@ -56,10 +70,10 @@ impl TenantDb {
         self.tenant
     }
 
-    /// This tenant's connection pool, and no other's.
+    /// Which bulkhead this handle's operations draw from.
     #[must_use]
-    pub const fn pool(&self) -> &PgPool {
-        &self.pool
+    pub const fn lane(&self) -> Lane {
+        self.lane
     }
 
     #[must_use]
@@ -69,11 +83,49 @@ impl TenantDb {
 
     /// Whether a module is live for this tenant.
     ///
-    /// Phase 4 replaces most uses of this with a `ModuleEnabled<M>` token, so
-    /// that a disabled module's handlers cannot be constructed rather than
-    /// returning 403 at runtime. Until then this is the check.
+    /// Phase 4 replaces most uses with a `ModuleEnabled<M>` token, so a disabled
+    /// module's handlers cannot be constructed rather than returning 403 at
+    /// runtime. Until then this is the check.
     #[must_use]
     pub fn has_module(&self, module: &ModuleId) -> bool {
         self.modules.contains(module)
+    }
+
+    /// A connection to the primary, holding a budget permit until dropped.
+    pub async fn acquire(&self) -> Result<Conn, PoolError> {
+        let permit = self.pools.permit(self.lane)?;
+        let conn = self.write.acquire().await?;
+        Ok(Conn::new(conn, permit))
+    }
+
+    /// A transaction on the primary, holding a budget permit until it commits
+    /// or rolls back.
+    pub async fn begin(&self) -> Result<Tx, PoolError> {
+        let permit = self.pools.permit(self.lane)?;
+        let tx = self.write.begin().await?;
+        Ok(Tx::new(tx, permit))
+    }
+
+    /// A connection for reads that tolerate replication lag.
+    ///
+    /// Routes to a replica when the cluster has one, and to the primary when it
+    /// does not — so this is always safe to call and adding replicas later is a
+    /// configuration change, not a code change.
+    ///
+    /// **Read-your-writes does not hold here.** Anything that must observe a
+    /// write it just made uses [`Self::acquire`]. The API contract exposes this
+    /// to clients as `?consistent_after=<position>`; see architecture §5.7.
+    pub async fn read(&self) -> Result<Conn, PoolError> {
+        let permit = self.pools.permit(self.lane)?;
+        let pool = self.read.as_ref().unwrap_or(&self.write);
+        let conn = pool.acquire().await?;
+        Ok(Conn::new(conn, permit))
+    }
+
+    /// Whether reads are served by a replica. For telemetry and for tests that
+    /// assert routing.
+    #[must_use]
+    pub const fn has_replica(&self) -> bool {
+        self.read.is_some()
     }
 }

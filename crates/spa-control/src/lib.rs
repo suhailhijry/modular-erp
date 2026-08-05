@@ -22,7 +22,10 @@
 //! log helps with. Provisioning workflows, which genuinely need resumable
 //! state, are event-sourced separately.
 
+mod cache;
+pub mod messages;
 mod model;
+mod placement;
 mod pools;
 mod tenant_db;
 
@@ -30,11 +33,31 @@ pub use model::{
     Actor, EnabledModules, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant,
     TenantStatus,
 };
-pub use pools::{ClusterRegistry, PoolConfig, PoolError, TenantPools};
+pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
+pub use pools::{ClusterRegistry, Conn, Lane, PoolConfig, PoolError, TenantPools, Tx};
 pub use tenant_db::TenantDb;
 
+use spa_i18n::{Localize, Message, MessageArg, StaticCatalog};
+
+/// This crate's messages, in every supported language.
+pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use cache::TtlCache;
 use spa_types::{IdentityId, MembershipId, ModuleId, TenantId};
 use sqlx::PgPool;
+
+/// How long entry-path lookups are cached.
+///
+/// Five seconds is the compromise: it removes ~99% of control-plane load at any
+/// meaningful request rate, while bounding how long a suspension or revocation
+/// can lag on a node that did not perform it. See [`cache`] for the full
+/// argument.
+const ENTRY_CACHE_TTL: Duration = Duration::from_secs(5);
+const ENTRY_CACHE_CAPACITY: usize = 50_000;
 
 /// Migrations for the control-plane database.
 pub static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/control");
@@ -70,19 +93,77 @@ pub enum AccessError {
     Database(#[from] sqlx::Error),
     #[error("stored data is invalid: {0}")]
     Corrupt(String),
+    /// Every cluster is full, draining, or offline.
+    ///
+    /// An operational condition, not a user error: someone needs to bring
+    /// capacity online. Carries the count so the alert says how bad it is.
+    #[error("no cluster has capacity ({clusters_at_limit} at their limit)")]
+    NoCapacity { clusters_at_limit: usize },
+    #[error("the name {0:?} is already taken")]
+    SlugTaken(String),
 }
 
 /// Handle on the core database.
 #[derive(Debug)]
 pub struct ControlPlane {
     pool: PgPool,
-    tenants: TenantPools,
+    tenants: Arc<TenantPools>,
+    identities: TtlCache<IdentityId, Option<Identity>>,
+    tenants_cache: TtlCache<TenantId, Option<Tenant>>,
+    memberships: TtlCache<(IdentityId, Option<TenantId>), bool>,
+    entitlements: TtlCache<TenantId, EnabledModules>,
+    /// Entry-path cache hits and misses. A miss is a control-database round
+    /// trip, so the ratio is the number that decides whether the control plane
+    /// survives the request rate — worth exporting, not just asserting in tests.
+    entry_hits: AtomicU64,
+    entry_misses: AtomicU64,
 }
 
 impl ControlPlane {
     #[must_use]
-    pub const fn new(pool: PgPool, tenants: TenantPools) -> Self {
-        Self { pool, tenants }
+    pub fn new(pool: PgPool, tenants: TenantPools) -> Self {
+        Self {
+            pool,
+            tenants: Arc::new(tenants),
+            identities: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            tenants_cache: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            memberships: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            entitlements: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            entry_hits: AtomicU64::new(0),
+            entry_misses: AtomicU64::new(0),
+        }
+    }
+
+    /// `(hits, misses)` on the entry path since start.
+    ///
+    /// A miss is one control-database round trip. At 10,000 requests a second a
+    /// 99% hit rate is the difference between 400 and 40,000 queries per second
+    /// against a database that cannot be sharded.
+    #[must_use]
+    pub fn entry_cache_stats(&self) -> (u64, u64) {
+        (
+            self.entry_hits.load(Ordering::Relaxed),
+            self.entry_misses.load(Ordering::Relaxed),
+        )
+    }
+
+    fn hit(&self) {
+        self.entry_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn miss(&self) {
+        self.entry_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Drops every cached entry-path lookup.
+    ///
+    /// For tests, and for an operator who has changed something out of band and
+    /// does not want to wait out the TTL.
+    pub fn clear_caches(&self) {
+        self.identities.clear();
+        self.tenants_cache.clear();
+        self.memberships.clear();
+        self.entitlements.clear();
     }
 
     /// The core database. Control-plane queries only — this is not a route to
@@ -93,7 +174,7 @@ impl ControlPlane {
     }
 
     #[must_use]
-    pub const fn tenants(&self) -> &TenantPools {
+    pub fn tenants(&self) -> &TenantPools {
         &self.tenants
     }
 
@@ -126,9 +207,10 @@ impl ControlPlane {
         &self,
         identity_id: IdentityId,
         tenant_id: TenantId,
+        lane: Lane,
     ) -> Result<TenantDb, AccessError> {
         let identity = self
-            .identity(identity_id)
+            .cached_identity(identity_id)
             .await?
             .ok_or(AccessError::NoSuchIdentity)?;
         if !identity.is_active() {
@@ -136,7 +218,7 @@ impl ControlPlane {
         }
 
         let tenant = self
-            .tenant(tenant_id)
+            .cached_tenant(tenant_id)
             .await?
             .ok_or(AccessError::NoSuchTenant)?;
         if !tenant.is_enterable() {
@@ -145,11 +227,11 @@ impl ControlPlane {
             });
         }
 
-        if !self.has_live_membership(identity_id, tenant_id).await? {
+        if !self.cached_membership(identity_id, Some(tenant_id)).await? {
             return Err(AccessError::NotAMember);
         }
 
-        self.open(&tenant).await
+        self.open(&tenant, lane).await
     }
 
     /// Opens a tenant on behalf of platform staff, recording who and why.
@@ -167,18 +249,18 @@ impl ControlPlane {
         reason: &str,
     ) -> Result<TenantDb, AccessError> {
         let staff = self
-            .identity(staff_id)
+            .cached_identity(staff_id)
             .await?
             .ok_or(AccessError::NoSuchIdentity)?;
         if !staff.is_active() {
             return Err(AccessError::IdentitySuspended);
         }
-        if !self.has_platform_membership(staff_id).await? {
+        if !self.cached_membership(staff_id, None).await? {
             return Err(AccessError::NotAMember);
         }
 
         let tenant = self
-            .tenant(tenant_id)
+            .cached_tenant(tenant_id)
             .await?
             .ok_or(AccessError::NoSuchTenant)?;
         // Suspended tenants are deliberately reachable for support: diagnosing
@@ -198,16 +280,85 @@ impl ControlPlane {
         )
         .await?;
 
-        self.open(&tenant).await
+        // Support access is interactive by definition — an engineer is waiting.
+        self.open(&tenant, Lane::Interactive).await
     }
 
-    async fn open(&self, tenant: &Tenant) -> Result<TenantDb, AccessError> {
-        let modules = self.enabled_modules(tenant.id).await?;
-        let (pool, permit) = self
+    async fn open(&self, tenant: &Tenant, lane: Lane) -> Result<TenantDb, AccessError> {
+        let modules = self.cached_modules(tenant.id).await?;
+        let (write, read) = self
             .tenants
-            .acquire(tenant.id, &tenant.cluster, &tenant.database_name)
+            .handles(tenant.id, &tenant.cluster, &tenant.database_name)
             .await?;
-        Ok(TenantDb::new(tenant.id, pool, modules, permit))
+        Ok(TenantDb::new(
+            tenant.id,
+            write,
+            read,
+            modules,
+            Arc::clone(&self.tenants),
+            lane,
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Cached lookups
+    //
+    // Each is a read-through: hit returns immediately, miss queries and stores.
+    // Failures are never cached, so granting access takes effect at once while
+    // revoking it is bounded by the TTL.
+    // -----------------------------------------------------------------------
+
+    async fn cached_identity(&self, id: IdentityId) -> Result<Option<Identity>, AccessError> {
+        if let Some(hit) = self.identities.get(&id) {
+            self.hit();
+            return Ok(hit);
+        }
+        self.miss();
+        let fresh = self.identity(id).await?;
+        self.identities.put(id, fresh.clone());
+        Ok(fresh)
+    }
+
+    async fn cached_tenant(&self, id: TenantId) -> Result<Option<Tenant>, AccessError> {
+        if let Some(hit) = self.tenants_cache.get(&id) {
+            self.hit();
+            return Ok(hit);
+        }
+        self.miss();
+        let fresh = self.tenant(id).await?;
+        self.tenants_cache.put(id, fresh.clone());
+        Ok(fresh)
+    }
+
+    /// `tenant` is `None` for a platform membership.
+    async fn cached_membership(
+        &self,
+        identity_id: IdentityId,
+        tenant: Option<TenantId>,
+    ) -> Result<bool, AccessError> {
+        let key = (identity_id, tenant);
+        if let Some(hit) = self.memberships.get(&key) {
+            self.hit();
+            return Ok(hit);
+        }
+        self.miss();
+        let fresh = match tenant {
+            Some(tenant_id) => self.has_live_membership(identity_id, tenant_id).await?,
+            None => self.has_platform_membership(identity_id).await?,
+        };
+        self.memberships.put(key, fresh);
+        Ok(fresh)
+    }
+
+    async fn cached_modules(&self, tenant_id: TenantId) -> Result<EnabledModules, AccessError> {
+        if let Some(hit) = self.entitlements.get(&tenant_id) {
+            self.hit();
+            return Ok(hit);
+        }
+        self.miss();
+        let fresh = self.enabled_modules(tenant_id).await?;
+        self.entitlements.put(tenant_id, fresh.clone());
+        Ok(fresh)
     }
 
     // -----------------------------------------------------------------------
@@ -276,6 +427,10 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
+        // Local invalidation: this node stops honouring the identity at once.
+        // Other nodes converge within ENTRY_CACHE_TTL — a documented window,
+        // see the `cache` module.
+        self.identities.invalidate(&id);
 
         self.record(
             actor,
@@ -288,12 +443,151 @@ impl ControlPlane {
     }
 
     // -----------------------------------------------------------------------
+    // Clusters
+    // -----------------------------------------------------------------------
+
+    /// Brings a cluster online.
+    ///
+    /// `dsn_env`/`replica_dsn_env` name the environment variables holding the
+    /// connection strings — the DSN itself is never stored, so a control-plane
+    /// backup carries no credentials.
+    ///
+    /// `max_active_tenants` is the limit that matters: open connections scale
+    /// with concurrently-active tenants, so this is what stops a cluster running
+    /// out of backends. `max_databases` is the storage-shaped secondary limit.
+    pub async fn register_cluster(
+        &self,
+        name: &str,
+        dsn_env: &str,
+        replica_dsn_env: Option<&str>,
+        max_active_tenants: i32,
+        max_databases: i32,
+        actor: Actor,
+    ) -> Result<(), AccessError> {
+        sqlx::query!(
+            "INSERT INTO cluster (name, dsn_env, replica_dsn_env, max_active_tenants, max_databases)
+             VALUES ($1, $2, $3, $4, $5)",
+            name,
+            dsn_env,
+            replica_dsn_env,
+            max_active_tenants,
+            max_databases,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        self.record(
+            actor,
+            "cluster.registered",
+            "cluster",
+            name,
+            serde_json::json!({
+                "max_active_tenants": max_active_tenants,
+                "max_databases": max_databases,
+            }),
+        )
+        .await
+    }
+
+    /// Moves a cluster between accepting placements and not.
+    ///
+    /// `Draining` is the one to reach for when retiring hardware: it keeps
+    /// serving existing tenants while taking no new ones.
+    pub async fn set_cluster_status(
+        &self,
+        name: &str,
+        status: ClusterStatus,
+        actor: Actor,
+    ) -> Result<(), AccessError> {
+        sqlx::query!(
+            "UPDATE cluster SET status = $2 WHERE name = $1",
+            name,
+            status.as_str(),
+        )
+        .execute(&self.pool)
+        .await?;
+
+        self.record(
+            actor,
+            "cluster.status_changed",
+            "cluster",
+            name,
+            serde_json::json!({ "status": status.as_str() }),
+        )
+        .await
+    }
+
+    /// What every cluster is currently carrying.
+    ///
+    /// Reads the `cluster_load` view, so the counts come from the tenant table
+    /// rather than from a counter that can drift out of step with reality.
+    pub async fn cluster_load(&self) -> Result<Vec<ClusterLoad>, AccessError> {
+        let rows = sqlx::query!(
+            r#"SELECT name as "name!", status as "status!", weight as "weight!",
+                      max_active_tenants as "max_active_tenants!",
+                      max_databases as "max_databases!",
+                      live_tenants as "live_tenants!",
+                      active_tenants as "active_tenants!"
+                 FROM cluster_load
+                ORDER BY name"#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ClusterLoad {
+                    name: row.name,
+                    status: ClusterStatus::parse(&row.status)?,
+                    live_tenants: row.live_tenants,
+                    active_tenants: row.active_tenants,
+                    max_active_tenants: i64::from(row.max_active_tenants),
+                    max_databases: i64::from(row.max_databases),
+                    weight: row.weight,
+                })
+            })
+            .collect()
+    }
+
+    /// Picks a cluster for a new tenant.
+    pub async fn choose_cluster(&self, policy: PlacementPolicy) -> Result<String, AccessError> {
+        let clusters = self.cluster_load().await?;
+        policy.choose(&clusters).map_or_else(
+            || {
+                Err(AccessError::NoCapacity {
+                    clusters_at_limit: clusters.len(),
+                })
+            },
+            |chosen| Ok(chosen.name.clone()),
+        )
+    }
+
+    // -----------------------------------------------------------------------
     // Tenants
     // -----------------------------------------------------------------------
 
-    /// Registers a tenant in `provisioning`. The database itself is created by
-    /// the provisioning workflow, which is why this does not touch a cluster.
+    /// Registers a tenant on a cluster chosen by the placement policy.
+    ///
+    /// This is the normal path: signup does not know or care which machine it
+    /// lands on. Use [`Self::register_tenant_on`] to pin one, which is for
+    /// migrations and for an enterprise tenant with dedicated hardware.
     pub async fn register_tenant(
+        &self,
+        slug: &str,
+        display_name: &str,
+        policy: PlacementPolicy,
+        actor: Actor,
+    ) -> Result<Tenant, AccessError> {
+        let cluster = self.choose_cluster(policy).await?;
+        self.register_tenant_on(slug, display_name, &cluster, actor)
+            .await
+    }
+
+    /// Registers a tenant on a named cluster, bypassing placement.
+    ///
+    /// The database itself is created by the provisioning workflow, which is why
+    /// this does not connect to the cluster — it only records the intent.
+    pub async fn register_tenant_on(
         &self,
         slug: &str,
         display_name: &str,
@@ -315,7 +609,16 @@ impl ControlPlane {
             database_name,
         )
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| match &e {
+            // A taken slug is a normal outcome of self-service signup, not a
+            // database failure. Surfacing it as one would render "something went
+            // wrong" to someone who just needs to pick another name.
+            sqlx::Error::Database(db) if db.constraint() == Some("tenant_slug_key") => {
+                AccessError::SlugTaken(slug.to_owned())
+            }
+            _ => AccessError::Database(e),
+        })?;
 
         self.record(
             actor,
@@ -399,6 +702,7 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
+        self.tenants_cache.invalidate(&id);
 
         self.record(
             actor,
@@ -433,6 +737,7 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
+        self.memberships.invalidate(&(identity_id, scope.tenant()));
 
         self.record(
             actor,
@@ -466,6 +771,7 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
+        self.memberships.invalidate(&(identity_id, scope.tenant()));
 
         self.record(
             actor,
@@ -564,6 +870,7 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
+        self.entitlements.invalidate(&tenant_id);
 
         self.record(
             actor,
@@ -592,6 +899,7 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
+        self.entitlements.invalidate(&tenant_id);
 
         self.record(
             actor,
@@ -658,6 +966,53 @@ impl ControlPlane {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Localization
+// ---------------------------------------------------------------------------
+
+impl Localize for AccessError {
+    /// What a *user* is told, which is not what an operator is told.
+    ///
+    /// `NoSuchTenant` and `NotAMember` collapse to one message on purpose: a
+    /// distinct "no such tenant" would let an attacker enumerate tenant slugs by
+    /// watching which error comes back. The `Display` impl keeps them apart for
+    /// logs, where the distinction is useful and the audience is trusted.
+    fn message(&self) -> Message {
+        match self {
+            Self::NoSuchIdentity => Message::new(messages::NO_SUCH_IDENTITY),
+            Self::IdentitySuspended => Message::new(messages::IDENTITY_SUSPENDED),
+            Self::NoSuchTenant | Self::NotAMember => Message::new(messages::ACCESS_DENIED),
+            Self::TenantNotActive { status } => match status {
+                // Provisioning is a retry, and saying so saves a support ticket.
+                TenantStatus::Provisioning => Message::new(messages::TENANT_PROVISIONING),
+                _ => Message::new(messages::TENANT_UNAVAILABLE),
+            },
+            Self::Pool(e) => e.message(),
+            // Deliberately says nothing about clusters: a signup form has no
+            // business reporting our capacity. The count reaches operators
+            // through `messages::CLUSTERS_AT_LIMIT` and the log line.
+            Self::NoCapacity { .. } => Message::new(messages::NO_CAPACITY),
+            Self::SlugTaken(slug) => {
+                Message::new(messages::SLUG_TAKEN).with("slug", MessageArg::text(slug))
+            }
+            // A database failure or corrupt row is never described to a user.
+            // They get "something went wrong"; the detail goes to the log.
+            Self::Database(_) | Self::Corrupt(_) => Message::new(messages::INTERNAL),
+        }
+    }
+}
+
+impl Localize for PoolError {
+    fn message(&self) -> Message {
+        match self {
+            Self::Overloaded { .. } => Message::new(messages::OVERLOADED),
+            // An unconfigured cluster is our misconfiguration, not the user's
+            // problem to understand.
+            Self::UnknownCluster(_) | Self::Connect(_) => Message::new(messages::INTERNAL),
+        }
     }
 }
 

@@ -29,6 +29,9 @@ one means changing this document first.
 | D8 | Blueprints (versioned command scripts) are the single mechanism for charts of accounts, demo seeds, and presets | Accepted |
 | D9 | Effects are values written to an outbox, never inline I/O | Accepted |
 | D10 | Money carries its currency at runtime; no `Add` impl | Accepted — revises an earlier proposal, see §1.10 |
+| D11 | The kernel contains **no business domain**. Accounting is a module. | Accepted — revises an earlier proposal, see §1.11 |
+| D12 | Errors are message codes plus typed arguments, never sentences. Arabic is a first-class target. | Accepted — see §1.12 |
+| D13 | Clusters are control-plane data; placement is by concurrently-active tenants | Accepted — see §1.13 |
 
 ### 1.1 One database per tenant (D1)
 
@@ -45,11 +48,36 @@ can only be obtained by resolving a tenant through the control plane. There is
 no ambient pool. A query that reads another tenant's ledger cannot be written,
 because no connection is in scope that could serve it.
 
-**The cost to manage:** connections. Postgres spends a process per connection,
-so pools must be `min = 0`, held in an LRU with idle eviction, and workers must
-lease *tenants with pending work* rather than running a loop per tenant.
-Connection count tracks concurrency, not tenant count. This is load-bearing and
-is soak-tested before anything is built on it (§7).
+**The cost to manage:** connections. Two ceilings, measured in
+`spa-control/tests/soak.rs`, not assumed:
+
+| quantity | bounded by |
+|---|---|
+| connections *executing* | the lane budget (§1.1.1) |
+| connections *open* | concurrently-active tenants × `max_connections_per_tenant` |
+
+```text
+connections_per_cluster ≈ concurrently_active_tenants × max_connections_per_tenant
+```
+
+**Cluster count is driven by concurrently-active tenants — not total tenants, and
+not request rate.** 5,000 tenants at 25% concurrency and 2 connections each is
+~2,500 connections; at ~400 per instance that is 7–8 instances, which is also
+roughly what storage dictates. The two constraints agree at this scale; when they
+diverge, this is the one that decides.
+
+Pools are therefore `min_connections(0)` with a short idle timeout — that is what
+drains connections from tenants that have gone quiet — and workers lease *tenants
+with pending work* rather than running a loop per tenant.
+
+#### 1.1.1 Lanes
+
+A permit is taken **per database operation**, never per request. At 10,000 req/s
+a request-scoped permit needs ~400 connections; an operation-scoped one needs
+~120. Permits are drawn from a lane — `Interactive` (an employee at the counter),
+`Client` (a tenant's customers), `Background` (projections, outbox, migrations) —
+each with its own allowance, so a flood of consumer bookings cannot starve the
+counter. Exhaustion returns 503 rather than queueing.
 
 ### 1.2 Control plane persistence (D2)
 
@@ -157,6 +185,105 @@ handled — you cannot write `a + b` — while currency stays runtime data.
 
 `CurrencyCode` carries its ISO-4217 minor-unit exponent (JPY = 0, SAR/USD = 2,
 KWD/BHD = 3), so formatting and rounding are not caller guesswork.
+
+### 1.11 The kernel holds no business domain (D11) — revising an earlier proposal
+
+An earlier draft placed the general ledger in the kernel, on the reasoning that
+double-entry balance is a universal invariant rather than a tenant preference.
+The premise is true. The conclusion does not follow.
+
+**What was wrong with it:**
+
+- **Not every tenant needs accounting.** A tenant running only inventory, or a
+  booking system, would carry the ledger's schema and migrations for nothing.
+- **It contradicts the modularity requirement.** Modules exist so a tenant enables
+  what they need and pays for what they enable. Accounting is among the most
+  valuable things to charge for; making it unremovable removes it from the
+  catalogue.
+- **It couples every module to a domain.** With the ledger in the kernel, an
+  inventory module depends on accounting types whether or not that tenant has
+  accounting.
+- **The invariant is smaller than the domain.** What is genuinely universal is
+  *debits equal credits per currency*, *posted entries are immutable*, and *a
+  closed period refuses postings*. The chart of accounts, statement formats,
+  posting rules, fiscal-calendar shape, and multi-GAAP/multi-book support are all
+  variable — and some are regulated differently per jurisdiction. Bundling the
+  variable parts with the invariant ones puts jurisdiction-specific accounting in
+  the kernel.
+
+**The rule, restated:** the kernel is a *framework*, not a domain. It holds the
+event log, tenancy, identity, the projection runtime, money, rules, the module
+system, and the outbox. Every business capability — including accounting — is a
+module.
+
+An invariant lives with the thing it constrains. `BalancedLines` (§4) belongs to
+the ledger module, not the kernel; the module enforces its own law. Modules
+contribute health checks to the platform's verification battery (§7), so the
+trial-balance canary still runs — as a ledger-module invariant rather than a
+platform one.
+
+**Consequences to design around:**
+
+- Other modules must not call the ledger directly. `modules/*` depend only on the
+  kernel (§6), so integration is by event: inventory emits
+  `inventory.goods_issued`, and the ledger module's posting rules turn that into
+  a journal entry. Inventory does not know accounting exists.
+- Modules that need accounting declare `depends_on: [ledger]`, so the ledger
+  cannot be disabled while they are on. That is a module-system concern, handled
+  explicitly, rather than a reason to make the ledger permanent.
+- A module reacting to another module's events by *emitting* events is a process
+  manager, not a projection. Its output is written to the log once, live, and is
+  never regenerated by replay — replay rebuilds projections only. See L5.
+
+### 1.12 Errors are data, not prose (D12)
+
+Saudi Arabia is the first market, so Arabic is a target language, not a
+translation layer added later. That forces one decision early: **an error carries
+a stable [`MessageCode`] and typed arguments; the sentence is chosen at the API
+boundary** from `Accept-Language`.
+
+`#[error("no membership for this identity")]` bakes English into the type and
+turns localization into a rewrite. It also duplicates work: the machine-readable
+code is already required as the `type` field of the RFC 9457 problem response, so
+the localization requirement and the API requirement are the same requirement.
+
+Three consequences specific to Arabic, all mechanised in `spa-i18n`:
+
+- **Six CLDR plural categories**, selected by `n % 100`. `if n == 1` is wrong for
+  3 vs 103 vs 11 in a way no reviewer catches.
+- **Bidi isolation.** A Latin identifier interpolated into Arabic reorders the
+  text around it unless wrapped in `U+2068`/`U+2069`. Applied automatically for
+  RTL locales.
+- **Completeness is enforced.** A code without a translation in every locale
+  fails the build, so a missing Arabic string cannot ship as English.
+
+What a user is told is not what an operator is told. `NoSuchTenant` and
+`NotAMember` render identically — distinguishing them is a tenant-enumeration
+oracle — and internal failures never describe themselves. Both are tested.
+
+### 1.13 Clusters are data; placement follows activity (D13)
+
+A cluster is a row, not a config constant, so capacity can be brought online
+without a deploy. **Credentials are never stored**: the row names an environment
+variable holding the DSN, so a control-plane backup carries no passwords.
+
+Two capacity limits, answering different questions:
+
+| limit | bounds | binds when |
+|---|---|---|
+| `max_active_tenants` | connections | tenants are busy |
+| `max_databases` | storage, migration time, catalog size | tenants are numerous |
+
+The first is the one that takes a cluster down, because open connections scale
+with concurrently-active tenants (§1.1). Utilization is the **maximum** of the two
+ratios, never the average — a cluster 20% full on storage and 99% full on activity
+is 99% full. Expressed in integer basis points, since `float_arithmetic` is denied
+workspace-wide.
+
+Default placement is `Balanced` (least-utilized first): activity is what binds, so
+spreading it is right. `Packed` exists for deliberate consolidation while tenants
+are mostly dormant. `Draining` keeps a cluster serving while taking no new
+tenants, which is how hardware is retired.
 
 ---
 
@@ -471,17 +598,23 @@ crates/
   spa-projection  eventlog     groups, ProjectionCtx, scheduler, leases, shadow replay
   spa-config      types,rules  declarations, layers, versioned resolution
   spa-control     eventlog,config  identities, tenants, entitlements, TenantDb, migrator
-  spa-kernel      eventlog,rules,projection,config  ledger, periods, permits, Module
+  spa-kernel      eventlog,rules,projection,config  permits, Module trait + registry,
+                               numbering, health-check registry. No domain (D11).
   spa-api         control,kernel,modules  routing, problem+json, OpenAPI, composition root
   spa-testkit     all          template-DB fixtures, generators, fault injection, differ
 modules/
-  <one crate each>             depend on spa-kernel only
+  ledger          kernel       accounts, journal entries, fiscal periods, BalancedLines,
+                               posting rules, the trial-balance invariant
+  invoicing       kernel       depends_on: [ledger]
+  <others>        kernel       inventory, pos, payroll, … one crate each
 ```
 
 Direction is the enforcement: `modules/*` depend on `spa-kernel` and never on each
 other or on `spa-control`. A module physically cannot reach the control plane or
 another module's tables. Cross-module interaction goes through events, which is
-also what keeps L3 enforceable.
+also what keeps L3 enforceable — and is why the ledger being a module rather than
+kernel costs nothing: invoicing emits an event, the ledger's posting rules turn it
+into a journal entry, and neither crate knows the other's types.
 
 ---
 
@@ -512,7 +645,8 @@ doesn't.
 | Module composition | Demo build with every module enabled, as a required CI check |
 | Blueprint validity | Every shipped blueprint previewed against a fresh tenant in CI |
 | API contract | OpenAPI drift; generated-client round-trip; problem+json shape |
-| Connection strategy | Soak at target tenant count and concurrency |
+| Connection strategy | `soak.rs` — asserts open connections track active tenants, busy connections track the lane budget, and neither tracks request count |
+| Entry-path cost | A cold `enter` costs exactly 4 lookups; 200 warm ones cost 0 |
 
 **Validation happens in four places, each with one job:**
 
@@ -522,18 +656,27 @@ doesn't.
    returning every problem at once.
 4. **Continuous** — the invariants below asserted per tenant, in production.
 
-**Continuously asserted, per tenant:**
+**Continuously asserted, per tenant.** Platform invariants come from the kernel;
+modules contribute their own through the health-check registry, so a tenant is
+checked for exactly what it has enabled.
+
+*Kernel:*
 
 - schema version = target, per module
 - projection lag < threshold, per group
 - event positions contiguous (L1)
 - unresolved dead letters = 0
 - outbox backlog age < threshold
+
+*Contributed by the ledger module:*
+
 - **trial balance balances, per currency**
 
-The last one holds only if commands, events, projections and replays are all
-correct. It is one number that catches an entire class of pipeline bug, and it is
-the single most valuable alert in the system.
+That last one holds only if commands, events, projections and replays are all
+correct, so it catches an entire class of pipeline bug in one number — which is
+why it is worth naming even though it is now a module's invariant rather than the
+platform's. The demo tenant has every module enabled (§4.10 of the review), so
+CI gets the canary regardless of what any individual tenant runs.
 
 ---
 

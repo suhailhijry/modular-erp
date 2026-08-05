@@ -40,8 +40,11 @@ CREATE TABLE identity (
 -- ---------------------------------------------------------------------------
 CREATE TABLE tenant (
     id            UUID PRIMARY KEY,
+    -- 2–50 characters. Two is deliberate: "hp", "3m" and "bp" are real company
+    -- names, and a three-character floor would reject them. One character is
+    -- still refused, since single letters are worth reserving.
     slug          TEXT NOT NULL UNIQUE
-                  CHECK (slug ~ '^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$'),
+                  CHECK (slug ~ '^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$'),
     display_name  TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 200),
 
     status        TEXT NOT NULL DEFAULT 'provisioning'

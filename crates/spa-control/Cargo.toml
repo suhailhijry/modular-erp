@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 spa-types = { workspace = true, features = ["sqlx"] }
+spa-i18n = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
