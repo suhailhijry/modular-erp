@@ -103,12 +103,21 @@ every projection, so they land before the first projection exists.
 - [x] Append-only enforced by trigger; `integrity()` for the continuous check
 - [x] `Envelope`, `Metadata` with `config_version` (L5), optimistic concurrency
 - [x] Reads: `read_since` (tailer), `read_stream`/`read_stream_since` (rebuild)
-- [ ] Aggregate load/append helpers *(2b)*
-- [ ] Projection groups, one Postgres schema each, `search_path` isolation (L3)
-- [ ] `ProjectionCtx` — no clock, no RNG, no pool (L2)
-- [ ] Checkpoint-in-transaction with `FOR UPDATE` leases (L4)
-- [ ] Scheduler leasing *tenants with pending work*, not a loop per tenant
-- [ ] `replay --shadow` + table differ, wired into CI
+- [x] `Aggregate` / `DomainEvent` traits; `load`, `load_since`, `append_events`
+- [x] `execute` — load, decide, append, retry on conflict, give up as `Contended`
+- [x] Upcaster chain (`v1 → v2 → v3`), gap check, events-from-the-future refused
+- [x] Golden files: every stored shape decodes on every build
+- [ ] Snapshots *(deferred — an optimization, and which aggregates need one is
+      not yet known; `load_since` is the seam)*
+- [x] Projection groups, one Postgres schema each, `search_path` isolation (L3)
+- [x] `ProjectionCtx` — no clock, no RNG, no pool; `derive_id` instead (L2)
+- [x] Checkpoint-in-transaction; the row lock doubles as the lease (L4)
+- [x] `run_once` / `run_to_head`; `Progress::Busy` rather than blocking
+- [x] `replay_shadow` + table differ (`EXCEPT ALL` both ways)
+- [x] The differ is itself tested against a clock-reading projection, so a clean
+      diff means something
+- [ ] Scheduler leasing *tenants with pending work* *(needs `bin/worker`)*
+- [ ] Shadow replay wired into CI *(needs the demo tenant, Phase 4)*
 - [ ] Outbox schema and dispatcher; effects as values (D9)
 - [ ] `CancellationToken` + `TaskTracker` drain; `bin/worker`
 - [ ] SIGTERM-mid-batch test
@@ -204,6 +213,32 @@ deploy.
 ---
 
 ## Running notes
+
+- **L3 isolation caught its first bug immediately — mine.** The shadow rebuild
+  set `search_path` to the shadow schema *before* reading the log, which put the
+  `event` table out of scope. The isolation was working exactly as designed; the
+  sequencing was wrong. `run_once` had it right: read the batch, then narrow the
+  path, then apply.
+
+- **The differ needs its own proof.** A clean shadow diff is ambiguous between
+  "replay is reproducible" and "the differ does not work", and the second is
+  indistinguishable from the first until it matters. So there is a projection
+  that deliberately writes `now()`, and a test asserting the differ catches it —
+  same discipline as the naive-event-log test in Phase 2a.
+
+- **A concurrency test can pass without ever hitting the thing it tests.** The
+  16-task retry test was asserted to exercise the retry path; counting decision
+  invocations showed *16 decisions for 16 successes* — the transactions were
+  short enough that they never overlapped. The retry loop now has a test that
+  injects the competing write from inside the decision closure, so the conflict
+  is caused rather than hoped for.
+
+- **Do not block inside an async task to coordinate a test.** The first attempt
+  at the above held two tasks at a spin-wait until both had loaded. It deadlocked
+  — a spinning task starves the worker that would run the task it is waiting for
+  — and then *passed* on a rerun with different scheduling, which is worse than
+  failing. `block_in_place` is the supported escape hatch; better still, arrange
+  for one task to need no coordination.
 
 - **`cargo test` did not work from a clean checkout.** Cargo does not read
   `.env`, so a developer whose Postgres requires a password got

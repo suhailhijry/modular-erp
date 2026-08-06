@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT tablename as \"tablename!\" FROM pg_tables\n            WHERE schemaname = $1 ORDER BY tablename",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tablename!",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_tables",
+            "name": "tablename"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "3cb491020334b2f96b2892c013eb15f32502ec66f9aa93aaffff49165a1095fe"
+}

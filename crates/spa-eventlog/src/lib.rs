@@ -19,14 +19,21 @@
 //!
 //! `tests/append.rs` proves it under concurrency rather than asserting it.
 
+mod aggregate;
 mod append;
 mod envelope;
 pub mod messages;
 mod read;
+mod upcast;
 
+pub use aggregate::{
+    Aggregate, DomainEvent, ExecuteError, LoadError, Loaded, append_events, execute, load,
+    load_since,
+};
 pub use append::{AppendError, NewEvent, append};
 pub use envelope::{Envelope, Metadata};
-pub use read::{ReadError, integrity, read_since, read_stream, read_stream_since};
+pub use read::{Integrity, ReadError, integrity, read_since, read_stream, read_stream_since};
+pub use upcast::{UpcastError, UpcastStep, Upcasters};
 
 use spa_i18n::StaticCatalog;
 

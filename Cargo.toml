@@ -12,6 +12,7 @@ license = "UNLICENSED"
 # Internal
 spa-i18n = { path = "crates/spa-i18n" }
 spa-eventlog = { path = "crates/spa-eventlog" }
+spa-projection = { path = "crates/spa-projection" }
 spa-types = { path = "crates/spa-types" }
 spa-testkit = { path = "crates/spa-testkit" }
 
@@ -29,6 +30,7 @@ uuid = { version = "1.24", features = ["serde", "v5", "v7"] }
 
 # Async
 async-trait = "0.1"
+
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 

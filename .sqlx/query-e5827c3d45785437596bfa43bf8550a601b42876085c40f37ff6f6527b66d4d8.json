@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT position FROM projection_checkpoint\n          WHERE group_name = $1\n          FOR UPDATE NOWAIT",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "position",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "projection_checkpoint",
+            "name": "position"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e5827c3d45785437596bfa43bf8550a601b42876085c40f37ff6f6527b66d4d8"
+}
