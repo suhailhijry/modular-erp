@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*) FILTER (\n                   WHERE delivered_at IS NULL AND dead_at IS NULL\n               )                                          AS \"pending!\",\n               count(*) FILTER (WHERE dead_at IS NOT NULL) AS \"dead!\",\n               EXTRACT(EPOCH FROM now() - min(enqueued_at) FILTER (\n                   WHERE delivered_at IS NULL AND dead_at IS NULL\n               ))::BIGINT                                  AS backlog_age_seconds\n          FROM outbox\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pending!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "dead!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "backlog_age_seconds",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "880b1b1871b7c6cffe7f69dc0ebd8f9b6a4852863af220387b68b454396c262e"
+}

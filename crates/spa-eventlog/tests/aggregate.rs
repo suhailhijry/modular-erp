@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use spa_eventlog::{
-    Aggregate, DomainEvent, ExecuteError, Loaded, Metadata, Upcasters, append_events, execute,
-    integrity, load,
+    Aggregate, Decision, DomainEvent, ExecuteError, Loaded, Metadata, Upcasters, append_events,
+    execute, integrity, load,
 };
 use spa_testkit::{Schema, Template};
 use spa_types::{AggregateId, DomainName, EventName, SchemaVersion, Sequence};
@@ -166,16 +166,19 @@ async fn aggregates_do_not_see_each_others_events() {
 async fn execute_loads_decides_and_appends() {
     let db = tenant_db().await;
 
-    let events = execute::<Counter, _, CounterError>(
+    let committed = execute::<Counter, _, CounterError>(
         db.pool(),
         &id("c1"),
         &upcasters(),
         &Metadata::default(),
-        |_| Ok(vec![CounterEvent::Incremented { by: 4 }]),
+        |_| Ok(Decision::one(CounterEvent::Incremented { by: 4 })),
     )
     .await
     .expect("executes");
-    assert_eq!(events.len(), 1);
+    assert_eq!(committed.events.len(), 1);
+    assert_eq!(committed.at.map(spa_types::LogPosition::get), Some(1));
+    assert_eq!(committed.version.get(), 1);
+    assert_eq!(committed.effects_enqueued, 0);
 
     // The decision sees the state left by the previous one.
     execute::<Counter, _, CounterError>(
@@ -185,7 +188,7 @@ async fn execute_loads_decides_and_appends() {
         &Metadata::default(),
         |loaded| {
             assert_eq!(loaded.aggregate.total, 4, "decision must see prior state");
-            Ok(vec![CounterEvent::Incremented { by: 6 }])
+            Ok(Decision::one(CounterEvent::Incremented { by: 6 }))
         },
     )
     .await
@@ -231,16 +234,17 @@ async fn a_rejected_decision_leaves_no_trace() {
 async fn a_decision_to_do_nothing_writes_nothing() {
     let db = tenant_db().await;
 
-    let events = execute::<Counter, _, CounterError>(
+    let committed = execute::<Counter, _, CounterError>(
         db.pool(),
         &id("c1"),
         &upcasters(),
         &Metadata::default(),
-        |_| Ok(vec![]),
+        |_| Ok(Decision::nothing()),
     )
     .await
     .expect("an empty decision is not an error");
-    assert!(events.is_empty());
+    assert!(committed.did_nothing());
+    assert!(committed.at.is_none(), "no position was consumed");
 
     let mut conn = db.pool().acquire().await.expect("connection");
     assert_eq!(integrity(&mut conn).await.expect("checks").event_count, 0);
@@ -274,7 +278,7 @@ async fn concurrent_execution_loses_no_updates() {
                 &Metadata::default(),
                 move |_| {
                     decisions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    Ok(vec![CounterEvent::Incremented { by: 1 }])
+                    Ok(Decision::one(CounterEvent::Incremented { by: 1 }))
                 },
             )
             .await
@@ -386,7 +390,7 @@ async fn a_conflict_makes_the_decision_run_again() {
                 );
             }
 
-            Ok(vec![CounterEvent::Incremented { by: 1 }])
+            Ok(Decision::one(CounterEvent::Incremented { by: 1 }))
         },
     )
     .await
@@ -443,7 +447,7 @@ async fn the_decision_sees_committed_history() {
         &Metadata::default(),
         move |loaded: &Loaded<Counter>| {
             recorder.lock().unwrap().push(loaded.aggregate.total);
-            Ok(vec![CounterEvent::Incremented { by: 1 }])
+            Ok(Decision::one(CounterEvent::Incremented { by: 1 }))
         },
     )
     .await

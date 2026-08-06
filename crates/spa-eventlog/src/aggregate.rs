@@ -7,11 +7,14 @@
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use spa_types::{AggregateId, DomainName, EventName, SchemaVersion, Sequence, StreamId};
+use spa_types::{
+    AggregateId, DomainName, EventName, LogPosition, SchemaVersion, Sequence, StreamId,
+};
 use sqlx::{PgConnection, PgPool};
 
 use crate::append::{AppendError, NewEvent, append};
-use crate::envelope::Metadata;
+use crate::envelope::{Envelope, Metadata};
+use crate::outbox::{Effect, EnqueueError, enqueue};
 use crate::read::{ReadError, read_stream_since};
 use crate::upcast::{UpcastError, Upcasters};
 
@@ -66,6 +69,8 @@ pub enum ExecuteError<E> {
     #[error(transparent)]
     Append(#[from] AppendError),
     #[error(transparent)]
+    Enqueue(#[from] EnqueueError),
+    #[error(transparent)]
     Database(#[from] sqlx::Error),
     /// Optimistic concurrency lost repeatedly.
     ///
@@ -94,6 +99,114 @@ impl<A> Loaded<A> {
     #[must_use]
     pub fn is_new(&self) -> bool {
         self.version == Sequence::ZERO
+    }
+}
+
+/// What a command decided: facts to record, and promises to keep.
+///
+/// Both halves of D9 in one value. A decision function returns this instead of
+/// performing I/O, which is what makes a command handler testable without a
+/// network and replayable without side effects.
+///
+/// ```ignore
+/// |loaded| Ok(Decision::one(Opened { .. }))
+///
+/// |loaded| Ok(Decision::one(Posted { .. })
+///             .with_effect(Effect::new(kind("email.send"), payload)))
+///
+/// |loaded| Ok(Decision::nothing())
+/// ```
+///
+/// [`execute`] takes this type directly rather than anything convertible into
+/// it. An earlier version accepted `impl Into<Decision<_>>` so a command with no
+/// effects could return a bare `Vec`; that made the return type unnameable in a
+/// closure with no `Ok` branch — a rejection-only command handler — and the
+/// resulting inference error pointed at `Result`, not at the real problem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision<E> {
+    pub events: Vec<E>,
+    pub effects: Vec<Effect>,
+}
+
+impl<E> Default for Decision<E> {
+    fn default() -> Self {
+        Self {
+            events: Vec::new(),
+            effects: Vec::new(),
+        }
+    }
+}
+
+impl<E> Decision<E> {
+    /// The command looked, and there is nothing to do.
+    ///
+    /// A success, not a failure: re-issuing a command that has already taken
+    /// effect should be quiet, not an error.
+    #[must_use]
+    pub fn nothing() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn record(events: Vec<E>) -> Self {
+        Self {
+            events,
+            effects: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn one(event: E) -> Self {
+        Self::record(vec![event])
+    }
+
+    #[must_use]
+    pub fn with_effect(mut self, effect: Effect) -> Self {
+        self.effects.push(effect);
+        self
+    }
+
+    #[must_use]
+    pub fn with_effects(mut self, effects: impl IntoIterator<Item = Effect>) -> Self {
+        self.effects.extend(effects);
+        self
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.effects.is_empty()
+    }
+}
+
+impl<E> From<Vec<E>> for Decision<E> {
+    fn from(events: Vec<E>) -> Self {
+        Self::record(events)
+    }
+}
+
+/// What a command actually committed.
+///
+/// `version` is the aggregate's version afterwards, which is what an `ETag`
+/// carries and what the next `If-Match` is checked against — so it is returned
+/// even when nothing happened, because "nothing happened, and here is where you
+/// are" is a useful answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Committed<E> {
+    pub events: Vec<E>,
+    /// Position of the first event written. `None` when none were.
+    pub at: Option<LogPosition>,
+    /// The aggregate's version after this command.
+    pub version: Sequence,
+    /// Effects newly recorded. Lower than the number promised when a pinned
+    /// idempotency key was already present — which is the deduplication working.
+    pub effects_enqueued: usize,
+}
+
+impl<E> Committed<E> {
+    /// Whether the command was a no-op.
+    #[must_use]
+    pub fn did_nothing(&self) -> bool {
+        self.events.is_empty() && self.effects_enqueued == 0
     }
 }
 
@@ -135,7 +248,8 @@ pub async fn load_since<A: Aggregate>(
     Ok(Loaded { aggregate, version })
 }
 
-/// Loads, decides, and appends — retrying if someone else got there first.
+/// Loads, decides, appends, and records the decision's effects — retrying if
+/// someone else got there first.
 ///
 /// `decide` must be a **pure function of the aggregate's state**. It runs again
 /// on every retry, so a decision that reads a clock, generates an id, or writes
@@ -144,22 +258,30 @@ pub async fn load_since<A: Aggregate>(
 ///
 /// Retrying is safe precisely because of that purity: a conflict means the
 /// aggregate moved on, so the decision is remade against the state that actually
-/// won rather than being forced through.
+/// won rather than being forced through. Effects are remade with it, so the
+/// abandoned attempt's promises roll back along with its events.
 ///
-/// This owns its transaction. Commands that need to write *anything else*
-/// atomically with their events — an outbox row, a read-model update — need the
-/// caller's transaction instead, and use [`load`] plus
-/// [`append_events`] directly.
+/// # Atomicity (D9)
+///
+/// Events and effects are written in **one transaction**. That is the whole
+/// mechanism: after commit, either the facts and the promises are both durable
+/// or neither is, so there is no ordering in which a customer is emailed about
+/// something that did not happen, and none in which something happens with the
+/// promise lost.
+///
+/// A caller needing to write something *else* atomically — a read model, a
+/// module's own table — still owns its transaction and uses [`load`],
+/// [`append_events`] and [`enqueue`](crate::enqueue) directly.
 pub async fn execute<A, F, E>(
     pool: &PgPool,
     id: &AggregateId,
     upcasters: &Upcasters,
     metadata: &Metadata,
     decide: F,
-) -> Result<Vec<A::Event>, ExecuteError<E>>
+) -> Result<Committed<A::Event>, ExecuteError<E>>
 where
     A: Aggregate,
-    F: Fn(&Loaded<A>) -> Result<Vec<A::Event>, E>,
+    F: Fn(&Loaded<A>) -> Result<Decision<A::Event>, E>,
 {
     /// Enough to clear ordinary contention, few enough that a genuinely hot
     /// aggregate surfaces as a retryable error instead of a hung request.
@@ -171,18 +293,49 @@ where
         let mut tx = pool.begin().await?;
 
         let loaded = load::<A>(&mut tx, id, upcasters).await?;
-        let events = decide(&loaded).map_err(ExecuteError::Rejected)?;
+        let decision = decide(&loaded).map_err(ExecuteError::Rejected)?;
 
         // A decision to do nothing is a success, not an empty append.
-        if events.is_empty() {
+        if decision.is_empty() {
             tx.rollback().await?;
-            return Ok(events);
+            return Ok(Committed {
+                events: Vec::new(),
+                at: None,
+                version: loaded.version,
+                effects_enqueued: 0,
+            });
         }
 
-        match append_events::<A>(&mut tx, id, loaded.version, &events, metadata).await {
-            Ok(()) => {
+        let appended = if decision.events.is_empty() {
+            Ok(Vec::new())
+        } else {
+            append_events::<A>(&mut tx, id, loaded.version, &decision.events, metadata).await
+        };
+
+        match appended {
+            Ok(envelopes) => {
+                let at = envelopes.first().map(|e| e.position);
+                let version = envelopes.last().map_or(loaded.version, |e| e.sequence);
+
+                // Same transaction as the append above. A failure here — an
+                // unkeyed effect from a command that appended nothing — rolls
+                // the events back with it, which is right: the command asked for
+                // something the outbox cannot promise, so none of it happened.
+                let effects_enqueued = match enqueue(&mut tx, at, &decision.effects).await {
+                    Ok(count) => count,
+                    Err(e) => {
+                        tx.rollback().await?;
+                        return Err(e.into());
+                    }
+                };
+
                 tx.commit().await?;
-                return Ok(events);
+                return Ok(Committed {
+                    events: decision.events,
+                    at,
+                    version,
+                    effects_enqueued,
+                });
             }
             Err(AppendError::Conflict { .. }) => {
                 // Someone else wrote first. Roll back and decide again against
@@ -210,16 +363,18 @@ where
 /// Appends typed events to an aggregate's stream.
 ///
 /// The typed counterpart to [`append`](crate::append), for callers who own their
-/// own transaction because they are writing something else alongside.
+/// own transaction because they are writing something else alongside. Returns
+/// the stored envelopes, which is how the caller learns the positions its
+/// effects are keyed on.
 pub async fn append_events<A: Aggregate>(
     conn: &mut PgConnection,
     id: &AggregateId,
     expected: Sequence,
     events: &[A::Event],
     metadata: &Metadata,
-) -> Result<(), AppendError> {
+) -> Result<Vec<Envelope>, AppendError> {
     if events.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let stream = StreamId::new(A::domain(), id.clone());
@@ -238,6 +393,5 @@ pub async fn append_events<A: Aggregate>(
         })
         .collect();
 
-    append(conn, &stream, expected, &encoded, metadata).await?;
-    Ok(())
+    append(conn, &stream, expected, &encoded, metadata).await
 }

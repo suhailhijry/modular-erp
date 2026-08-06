@@ -23,12 +23,14 @@
 //! state, are event-sourced separately.
 
 mod cache;
+mod leases;
 pub mod messages;
 mod model;
 mod placement;
 mod pools;
 mod tenant_db;
 
+pub use leases::WorkSchedule;
 pub use model::{
     Actor, EnabledModules, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant,
     TenantStatus,
@@ -282,6 +284,173 @@ impl ControlPlane {
 
         // Support access is interactive by definition — an engineer is waiting.
         self.open(&tenant, Lane::Interactive).await
+    }
+
+    /// Opens a tenant for background work: projections, the outbox, migrations.
+    ///
+    /// # Why this is not a bypass
+    ///
+    /// It takes **no identity**, and that is the whole safety argument. A
+    /// request handler always has one, so it has no way to reach this path by
+    /// accident and no way to use it to act as somebody. Nothing it returns can
+    /// be attributed to a person, because no person was involved.
+    ///
+    /// It is also fixed to [`Lane::Background`], so however much work the fleet
+    /// is doing it draws from its own bulkhead and cannot starve a customer's
+    /// request.
+    ///
+    /// Unaudited, deliberately: a projection tick per tenant per interval would
+    /// bury the audit trail that [`Self::enter_for_support`] exists to keep
+    /// readable. What background work *did* is recorded where it belongs —
+    /// checkpoints, outbox rows, and the tenant's own event log.
+    pub async fn enter_for_maintenance(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<TenantDb, AccessError> {
+        let tenant = self
+            .cached_tenant(tenant_id)
+            .await?
+            .ok_or(AccessError::NoSuchTenant)?;
+
+        // A deleted tenant's database may be gone; a provisioning one has no
+        // schema yet. Suspended tenants still need their projections driven —
+        // suspension stops people using the system, not the system finishing
+        // what it already accepted.
+        if matches!(
+            tenant.status,
+            TenantStatus::Deleted | TenantStatus::Provisioning
+        ) {
+            return Err(AccessError::TenantNotActive {
+                status: tenant.status,
+            });
+        }
+
+        self.open(&tenant, Lane::Background).await
+    }
+
+    /// Claims tenants that are due for a visit, for the length of one visit.
+    ///
+    /// One statement does the scheduling and the mutual exclusion together: it
+    /// returns tenants whose `next_visit_at` has arrived and which no other
+    /// worker holds, and marks them as `owner`'s until the lease lapses.
+    ///
+    /// `SKIP LOCKED` means two workers claiming at the same instant get disjoint
+    /// sets rather than one waiting. A worker that dies mid-visit is recovered
+    /// from by the lease expiring — there is nothing to detect and nothing to
+    /// rebalance.
+    ///
+    /// A tenant this worker already holds is re-claimable, so renewing and
+    /// claiming are the same call.
+    pub async fn claim_tenants(
+        &self,
+        owner: &str,
+        limit: i64,
+        schedule: WorkSchedule,
+    ) -> Result<Vec<Tenant>, AccessError> {
+        let lease_millis = i64::try_from(schedule.lease.as_millis()).unwrap_or(i64::MAX);
+
+        let rows = sqlx::query!(
+            r#"
+            UPDATE tenant
+               SET worker_lease_owner = $1,
+                   worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond')
+             WHERE id IN (
+                 SELECT id
+                   FROM tenant
+                  WHERE status = 'active'
+                    AND next_visit_at <= now()
+                    AND (worker_lease_until IS NULL
+                         OR worker_lease_until <= now()
+                         OR worker_lease_owner = $1)
+                  ORDER BY next_visit_at
+                  LIMIT $2
+                    FOR UPDATE SKIP LOCKED
+             )
+            RETURNING id as "id: TenantId", slug, display_name, status, cluster,
+                      database_name, demo_expires_at, created_at
+            "#,
+            owner,
+            limit,
+            lease_millis,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                tenant_from_row(
+                    row.id,
+                    row.slug,
+                    row.display_name,
+                    &row.status,
+                    row.cluster,
+                    row.database_name,
+                    row.demo_expires_at,
+                    row.created_at,
+                )
+            })
+            .collect()
+    }
+
+    /// Schedules the next visit to a tenant, and drops the lease.
+    ///
+    /// `after` is zero when the visit did work — there is more to do and it
+    /// should be looked at again immediately — and
+    /// [`WorkSchedule::next_idle_delay`] when it did not.
+    pub async fn schedule_next_visit(
+        &self,
+        tenant_id: TenantId,
+        after: Duration,
+    ) -> Result<(), AccessError> {
+        let millis = i64::try_from(after.as_millis()).unwrap_or(i64::MAX);
+        sqlx::query!(
+            "UPDATE tenant
+                SET next_visit_at      = now() + ($2::BIGINT * INTERVAL '1 millisecond'),
+                    worker_lease_owner = NULL,
+                    worker_lease_until = NULL
+              WHERE id = $1",
+            tenant_id.as_uuid(),
+            millis,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Marks a tenant as having work waiting, so the next claim picks it up.
+    ///
+    /// The seam the push path attaches to: today the worker polls on an
+    /// interval, and when the API can tell it directly that a tenant just wrote
+    /// something, it does so by calling this. Polling becomes the floor rather
+    /// than the mechanism, and nothing downstream changes.
+    pub async fn request_visit(&self, tenant_id: TenantId) -> Result<(), AccessError> {
+        sqlx::query!(
+            "UPDATE tenant SET next_visit_at = now()
+              WHERE id = $1 AND next_visit_at > now()",
+            tenant_id.as_uuid(),
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Drops every lease this worker holds, without changing when the tenants
+    /// are next due.
+    ///
+    /// Called on the way out. Nothing depends on it — the leases would lapse
+    /// anyway — but releasing them means a rolling deploy hands work over in
+    /// milliseconds instead of one lease interval.
+    pub async fn release_leases(&self, owner: &str) -> Result<u64, AccessError> {
+        let released = sqlx::query!(
+            "UPDATE tenant
+                SET worker_lease_owner = NULL, worker_lease_until = NULL
+              WHERE worker_lease_owner = $1",
+            owner,
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(released)
     }
 
     async fn open(&self, tenant: &Tenant, lane: Lane) -> Result<TenantDb, AccessError> {

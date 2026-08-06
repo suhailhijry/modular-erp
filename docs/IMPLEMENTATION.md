@@ -109,6 +109,8 @@ every projection, so they land before the first projection exists.
 - [x] Golden files: every stored shape decodes on every build
 - [ ] Snapshots *(deferred — an optimization, and which aggregates need one is
       not yet known; `load_since` is the seam)*
+- [x] Crash tests: a rolled-back append returns its positions; a crash between
+      the append and the promise leaves neither
 - [x] Projection groups, one Postgres schema each, `search_path` isolation (L3)
 - [x] `ProjectionCtx` — no clock, no RNG, no pool; `derive_id` instead (L2)
 - [x] Checkpoint-in-transaction; the row lock doubles as the lease (L4)
@@ -116,16 +118,25 @@ every projection, so they land before the first projection exists.
 - [x] `replay_shadow` + table differ (`EXCEPT ALL` both ways)
 - [x] The differ is itself tested against a clock-reading projection, so a clean
       diff means something
-- [ ] Scheduler leasing *tenants with pending work* *(needs `bin/worker`)*
+- [x] Outbox schema; `Effect` as a value; `enqueue` in the command's transaction
+- [x] `Decision` (events + effects) and `Committed` (position, version, effects)
+- [x] Dispatcher: claim under `SKIP LOCKED`, deliver with no connection held,
+      settle separately; exponential backoff, dead letters, health counters
+- [x] Effects whose kind has no registered handler are **not claimed**, so a
+      staggered deploy cannot dead-letter a tenant's work
+- [x] Per-visit tenant leases (`claim_tenants`), `next_visit_at` scheduling with
+      per-tenant jitter, `request_visit` as the seam for the push path
+- [x] `enter_for_maintenance` — background access with no identity, own lane
+- [x] `spa-worker`: `Job` trait, `ProjectionJob`, `OutboxJob`, `bin/worker`
+- [x] `CancellationToken` + `TaskTracker` drain; leases released on the way out
+- [x] SIGTERM-mid-batch test, verified by shadow differ rather than by assertion
+- [x] Fault injection at transaction boundaries (carried from 1c) —
+      `pg_terminate_backend`, not a simulated failure
+- [ ] Snapshots *(deferred — see above)*
 - [ ] Shadow replay wired into CI *(needs the demo tenant, Phase 4)*
-- [ ] Outbox schema and dispatcher; effects as values (D9)
-- [ ] `CancellationToken` + `TaskTracker` drain; `bin/worker`
-- [ ] SIGTERM-mid-batch test
-- [ ] Event `schema_version` + upcaster registry + golden-file tests
-- [ ] Fault injection at transaction boundaries (carried from 1c)
 
 **Exit:** a projection can be written, replayed into a shadow schema, and proven
-identical by a differ rather than by assertion.
+identical by a differ rather than by assertion. **Met.** 215 tests.
 
 ---
 
@@ -213,6 +224,95 @@ deploy.
 ---
 
 ## Running notes
+
+- **Effects are written by commands, not derived by projections.** A projection
+  deriving effects from the stream would get exactly-once for free from L4, which
+  makes it the tempting design. It is wrong for one reason that settles it:
+  projections are rebuildable, and a rebuild would re-derive every effect and
+  re-send years of email. Command-time effects mean a rebuild sends nothing,
+  which is what makes `replay_shadow` something you can run in production. It
+  also matches L5 — an effect records a decision taken under the configuration in
+  force at the time, and re-deriving it later would resolve against today's.
+
+- **A missing handler must not be a delivery failure.** The first design claimed
+  every due effect and failed the ones it could not handle, which backs off and
+  eventually dead-letters. That turns an ordinary staggered rollout — some
+  workers have a module's handler, some do not yet — into a dead-letter storm for
+  every tenant using that module. The claim now filters on the kinds the
+  dispatcher knows, so an unrecognised effect is simply left for a worker that
+  can take it, and "nobody can handle this" surfaces through the backlog-age
+  alarm instead. `effects_with_no_registered_handler_are_left_alone` is the test.
+
+- **`impl Into<Decision>` made a rejection-only command handler uninferable.**
+  `execute` first took anything convertible into a `Decision`, so a command with
+  no effects could return a bare `Vec`. A closure whose only branch is
+  `Err(...)` then has no way to name the `Ok` type, and the compiler's complaint
+  points at `Result` rather than at the real problem. It now takes `Decision`
+  directly: one fewer generic parameter, always inferable, and `Decision::one(…)`
+  at every call site puts the D9 vocabulary where a reader will see it.
+
+- **`FOR UPDATE` with `OFFSET` locks the rows the offset skipped.** A test that
+  held a lock on "the second outbox row" via `ORDER BY id LIMIT 1 OFFSET 1 FOR
+  UPDATE` was locking the first row as well, because discarded rows still pass
+  through the `LockRows` node. It measured the wrong thing and failed for the
+  right reason. Pick the id first, then lock by primary key.
+
+- **The lease is per *visit*, not per tenant.** Two workers processing one
+  projection group is already refused by the checkpoint lock (L4), so a tenant
+  lease is not what makes concurrency safe — it is what stops two workers opening
+  connections to the same tenant at the same moment to learn there is nothing to
+  do. That reframing removed the renewal loop, the rebalancing, and the
+  membership protocol: one statement claims what is due, and the mark lapses
+  afterwards.
+
+- **Idle tenants are throttled by `next_visit_at`, not by the lease.** The
+  measured sizing rule is `connections ≈ active_tenants × per_tenant_pool`, so
+  visiting every tenant constantly would make every tenant active. A visit that
+  finds nothing pushes its tenant out by an interval, and per-tenant pools hold
+  no connection in between. The jitter is derived from the tenant's own id rather
+  than a random source, so it is a pure function and a restart does not reshuffle
+  the fleet — without it, a batch claimed together stays synchronized forever.
+
+- **`run_once` had to give up ownership of its transaction.** The worker takes
+  its connections from `TenantDb`, which has no public pool accessor by design —
+  so a runner that begins its own transaction from a `&PgPool` cannot be driven
+  by a worker without breaking the boundary that makes cross-tenant access a type
+  error. `run_once_in` takes the caller's connection and does everything L4 needs
+  inside it; `run_once` is now a thin wrapper for tests. The obligation moves to
+  the caller, and it fails safe: forgetting to commit loses a batch, and there is
+  no ordering in which a caller can commit part of one.
+
+- **Fault injection kills the connection rather than simulating a failure.**
+  Returning an error from a fake proves the code's own rollback path works, which
+  was never in doubt. `spa_testkit::kill_connection` issues
+  `pg_terminate_backend` from a second connection, so Postgres does the rollback
+  and the code finds out the way it would in production. That is what makes
+  `a_crash_mid_batch_leaves_neither_rows_nor_a_moved_checkpoint` an L4 test
+  rather than an error-handling test.
+
+- **The outbox test suite asserts at-least-once, not exactly-once.** Delivery and
+  the record of it are separate commits, so a crash between them redelivers.
+  Asserting "exactly once" would assert something the design does not provide,
+  and would first fail in production rather than in CI. The test asserts the two
+  deliveries carry the *same* idempotency key, which is the property that makes
+  at-least-once survivable.
+
+- **A five-millisecond backoff made an assertion a race.** A test asserted an
+  effect was *not yet* due immediately after failing delivery, with the backoff
+  set to 5ms so the suite would stay quick. Under the full parallel suite it lost
+  that race about one run in six — and a flake that says the code is broken when
+  the test is is worse than a failure, because the response to it is to rerun.
+  Fixed twice over: the assertion now reads `next_attempt_at` from the row rather
+  than inferring it from a second dispatch, and waiting for a backoff polls for
+  due-ness instead of sleeping a guessed duration. Verified across eight
+  consecutive runs of the file and three of the workspace.
+
+- **`just prepare` did not work from a clean checkout either.** Same class of bug
+  as `cargo test` in Phase 1: `just` does not read `.env` by default, so a
+  developer whose Postgres wants a password got `no password supplied` from a
+  recipe while their tests passed. `set dotenv-load := true`, and both the
+  type-check and admin URLs are now derived from `DATABASE_URL` so credentials
+  live in one place.
 
 - **L3 isolation caught its first bug immediately — mine.** The shadow rebuild
   set `search_path` to the shadow schema *before* reading the log, which put the

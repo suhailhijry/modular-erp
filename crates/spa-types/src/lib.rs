@@ -33,8 +33,8 @@ pub use error::{
     NegativeCounter,
 };
 pub use ids::{
-    AggregateId, DomainName, EventName, IdentityId, LogPosition, MembershipId, ModuleId, ProfileId,
-    SchemaVersion, Sequence, StreamId, TenantId,
+    AggregateId, DomainName, EffectKind, EventName, IdentityId, LogPosition, MembershipId,
+    ModuleId, ProfileId, SchemaVersion, Sequence, StreamId, TenantId,
 };
 pub use money::{CurrencyCode, Money};
 pub use non_empty::NonEmpty;

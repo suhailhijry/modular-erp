@@ -1,8 +1,17 @@
 # Task runner. See docs/DATABASE_SETUP.md for the database layout.
 
-# Host to build the type-check database on. Only the server part is used.
-typecheck_url := env("TYPECHECK_DATABASE_URL", "postgres://postgres@localhost/spa_typecheck")
-admin_url := env("ADMIN_DATABASE_URL", "postgres://postgres@localhost/postgres")
+# `.env` is loaded here for the same reason `spa-testkit` loads it: a developer
+# whose Postgres wants a password has it in `.env`, and neither cargo nor just
+# reads that file by default. Without this, `just prepare` fails with
+# `no password supplied` on a checkout where `cargo test` works fine.
+set dotenv-load := true
+
+# Both databases are derived from `DATABASE_URL` by swapping the database name,
+# so there is one place to configure credentials. Override either directly if
+# your server needs something the substitution cannot express.
+base_url := env("DATABASE_URL", "postgres://postgres@localhost/postgres")
+typecheck_url := env("TYPECHECK_DATABASE_URL", replace_regex(base_url, "/[^/]*$", "/spa_typecheck"))
+admin_url := env("ADMIN_DATABASE_URL", replace_regex(base_url, "/[^/]*$", "/postgres"))
 
 default:
     @just --list

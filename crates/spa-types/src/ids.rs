@@ -99,6 +99,16 @@ validated_string! {
     validate = ascii_identifier
 }
 
+validated_string! {
+    /// What kind of effect an outbox row is — `email.send`, `webhook.post`.
+    ///
+    /// The routing key from a promise to the handler that keeps it. Stored, so
+    /// renaming one strands every effect already enqueued under the old name.
+    EffectKind,
+    max_len = 64,
+    validate = ascii_identifier
+}
+
 /// Where an aggregate's events live: domain plus identity.
 ///
 /// Deliberately a struct rather than two loose `&str` parameters, which is how

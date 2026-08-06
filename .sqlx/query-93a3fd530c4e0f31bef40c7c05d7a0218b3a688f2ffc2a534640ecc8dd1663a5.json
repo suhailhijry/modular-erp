@@ -1,0 +1,102 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE outbox\n               SET attempts      = attempts + 1,\n                   leased_until  = now() + ($2::BIGINT * INTERVAL '1 millisecond')\n             WHERE id IN (\n                 SELECT id\n                   FROM outbox\n                  WHERE delivered_at IS NULL\n                    AND dead_at IS NULL\n                    AND next_attempt_at <= now()\n                    AND (leased_until IS NULL OR leased_until <= now())\n                    AND kind = ANY($3::TEXT[])\n                  ORDER BY next_attempt_at, id\n                  LIMIT $1\n                    FOR UPDATE SKIP LOCKED\n             )\n            RETURNING id, kind, payload, idempotency_key, attempts, caused_by, enqueued_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "payload",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "payload"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "idempotency_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "idempotency_key"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "attempts",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "caused_by",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "caused_by"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "enqueued_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "enqueued_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "93a3fd530c4e0f31bef40c7c05d7a0218b3a688f2ffc2a534640ecc8dd1663a5"
+}

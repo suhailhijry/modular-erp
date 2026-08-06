@@ -32,6 +32,7 @@ one means changing this document first.
 | D11 | The kernel contains **no business domain**. Accounting is a module. | Accepted — revises an earlier proposal, see §1.11 |
 | D12 | Errors are message codes plus typed arguments, never sentences. Arabic is a first-class target. | Accepted — see §1.12 |
 | D13 | Clusters are control-plane data; placement is by concurrently-active tenants | Accepted — see §1.13 |
+| D14 | Background work claims tenants by **per-visit lease**; idle tenants are throttled by `next_visit_at` | Accepted — see §1.14 |
 
 ### 1.1 One database per tenant (D1)
 
@@ -143,6 +144,22 @@ in front of a customer.
 No domain code performs I/O. A command returns events *and* effects; both are
 written in one transaction; a dispatcher delivers afterwards with retries and
 idempotency keys.
+
+Three consequences worth stating, because each rules out a design that looks
+equivalent:
+
+- **Effects are written by commands, never derived by projections.** A projection
+  would get exactly-once for free from L4, but projections are rebuildable — and
+  a rebuild would re-derive every effect and re-send years of email. Command-time
+  effects are what make `replay --shadow` safe to run against a live tenant.
+- **Delivery is at-least-once, and that is not fixable at this layer.** The
+  delivery and the record of it are separate commits, so a crash between them
+  redelivers. Every effect carries a stable idempotency key; a handler that
+  passes it downstream is what turns the second delivery into a no-op.
+- **An effect whose kind has no registered handler is not claimed.** Claiming and
+  failing would burn attempts and dead-letter a tenant's work during an ordinary
+  staggered rollout. Unhandled effects age instead, and the backlog-age health
+  check is where "nobody can handle this" belongs.
 
 ### 1.9 Identity, membership, profile
 
@@ -284,6 +301,37 @@ Default placement is `Balanced` (least-utilized first): activity is what binds, 
 spreading it is right. `Packed` exists for deliberate consolidation while tenants
 are mostly dormant. `Draining` keeps a cluster serving while taking no new
 tenants, which is how hardware is retired.
+
+### 1.14 Background work is scheduled by per-visit lease (D14)
+
+Projections and the outbox need driving. With one worker that is trivial; with a
+fleet it is a coordination problem whose obvious answers are both wrong.
+
+**Every worker services every tenant** is *safe* — two workers on one projection
+group is already refused by the checkpoint lock (L4) — but each worker opens a
+connection to each tenant to discover there is nothing to do. Connections scale
+as workers × tenants, and by D13's own sizing rule that makes every tenant
+permanently active. It is the one thing that must not happen.
+
+**Static assignment by hash** means a deploy either leaves a shard unowned or
+leaves it doubly owned, for as long as the rollout takes.
+
+So a worker claims tenants that are **due**, holds them for the length of one
+visit, and lets the claim lapse. `FOR UPDATE SKIP LOCKED` makes simultaneous
+claims disjoint; a worker that dies is recovered from by doing nothing. Claiming
+and renewing are the same call, so long work needs no second code path.
+
+The throttle is a separate column, and it is the one that matters for cost. A
+visit that finds nothing pushes `next_visit_at` out by an interval plus jitter
+derived from the tenant's own id — so idle tenants cost one short query per
+interval and hold no connection between them. `request_visit` pulls a tenant
+forward, which is where a push path attaches when the API can tell a worker
+directly that a tenant just wrote something: polling becomes the floor rather
+than the mechanism, and nothing downstream changes.
+
+Background access is its own entry path (`enter_for_maintenance`). It takes no
+identity — which is the safety argument, since a request handler always has one
+and so cannot reach it by accident — and is fixed to the background lane.
 
 ---
 
@@ -597,9 +645,12 @@ crates/
   spa-eventlog    types        gapless append, load, snapshot, upcasters, outbox
   spa-projection  eventlog     groups, ProjectionCtx, scheduler, leases, shadow replay
   spa-config      types,rules  declarations, layers, versioned resolution
-  spa-control     eventlog,config  identities, tenants, entitlements, TenantDb, migrator
+  spa-control     eventlog,config  identities, tenants, entitlements, TenantDb, migrator,
+                               per-visit tenant leases
   spa-kernel      eventlog,rules,projection,config  permits, Module trait + registry,
                                numbering, health-check registry. No domain (D11).
+  spa-worker      control,eventlog,projection  Job trait, tenant visit loop,
+                               cancellation and drain, bin/worker
   spa-api         control,kernel,modules  routing, problem+json, OpenAPI, composition root
   spa-testkit     all          template-DB fixtures, generators, fault injection, differ
 modules/
@@ -636,8 +687,10 @@ doesn't.
 | Replay reproducibility (L2, L3, L5) | `replay --shadow` then diff every table against live |
 | Log integrity (L1) | Concurrent-append test asserting contiguous, commit-ordered positions |
 | Idempotency (L8) | Command applied twice ≡ once; batch replayed ≡ applied once |
-| Crash safety | Fault injection at every transaction boundary; assert no partial state and that resume completes |
-| Shutdown safety | SIGTERM mid-batch; assert drain completes and nothing is lost |
+| Crash safety | `pg_terminate_backend` mid-transaction — a real severed connection, not a simulated error; assert no partial state and that resume completes |
+| Shutdown safety | SIGTERM mid-batch; assert the drain completes, then **rebuild the projection from the log and diff** rather than trusting the numbers left behind |
+| Effect delivery | At-least-once asserted, not exactly-once: a crash between the delivery and its record must redeliver, with the same idempotency key |
+| Deploy safety | A worker without a module's handler leaves those effects unclaimed rather than dead-lettering them |
 | Old data still reads | Golden files of real event JSON per schema version, decoded every build |
 | Migration equivalence | Schema migrated from v(N−1) must equal one built fresh at vN |
 | Tenant isolation (D1) | Two provisioned tenants; assert no code path reaches across |

@@ -15,6 +15,8 @@ spa-eventlog = { path = "crates/spa-eventlog" }
 spa-projection = { path = "crates/spa-projection" }
 spa-types = { path = "crates/spa-types" }
 spa-testkit = { path = "crates/spa-testkit" }
+spa-control = { path = "crates/spa-control" }
+spa-worker = { path = "crates/spa-worker" }
 
 # Error handling
 anyhow = "1.0"

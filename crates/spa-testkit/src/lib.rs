@@ -40,9 +40,11 @@
 //! # }
 //! ```
 
+mod fault;
 mod schema;
 mod template;
 
+pub use fault::{backend_pid, kill_backend, kill_connection};
 pub use schema::Schema;
 pub use template::{Template, TestDb, create_named_database, drop_named_database};
 

@@ -89,7 +89,8 @@ pub async fn checkpoint<G: ProjectionGroup>(
     Ok(LogPosition::new(position).unwrap_or(LogPosition::ZERO))
 }
 
-/// Advances a group by at most `batch_size` events.
+/// Advances a group by at most `batch_size` events, inside the caller's
+/// transaction.
 ///
 /// # What makes this correct (L4)
 ///
@@ -106,14 +107,28 @@ pub async fn checkpoint<G: ProjectionGroup>(
 /// Because the checkpoint moves with the effects, a crash anywhere leaves the
 /// two consistent: the events whose effects were lost are exactly the events the
 /// checkpoint has not passed. No dedup table, no reconciliation.
-pub async fn run_once<G: ProjectionGroup>(
-    pool: &PgPool,
+///
+/// # The caller's obligation
+///
+/// **Commit on `Ok`, and do not commit on `Err`.** The transaction is the
+/// caller's because the connection budget is: a worker takes its transaction
+/// from `TenantDb::begin`, which meters it against the background lane, and
+/// handing a raw pool down here would mean an unmetered connection escaping the
+/// boundary that makes cross-tenant access a type error.
+///
+/// Forgetting to commit is safe in the only direction that matters — the batch
+/// rolls back whole and the checkpoint stays where it was, so work is lost, not
+/// corrupted. There is no ordering in which a caller can commit *part* of this,
+/// because it is one statement sequence in one transaction.
+///
+/// [`run_once`] is the version that owns its transaction, for tests and for
+/// single-tenant tools.
+pub async fn run_once_in<G: ProjectionGroup>(
+    conn: &mut PgConnection,
     projections: &[&dyn Projection<Group = G>],
     upcasters: &Upcasters,
     batch_size: i64,
 ) -> Result<Progress, RunError> {
-    let mut tx = pool.begin().await?;
-
     // 1. The lease. `NOWAIT` so a second worker returns immediately rather than
     //    blocking a connection until the first finishes.
     let held = sqlx::query_scalar!(
@@ -122,38 +137,32 @@ pub async fn run_once<G: ProjectionGroup>(
           FOR UPDATE NOWAIT",
         G::NAME,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await;
 
     let position = match held {
         Ok(Some(position)) => position,
         // No row: the group's schema has not been created. Nothing to do.
         Ok(None) => {
-            tx.rollback().await?;
             return Ok(Progress::UpToDate {
                 at: LogPosition::ZERO,
             });
         }
         Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some(LOCK_NOT_AVAILABLE) => {
-            tx.rollback().await?;
             return Ok(Progress::Busy);
         }
-        Err(e) => {
-            tx.rollback().await?;
-            return Err(e.into());
-        }
+        Err(e) => return Err(e.into()),
     };
     let from = LogPosition::new(position).unwrap_or(LogPosition::ZERO);
 
-    let batch = read_since(&mut tx, from, batch_size).await?;
+    let batch = read_since(&mut *conn, from, batch_size).await?;
     if batch.is_empty() {
-        tx.rollback().await?;
         return Ok(Progress::UpToDate { at: from });
     }
 
     // 2. L3. From here to commit, unqualified names resolve only inside the
     //    group's own schema.
-    set_search_path(&mut tx, G::SCHEMA).await?;
+    set_search_path(&mut *conn, G::SCHEMA).await?;
 
     // 3. Apply, in order.
     let mut to = from;
@@ -161,7 +170,7 @@ pub async fn run_once<G: ProjectionGroup>(
         let ctx = ProjectionCtx::new(envelope.position, envelope.recorded_at, upcasters);
         for projection in projections {
             projection
-                .apply(&ctx, envelope, &mut tx)
+                .apply(&ctx, envelope, &mut *conn)
                 .await
                 .map_err(|source| RunError::Projection {
                     projection: projection.name(),
@@ -184,16 +193,41 @@ pub async fn run_once<G: ProjectionGroup>(
         G::NAME,
         to.get(),
     )
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
-
-    tx.commit().await?;
 
     Ok(Progress::Advanced {
         from,
         to,
         events: batch.len(),
     })
+}
+
+/// [`run_once_in`] in a transaction of its own.
+///
+/// Rolls back when nothing was applied, so a `Busy` or up-to-date pass leaves no
+/// trace and holds no locks past its return.
+pub async fn run_once<G: ProjectionGroup>(
+    pool: &PgPool,
+    projections: &[&dyn Projection<Group = G>],
+    upcasters: &Upcasters,
+    batch_size: i64,
+) -> Result<Progress, RunError> {
+    let mut tx = pool.begin().await?;
+    match run_once_in::<G>(&mut tx, projections, upcasters, batch_size).await {
+        Ok(progress @ Progress::Advanced { .. }) => {
+            tx.commit().await?;
+            Ok(progress)
+        }
+        Ok(progress) => {
+            tx.rollback().await?;
+            Ok(progress)
+        }
+        Err(e) => {
+            tx.rollback().await?;
+            Err(e)
+        }
+    }
 }
 
 /// Runs until the group is at the head of the log.

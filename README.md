@@ -41,9 +41,14 @@ regenerates the offline query data; commit the `.sqlx/` diff alongside it.
 
 ```
 crates/spa-types      value types — no I/O, WASM-safe, shareable with a frontend
+crates/spa-i18n       message codes and typed arguments; English and Arabic
 crates/spa-testkit    test harness — real Postgres, one database per test
 crates/spa-control    control plane — identities, tenants, memberships, TenantDb
+crates/spa-eventlog   the tenant log: gapless append, aggregates, upcasters, outbox
+crates/spa-projection projection groups, checkpoints, shadow replay and the differ
+crates/spa-worker     background worker — tenant visits, jobs, drain; bin/worker
 migrations/control    control-plane schema
+migrations/tenant     per-tenant schema
 ```
 
 Crates are added as the phases in `docs/IMPLEMENTATION.md` reach them; the full
@@ -64,6 +69,11 @@ are runtime data and mismatches must be handled. Amounts are integer minor units
 carry on with the feature disabled". In a system of record a loud failure costs
 an incident and a quiet one costs an audit. This is architecture law L6, and
 `unwrap`/`expect`/`panic` are lint-warned outside tests to keep it honest.
+
+**Nothing performs I/O inline.** A command returns events *and* effects, both
+written in one transaction; a worker delivers the effects afterwards. So a
+rolled-back command emails nobody, a crashed one still owes what it promised, and
+rebuilding a read model sends nothing at all.
 
 ## History
 

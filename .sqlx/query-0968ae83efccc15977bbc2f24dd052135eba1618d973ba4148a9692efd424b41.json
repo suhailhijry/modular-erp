@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO outbox (idempotency_key, kind, payload, caused_by)\n        SELECT t.key, t.kind, t.payload, $4\n          FROM UNNEST($1::text[], $2::text[], $3::jsonb[]) AS t(key, kind, payload)\n        ON CONFLICT (idempotency_key) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "TextArray",
+        "JsonbArray",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0968ae83efccc15977bbc2f24dd052135eba1618d973ba4148a9692efd424b41"
+}

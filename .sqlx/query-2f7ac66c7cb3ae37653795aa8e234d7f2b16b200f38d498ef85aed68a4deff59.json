@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE outbox\n                        SET dead_at = now(), leased_until = NULL, last_error = $2\n                      WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2f7ac66c7cb3ae37653795aa8e234d7f2b16b200f38d498ef85aed68a4deff59"
+}

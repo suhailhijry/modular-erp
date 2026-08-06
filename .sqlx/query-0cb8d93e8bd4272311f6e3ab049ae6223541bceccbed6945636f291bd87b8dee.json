@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tenant SET next_visit_at = now()\n              WHERE id = $1 AND next_visit_at > now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0cb8d93e8bd4272311f6e3ab049ae6223541bceccbed6945636f291bd87b8dee"
+}

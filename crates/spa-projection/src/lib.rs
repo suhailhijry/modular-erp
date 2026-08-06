@@ -20,5 +20,7 @@ mod runner;
 mod shadow;
 
 pub use group::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
-pub use runner::{Progress, RunError, checkpoint, ensure_group_schema, run_once, run_to_head};
+pub use runner::{
+    Progress, RunError, checkpoint, ensure_group_schema, run_once, run_once_in, run_to_head,
+};
 pub use shadow::{ShadowReport, TableDiff, replay_shadow};
