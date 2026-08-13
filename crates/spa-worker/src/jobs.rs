@@ -10,6 +10,7 @@ use std::sync::Arc;
 use spa_control::TenantDb;
 use spa_eventlog::{Dispatcher, Upcasters};
 use spa_projection::{Progress, Projection, ProjectionGroup, run_once_in};
+use spa_types::ModuleId;
 
 use crate::job::{Activity, BoxError, Job};
 
@@ -26,6 +27,7 @@ pub struct ProjectionJob<G: ProjectionGroup> {
     projections: Vec<Arc<dyn Projection<Group = G>>>,
     upcasters: Arc<Upcasters>,
     batch_size: i64,
+    module: Option<ModuleId>,
 }
 
 impl<G: ProjectionGroup> std::fmt::Debug for ProjectionJob<G> {
@@ -49,7 +51,16 @@ impl<G: ProjectionGroup> ProjectionJob<G> {
             projections,
             upcasters,
             batch_size,
+            module: None,
         }
+    }
+
+    /// Marks this group as belonging to a module, so tenants without it are
+    /// skipped.
+    #[must_use]
+    pub fn for_module(mut self, module: ModuleId) -> Self {
+        self.module = Some(module);
+        self
     }
 }
 
@@ -57,6 +68,10 @@ impl<G: ProjectionGroup> ProjectionJob<G> {
 impl<G: ProjectionGroup> Job for ProjectionJob<G> {
     fn name(&self) -> &'static str {
         self.name
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        self.module.clone()
     }
 
     async fn tick(&self, db: &TenantDb) -> Result<Activity, BoxError> {

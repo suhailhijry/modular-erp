@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO authenticator (id, identity_id, kind, handle, secret)\n             VALUES ($1, $2, 'password', $3, $4)\n             ON CONFLICT (kind, handle) DO UPDATE SET secret = EXCLUDED.secret",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0274eb72b27bc34abf23a35639ba87ff898e1a8f4024f29290993cb1e1683a97"
+}

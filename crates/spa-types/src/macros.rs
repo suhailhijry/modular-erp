@@ -91,6 +91,10 @@ macro_rules! counter {
             /// The position before any record exists. Checkpoints start here.
             pub const ZERO: Self = Self(0);
 
+            /// The first real one. Mostly useful as `SchemaVersion::ONE`, which
+            /// every event declares before it has a second shape.
+            pub const ONE: Self = Self(1);
+
             /// Fails on negatives: Postgres `BIGINT` columns are signed, but
             /// these quantities never are, and a negative reaching a query is a
             /// bug worth catching at the boundary.

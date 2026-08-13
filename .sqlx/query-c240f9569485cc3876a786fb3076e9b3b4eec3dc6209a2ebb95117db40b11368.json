@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tenant WHERE id = $1 AND status = 'provisioning'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c240f9569485cc3876a786fb3076e9b3b4eec3dc6209a2ebb95117db40b11368"
+}

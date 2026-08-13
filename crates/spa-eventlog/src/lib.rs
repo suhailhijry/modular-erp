@@ -28,8 +28,8 @@ mod read;
 mod upcast;
 
 pub use aggregate::{
-    Aggregate, Committed, Decision, DomainEvent, ExecuteError, LoadError, Loaded, append_events,
-    execute, load, load_since,
+    Aggregate, Committed, Decision, DomainEvent, ExecuteError, LoadError, Loaded, MAX_ATTEMPTS,
+    append_events, execute, load, load_since, try_execute,
 };
 pub use append::{AppendError, NewEvent, append};
 pub use envelope::{Envelope, Metadata};

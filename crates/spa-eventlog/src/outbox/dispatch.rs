@@ -330,7 +330,7 @@ impl Dispatcher {
             lease_millis,
             &kind_strings,
         )
-        .fetch_all(conn)
+        .fetch_all(&mut *conn)
         .await?;
 
         rows.into_iter()
@@ -437,7 +437,7 @@ impl Dispatcher {
                       WHERE id = $1",
                     effect.id,
                 )
-                .execute(conn)
+                .execute(&mut *conn)
                 .await?;
             }
             Settlement::Retrying { delay, error } => {
@@ -452,7 +452,7 @@ impl Dispatcher {
                     delay_millis,
                     truncate(error),
                 )
-                .execute(conn)
+                .execute(&mut *conn)
                 .await?;
             }
             Settlement::Dead { error } => {
@@ -463,7 +463,7 @@ impl Dispatcher {
                     effect.id,
                     truncate(error),
                 )
-                .execute(conn)
+                .execute(&mut *conn)
                 .await?;
             }
             // Deliberately writes nothing: the lease lapses and the row returns

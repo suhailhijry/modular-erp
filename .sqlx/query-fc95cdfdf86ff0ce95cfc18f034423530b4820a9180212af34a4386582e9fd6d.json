@@ -1,0 +1,98 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT code as \"code!\", name as \"name!\", kind as \"kind!\",\n                  currency as \"currency!\", closed as \"closed!\",\n                  balance as \"balance!\", postings as \"postings!\"\n             FROM proj_ledger.account_balance\n            ORDER BY code",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "code!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account_balance",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account_balance",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account_balance",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account_balance",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "closed!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account_balance",
+            "name": "closed"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "balance!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account_balance",
+            "name": "balance"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "postings!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account_balance",
+            "name": "postings"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "fc95cdfdf86ff0ce95cfc18f034423530b4820a9180212af34a4386582e9fd6d"
+}

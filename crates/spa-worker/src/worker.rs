@@ -306,6 +306,11 @@ impl Visit {
                     };
                 }
 
+                // A module this tenant declined costs it nothing.
+                if job.module().is_some_and(|m| !db.has_module(&m)) {
+                    continue;
+                }
+
                 match job.tick(db).await {
                     Ok(Activity::Worked) => {
                         worked_this_round = true;

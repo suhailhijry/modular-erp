@@ -1,6 +1,7 @@
 //! What a worker actually does to a tenant.
 
 use spa_control::TenantDb;
+use spa_types::ModuleId;
 
 /// Whether a tick found anything to do.
 ///
@@ -40,6 +41,16 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub trait Job: Send + Sync + 'static {
     /// Stable name, for logs and metrics.
     fn name(&self) -> &'static str;
+
+    /// The module this job belongs to, if any.
+    ///
+    /// The worker skips it for tenants that have not enabled that module — so a
+    /// tenant declining accounting pays nothing for its projections, which is
+    /// what "modular" has to mean if it is going to mean anything. `None` is a
+    /// kernel job that every tenant gets.
+    fn module(&self) -> Option<ModuleId> {
+        None
+    }
 
     /// Does a bounded amount of work for one tenant.
     async fn tick(&self, db: &TenantDb) -> Result<Activity, BoxError>;

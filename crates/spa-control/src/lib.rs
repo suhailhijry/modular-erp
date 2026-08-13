@@ -22,14 +22,17 @@
 //! log helps with. Provisioning workflows, which genuinely need resumable
 //! state, are event-sourced separately.
 
+mod auth;
 mod cache;
 mod leases;
 pub mod messages;
 mod model;
 mod placement;
 mod pools;
+mod provision;
 mod tenant_db;
 
+pub use auth::{AuthError, SESSION_LIFETIME, Session, SessionToken, hash_password};
 pub use leases::WorkSchedule;
 pub use model::{
     Actor, EnabledModules, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant,
@@ -37,7 +40,8 @@ pub use model::{
 };
 pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
 pub use pools::{ClusterRegistry, Conn, Lane, PoolConfig, PoolError, TenantPools, Tx};
-pub use tenant_db::TenantDb;
+pub use provision::{ModuleSetup, SignedUp as ProvisionedTenant};
+pub use tenant_db::{CommandError, TenantDb};
 
 use spa_i18n::{Localize, Message, MessageArg, StaticCatalog};
 

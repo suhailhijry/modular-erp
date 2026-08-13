@@ -140,36 +140,109 @@ identical by a differ rather than by assertion. **Met.** 215 tests.
 
 ---
 
-## Phase 3 — Kernel services and the API contract · 3–4 weeks
+## Phase 3 — The request path · 2–3 weeks
 
-No business domain here — that is D11. This phase builds what modules are built
-*on*.
+**Resequenced.** The original Phase 3 was "build what modules are built on"
+before any module existed: a `Module` trait with one implementation, capability
+permits with nothing to permit, a configuration system with nothing configurable.
+Every one of those is an abstraction invented from a guess about its consumer.
 
-- [ ] `Module` trait, registry, and the health-check registry modules contribute to
-- [ ] Capability permits; `Permit<C>` minted only by the authorizer
-- [ ] Tenant-local authorization as a projection, never an aggregate replay (L7)
+So Phase 3 is now the **spine** — the shortest path from an HTTP request to a
+tenant's data — and the kernel abstractions are deferred to 3c, where two real
+modules can say what shape they need.
+
+### 3a · Authentication and sessions *(carried from 1d)*
+- [x] `authenticator` table; Argon2id, PHC strings so cost is raisable without a
+      migration
+- [x] Opaque 256-bit session tokens; only the SHA-256 is stored
+- [x] Constant-time-ish login: an unknown handle costs the same as a wrong
+      password, so the API is not an account-enumeration oracle
+- [x] `SessionToken`'s `Debug` is redacted — a token in a log line is a working
+      credential
+- [x] `log_out`, `log_out_everywhere`, `sweep_sessions`
+- [ ] MFA, OIDC, API keys *(more rows in `authenticator`, not more tables)*
+
+### 3b · The HTTP surface
+- [x] `spa-api` on axum; `bin/api` with body limit, timeout, graceful shutdown
+- [x] problem+json (RFC 9457) plus `code` and `args` — a client branches on the
+      code, never on the prose
+- [x] `Accept-Language` honoured on every response including failures
+- [x] Composite catalog across crates, with a duplicate-code test
+- [x] `Tenant` extractor: the only route to a `TenantDb`, so "did we check the
+      membership?" is answered by the signature
+- [x] Status mapping in one place; a tenant that exists but is not yours is
+      byte-identical to one that does not exist
+- [x] Nine tests through the real router, including the two enumeration oracles
+
+### 3e · Provisioning
+- [x] `ControlPlane::provision` — registers, creates and migrates the database,
+      installs modules, grants the owner, activates. Idempotent throughout.
+- [x] Compensation: a failure drops the database and the row, so the name is
+      free again — proved by signing the same name up successfully after
+- [x] `ControlPlane::sign_up` — the whole thing, plus the account and a session
+- [x] `ModuleSetup`: a module *describes* its install (SQL + projection groups)
+      rather than the control plane knowing what a ledger is
+- [x] **`POST /v1/signups`** — one request, and the caller has a working system
+      they are already logged into, with the ledger installed and usable
+- [ ] A sweeper for tenants stuck in `provisioning` *(not needed while signup
+      compensates synchronously; needed the moment a step goes async)*
+
+### 3c · Kernel services
+
+Built only where the ledger produced a second consumer.
+
+- [x] `Job::module()` — a tenant that declined a module is not worked on its
+      behalf, which is what "modular" has to mean to be worth anything
+- [x] `Invariant` trait + `HealthJob` — architecture §7's per-tenant checks
+      actually run, on an interval. Four kernel invariants; the ledger
+      contributes the trial balance through the composition root
+- [x] `bin/worker` composes the kernel and the modules; neither crate depends on
+      the other
+- [ ] `Module` trait and registry *(still one module; the second describes it)*
+- [ ] `Idempotency-Key` *(the ledger's mutations take client-chosen ids, so both
+      are already idempotent — this may turn out to be unnecessary)*
+- [ ] `ETag`/`If-Match` *(no update-in-place endpoint yet)*
+- [ ] Cursors *(no list long enough)*
+- [ ] Capability permits; tenant-local authorization as a projection (L7)
 - [ ] `spa-config`: declarations, layers, versioned resolution, provenance
 - [ ] Numbering (gapless per-tenant document sequences)
-- [ ] API: problem+json, cursors, `ETag`/`If-Match`, `Idempotency-Key`
 - [ ] OpenAPI generation with CI drift check
-- [ ] Authorization matrix tests; crash-injection tests
+- [ ] Authorization matrix tests
 
-**Exit:** a module can be written, mounted, authorized and called — with nothing
-domain-specific in the kernel.
+**Exit for 3a+3b:** a person signs in and reads their own tenant over HTTP, in
+Arabic, and cannot read anybody else's. **Met.** 230 tests.
 
-## Phase 3b — `modules/ledger` · 2–3 weeks
+## Phase 3d — `modules/ledger` · 2–3 weeks
 
 The first real module, and the proof that the module seam works. Built as a
 module from the start rather than extracted from the kernel later.
 
-- [ ] Accounts, journal entries, fiscal periods
-- [ ] `BalancedLines` as a proof-carrying event payload
-- [ ] Typestate on `JournalEntry` and `FiscalPeriod`
-- [ ] Trial-balance invariant contributed to the platform health registry
-- [ ] Property test: any valid command sequence leaves the ledger balanced
+**This is what 3c waits on.** Writing the ledger against the bare spine shows
+which kernel services are genuinely shared and which were invented — and the
+first `Idempotency-Key` and `ETag` have a real mutation to attach to.
+
+- [x] Accounts (open, rename, close) and journal entries
+- [x] `BalancedLines` as a proof-carrying event payload — revalidates on
+      `Deserialize`, so a stored unbalanced entry will not decode
+- [x] Signed amounts rather than a debit/credit pair: "debits equal credits"
+      becomes "sums to zero", one check on one number
+- [x] Trial balance and account balances as **views**, not maintained tables
+- [x] `imbalances()` — the health check this module contributes
+- [x] Property tests on `BalancedLines`, plus a generated command sequence whose
+      stored postings must still sum to zero
+- [x] Shadow replay proves the ledger rebuilds identically
+- [x] HTTP routes; the same `Tenant` extractor, so isolation is inherited
+- [ ] Fiscal periods, drafts, reversals, multi-currency entries with FX
+      *(each needs someone to want it before its shape is decided)*
+- [x] Chart-of-accounts templates — `services` and `retail`, bilingual, with
+      Saudi VAT and Zakat accounts in both
+- [x] `GET /v1/ledger/charts` (unauthenticated — a signup form has to show the
+      choices) and `POST /v1/tenants/{slug}/ledger/chart`
+- [x] Installing is idempotent, so a half-finished install is fixed by retrying,
+      and `retail` on top of `services` opens only the difference
 
 **Exit:** a correct ledger behind an API a third party could integrate against —
-and a module a tenant can decline.
+and a module a tenant can decline. **Met.** 256 tests.
 
 ---
 
@@ -224,6 +297,146 @@ deploy.
 ---
 
 ## Running notes
+
+- **"Implementation of `Send` is not general enough" is diagnosable — from the
+  right place.** An axum handler's future must be `Send`, and rustc reports a
+  failure at the *route table*, naming borrows in files that look unrelated
+  (rust-lang/rust#102211). `#[axum::debug_handler]` finds nothing. A whole day
+  went into chasing it from the handler, moving the error around without ever
+  closing it.
+
+  What actually worked was one line, put in the crate that owns the code:
+
+  ```rust
+  const _: fn() = || {
+      fn assert_send<T: Send>(_: T) {}
+      fn probe(control: &ControlPlane, modules: Vec<ModuleSetup>) {
+          assert_send(control.sign_up(/* … */));
+      }
+  };
+  ```
+
+  With the error landing next to the cause, bisecting took twenty minutes. Four
+  distinct triggers, each one enough on its own:
+
+  1. **A helper `async fn` taking several references.**
+     `install_modules(&Tenant, &[ModuleSetup], &mut PgConnection)` — three
+     elided lifetimes. Inlined.
+  2. **A borrowed iterator held across an await.** `for setup in &modules`
+     carries a `slice::Iter<'_, _>`; indexing does not.
+  3. **A closure capturing by reference across an await.** `|e| f(locale)`
+     needed `move`; `&Locale` alone broke the proof.
+  4. **`Migrator::run`, generic over `Acquire<'_>`.** `Box::pin` does not help —
+     the opaque future still carries the bound. sqlx ships `run_direct` for
+     exactly this, marked `#[doc(hidden)]` with the comment *"getting around the
+     annoying `implementation of Acquire is not general enough` error"*.
+
+  Two structural improvements fell out and were kept: DDL now goes through
+  helpers that **take and return the connection by value**, so the `Acquire`
+  bound never reaches a caller's future; and the control plane no longer depends
+  on `spa-projection`, because creating a projection group turned out to be two
+  statements it can run itself.
+
+  **The lesson is the diagnostic, not the fixes.** When an error names types from
+  a file you are not editing, assert the property where the code lives.
+
+- **A chart of accounts is a template, not a fixture.** The architecture
+  describes blueprints as browse → parameterize → materialize → edit → preview →
+  install. What shipped is browse, preview and install: every account a template
+  creates is an ordinary account that can be renamed, closed, and posted to from
+  the moment it exists, so "edit before installing" solves a problem that only
+  exists if installing were irreversible. It is not.
+
+  The two decisions that took thought were bilingual account names — telling a
+  Saudi bookkeeper to rename eighteen accounts is a chore, not a starting point —
+  and putting VAT and Zakat in *every* chart rather than an "advanced" one,
+  because a Saudi business without them has to fix the chart before its first
+  invoice. A test asserts both, including that the Arabic is actually Arabic
+  rather than a copied English string.
+
+  Installing skips accounts that already exist rather than refusing. Eighteen
+  accounts is eighteen commands and the fifteenth can fail; refusing would make
+  the retry — the obvious next move — fail immediately and leave the chart
+  half-built forever.
+
+- **The system did not actually work outside its tests.** After the ledger
+  landed, a user could post an entry over HTTP and nothing would ever project it
+  — `bin/worker` had no jobs registered, so the read models only moved when a
+  test drove them by hand. Worth naming because every individual piece was
+  tested and green: the gap was in the composition, which is the one thing unit
+  tests structurally cannot cover.
+
+- **Listing an invariant is not checking it.** Architecture §7 has named five
+  per-tenant invariants since the first draft, and nothing ran any of them. They
+  run now, on an interval — in memory rather than in a table, because losing the
+  schedule on a deploy costs one extra check per tenant, which is cheaper than
+  the table that would avoid it.
+
+- **`Invariant` is a trait; the kernel checks are not.** The four kernel
+  invariants apply to every tenant and there is nothing to register, so they are
+  written directly. The trait exists because the *ledger's* trial balance must
+  not be knowable to the kernel (D11) and the worker must not be knowable to the
+  module — so they meet in `bin/worker`, in three lines. That is the shape a
+  `Module` trait will take when there is a second module to describe it.
+
+- **`Money` could not be decoded out of a stored event.** `CurrencyCode`'s
+  `Deserialize` took `&str`, which only works when the deserializer can point
+  into its input — true for `from_str`, false for `from_value`, which is how
+  every event payload is decoded. Every unit test passed; the first real event
+  carrying an amount failed. Now `Cow<str>`, with a test on the `from_value`
+  path specifically. The lesson generalizes: a type's serde impl must be tested
+  on the path production uses, not the path that is convenient to write.
+
+- **Two sqlx migrators cannot share one database.** The ledger's read models
+  were a numbered migration chain, which failed with `VersionMissing(2)` because
+  `_sqlx_migrations` already belonged to the tenant schema. The fix is not a
+  second table — it is noticing that a module's read models are *derived*, so
+  there is no data to preserve across a change and no chain to be in. They are
+  an idempotent install script now, and a module that eventually needs real
+  migrations will need its own version table then.
+
+- **The retry loop had to move to where the connection budget is.** `execute`
+  begins a transaction per attempt, and a transaction needs a permit from the
+  tenant's lane — so a version taking a bare `PgPool` either hands out an
+  unmetered connection or holds one permit across every attempt. `try_execute`
+  is one attempt in the caller's transaction; `TenantDb::execute` is the loop.
+  Same split as `run_once`/`run_once_in`, for the same reason.
+
+- **The ledger's route layer lives in `spa-api`, not in the module.** With one
+  module, a `Module` trait that mounts routers is a trait with one
+  implementation. When the second module lands, what the two route layers have
+  in common *is* the trait — described rather than guessed. The module still
+  owns everything that matters: aggregates, the invariant, the read models.
+
+- **Balances are views.** A maintained balance table is a second thing that can
+  be wrong, and keeping it in step is the projection code most likely to
+  double-count. `sum(amount)` is exact and needs no code. Marked with the
+  ceiling: fine to millions of postings, wrong at hundreds of millions.
+
+- **Phase 3 was building abstractions before their consumers existed.** A
+  `Module` trait with one implementation is a factory for one product; capability
+  permits with nothing to permit are a guess about what a module will ask for;
+  a configuration system with nothing configurable is the largest guess of the
+  three. All of it was scheduled *before* the first module, which is the one
+  thing that could tell us the shape. Phase 3 is now the request path — sign in,
+  enter a tenant, get an answer in your language — and the kernel services wait
+  for the ledger to say what they should be.
+
+- **The extractor is the authorization.** `Tenant` in a handler's signature is
+  the check, because its only constructor is `ControlPlane::enter` and there is
+  no other route to a `TenantDb`. "Did we verify the membership?" stops being a
+  question you answer by reading the handler body.
+
+- **Two enumeration oracles closed, both tested.** A tenant that exists but is
+  not yours returns a response byte-identical to one that does not exist; an
+  unknown login handle costs the same time and returns the same bytes as a wrong
+  password. The second needs a dummy Argon2 verification on the miss path —
+  identical error messages do not hide a 50ms/50µs timing difference.
+
+- **Sessions are the one entry-path lookup that is not cached.** Everything else
+  tolerates five seconds of staleness. A logged-out token that keeps working for
+  five seconds does not, so `session()` hits the database every request. That is
+  the cost of a revocation that means something.
 
 - **Effects are written by commands, not derived by projections.** A projection
   deriving effects from the stream would get exactly-once for free from L4, which

@@ -1,23 +1,21 @@
 //! The worker process.
 //!
-//! # What it is not yet
+//! # The composition root
 //!
-//! A worker with no jobs registered. Projection groups belong to modules, and
-//! there are no modules yet (D11 keeps business domain out of the kernel), so
-//! the composition below has nothing to compose. It still starts, claims
-//! tenants, finds nothing to do, and shuts down cleanly — which is exactly what
-//! is worth being able to run today, because every one of those steps is a place
-//! deployment goes wrong.
-//!
-//! When `modules/ledger` lands in Phase 3b, its groups and effect handlers are
-//! registered here and nothing else changes.
+//! The only file that knows both the kernel and the modules. `spa-worker`
+//! depends on no module and `modules/ledger` depends on no worker; they meet
+//! here, which is what keeps the dependency arrow pointing one way and lets a
+//! module be dropped from a build by deleting three lines.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use spa_control::{ClusterRegistry, ControlPlane, PoolConfig, TenantPools};
 use spa_eventlog::{Dispatcher, RetryPolicy};
-use spa_worker::{OutboxJob, Worker, WorkerConfig, shutdown_signal};
+use spa_types::ModuleId;
+use spa_worker::{
+    Finding, HealthJob, Invariant, OutboxJob, ProjectionJob, Worker, WorkerConfig, shutdown_signal,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -49,9 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         TenantPools::new(clusters, PoolConfig::default()),
     ));
 
-    // Effect handlers come from modules too. An empty dispatcher claims nothing
-    // — which is the same behaviour as a worker rolled out before a module's
-    // handler exists, and is deliberately not an error.
+    // Effect handlers come from modules. An empty dispatcher claims nothing —
+    // the same behaviour as a worker rolled out before a module's handler
+    // exists, and deliberately not an error.
     let dispatcher = Arc::new(Dispatcher::new(RetryPolicy::default()));
 
     let config = WorkerConfig {
@@ -61,7 +59,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ..WorkerConfig::default()
     };
 
-    let worker = Worker::new(control, config).with_job(Arc::new(OutboxJob::new(dispatcher, 64)));
+    // The composition root, and the only place that knows both the kernel and
+    // the modules. `spa-worker` itself depends on no module, which is what keeps
+    // the dependency arrow pointing one way.
+    let worker = Worker::new(control, config)
+        .with_job(Arc::new(OutboxJob::new(dispatcher, 64)))
+        .with_job(Arc::new(
+            ProjectionJob::<ledger::Ledger>::new(
+                ledger::projections(),
+                Arc::new(ledger::upcasters().clone()),
+                200,
+            )
+            .for_module(ledger_module()),
+        ))
+        .with_job(Arc::new(
+            HealthJob::every(Duration::from_mins(5)).with(Arc::new(TrialBalance)),
+        ));
 
     let shutdown = worker.run(shutdown_signal()).await;
 
@@ -73,4 +86,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     Ok(())
+}
+
+/// The ledger's trial balance, as an invariant the platform checks.
+///
+/// It lives here rather than in `spa-worker` because the *kernel* must not know
+/// what a trial balance is (D11), and rather than in `modules/ledger` because a
+/// module must not depend on the worker. The composition root is where the two
+/// meet, and it is three lines.
+struct TrialBalance;
+
+#[async_trait::async_trait]
+impl Invariant for TrialBalance {
+    fn name(&self) -> &'static str {
+        "trial_balance"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(ledger_module())
+    }
+
+    async fn check(
+        &self,
+        db: &spa_control::TenantDb,
+    ) -> Result<Vec<Finding>, spa_worker::BoxError> {
+        let mut conn = db.acquire().await?;
+        Ok(ledger::imbalances(&mut conn)
+            .await?
+            .into_iter()
+            .map(|t| {
+                Finding::new(
+                    "trial_balance",
+                    format!(
+                        "{} is out by {} ({} debits against {} credits)",
+                        t.currency, t.difference, t.debits, t.credits
+                    ),
+                )
+            })
+            .collect())
+    }
+}
+
+fn ledger_module() -> ModuleId {
+    ModuleId::new("ledger").unwrap_or_else(|_| unreachable!("a literal that satisfies ModuleId"))
 }

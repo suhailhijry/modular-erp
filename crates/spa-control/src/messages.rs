@@ -29,6 +29,11 @@ pub const NO_CAPACITY: MessageCode = MessageCode::new("provisioning.no_capacity"
 /// has no business mentioning how our clusters are doing.
 pub const CLUSTERS_AT_LIMIT: MessageCode = MessageCode::new("ops.clusters_at_limit");
 pub const SLUG_TAKEN: MessageCode = MessageCode::new("provisioning.slug_taken");
+/// Wrong handle, wrong password, unknown handle, suspended identity — one
+/// message for all four, for the same reason `NoSuchTenant` and `NotAMember`
+/// share one.
+pub const INVALID_CREDENTIALS: MessageCode = MessageCode::new("auth.invalid_credentials");
+pub const SESSION_EXPIRED: MessageCode = MessageCode::new("auth.session_expired");
 
 /// Every code this crate can produce. The completeness test walks this list.
 pub static CODES: &[MessageCode] = &[
@@ -42,6 +47,8 @@ pub static CODES: &[MessageCode] = &[
     NO_CAPACITY,
     CLUSTERS_AT_LIMIT,
     SLUG_TAKEN,
+    INVALID_CREDENTIALS,
+    SESSION_EXPIRED,
 ];
 
 // ---------------------------------------------------------------------------
@@ -180,5 +187,28 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         // `{slug}` is Latin script inside Arabic text; the renderer isolates it
         // so the sentence does not reorder around it.
         Template::Simple("الاسم {slug} مستخدم بالفعل. يُرجى اختيار اسم آخر."),
+    ),
+    // -- authentication ----------------------------------------------------
+    (
+        INVALID_CREDENTIALS,
+        Locale::English,
+        // Says nothing about which half was wrong, or whether the account
+        // exists.
+        Template::Simple("Those sign-in details are not correct. Please try again."),
+    ),
+    (
+        INVALID_CREDENTIALS,
+        Locale::Arabic,
+        Template::Simple("بيانات تسجيل الدخول غير صحيحة. يُرجى المحاولة مرة أخرى."),
+    ),
+    (
+        SESSION_EXPIRED,
+        Locale::English,
+        Template::Simple("Your session has ended. Please sign in again."),
+    ),
+    (
+        SESSION_EXPIRED,
+        Locale::Arabic,
+        Template::Simple("انتهت جلستك. يُرجى تسجيل الدخول مرة أخرى."),
     ),
 ];

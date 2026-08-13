@@ -108,9 +108,15 @@ impl Serialize for CurrencyCode {
 }
 
 impl<'de> Deserialize<'de> for CurrencyCode {
+    /// `Cow`, not `&str`.
+    ///
+    /// A borrowed `&str` only works when the deserializer can point into its
+    /// input — true for `serde_json::from_str`, false for `from_value`, which is
+    /// how every event payload is decoded. This failed on the first real event
+    /// that carried a `Money`.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = <&str>::deserialize(d)?;
-        Self::new(raw).map_err(serde::de::Error::custom)
+        let raw = std::borrow::Cow::<'de, str>::deserialize(d)?;
+        Self::new(&raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -431,6 +437,25 @@ mod tests {
     #[test]
     fn deserializing_a_bad_currency_fails_rather_than_defaulting() {
         assert!(serde_json::from_str::<Money>(r#"{"minor":1,"currency":"XX"}"#).is_err());
+    }
+
+    /// **The path every event payload takes.**
+    ///
+    /// Events are stored as `jsonb` and decoded with `from_value`, which owns
+    /// its strings — so a `Deserialize` that insists on borrowing works in every
+    /// unit test and fails on the first stored event.
+    #[test]
+    fn money_decodes_from_an_owned_value_not_just_a_borrowed_str() {
+        let money = Money::from_minor(1050, sar());
+        let value = serde_json::to_value(money).unwrap();
+        assert_eq!(serde_json::from_value::<Money>(value).unwrap(), money);
+        assert!(
+            serde_json::from_value::<Money>(serde_json::json!({
+                "minor": 1, "currency": "XX"
+            }))
+            .is_err(),
+            "and validation still applies on that path"
+        );
     }
 
     mod properties {

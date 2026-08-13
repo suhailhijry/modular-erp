@@ -55,10 +55,24 @@ impl Progress {
 pub async fn ensure_group_schema<G: ProjectionGroup>(
     conn: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {
-    // `G::SCHEMA` is a `&'static str` from source, never input.
+    ensure_group(conn, G::NAME, G::SCHEMA).await
+}
+
+/// [`ensure_group_schema`] without the type parameter.
+///
+/// Provisioning installs whichever modules a tenant chose, which is a runtime
+/// list — and a generic function awaited through that list produces a future
+/// rustc cannot prove `Send`, reported at the HTTP route rather than here.
+/// Names are `&'static str` from a `ProjectionGroup` either way.
+pub async fn ensure_group(
+    conn: &mut PgConnection,
+    name: &str,
+    schema: &str,
+) -> Result<(), sqlx::Error> {
+    // A `&'static str` from a `ProjectionGroup` declaration, never input.
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE SCHEMA IF NOT EXISTS {}",
-        quote_ident(G::SCHEMA)
+        quote_ident(schema)
     )))
     .execute(&mut *conn)
     .await?;
@@ -66,9 +80,14 @@ pub async fn ensure_group_schema<G: ProjectionGroup>(
     sqlx::query!(
         "INSERT INTO projection_checkpoint (group_name) VALUES ($1)
          ON CONFLICT (group_name) DO NOTHING",
-        G::NAME,
+        name,
     )
-    .execute(conn)
+    // `&mut *conn`, not `conn`. Moving the `&mut` into `Executor` here leaves
+    // the future's `Send`-ness dependent on a higher-ranked bound that rustc
+    // cannot discharge once this is awaited two levels down — and it reports it
+    // at whatever eventually spawns the task, naming types from a different
+    // file. Reborrowing keeps the lifetime local.
+    .execute(&mut *conn)
     .await?;
 
     Ok(())
@@ -82,7 +101,7 @@ pub async fn checkpoint<G: ProjectionGroup>(
         "SELECT position FROM projection_checkpoint WHERE group_name = $1",
         G::NAME,
     )
-    .fetch_optional(conn)
+    .fetch_optional(&mut *conn)
     .await?
     .unwrap_or(0);
 
@@ -264,7 +283,7 @@ pub(crate) async fn set_search_path(
         "SET LOCAL search_path TO {}",
         quote_ident(schema)
     )))
-    .execute(conn)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

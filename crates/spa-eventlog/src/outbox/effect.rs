@@ -174,7 +174,7 @@ pub async fn enqueue(
         &payloads,
         cause.map(LogPosition::get),
     )
-    .execute(conn)
+    .execute(&mut *conn)
     .await?
     .rows_affected();
 
@@ -246,7 +246,7 @@ pub async fn outbox_health(conn: &mut PgConnection) -> Result<OutboxHealth, sqlx
           FROM outbox
         "#
     )
-    .fetch_one(conn)
+    .fetch_one(&mut *conn)
     .await?;
 
     Ok(OutboxHealth {

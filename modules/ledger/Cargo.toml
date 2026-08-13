@@ -1,0 +1,33 @@
+[package]
+name = "ledger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Double-entry accounting: accounts, journal entries, and the invariant that keeps them honest."
+
+[lints]
+workspace = true
+
+[dependencies]
+# `spa-control` is here for `TenantDb` alone — the handle a command needs.
+# ponytail: the architecture says modules depend on `spa-kernel`, which does not
+# exist yet; when it does it re-exports `TenantDb` and this line changes to it.
+# Nothing here touches `ControlPlane`, so the isolation property already holds.
+spa-control = { workspace = true }
+spa-eventlog = { workspace = true }
+spa-i18n = { workspace = true }
+spa-projection = { workspace = true }
+spa-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+spa-testkit = { workspace = true }
+spa-i18n = { workspace = true }
+proptest = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

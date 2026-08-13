@@ -82,7 +82,7 @@ pub enum UpcastError {
 pub type UpcastStep = fn(serde_json::Value) -> Result<serde_json::Value, String>;
 
 /// What this build knows about every event's history.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Upcasters {
     /// Event name → the version this build reads and writes.
     current: BTreeMap<String, SchemaVersion>,

@@ -344,6 +344,27 @@ impl TenantPools {
         self.budget.try_acquire(lane)
     }
 
+    /// Connect options for a cluster, with no database chosen.
+    ///
+    /// For provisioning, which needs a connection to `postgres` before the
+    /// tenant's database exists. Not a pool: these are one-shot.
+    pub(crate) fn cluster_options(&self, cluster: &str) -> Result<PgConnectOptions, PoolError> {
+        self.clusters.options_for(cluster, "postgres", Role::Write)
+    }
+
+    /// Closes and forgets a tenant's pools.
+    ///
+    /// `DROP DATABASE` fails while anything is connected, so abandoning a
+    /// half-built tenant has to let go first.
+    pub(crate) async fn forget(&self, tenant: TenantId) {
+        let mut cache = self.cache.lock().await;
+        for role in [Role::Write, Role::Read] {
+            if let Some(entry) = cache.remove(&(tenant, role)) {
+                entry.pool.close().await;
+            }
+        }
+    }
+
     async fn pool_for(
         &self,
         tenant: TenantId,

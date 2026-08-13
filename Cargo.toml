@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "modules/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,8 @@ spa-types = { path = "crates/spa-types" }
 spa-testkit = { path = "crates/spa-testkit" }
 spa-control = { path = "crates/spa-control" }
 spa-worker = { path = "crates/spa-worker" }
+spa-api = { path = "crates/spa-api" }
+ledger = { path = "modules/ledger" }
 
 # Error handling
 anyhow = "1.0"
@@ -35,6 +37,11 @@ async-trait = "0.1"
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+
+# HTTP
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
 
 # Storage
 sqlx = { version = "0.9", default-features = false, features = [

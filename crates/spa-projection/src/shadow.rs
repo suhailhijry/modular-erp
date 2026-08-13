@@ -127,7 +127,7 @@ async fn tables_in(
             WHERE schemaname = $1 ORDER BY tablename"#,
         schema,
     )
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await?;
     Ok(names)
 }

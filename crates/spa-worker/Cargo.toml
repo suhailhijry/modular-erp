@@ -14,6 +14,7 @@ spa-control = { workspace = true }
 spa-eventlog = { workspace = true }
 spa-projection = { workspace = true }
 spa-types = { workspace = true }
+ledger = { workspace = true }
 async-trait = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }

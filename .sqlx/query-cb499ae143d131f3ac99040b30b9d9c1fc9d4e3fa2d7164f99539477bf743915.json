@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT currency as \"currency!\", difference as \"difference!\",\n                  debits as \"debits!\", credits as \"credits!\",\n                  postings as \"postings!\"\n             FROM proj_ledger.trial_balance\n            ORDER BY currency",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.trial_balance",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "difference!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.trial_balance",
+            "name": "difference"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "debits!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.trial_balance",
+            "name": "debits"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "credits!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.trial_balance",
+            "name": "credits"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "postings!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.trial_balance",
+            "name": "postings"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "cb499ae143d131f3ac99040b30b9d9c1fc9d4e3fa2d7164f99539477bf743915"
+}

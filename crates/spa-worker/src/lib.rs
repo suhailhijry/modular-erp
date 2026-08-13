@@ -25,10 +25,12 @@
 //! `tests/shutdown.rs` proves the result is indistinguishable from never having
 //! been interrupted, by rebuilding the projection from the log and diffing.
 
+mod health;
 mod job;
 mod jobs;
 mod worker;
 
+pub use health::{Finding, HealthJob, Invariant};
 pub use job::{Activity, BoxError, Job};
 pub use jobs::{OutboxJob, ProjectionJob};
 pub use worker::{Shutdown, Worker, WorkerConfig};

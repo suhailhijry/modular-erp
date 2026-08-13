@@ -38,7 +38,7 @@ prepare:
     psql "{{admin_url}}" -q -c "CREATE DATABASE spa_typecheck"
     # Both schemas live in one type-check database. Table names do not collide,
     # and sqlx validates every query against a single connection.
-    for f in migrations/control/*.sql migrations/tenant/*.sql; do psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 -f "$f"; done
+    for f in migrations/control/*.sql migrations/tenant/*.sql modules/*/schema/*.sql; do psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 -f "$f"; done
     DATABASE_URL="{{typecheck_url}}" SQLX_OFFLINE=false cargo sqlx prepare --workspace -- --all-targets
 
 # Drop every database this project creates. Does not touch anything else.

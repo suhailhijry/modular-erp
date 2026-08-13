@@ -47,6 +47,8 @@ crates/spa-control    control plane — identities, tenants, memberships, Tenant
 crates/spa-eventlog   the tenant log: gapless append, aggregates, upcasters, outbox
 crates/spa-projection projection groups, checkpoints, shadow replay and the differ
 crates/spa-worker     background worker — tenant visits, jobs, drain; bin/worker
+crates/spa-api        HTTP surface — sessions, problem+json, extractors; bin/api
+modules/ledger        double-entry accounting — the first module, and declinable
 migrations/control    control-plane schema
 migrations/tenant     per-tenant schema
 ```

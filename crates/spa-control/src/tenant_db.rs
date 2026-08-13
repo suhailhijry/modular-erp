@@ -128,4 +128,75 @@ impl TenantDb {
     pub const fn has_replica(&self) -> bool {
         self.read.is_some()
     }
+
+    /// Runs a command against this tenant, retrying if someone wrote first.
+    ///
+    /// The retry loop lives here rather than in `spa-eventlog` because each
+    /// attempt needs a transaction, and a transaction needs a permit from this
+    /// tenant's lane. A version taking a bare `PgPool` would either hand out an
+    /// unmetered connection or hold one permit across every attempt.
+    ///
+    /// See `spa_eventlog::try_execute` for what one attempt does.
+    pub async fn execute<A, F, E>(
+        &self,
+        id: &spa_types::AggregateId,
+        upcasters: &spa_eventlog::Upcasters,
+        metadata: &spa_eventlog::Metadata,
+        decide: F,
+    ) -> Result<spa_eventlog::Committed<A::Event>, CommandError<E>>
+    where
+        A: spa_eventlog::Aggregate,
+        F: Fn(&spa_eventlog::Loaded<A>) -> Result<spa_eventlog::Decision<A::Event>, E>,
+    {
+        for attempt in 1..=spa_eventlog::MAX_ATTEMPTS {
+            let mut tx = self.begin().await?;
+
+            match spa_eventlog::try_execute::<A, _, E>(&mut tx, id, upcasters, metadata, &decide)
+                .await
+            {
+                Ok(committed) => {
+                    tx.commit()
+                        .await
+                        .map_err(spa_eventlog::ExecuteError::from)?;
+                    return Ok(committed);
+                }
+                Err(e) if e.is_conflict() => {
+                    tx.rollback()
+                        .await
+                        .map_err(spa_eventlog::ExecuteError::from)?;
+                    tracing::debug!(
+                        tenant = %self.tenant,
+                        attempt,
+                        "optimistic concurrency conflict, retrying"
+                    );
+                }
+                Err(e) => {
+                    tx.rollback()
+                        .await
+                        .map_err(spa_eventlog::ExecuteError::from)?;
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Err(spa_eventlog::ExecuteError::Contended {
+            stream: spa_types::StreamId::new(A::domain(), id.clone()),
+            attempts: spa_eventlog::MAX_ATTEMPTS,
+        }
+        .into())
+    }
+}
+
+/// What a command against a tenant can fail with.
+///
+/// Two layers, kept apart because they mean different things to a caller:
+/// [`PoolError::Overloaded`] is "come back in a moment" and deserves a 503,
+/// while everything inside [`spa_eventlog::ExecuteError`] is about the command
+/// itself. Flattening them would turn backpressure into a 500.
+#[derive(Debug, thiserror::Error)]
+pub enum CommandError<E> {
+    #[error(transparent)]
+    Pool(#[from] PoolError),
+    #[error(transparent)]
+    Execute(#[from] spa_eventlog::ExecuteError<E>),
 }

@@ -81,6 +81,17 @@ pub enum ExecuteError<E> {
     Contended { stream: StreamId, attempts: u32 },
 }
 
+impl<E> ExecuteError<E> {
+    /// Whether retrying the whole command is worth doing.
+    ///
+    /// Only a lost optimistic-concurrency race. A rejection is the aggregate's
+    /// rules saying no, and re-asking gets the same answer.
+    #[must_use]
+    pub const fn is_conflict(&self) -> bool {
+        matches!(self, Self::Append(AppendError::Conflict { .. }))
+    }
+}
+
 /// An aggregate and the version it was loaded at.
 ///
 /// The version is what the next append is checked against, which is why they
@@ -283,80 +294,92 @@ where
     A: Aggregate,
     F: Fn(&Loaded<A>) -> Result<Decision<A::Event>, E>,
 {
-    /// Enough to clear ordinary contention, few enough that a genuinely hot
-    /// aggregate surfaces as a retryable error instead of a hung request.
-    const MAX_ATTEMPTS: u32 = 5;
-
-    let stream = StreamId::new(A::domain(), id.clone());
-
     for attempt in 1..=MAX_ATTEMPTS {
         let mut tx = pool.begin().await?;
-
-        let loaded = load::<A>(&mut tx, id, upcasters).await?;
-        let decision = decide(&loaded).map_err(ExecuteError::Rejected)?;
-
-        // A decision to do nothing is a success, not an empty append.
-        if decision.is_empty() {
-            tx.rollback().await?;
-            return Ok(Committed {
-                events: Vec::new(),
-                at: None,
-                version: loaded.version,
-                effects_enqueued: 0,
-            });
-        }
-
-        let appended = if decision.events.is_empty() {
-            Ok(Vec::new())
-        } else {
-            append_events::<A>(&mut tx, id, loaded.version, &decision.events, metadata).await
-        };
-
-        match appended {
-            Ok(envelopes) => {
-                let at = envelopes.first().map(|e| e.position);
-                let version = envelopes.last().map_or(loaded.version, |e| e.sequence);
-
-                // Same transaction as the append above. A failure here — an
-                // unkeyed effect from a command that appended nothing — rolls
-                // the events back with it, which is right: the command asked for
-                // something the outbox cannot promise, so none of it happened.
-                let effects_enqueued = match enqueue(&mut tx, at, &decision.effects).await {
-                    Ok(count) => count,
-                    Err(e) => {
-                        tx.rollback().await?;
-                        return Err(e.into());
-                    }
-                };
-
+        match try_execute::<A, _, E>(&mut tx, id, upcasters, metadata, &decide).await {
+            Ok(committed) => {
                 tx.commit().await?;
-                return Ok(Committed {
-                    events: decision.events,
-                    at,
-                    version,
-                    effects_enqueued,
-                });
+                return Ok(committed);
             }
-            Err(AppendError::Conflict { .. }) => {
-                // Someone else wrote first. Roll back and decide again against
-                // the state that won.
+            Err(e) if e.is_conflict() => {
                 tx.rollback().await?;
-                tracing::debug!(
-                    stream = %stream,
-                    attempt,
-                    "optimistic concurrency conflict, retrying"
-                );
+                tracing::debug!(attempt, "optimistic concurrency conflict, retrying");
             }
             Err(e) => {
                 tx.rollback().await?;
-                return Err(e.into());
+                return Err(e);
             }
         }
     }
 
     Err(ExecuteError::Contended {
-        stream,
+        stream: StreamId::new(A::domain(), id.clone()),
         attempts: MAX_ATTEMPTS,
+    })
+}
+
+/// Enough to clear ordinary contention, few enough that a genuinely hot
+/// aggregate surfaces as a retryable error instead of a hung request.
+pub const MAX_ATTEMPTS: u32 = 5;
+
+/// One attempt at [`execute`], inside the caller's transaction.
+///
+/// # Who retries
+///
+/// Not this function. It reports a conflict and leaves the caller to roll back
+/// and try again, because **the transaction has to come from wherever the
+/// connection budget is** — `TenantDb::begin` for anything serving a tenant.
+/// `TenantDb::execute` is the loop; this is one turn of it.
+///
+/// # The caller's obligation
+///
+/// Commit on `Ok`, roll back on `Err`. Same shape and same failure mode as
+/// `run_once_in`: forgetting to commit loses the command, and there is no
+/// ordering in which part of it survives.
+pub async fn try_execute<A, F, E>(
+    conn: &mut PgConnection,
+    id: &AggregateId,
+    upcasters: &Upcasters,
+    metadata: &Metadata,
+    decide: F,
+) -> Result<Committed<A::Event>, ExecuteError<E>>
+where
+    A: Aggregate,
+    F: Fn(&Loaded<A>) -> Result<Decision<A::Event>, E>,
+{
+    let loaded = load::<A>(&mut *conn, id, upcasters).await?;
+    let decision = decide(&loaded).map_err(ExecuteError::Rejected)?;
+
+    // A decision to do nothing is a success, not an empty append.
+    if decision.is_empty() {
+        return Ok(Committed {
+            events: Vec::new(),
+            at: None,
+            version: loaded.version,
+            effects_enqueued: 0,
+        });
+    }
+
+    let envelopes = if decision.events.is_empty() {
+        Vec::new()
+    } else {
+        append_events::<A>(&mut *conn, id, loaded.version, &decision.events, metadata).await?
+    };
+
+    let at = envelopes.first().map(|e| e.position);
+    let version = envelopes.last().map_or(loaded.version, |e| e.sequence);
+
+    // Same transaction as the append above. A failure here — an unkeyed effect
+    // from a command that appended nothing — takes the events with it, which is
+    // right: the command asked for something the outbox cannot promise, so none
+    // of it happened.
+    let effects_enqueued = enqueue(&mut *conn, at, &decision.effects).await?;
+
+    Ok(Committed {
+        events: decision.events,
+        at,
+        version,
+        effects_enqueued,
     })
 }
 
