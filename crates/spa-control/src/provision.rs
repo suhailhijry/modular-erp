@@ -54,7 +54,7 @@
 //! [`provision_is_send`](self) at the bottom of this file is the check. It fails
 //! here, next to the cause, rather than three crates away at a route table.
 
-use spa_types::{IdentityId, ModuleId};
+use spa_types::{IdentityId, ModuleId, TenantId};
 use sqlx::{Connection, PgConnection};
 
 use crate::model::{Actor, Scope, Tenant};
@@ -71,6 +71,12 @@ pub struct ModuleSetup {
     pub install_sql: &'static str,
     /// The projection groups this module owns, as `(name, schema)`.
     pub groups: &'static [(&'static str, &'static str)],
+    /// Modules this one cannot work without, by name.
+    ///
+    /// Declared here rather than checked at each call site, because three
+    /// places need the same answer: signing up, enabling later, and refusing to
+    /// disable something another module is standing on.
+    pub requires: &'static [&'static str],
 }
 
 impl ModuleSetup {
@@ -84,7 +90,15 @@ impl ModuleSetup {
             module,
             install_sql,
             groups,
+            requires: &[],
         }
+    }
+
+    /// Names the modules this one needs underneath it.
+    #[must_use]
+    pub const fn requiring(mut self, modules: &'static [&'static str]) -> Self {
+        self.requires = modules;
+        self
     }
 }
 
@@ -141,11 +155,10 @@ impl ControlPlane {
     /// Compensates on failure — the database is dropped and the row deleted, so
     /// the name is free again. Returns the activated tenant.
     #[expect(
-        clippy::too_many_lines,
         clippy::needless_range_loop,
-        reason = "flat and indexed on purpose; a borrowed iterator held across \
-                  an await costs this function its `Send` proof, and clippy \
-                  cannot see that. See the module docs."
+        reason = "indexed on purpose; a borrowed iterator held across an await \
+                  costs this function its `Send` proof, and clippy cannot see \
+                  that. See the module docs."
     )]
     pub fn provision(
         &self,
@@ -222,58 +235,22 @@ impl ControlPlane {
                 // `slice::Iter` across the awaits below, and a borrowed iterator is
                 // one of the things that costs this function its `Send`.
                 for index in 0..modules.len() {
-                    let module = modules[index].module.clone();
-                    let install_sql: &'static str = modules[index].install_sql;
-                    let groups: &'static [(&'static str, &'static str)] = modules[index].groups;
+                    let setup = modules[index].clone();
 
                     // Entitlement before schema, so a retry can read back what was
-                    // wanted even if it died part-way through installing.
+                    // wanted even if it died part-way through installing. Safe
+                    // here and *not* safe on a live tenant — see `install_module`.
                     if let Err(e) =
-                        Box::pin(self.enable_module(tenant.id, &module, Actor::system())).await
+                        Box::pin(self.enable_module(tenant.id, &setup.module, Actor::system()))
+                            .await
                     {
                         break 'build Err(e);
                     }
 
-                    conn = match run_ddl(conn, install_sql.to_owned()).await {
+                    conn = match install_schema(conn, setup).await {
                         Ok(conn) => conn,
-                        Err(e) => break 'build Err(AccessError::Database(e)),
+                        Err(e) => break 'build Err(e),
                     };
-
-                    // The projection group's schema and its checkpoint row.
-                    //
-                    // Inlined rather than calling `spa_projection::ensure_group`:
-                    // the control plane has no business knowing what a projection
-                    // is, and a cross-crate `async fn` taking `&mut PgConnection`
-                    // puts an `Acquire` bound in this future that rustc will not
-                    // discharge. Two statements is cheaper than either problem.
-                    for group in 0..groups.len() {
-                        let (name, schema) = groups[group];
-                        let quoted_schema = match quote_ident(schema) {
-                            Ok(quoted) => quoted,
-                            Err(e) => break 'build Err(e),
-                        };
-                        conn = match run_ddl(
-                            conn,
-                            format!("CREATE SCHEMA IF NOT EXISTS {quoted_schema}"),
-                        )
-                        .await
-                        {
-                            Ok(conn) => conn,
-                            Err(e) => break 'build Err(AccessError::Database(e)),
-                        };
-                        conn = match run_ddl(
-                            conn,
-                            format!(
-                                "INSERT INTO projection_checkpoint (group_name) VALUES ('{name}')
-                             ON CONFLICT (group_name) DO NOTHING"
-                            ),
-                        )
-                        .await
-                        {
-                            Ok(conn) => conn,
-                            Err(e) => break 'build Err(AccessError::Database(e)),
-                        };
-                    }
                 }
                 conn.close().await.ok();
 
@@ -318,6 +295,43 @@ impl ControlPlane {
                 }
             }
         })
+    }
+
+    /// Turns a module on for a tenant that is already running.
+    ///
+    /// # Schema first, entitlement second — the opposite of `provision`
+    ///
+    /// During provisioning the tenant is invisible, so entitling early is free
+    /// and buys retry visibility. Here the tenant is *live*: entitling before
+    /// the tables exist opens a window in which the module's routes are found
+    /// and every one of them fails on a missing relation. So the schema goes in
+    /// first, and the entitlement — the thing that makes it visible — last.
+    ///
+    /// Idempotent throughout, and it does not check dependencies: what a module
+    /// needs underneath it is [`ModuleSetup::requires`], and refusing belongs at
+    /// the boundary that can say so in the caller's language.
+    pub async fn install_module(
+        &self,
+        tenant_id: TenantId,
+        setup: ModuleSetup,
+        actor: Actor,
+    ) -> Result<(), AccessError> {
+        let tenant = self
+            .tenant(tenant_id)
+            .await?
+            .ok_or(AccessError::NoSuchTenant)?;
+
+        let options = self
+            .tenants
+            .cluster_options(&tenant.cluster)?
+            .database(&tenant.database_name);
+
+        let module = setup.module.clone();
+        let conn = Box::pin(PgConnection::connect_with(&options)).await?;
+        let conn = install_schema(conn, setup).await?;
+        conn.close().await.ok();
+
+        self.enable_module(tenant_id, &module, actor).await
     }
 
     /// Drops a half-built tenant's database and row.
@@ -402,6 +416,56 @@ fn migrate(mut conn: PgConnection) -> BoxFuture<Result<PgConnection, sqlx::migra
 /// `AssertSqlSafe` is defensible because every caller passes either a module's
 /// `&'static str` install script or a name that has been through
 /// [`quote_ident`].
+/// Creates one module's read models and projection checkpoints.
+///
+/// Takes and returns the connection **by value** for the same reason every
+/// other helper here does: a borrowed `&mut PgConnection` held across an await
+/// is one of the four things that costs `sign_up` its `Send`. See the module
+/// docs.
+///
+/// Idempotent — every statement it runs is — so a retry is a retry rather than
+/// a second install.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "by value on purpose: a borrow would have to be `&'static` to live in a `Send + 'static` future, and that is the constraint this whole file is shaped by"
+)]
+fn install_schema(
+    conn: PgConnection,
+    setup: ModuleSetup,
+) -> BoxFuture<Result<PgConnection, AccessError>> {
+    Box::pin(async move {
+        let mut conn = run_ddl(conn, setup.install_sql.to_owned())
+            .await
+            .map_err(AccessError::Database)?;
+
+        // The projection group's schema and its checkpoint row.
+        //
+        // Inlined rather than calling `spa_projection::ensure_group`: the
+        // control plane has no business knowing what a projection is, and a
+        // cross-crate `async fn` taking `&mut PgConnection` puts an `Acquire`
+        // bound in this future that rustc will not discharge. Two statements is
+        // cheaper than either problem.
+        for index in 0..setup.groups.len() {
+            let (name, schema) = setup.groups[index];
+            let quoted = quote_ident(schema)?;
+            conn = run_ddl(conn, format!("CREATE SCHEMA IF NOT EXISTS {quoted}"))
+                .await
+                .map_err(AccessError::Database)?;
+            conn = run_ddl(
+                conn,
+                format!(
+                    "INSERT INTO projection_checkpoint (group_name) VALUES ('{name}')
+                     ON CONFLICT (group_name) DO NOTHING"
+                ),
+            )
+            .await
+            .map_err(AccessError::Database)?;
+        }
+
+        Ok(conn)
+    })
+}
+
 fn run_ddl(mut conn: PgConnection, sql: String) -> BoxFuture<Result<PgConnection, sqlx::Error>> {
     Box::pin(async move {
         sqlx::raw_sql(sqlx::AssertSqlSafe(sql))

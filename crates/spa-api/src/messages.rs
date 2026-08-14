@@ -20,6 +20,8 @@ pub const MODULE_REQUIRES: MessageCode = MessageCode::new("request.module_requir
 pub const MODULE_NOT_ENABLED: MessageCode = MessageCode::new("request.module_not_enabled");
 pub const UNKNOWN_VAT_CATEGORY: MessageCode = MessageCode::new("request.unknown_vat_category");
 pub const NO_SUCH_INVOICE: MessageCode = MessageCode::new("request.no_such_invoice");
+/// A module cannot be turned off while another is standing on it.
+pub const MODULE_IN_USE: MessageCode = MessageCode::new("request.module_in_use");
 
 pub static CODES: &[MessageCode] = &[
     UNKNOWN_CURRENCY,
@@ -34,6 +36,7 @@ pub static CODES: &[MessageCode] = &[
     MODULE_NOT_ENABLED,
     UNKNOWN_VAT_CATEGORY,
     NO_SUCH_INVOICE,
+    MODULE_IN_USE,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -174,5 +177,15 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_INVOICE,
         Locale::Arabic,
         Template::Simple("لا توجد فاتورة {invoice}."),
+    ),
+    (
+        MODULE_IN_USE,
+        Locale::English,
+        Template::Simple("{dependent} needs {module}. Turn {dependent} off first."),
+    ),
+    (
+        MODULE_IN_USE,
+        Locale::Arabic,
+        Template::Simple("تحتاج وحدة {dependent} إلى {module}. أوقف {dependent} أولًا."),
     ),
 ];

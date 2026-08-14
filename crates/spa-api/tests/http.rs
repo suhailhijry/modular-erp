@@ -145,44 +145,28 @@ impl Fixture {
         body["token"].as_str().expect("a token").to_owned()
     }
 
-    /// Entitles the tenant to the ledger and installs its read models — both
-    /// halves, which is what `sign_up` does and what a route now checks.
-    async fn enable_ledger(&self, tenant: TenantId) {
+    /// Turns a module on the way the product does.
+    ///
+    /// Through `install_module`, not by hand: an earlier version of this fixture
+    /// created `proj_ledger` and never wrote the entitlement, so every tenant in
+    /// these tests had a module's tables and no right to use them. A harness
+    /// with its own install path is a harness that can be right while the
+    /// product is wrong.
+    async fn enable_module(&self, tenant: TenantId, setup: spa_control::ModuleSetup) {
         self.control
-            .enable_module(tenant, &ledger::module_id(), Actor::system())
+            .install_module(tenant, setup, Actor::system())
             .await
-            .expect("entitlement");
-
-        let db = self
-            .control
-            .enter_for_maintenance(tenant)
-            .await
-            .expect("maintenance entry");
-        let mut conn = db.acquire().await.expect("connection");
-        ledger::install(&mut conn).await.expect("module schema");
-        spa_projection::ensure_group_schema::<ledger::Ledger>(&mut conn)
-            .await
-            .expect("group checkpoint");
+            .expect("module installs");
     }
 
-    /// The same for sales, which needs the ledger underneath it.
+    async fn enable_ledger(&self, tenant: TenantId) {
+        self.enable_module(tenant, ledger::setup()).await;
+    }
+
+    /// Sales needs the ledger underneath it.
     async fn enable_sales(&self, tenant: TenantId) {
         self.enable_ledger(tenant).await;
-        self.control
-            .enable_module(tenant, &sales::module_id(), Actor::system())
-            .await
-            .expect("entitlement");
-
-        let db = self
-            .control
-            .enter_for_maintenance(tenant)
-            .await
-            .expect("maintenance entry");
-        let mut conn = db.acquire().await.expect("connection");
-        sales::install(&mut conn).await.expect("module schema");
-        spa_projection::ensure_group_schema::<sales::Sales>(&mut conn)
-            .await
-            .expect("group checkpoint");
+        self.enable_module(tenant, sales::setup()).await;
     }
 
     /// Drives one group's projections, standing in for the worker.
@@ -2070,6 +2054,314 @@ async fn an_invoice_the_chart_cannot_take_is_unprocessable() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert_eq!(body["code"], "ledger.no_such_account");
     assert_eq!(body["args"]["code"]["value"], "1100");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Modules
+// ---------------------------------------------------------------------------
+
+/// **The modularity requirement, over HTTP.** A tenant that did not buy sales at
+/// signup can buy it on a Tuesday, and it works immediately.
+#[tokio::test]
+async fn a_tenant_can_turn_a_module_on_after_signing_up() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    // Not there yet.
+    let (status, _, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/modules"))
+                .body(Body::from(
+                    serde_json::json!({ "module": "sales" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // And it is *usable*, not merely listed — the read models were installed
+    // too. Entitling without installing is a tenant that 500s on its first
+    // request, which is what this asserts did not happen.
+    fixture.install_chart(&token, "acme", "services").await;
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "INV-LATE",
+                        "customer": { "name": "Rawabi" },
+                        "issued_on": "2026-03-01T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [{ "description": "Work", "net": 10_000, "vat": "standard" }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    fixture.project_sales(tenant).await;
+    let (_, invoices, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(invoices.as_array().expect("a list").len(), 1);
+
+    fixture.cleanup().await;
+}
+
+/// Turning a module off keeps every byte of its data.
+///
+/// "Updates should never break old data", applied to the operation most likely
+/// to violate it: a tenant who downgrades and comes back finds their invoices.
+#[tokio::test]
+async fn turning_a_module_off_hides_it_without_losing_anything() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    fixture.install_chart(&token, "acme", "services").await;
+    let (status, _, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "INV-KEEP",
+                        "customer": { "name": "Rawabi" },
+                        "issued_on": "2026-03-01T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [{ "description": "Work", "net": 10_000, "vat": "standard" }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    fixture.project_sales(tenant).await;
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::delete("/v1/tenants/acme/modules/sales"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, _, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "gone from the API");
+
+    // The ledger keeps the entry the sale made, because disabling sales does
+    // not unpost anything.
+    assert_eq!(
+        fixture.ledger_balance(&token, "acme", "1100").await,
+        11_500,
+        "the receivable the invoice created is still on the books"
+    );
+
+    // Back on, and the invoice is exactly where it was left.
+    let (status, _, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/modules"))
+                .body(Body::from(
+                    serde_json::json!({ "module": "sales" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, invoices, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        invoices.as_array().expect("a list").len(),
+        1,
+        "the data was hidden, never deleted"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A module cannot be pulled out from under one that needs it, and the refusal
+/// says which one — in the caller's language.
+#[tokio::test]
+async fn a_module_something_else_needs_cannot_be_turned_off() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::delete("/v1/tenants/acme/modules/ledger")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::ACCEPT_LANGUAGE, "ar")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.module_in_use");
+    assert_eq!(body["args"]["dependent"]["value"], "sales");
+
+    // Not vacuous: with sales off first, the ledger goes too.
+    let (status, _, _) = fixture
+        .send(
+            Request::delete("/v1/tenants/acme/modules/sales")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, _) = fixture
+        .send(
+            Request::delete("/v1/tenants/acme/modules/ledger")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    fixture.cleanup().await;
+}
+
+/// Enabling a module without what it needs is refused, with the same message
+/// signup gives — because both read the same declaration.
+#[tokio::test]
+async fn a_module_cannot_be_turned_on_without_what_it_needs() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    // No modules at all.
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/modules")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "module": "sales" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.module_requires");
+
+    fixture.cleanup().await;
+}
+
+/// Only `ManageTenant` may change what a tenant is paying for.
+#[tokio::test]
+async fn changing_modules_needs_the_capability_to_manage_the_tenant() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    fixture.enable_ledger(tenant).await;
+
+    for (role, may) in [("owner", true), ("accountant", false), ("viewer", false)] {
+        let email = format!("{role}@acme.test");
+        let user = fixture.user(&email, "hunter2hunter2").await;
+        fixture.join_as(user, tenant, role).await;
+        let token = fixture.token(&email, "hunter2hunter2").await;
+
+        let (status, body, _) = fixture
+            .send(
+                Request::post("/v1/tenants/acme/modules")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "module": "sales" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+
+        assert_eq!(
+            status != StatusCode::FORBIDDEN,
+            may,
+            "{role} enabling a module: {status} {body}"
+        );
+    }
+
+    fixture.cleanup().await;
+}
+
+/// The catalogue is public, because a pricing page needs it before anyone has
+/// an account — and it carries the dependencies, so a picker can grey out the
+/// impossible combinations rather than let someone discover them.
+#[tokio::test]
+async fn the_module_catalogue_is_readable_without_signing_in() {
+    let fixture = Fixture::new().await;
+
+    let (status, body, _) = fixture
+        .send(Request::get("/v1/modules").body(Body::empty()).unwrap())
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let modules = body.as_array().expect("a list");
+    assert!(modules.len() >= 2);
+
+    let sales = modules
+        .iter()
+        .find(|m| m["name"] == "sales")
+        .expect("sales is offered");
+    assert_eq!(sales["requires"][0], "ledger");
 
     fixture.cleanup().await;
 }

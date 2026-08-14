@@ -313,12 +313,29 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [ ] Demo tenant TTL and reaper *(needed before one is exposed publicly;
       `tenant.demo_expires_at` is already in the schema)*
 
-### 4c · The rest
+### 4c · Entitlements a tenant can change
+
+- [x] `POST /v1/tenants/{slug}/modules` and `DELETE .../modules/{module}` —
+      a tenant buys a module on a Tuesday and it works immediately
+- [x] `ControlPlane::install_module` — read models **and** entitlement, because
+      either alone is a tenant that 500s
+- [x] `ModuleSetup::requires` — the dependency declared once and read by all
+      three places that ask: signing up, enabling later, refusing to disable
+- [x] Disabling deletes nothing. The entitlement is marked off; the events and
+      read models stay, so a tenant who downgrades and returns finds their data
+- [x] `GET /v1/modules` — the catalogue, unauthenticated, carrying dependencies
+      so a picker can grey out impossible combinations
+- [x] The test fixture installs modules through `install_module` rather than by
+      hand, so it can no longer be right while the product is wrong
+- [ ] `ModuleEnabled<M>` capability tokens *(`require_module` is a runtime check
+      at the top of each handler; the token makes a disabled module's handler
+      unconstructable. Worth it when a module has enough routes that remembering
+      the call is the weak link)*
+
+### 4d · The rest
 
 - [x] A second business module *(shipped as 4a — and it changed how
       cross-module integration works, which is the point of building one)*
-- [ ] Entitlements → enable/disable durable workflows
-- [ ] `ModuleEnabled<M>` capability tokens
 - [ ] Blueprints: browse → parameterize → materialize → edit → preview → install
 - [ ] Preview executes in a rolled-back transaction and reports resulting state
 - [ ] Chart-of-accounts templates: generic IFRS, SOCPA-aligned, retail, services, empty
@@ -857,3 +874,28 @@ here and folded back into ARCHITECTURE.md.
   has run nothing — and asserts it really is bare before bootstrapping it. A
   bootstrap test against an already-migrated fixture passes for the wrong
   reason.
+
+- **Two halves of "enable a module", and only one of them existed.**
+  `ControlPlane::enable_module` wrote the entitlement. Installing the read
+  models was a separate step, inlined in `provision`. So enabling a module on a
+  live tenant — which nothing could do over HTTP anyway — would have produced a
+  tenant entitled to a module whose tables did not exist: routes found, every
+  one of them failing on a missing relation.
+
+  The test fixture had been papering over it, doing both steps by hand. That is
+  the tell worth naming: **a harness with its own install path is a harness that
+  can be right while the product is wrong.** `install_module` now does both, and
+  the fixture calls it.
+
+  The two orderings differ on purpose. `provision` entitles *before* installing,
+  because the tenant is invisible until activation and early entitlement buys
+  retry visibility. `install_module` installs *before* entitling, because the
+  tenant is live and the entitlement is the thing that makes the routes
+  reachable.
+
+- **The dependency moved onto the module.** `sales::setup().requiring(&["ledger"])`
+  replaced a hardcoded `if requested.contains("sales")` in signup. Three places
+  needed the same answer — signing up, enabling later, and refusing to disable
+  something another module is standing on — and two of them did not exist when
+  the first was written. A `requires` field is not an abstraction; it is the
+  question being asked in one place instead of three.

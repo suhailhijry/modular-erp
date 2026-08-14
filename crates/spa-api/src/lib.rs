@@ -27,6 +27,7 @@ mod extract;
 mod ledger_routes;
 mod members;
 pub mod messages;
+mod modules;
 mod problem;
 mod routes;
 mod sales_routes;
@@ -46,7 +47,7 @@ pub use extract::{
     Allowed, Authenticated, Capability, Language, ManageAccounts, ManageTenant, PostEntries, Read,
     Tenant,
 };
+pub use modules::available as modules;
 pub use problem::Problem;
 pub use routes::router;
-pub use signup::modules;
 pub use state::AppState;

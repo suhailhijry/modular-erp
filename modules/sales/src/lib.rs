@@ -76,10 +76,17 @@ const GROUPS: &[(&str, &str)] = &[(
     <Sales as spa_projection::ProjectionGroup>::SCHEMA,
 )];
 
-/// What a tenant enabling this module needs installed.
+/// What a tenant enabling this module needs installed, and what it needs
+/// underneath it.
+///
+/// The dependency on the ledger is real: every invoice posts a journal entry in
+/// the same transaction. Declaring it here rather than checking for it at each
+/// call site is what lets signup, enabling later, and refusing to disable the
+/// ledger all give the same answer.
 #[must_use]
 pub fn setup() -> spa_control::ModuleSetup {
     spa_control::ModuleSetup::new(module_id(), include_str!("../schema/install.sql"), GROUPS)
+        .requiring(&["ledger"])
 }
 
 /// This module's entitlement name.
@@ -87,18 +94,6 @@ pub fn setup() -> spa_control::ModuleSetup {
 pub fn module_id() -> spa_types::ModuleId {
     spa_types::ModuleId::new("sales")
         .unwrap_or_else(|_| unreachable!("a literal that satisfies ModuleId"))
-}
-
-/// The module this one cannot work without.
-///
-/// ponytail: one edge, expressed as a function rather than a graph. The third
-/// module with a dependency is what earns a `requires()` on a `Module` trait —
-/// and by then there will be two real cases to describe instead of one to guess
-/// from. Signup checks this so "sales without ledger" is refused at the door
-/// rather than discovered at the first invoice.
-#[must_use]
-pub fn requires() -> spa_types::ModuleId {
-    ledger::module_id()
 }
 
 /// Every event shape this build can read.

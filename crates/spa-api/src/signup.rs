@@ -93,61 +93,21 @@ async fn sign_up(
     ))
 }
 
-/// Every module this build offers, as `(name, setup)`.
-///
-/// The list, in one place — because two things need it and they must not
-/// disagree: this endpoint, which refuses anything not here, and the demo
-/// tenant, which enables *all* of it. "The demo has every module enabled" is a
-/// requirement nothing could check while the set was a `match` arm.
-///
-/// ponytail: still not a `Module` trait. A trait would also have to carry the
-/// routes and the worker's jobs, and those cannot cross this boundary — a
-/// module must not depend on `spa-api` or `spa-worker`. Each composition root
-/// keeps listing what it composes; only the *set* is shared.
-#[must_use]
-pub fn modules() -> Vec<(&'static str, ModuleSetup)> {
-    vec![("ledger", ledger::setup()), ("sales", sales::setup())]
-}
-
 /// Turns requested module names into their setup descriptions.
+///
+/// The list and the dependency rule both live in [`crate::modules`], so signing
+/// up for a module and enabling it later cannot disagree about either.
 fn parse_modules(requested: &[String], locale: Locale) -> Result<Vec<ModuleSetup>, Problem> {
-    let available = modules();
     let setups: Vec<ModuleSetup> = requested
         .iter()
-        .map(|name| {
-            available
-                .iter()
-                .find(|(known, _)| *known == name.as_str())
-                // Cheap: `ModuleSetup` holds a name, a `&'static str` of SQL and
-                // a slice of group names.
-                .map(|(_, setup)| setup.clone())
-                .ok_or_else(|| {
-                    ApiError::BadRequest(
-                        spa_i18n::Message::new(crate::messages::UNKNOWN_MODULE)
-                            .with("module", spa_i18n::MessageArg::text(name.clone())),
-                    )
-                    .into_problem(locale)
-                })
-        })
+        .map(|name| crate::modules::find(name, locale))
         .collect::<Result<_, _>>()?;
 
-    // Sales posts every invoice to the ledger, so a tenant that asked for one
-    // without the other would get a system that refuses its first invoice.
-    // Refused here rather than silently adding the ledger: what someone is
-    // signing up for should be what they asked for.
-    if requested.iter().any(|m| m == "sales") && !requested.iter().any(|m| m == "ledger") {
-        return Err(ApiError::BadRequest(
-            spa_i18n::Message::new(crate::messages::MODULE_REQUIRES)
-                .with(
-                    "module",
-                    spa_i18n::MessageArg::text(sales::module_id().to_string()),
-                )
-                .with(
-                    "required",
-                    spa_i18n::MessageArg::text(sales::requires().to_string()),
-                ),
-        )
-        .into_problem(locale));
+    // Checked against what was *asked for*, not against what exists: signing up
+    // for sales without the ledger is refused at the door rather than producing
+    // a system that fails on its first invoice.
+    for setup in &setups {
+        crate::modules::check_requirements(setup, requested, locale)?;
     }
 
     Ok(setups)

@@ -25,6 +25,7 @@ pub fn router(state: AppState) -> Router {
         // Module routes mount alongside. One module today; see `ledger_routes`.
         .merge(crate::signup::routes())
         .merge(crate::members::routes())
+        .merge(crate::modules::routes())
         .merge(crate::ledger_routes::routes())
         .merge(crate::sales_routes::routes())
         .with_state(state)

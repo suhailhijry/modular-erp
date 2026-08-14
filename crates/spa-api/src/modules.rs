@@ -1,0 +1,274 @@
+//! Which modules exist, and turning them on and off.
+//!
+//! # Why this is not a `Module` trait
+//!
+//! A trait would also have to carry the routes and the worker's jobs, and
+//! neither can cross this boundary — a module must not depend on `spa-api` or
+//! `spa-worker`. So each composition root still lists what it composes, and only
+//! the *set* is shared. [`available`] is that set.
+//!
+//! What a module does describe for itself is [`ModuleSetup`]: its install SQL,
+//! its projection groups, and what it needs underneath it. The three places that
+//! ask about dependencies — signing up, enabling later, and refusing to disable
+//! — all read the same field, so they cannot drift.
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::{Json, Router, routing};
+use serde::{Deserialize, Serialize};
+use spa_control::{Actor, ModuleSetup};
+use spa_i18n::{Locale, Message, MessageArg};
+
+use crate::error::ApiError;
+use crate::extract::{Allowed, Language, ManageTenant, Read};
+use crate::problem::Problem;
+use crate::state::AppState;
+
+pub(crate) fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/v1/tenants/{slug}/modules",
+            routing::get(list).post(enable),
+        )
+        .route(
+            "/v1/tenants/{slug}/modules/{module}",
+            routing::delete(disable),
+        )
+        // Unauthenticated on purpose: a pricing page needs the catalogue before
+        // anyone has an account. It is product information, not data.
+        .route("/v1/modules", routing::get(catalogue))
+}
+
+/// Every module this build offers, as `(name, setup)`.
+///
+/// The list, in one place — because several things need it and they must not
+/// disagree: signup, this file, and the demo tenant, which enables *all* of it.
+/// "The demo has every module enabled" is a requirement nothing could check
+/// while the set was a `match` arm.
+#[must_use]
+pub fn available() -> Vec<(&'static str, ModuleSetup)> {
+    vec![("ledger", ledger::setup()), ("sales", sales::setup())]
+}
+
+/// Looks a module up by the name a client sent.
+pub(crate) fn find(name: &str, locale: Locale) -> Result<ModuleSetup, Problem> {
+    available()
+        .into_iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, setup)| setup)
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                Message::new(crate::messages::UNKNOWN_MODULE)
+                    .with("module", MessageArg::text(name.to_owned())),
+            )
+            .into_problem(locale)
+        })
+}
+
+/// Refuses a module whose dependencies are not in `present`.
+///
+/// Shared by signup (where `present` is what was asked for) and enabling (where
+/// it is what the tenant already has), because "sales needs the ledger" must not
+/// be true in one and forgotten in the other.
+pub(crate) fn check_requirements(
+    setup: &ModuleSetup,
+    present: &[String],
+    locale: Locale,
+) -> Result<(), Problem> {
+    for required in setup.requires {
+        if present.iter().any(|p| p == required) {
+            continue;
+        }
+        return Err(ApiError::BadRequest(
+            Message::new(crate::messages::MODULE_REQUIRES)
+                .with("module", MessageArg::text(setup.module.as_str().to_owned()))
+                .with("required", MessageArg::text((*required).to_owned())),
+        )
+        .into_problem(locale));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Wire shapes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct ModuleView {
+    name: &'static str,
+    /// What this module needs underneath it. A client building a picker needs
+    /// this to grey out the impossible combinations rather than discover them.
+    requires: &'static [&'static str],
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CatalogueView {
+    name: &'static str,
+    requires: &'static [&'static str],
+}
+
+#[derive(Debug, Deserialize)]
+struct Enable {
+    module: String,
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// The catalogue, for a signup form or a pricing page.
+async fn catalogue() -> Json<Vec<CatalogueView>> {
+    Json(
+        available()
+            .into_iter()
+            .map(|(name, setup)| CatalogueView {
+                name,
+                requires: setup.requires,
+            })
+            .collect(),
+    )
+}
+
+/// What this tenant has, and what else it could have.
+async fn list(tenant: Allowed<Read>) -> Json<Vec<ModuleView>> {
+    Json(
+        available()
+            .into_iter()
+            .map(|(name, setup)| ModuleView {
+                name,
+                requires: setup.requires,
+                enabled: tenant.db.has_module(&setup.module),
+            })
+            .collect(),
+    )
+}
+
+/// Turns a module on for a running tenant.
+///
+/// Installs its read models *and* records the entitlement — both, because
+/// either alone is a tenant that 500s: entitled with no tables, or tables
+/// nothing can reach.
+async fn enable(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Json(body): Json<Enable>,
+) -> Result<StatusCode, Problem> {
+    let setup = find(&body.module, locale)?;
+
+    let enabled: Vec<String> = tenant
+        .db
+        .modules()
+        .iter()
+        .map(|m| m.as_str().to_owned())
+        .collect();
+    check_requirements(&setup, &enabled, locale)?;
+
+    if tenant.db.has_module(&setup.module) {
+        // Already on. A no-op rather than a conflict: the caller wanted it
+        // enabled and it is.
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    state
+        .control
+        .install_module(
+            tenant.db.tenant(),
+            setup,
+            Actor::identity(tenant.session.identity),
+        )
+        .await
+        .map_err(|e| ApiError::Access(e).into_problem(locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Turns a module off.
+///
+/// **Nothing is deleted.** The entitlement is marked disabled, the routes stop
+/// answering and the worker stops visiting on its behalf — but the events and
+/// the read models stay exactly where they are, so a tenant who downgrades and
+/// comes back finds their data. That is the "updates never break old data"
+/// requirement applied to the one operation most likely to violate it.
+async fn disable(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+) -> Result<StatusCode, Problem> {
+    let name = params.get("module").map_or("", String::as_str);
+    let setup = find(name, locale)?;
+
+    if !tenant.db.has_module(&setup.module) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    // Refuse to pull the rug from under something still running on it. The
+    // alternative — disabling anyway — leaves sales issuing invoices that
+    // cannot post, which is a worse outcome than an error.
+    if let Some(dependent) = dependent_on(name, tenant.db.modules()) {
+        return Err(ApiError::BadRequest(
+            Message::new(crate::messages::MODULE_IN_USE)
+                .with("module", MessageArg::text(name.to_owned()))
+                .with("dependent", MessageArg::text(dependent)),
+        )
+        .into_problem(locale));
+    }
+
+    state
+        .control
+        .disable_module(
+            tenant.db.tenant(),
+            &setup.module,
+            Actor::identity(tenant.session.identity),
+        )
+        .await
+        .map_err(|e| ApiError::Access(e).into_problem(locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// An enabled module that needs `name`, if there is one.
+fn dependent_on(name: &str, enabled: &spa_control::EnabledModules) -> Option<String> {
+    available()
+        .into_iter()
+        .filter(|(_, setup)| enabled.contains(&setup.module))
+        .find(|(_, setup)| setup.requires.contains(&name))
+        .map(|(dependent, _)| dependent.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_requirement_names_a_module_that_exists() {
+        // A typo in `requiring(&["ledgre"])` would make that module permanently
+        // un-enableable, and nothing else would notice until someone tried.
+        let names: Vec<&str> = available().into_iter().map(|(name, _)| name).collect();
+        for (name, setup) in available() {
+            for required in setup.requires {
+                assert!(
+                    names.contains(required),
+                    "{name} requires {required:?}, which is not a module"
+                );
+            }
+            assert_ne!(
+                setup.module.as_str(),
+                *setup.requires.first().unwrap_or(&""),
+                "{name} requires itself"
+            );
+        }
+    }
+
+    #[test]
+    fn a_modules_name_matches_the_id_it_installs_under() {
+        // The catalogue key and the entitlement row have to agree, or enabling
+        // "sales" would entitle something else and every check would disagree
+        // with every other.
+        for (name, setup) in available() {
+            assert_eq!(name, setup.module.as_str());
+        }
+    }
+}
