@@ -44,6 +44,9 @@ pub struct TenantDb {
     modules: EnabledModules,
     pools: Arc<TenantPools>,
     lane: Lane,
+    /// What the caller may do here. `None` for background and support access,
+    /// which are not acting as anyone — see [`Self::role`].
+    role: Option<crate::Role>,
 }
 
 impl TenantDb {
@@ -62,7 +65,32 @@ impl TenantDb {
             modules,
             pools,
             lane,
+            role: None,
         }
+    }
+
+    pub(crate) const fn set_role(&mut self, role: Option<crate::Role>) {
+        self.role = role;
+    }
+
+    /// The caller's role, if a person is behind this handle.
+    ///
+    /// `None` for maintenance and provisioning, which act on the system's
+    /// behalf rather than anyone's. A capability check against `None` must
+    /// refuse — background work that needs to write should say so in its own
+    /// terms, not borrow a person's authority.
+    #[must_use]
+    pub const fn role(&self) -> Option<crate::Role> {
+        self.role
+    }
+
+    /// Whether the caller may do this.
+    ///
+    /// The single predicate every check goes through. `Allowed<C>` in
+    /// `spa-api` is the type-level form; this is what it calls.
+    #[must_use]
+    pub fn allows(&self, capability: crate::Capability) -> bool {
+        self.role.is_some_and(|role| role.allows(capability))
     }
 
     #[must_use]

@@ -21,9 +21,11 @@
 //! with the ledger module — building them now would be guessing at their shape.
 
 mod catalog;
+mod consistency;
 mod error;
 mod extract;
 mod ledger_routes;
+mod members;
 pub mod messages;
 mod problem;
 mod routes;
@@ -36,8 +38,12 @@ use spa_i18n::StaticCatalog;
 
 /// This crate's own messages — about the request, not the domain.
 pub static REQUEST_CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
+pub use consistency::Consistency;
 pub use error::ApiError;
-pub use extract::{Authenticated, Language, Tenant};
+pub use extract::{
+    Allowed, Authenticated, Capability, Language, ManageAccounts, ManageTenant, PostEntries, Read,
+    Tenant,
+};
 pub use problem::Problem;
 pub use routes::router;
 pub use state::AppState;

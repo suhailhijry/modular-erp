@@ -202,8 +202,20 @@ Built only where the ledger produced a second consumer.
 - [ ] `Idempotency-Key` *(the ledger's mutations take client-chosen ids, so both
       are already idempotent — this may turn out to be unnecessary)*
 - [ ] `ETag`/`If-Match` *(no update-in-place endpoint yet)*
+- [x] `?consistent_after=<position>` — read your own write, with the write
+      nudging the worker so the wait is a claim cycle rather than the idle backoff
 - [ ] Cursors *(no list long enough)*
-- [ ] Capability permits; tenant-local authorization as a projection (L7)
+- [x] Roles and capabilities: `Role::allows` is the one place authorization is
+      decided, and `Allowed<C>` in a handler's signature *is* the check
+- [x] Authorization matrix as a test, written out rather than derived — over
+      HTTP, every role against every endpoint
+- [x] A 403 names the capability, in the caller's language
+- [x] Member management: list, add, change role, remove — `ManageTenant`, and
+      the last owner cannot remove or demote themselves
+- [ ] Invitations *(the owner sets the password and hands it over today; an
+      emailed token needs an outbox handler nothing has written)*
+- [ ] Tenant-local authorization as a projection (L7) *(roles live in the
+      control plane for now; the projection is for fact-derived permissions)*
 - [ ] `spa-config`: declarations, layers, versioned resolution, provenance
 - [ ] Numbering (gapless per-tenant document sequences)
 - [ ] OpenAPI generation with CI drift check
@@ -339,6 +351,80 @@ deploy.
 
   **The lesson is the diagnostic, not the fixes.** When an error names types from
   a file you are not editing, assert the property where the code lives.
+
+- **Submit-then-refresh was broken, and the fix was mostly a call nobody made.**
+  Projections are driven by a worker, so a read taken immediately after a write
+  can legitimately miss it. Every write already returned its log position and
+  nothing could be done with it.
+
+  `?consistent_after=<position>` waits for the projection to reach it — but the
+  real bug was underneath: `request_visit` had existed since the lease work and
+  *nothing called it*, so a tenant that had been quiet waited out its thirty-second
+  idle backoff before anything projected the write. `consistent_after` would have
+  timed out on a perfectly healthy system.
+
+  On timeout the read is a 503, not stale data with a shrug. The caller asked for
+  a guarantee this response cannot make; answering anyway is the behaviour that
+  made the feature necessary. A read that does *not* ask never waits, and a test
+  asserts it does not pay for the option.
+
+  ponytail: one control-plane round trip per write, and the update is a no-op for
+  an already-due tenant. If write rate makes it hot, batch the ids in the API
+  process and flush on a timer — the call site does not change.
+
+- **`Path<String>` silently 404s any route with two parameters.** The `Tenant`
+  extractor pulled the slug positionally, which works for
+  `/tenants/{slug}` and fails for `/tenants/{slug}/members/{identity}` — the
+  shape every nested route in this API will have. It surfaced as a 404 on a
+  route that plainly existed, which is the most misleading failure available.
+  Extracting by name from a `HashMap` fixes it for every route, present and
+  future.
+
+- **A capability with no endpoint is a capability nobody has thought about.**
+  `ManageTenant` shipped last round with nothing behind it — by the standard
+  written two paragraphs above its own definition. Member management is what it
+  was for: a tenant had exactly one user, forever.
+
+  The owner sets a colleague's password and hands it over. The polished flow is
+  an emailed invitation link, which needs email delivery, which needs an outbox
+  handler nothing has written — so it would look finished and deliver nothing.
+  What shipped is how small businesses actually onboard staff, and the invitation
+  flow calls the same `add_member` once someone accepts.
+
+  Two rules are worth naming. A demotion invalidates the cache immediately
+  rather than waiting out the five-second TTL, because five seconds is five
+  seconds of someone doing what they were just told they cannot. And the last
+  owner cannot remove or demote themselves: a tenant with no owner has nobody
+  who can add one, and the only fix is a support ticket.
+
+- **The `role` column was written and never read.** Every member of a tenant
+  could do everything — post entries, close accounts, install charts — while
+  `grant_membership` dutifully recorded "owner" or "clerk" for nobody. A stored
+  field that no code path consults is worse than an absent one: it reads like a
+  control.
+
+  Four roles, four capabilities, and `Role::allows` is the only place the
+  decision is made — which is what makes the rule engine (Phase 5) a change to
+  one function rather than an audit of every handler. `Allowed<C>` in a
+  handler's signature is the check, for the same reason `TenantDb` has no public
+  constructor: `tenant.require(…)?` on the first line fails by *omission*, which
+  is silent and invisible in review.
+
+  Clippy found the one honest mistake in the design: `Admin` and `Accountant`
+  had identical bodies. With the capabilities that exist they were the same
+  role, and a role that is a synonym for another is a support question with no
+  answer. Dropped.
+
+- **Platform staff are not tenant members with a different role.** Making the
+  membership cache hold a parsed tenant `Role` broke support access immediately,
+  because platform memberships store `support` and `superadmin` — a different
+  vocabulary. Forcing them through the same enum would let "support" answer
+  questions about what someone may do inside a tenant's books. Two caches now,
+  each with the type its question actually has.
+
+  A stored role this build does not recognise is a 500, not a default.
+  Defaulting down locks someone out silently; defaulting up lets them in
+  silently. A test asserts the 500.
 
 - **A chart of accounts is a template, not a fixture.** The architecture
   describes blueprints as browse → parameterize → materialize → edit → preview →

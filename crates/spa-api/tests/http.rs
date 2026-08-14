@@ -97,8 +97,12 @@ impl Fixture {
     }
 
     async fn join(&self, identity: IdentityId, tenant: TenantId) {
+        self.join_as(identity, tenant, "owner").await;
+    }
+
+    async fn join_as(&self, identity: IdentityId, tenant: TenantId, role: &str) {
         self.control
-            .grant_membership(identity, Scope::Tenant(tenant), "owner", Actor::system())
+            .grant_membership(identity, Scope::Tenant(tenant), role, Actor::system())
             .await
             .expect("membership is granted");
     }
@@ -986,5 +990,737 @@ async fn an_unknown_chart_is_refused() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "request.unknown_chart");
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Authorization
+// ---------------------------------------------------------------------------
+
+/// **The authorization matrix, over HTTP.**
+///
+/// Every role against every endpoint. Written out rather than derived from
+/// `Role::allows`, because a test that asks the code what it does can only ever
+/// agree with it — this one asks whether that is what we *meant*.
+#[tokio::test]
+async fn every_role_can_do_exactly_what_it_should() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    fixture.enable_ledger(tenant).await;
+
+    // (role, read, post, manage accounts)
+    let matrix = [
+        ("owner", true, true, true),
+        ("accountant", true, true, true),
+        ("clerk", true, true, false),
+        ("viewer", true, false, false),
+    ];
+
+    for (role, may_read, may_post, may_manage) in matrix {
+        let email = format!("{role}@acme.test");
+        let user = fixture.user(&email, "hunter2hunter2").await;
+        fixture.join_as(user, tenant, role).await;
+        let token = fixture.token(&email, "hunter2hunter2").await;
+
+        let bearer = |request: axum::http::request::Builder| {
+            request.header(header::AUTHORIZATION, format!("Bearer {token}"))
+        };
+
+        let (read, _, _) = fixture
+            .send(
+                bearer(Request::get("/v1/tenants/acme/ledger/accounts"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(read == StatusCode::OK, may_read, "{role} read: {read}");
+
+        let (manage, _, _) = fixture
+            .send(
+                bearer(Request::post("/v1/tenants/acme/ledger/accounts"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "code": format!("9{}", role.len()),
+                            "name": "Test", "kind": "asset", "currency": "SAR"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            manage == StatusCode::CREATED,
+            may_manage,
+            "{role} manage accounts: {manage}"
+        );
+
+        // Posting needs accounts, so this asserts the *authorization* outcome:
+        // a refused role gets 403 before the ledger is consulted, an allowed
+        // one gets past it and fails on the missing accounts instead.
+        let (post, body, _) = fixture
+            .send(
+                bearer(Request::post("/v1/tenants/acme/ledger/entries"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": format!("e-{role}"),
+                            "occurred_on": "2026-01-15T00:00:00Z",
+                            "lines": [
+                                { "account": "1000", "amount": { "minor": 1, "currency": "SAR" } },
+                                { "account": "4000", "amount": { "minor": -1, "currency": "SAR" } }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            post != StatusCode::FORBIDDEN,
+            may_post,
+            "{role} post entries: {post} {body}"
+        );
+    }
+
+    fixture.cleanup().await;
+}
+
+/// A refusal says which capability, so "ask someone with permission" is
+/// actionable — and it says it in the caller's language.
+#[tokio::test]
+async fn a_refusal_names_the_capability_and_speaks_arabic() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    fixture.enable_ledger(tenant).await;
+    let user = fixture.user("viewer@acme.test", "hunter2hunter2").await;
+    fixture.join_as(user, tenant, "viewer").await;
+    let token = fixture.token("viewer@acme.test", "hunter2hunter2").await;
+
+    let (status, body, content_type) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/ledger/accounts")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT_LANGUAGE, "ar")
+                .body(Body::from(
+                    serde_json::json!({
+                        "code": "1000", "name": "Cash", "kind": "asset", "currency": "SAR"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    // 403, not 404: they have already proved membership, so hiding the tenant
+    // buys nothing, and they need to know what to ask for.
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(content_type, b"application/problem+json");
+    assert_eq!(body["code"], "access.not_permitted");
+    assert!(
+        body["detail"].as_str().unwrap().contains("manage_accounts"),
+        "the message must name the capability: {}",
+        body["detail"]
+    );
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)),
+        "and be in Arabic: {}",
+        body["detail"]
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A stored role this build does not know is refused, not guessed at.
+#[tokio::test]
+async fn an_unknown_stored_role_locks_nobody_in_or_out_silently() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.user("odd@acme.test", "hunter2hunter2").await;
+    fixture.join_as(user, tenant, "superuser").await;
+    let token = fixture.token("odd@acme.test", "hunter2hunter2").await;
+
+    let (status, _, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "defaulting down locks someone out silently; defaulting up lets them \
+         in silently. Both are worse than an error naming the row."
+    );
+
+    fixture.cleanup().await;
+}
+
+/// The tenant view reports the caller's role, so a client can hide what it must
+/// not offer. The server refuses regardless.
+#[tokio::test]
+async fn the_tenant_view_tells_a_client_what_to_show() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    fixture.join_as(user, tenant, "clerk").await;
+    let token = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["role"], "clerk");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Members
+// ---------------------------------------------------------------------------
+
+/// **Adding a colleague, end to end.**
+#[tokio::test]
+async fn an_owner_can_add_a_colleague_who_can_then_sign_in() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, added, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/members")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "email": "clerk@acme.test",
+                        "password": "another good passphrase",
+                        "role": "clerk"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{added}");
+
+    // They can sign in with what the owner set, and they land in the tenant.
+    let colleague = fixture
+        .token("clerk@acme.test", "another good passphrase")
+        .await;
+    let (status, view, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme")
+                .header(header::AUTHORIZATION, format!("Bearer {colleague}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(view["role"], "clerk");
+
+    // And their role is enforced: a clerk cannot restructure the chart.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/ledger/accounts")
+                .header(header::AUTHORIZATION, format!("Bearer {colleague}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "code": "1000", "name": "Cash", "kind": "asset", "currency": "SAR"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Both show up in the list, which a viewer could also read.
+    let (status, members, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme/members")
+                .header(header::AUTHORIZATION, format!("Bearer {colleague}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let members = members.as_array().expect("a list");
+    assert_eq!(members.len(), 2);
+    assert!(
+        members
+            .iter()
+            .any(|m| m["handle"] == "owner@acme.test" && m["role"] == "owner")
+    );
+    assert!(
+        members
+            .iter()
+            .any(|m| m["handle"] == "clerk@acme.test" && m["role"] == "clerk")
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A demotion applies immediately, not after the cache TTL.
+#[tokio::test]
+async fn changing_a_role_takes_effect_at_once() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (_, added, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/members")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "email": "acct@acme.test",
+                        "password": "another good passphrase",
+                        "role": "accountant"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    let identity = added["identity"].as_str().expect("an identity").to_owned();
+    let colleague = fixture
+        .token("acct@acme.test", "another good passphrase")
+        .await;
+
+    let open_account = |t: &str| {
+        Request::post("/v1/tenants/acme/ledger/accounts")
+            .header(header::AUTHORIZATION, format!("Bearer {t}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "code": "1000", "name": "Cash", "kind": "asset", "currency": "SAR"
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, _, _) = fixture.send(open_account(&colleague)).await;
+    assert_eq!(status, StatusCode::CREATED, "an accountant may");
+
+    let (status, _, _) = fixture
+        .send(
+            Request::patch(format!("/v1/tenants/acme/members/{identity}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "role": "viewer" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, _) = fixture.send(open_account(&colleague)).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a demotion that takes five seconds to apply is five seconds of \
+         someone doing what they were just told they cannot"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The footgun that has no undo.**
+#[tokio::test]
+async fn the_last_owner_cannot_remove_or_demote_themselves() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::patch(format!("/v1/tenants/acme/members/{owner}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "role": "viewer" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["code"], "members.last_owner");
+
+    let (status, _, _) = fixture
+        .send(
+            Request::delete(format!("/v1/tenants/acme/members/{owner}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // But with a second owner it is allowed — the rule is about the tenant
+    // keeping an owner, not about anyone being undemotable.
+    fixture
+        .send(
+            Request::post("/v1/tenants/acme/members")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "email": "second@acme.test",
+                        "password": "another good passphrase",
+                        "role": "owner"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    let (status, _, _) = fixture
+        .send(
+            Request::patch(format!("/v1/tenants/acme/members/{owner}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "role": "viewer" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "a second owner makes it safe"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Only `ManageTenant` may change who has access.
+#[tokio::test]
+async fn an_accountant_cannot_add_members() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let acct = fixture.user("acct@acme.test", "hunter2hunter2").await;
+    fixture.join_as(acct, tenant, "accountant").await;
+    let token = fixture.token("acct@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/members")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "email": "friend@acme.test",
+                        "password": "another good passphrase",
+                        "role": "owner"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an accountant who can grant themselves ownership is not an accountant"
+    );
+    assert_eq!(body["code"], "access.not_permitted");
+
+    fixture.cleanup().await;
+}
+
+/// One person, two tenants, one account.
+#[tokio::test]
+async fn adding_an_existing_login_reuses_their_account() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let acme = fixture.provision("acme").await;
+    let globex = fixture.provision("globex").await;
+    fixture.join(owner, acme).await;
+    fixture.join(owner, globex).await;
+
+    let shared = fixture.user("cfo@example.test", "hunter2hunter2").await;
+    fixture.join_as(shared, acme, "accountant").await;
+
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let (status, added, _) = fixture
+        .send(
+            Request::post("/v1/tenants/globex/members")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "email": "cfo@example.test",
+                        "password": "ignored, they already have one",
+                        "role": "viewer"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        added["identity"].as_str().expect("an identity"),
+        shared.to_string(),
+        "one person with two tenants must not end up with two accounts"
+    );
+
+    // And adding them again is a conflict, not a silent second membership.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/tenants/globex/members")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "email": "cfo@example.test",
+                        "password": "another good passphrase",
+                        "role": "viewer"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "members.already_a_member");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Reading your own write
+// ---------------------------------------------------------------------------
+
+/// **The most common client pattern: submit, then refresh.**
+///
+/// Without `?consistent_after=` the refresh can legitimately miss the write —
+/// projections are driven by a worker. This is the whole reason every write
+/// returns its log position.
+#[tokio::test]
+async fn a_client_can_read_the_write_it_just_made() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    for (code, kind) in [("1000", "asset"), ("4000", "revenue")] {
+        fixture
+            .send(
+                Request::post("/v1/tenants/acme/ledger/accounts")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "code": code, "name": code, "kind": kind, "currency": "SAR"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+    }
+
+    let (status, posted, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/ledger/entries")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "inv-1",
+                        "occurred_on": "2026-01-15T00:00:00Z",
+                        "lines": [
+                            { "account": "1000", "amount": { "minor": 15000, "currency": "SAR" } },
+                            { "account": "4000", "amount": { "minor": -15000, "currency": "SAR" } }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{posted}");
+    let position = posted["position"].as_i64().expect("a position");
+
+    // No worker is running in this test, so the projection never advances and
+    // the read must time out rather than quietly serve stale data.
+    let (status, body, _) = fixture
+        .send(
+            Request::get(format!(
+                "/v1/tenants/acme/ledger/accounts?consistent_after={position}"
+            ))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a guarantee the response cannot make must not be answered with stale data"
+    );
+    assert_eq!(body["code"], "request.not_caught_up");
+
+    // With the projection caught up, the same request succeeds and the write is
+    // there.
+    fixture.project_ledger(tenant).await;
+    let (status, accounts, _) = fixture
+        .send(
+            Request::get(format!(
+                "/v1/tenants/acme/ledger/accounts?consistent_after={position}"
+            ))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let cash = accounts
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|a| a["code"] == "1000")
+        .expect("cash");
+    assert_eq!(cash["balance"], 15000);
+
+    fixture.cleanup().await;
+}
+
+/// A read that does not ask for consistency never waits.
+#[tokio::test]
+async fn a_read_without_the_hint_is_never_delayed() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    fixture
+        .send(
+            Request::post("/v1/tenants/acme/ledger/accounts")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "code": "1000", "name": "Cash", "kind": "asset", "currency": "SAR"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    // Nothing has projected it, and the read returns immediately with what the
+    // read model actually holds — which is the honest answer to a question that
+    // did not ask for more.
+    let started = std::time::Instant::now();
+    let (status, accounts, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme/ledger/accounts")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(accounts.as_array().expect("a list").is_empty());
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "a read with no hint must not pay for one: {:?}",
+        started.elapsed()
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A write asks the worker to look now, so the wait is a claim cycle rather than
+/// the idle backoff.
+#[tokio::test]
+async fn a_write_marks_the_tenant_as_needing_a_visit() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // Push the tenant far into the future, as an idle one would be.
+    fixture
+        .control
+        .schedule_next_visit(tenant, std::time::Duration::from_hours(1))
+        .await
+        .expect("defers");
+    assert!(
+        fixture
+            .control
+            .claim_tenants("w", 10, spa_control::WorkSchedule::default())
+            .await
+            .expect("claims")
+            .is_empty(),
+        "the tenant starts out not due"
+    );
+
+    fixture
+        .send(
+            Request::post("/v1/tenants/acme/ledger/accounts")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "code": "1000", "name": "Cash", "kind": "asset", "currency": "SAR"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    let claimed = fixture
+        .control
+        .claim_tenants("w", 10, spa_control::WorkSchedule::default())
+        .await
+        .expect("claims");
+    assert_eq!(
+        claimed.len(),
+        1,
+        "without this the first write after a quiet period waits out the idle \
+         backoff, and `consistent_after` times out on a healthy system"
+    );
+
     fixture.cleanup().await;
 }

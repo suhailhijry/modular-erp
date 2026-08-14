@@ -97,9 +97,20 @@ pub async fn ensure_group(
 pub async fn checkpoint<G: ProjectionGroup>(
     conn: &mut PgConnection,
 ) -> Result<LogPosition, sqlx::Error> {
+    checkpoint_of(conn, G::NAME).await
+}
+
+/// [`checkpoint`] without the type parameter.
+///
+/// For the API's `?consistent_after=`, which knows a group by name rather than
+/// by type — the group belongs to whichever module served the route.
+pub async fn checkpoint_of(
+    conn: &mut PgConnection,
+    group: &str,
+) -> Result<LogPosition, sqlx::Error> {
     let position = sqlx::query_scalar!(
         "SELECT position FROM projection_checkpoint WHERE group_name = $1",
-        G::NAME,
+        group,
     )
     .fetch_optional(&mut *conn)
     .await?

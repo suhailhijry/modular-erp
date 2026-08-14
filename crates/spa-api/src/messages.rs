@@ -11,6 +11,9 @@ pub const INVALID_ID: MessageCode = MessageCode::new("request.invalid_id");
 pub const PASSWORD_TOO_SHORT: MessageCode = MessageCode::new("request.password_too_short");
 pub const UNKNOWN_MODULE: MessageCode = MessageCode::new("request.unknown_module");
 pub const UNKNOWN_CHART: MessageCode = MessageCode::new("request.unknown_chart");
+pub const UNKNOWN_ROLE: MessageCode = MessageCode::new("request.unknown_role");
+/// 503. The caller asked to see a write that has not been projected yet.
+pub const NOT_CAUGHT_UP: MessageCode = MessageCode::new("request.not_caught_up");
 
 pub static CODES: &[MessageCode] = &[
     UNKNOWN_CURRENCY,
@@ -19,6 +22,8 @@ pub static CODES: &[MessageCode] = &[
     PASSWORD_TOO_SHORT,
     UNKNOWN_MODULE,
     UNKNOWN_CHART,
+    UNKNOWN_ROLE,
+    NOT_CAUGHT_UP,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -99,5 +104,25 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         UNKNOWN_CHART,
         Locale::Arabic,
         Template::Simple("لا يوجد دليل حسابات باسم {chart}."),
+    ),
+    (
+        UNKNOWN_ROLE,
+        Locale::English,
+        Template::Simple("{role} is not a role. Use owner, accountant, clerk or viewer."),
+    ),
+    (
+        UNKNOWN_ROLE,
+        Locale::Arabic,
+        Template::Simple("{role} ليس دورًا. استخدم owner أو accountant أو clerk أو viewer."),
+    ),
+    (
+        NOT_CAUGHT_UP,
+        Locale::English,
+        Template::Simple("Still catching up ({behind} to go). Please try again in a moment."),
+    ),
+    (
+        NOT_CAUGHT_UP,
+        Locale::Arabic,
+        Template::Simple("لا يزال التحديث جاريًا (متبقٍ {behind}). يُرجى المحاولة بعد لحظات."),
     ),
 ];

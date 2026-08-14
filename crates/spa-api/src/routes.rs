@@ -12,7 +12,7 @@ use axum::{Json, Router, routing};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
-use crate::extract::{Authenticated, Language, Tenant};
+use crate::extract::{Allowed, Authenticated, Language, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
 
@@ -24,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/tenants/{slug}", routing::get(tenant))
         // Module routes mount alongside. One module today; see `ledger_routes`.
         .merge(crate::signup::routes())
+        .merge(crate::members::routes())
         .merge(crate::ledger_routes::routes())
         .with_state(state)
 }
@@ -82,14 +83,19 @@ async fn log_out(
 #[derive(Debug, Serialize)]
 struct TenantView {
     id: spa_types::TenantId,
+    /// What the caller may do here, so a client can hide what it must not
+    /// offer. The server refuses regardless — this is for the buttons.
+    role: Option<&'static str>,
     modules: Vec<String>,
 }
 
-/// Proves the whole path: a `Tenant` in the signature means every access check
-/// already passed, and there is no way to obtain one that skips them.
-async fn tenant(tenant: Tenant) -> Json<TenantView> {
+/// Proves the whole path: `Allowed<Read>` in the signature means membership was
+/// checked *and* the role permits it, and there is no way to obtain one that
+/// skips either.
+async fn tenant(tenant: Allowed<Read>) -> Json<TenantView> {
     Json(TenantView {
         id: tenant.db.tenant(),
+        role: tenant.db.role().map(spa_control::Role::as_str),
         modules: tenant
             .db
             .modules()

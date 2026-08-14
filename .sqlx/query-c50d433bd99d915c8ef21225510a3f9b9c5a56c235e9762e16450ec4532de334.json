@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE membership SET role = $3\n              WHERE tenant_id = $1 AND identity_id = $2 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c50d433bd99d915c8ef21225510a3f9b9c5a56c235e9762e16450ec4532de334"
+}

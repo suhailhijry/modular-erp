@@ -25,15 +25,18 @@
 mod auth;
 mod cache;
 mod leases;
+mod members;
 pub mod messages;
 mod model;
 mod placement;
 mod pools;
 mod provision;
+mod roles;
 mod tenant_db;
 
 pub use auth::{AuthError, SESSION_LIFETIME, Session, SessionToken, hash_password};
 pub use leases::WorkSchedule;
+pub use members::{Member, MemberError};
 pub use model::{
     Actor, EnabledModules, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant,
     TenantStatus,
@@ -41,6 +44,7 @@ pub use model::{
 pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
 pub use pools::{ClusterRegistry, Conn, Lane, PoolConfig, PoolError, TenantPools, Tx};
 pub use provision::{ModuleSetup, SignedUp as ProvisionedTenant};
+pub use roles::{Capability, Role, UnknownRole};
 pub use tenant_db::{CommandError, TenantDb};
 
 use spa_i18n::{Localize, Message, MessageArg, StaticCatalog};
@@ -116,7 +120,16 @@ pub struct ControlPlane {
     tenants: Arc<TenantPools>,
     identities: TtlCache<IdentityId, Option<Identity>>,
     tenants_cache: TtlCache<TenantId, Option<Tenant>>,
-    memberships: TtlCache<(IdentityId, Option<TenantId>), bool>,
+    /// A caller's role in a tenant. Cached as the parsed [`Role`], so
+    /// authorization needs no second query.
+    memberships: TtlCache<(IdentityId, TenantId), Option<Role>>,
+    /// Whether an identity is platform staff.
+    ///
+    /// A separate cache because it is a separate question with a separate
+    /// vocabulary: platform roles are `support`, `superadmin`, `billing`, and
+    /// forcing them through [`Role`] would let "support" answer questions about
+    /// what someone may do inside a tenant's books.
+    platform: TtlCache<IdentityId, bool>,
     entitlements: TtlCache<TenantId, EnabledModules>,
     /// Entry-path cache hits and misses. A miss is a control-database round
     /// trip, so the ratio is the number that decides whether the control plane
@@ -134,6 +147,7 @@ impl ControlPlane {
             identities: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             tenants_cache: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             memberships: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            platform: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             entitlements: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             entry_hits: AtomicU64::new(0),
             entry_misses: AtomicU64::new(0),
@@ -169,6 +183,7 @@ impl ControlPlane {
         self.identities.clear();
         self.tenants_cache.clear();
         self.memberships.clear();
+        self.platform.clear();
         self.entitlements.clear();
     }
 
@@ -233,11 +248,14 @@ impl ControlPlane {
             });
         }
 
-        if !self.cached_membership(identity_id, Some(tenant_id)).await? {
-            return Err(AccessError::NotAMember);
-        }
+        let role = self
+            .cached_membership(identity_id, tenant_id)
+            .await?
+            .ok_or(AccessError::NotAMember)?;
 
-        self.open(&tenant, lane).await
+        let mut db = self.open(&tenant, lane).await?;
+        db.set_role(Some(role));
+        Ok(db)
     }
 
     /// Opens a tenant on behalf of platform staff, recording who and why.
@@ -261,7 +279,7 @@ impl ControlPlane {
         if !staff.is_active() {
             return Err(AccessError::IdentitySuspended);
         }
-        if !self.cached_membership(staff_id, None).await? {
+        if !self.cached_platform_membership(staff_id).await? {
             return Err(AccessError::NotAMember);
         }
 
@@ -504,22 +522,45 @@ impl ControlPlane {
     }
 
     /// `tenant` is `None` for a platform membership.
+    /// The caller's role in a scope, or `None` if they have no live membership.
+    ///
+    /// Caching the *role* rather than a boolean is what lets authorization be
+    /// decided without a second query. The staleness window is the same one
+    /// documented in [`cache`]: a demotion takes up to the TTL to take effect,
+    /// which is why revoking access outright also ends the session.
     async fn cached_membership(
         &self,
         identity_id: IdentityId,
-        tenant: Option<TenantId>,
-    ) -> Result<bool, AccessError> {
-        let key = (identity_id, tenant);
+        tenant_id: TenantId,
+    ) -> Result<Option<Role>, AccessError> {
+        let key = (identity_id, tenant_id);
         if let Some(hit) = self.memberships.get(&key) {
             self.hit();
             return Ok(hit);
         }
         self.miss();
-        let fresh = match tenant {
-            Some(tenant_id) => self.has_live_membership(identity_id, tenant_id).await?,
-            None => self.has_platform_membership(identity_id).await?,
-        };
+        let fresh = self.live_membership(identity_id, tenant_id).await?;
         self.memberships.put(key, fresh);
+        Ok(fresh)
+    }
+
+    /// Whether this identity is platform staff.
+    ///
+    /// Existence only. What platform staff may do is decided by the path they
+    /// take — [`Self::enter_for_support`] is audited and time-boxed — not by a
+    /// role string, so parsing one would be inventing a vocabulary nothing
+    /// reads.
+    async fn cached_platform_membership(
+        &self,
+        identity_id: IdentityId,
+    ) -> Result<bool, AccessError> {
+        if let Some(hit) = self.platform.get(&identity_id) {
+            self.hit();
+            return Ok(hit);
+        }
+        self.miss();
+        let fresh = self.platform_membership(identity_id).await?;
+        self.platform.put(identity_id, fresh);
         Ok(fresh)
     }
 
@@ -910,7 +951,12 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
-        self.memberships.invalidate(&(identity_id, scope.tenant()));
+        // A grant or revocation must take effect now on this node, not after
+        // the TTL. Both caches, because the scope decides which one holds it.
+        match scope.tenant() {
+            Some(tenant_id) => self.memberships.invalidate(&(identity_id, tenant_id)),
+            None => self.platform.invalidate(&identity_id),
+        }
 
         self.record(
             actor,
@@ -944,7 +990,12 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
-        self.memberships.invalidate(&(identity_id, scope.tenant()));
+        // A grant or revocation must take effect now on this node, not after
+        // the TTL. Both caches, because the scope decides which one holds it.
+        match scope.tenant() {
+            Some(tenant_id) => self.memberships.invalidate(&(identity_id, tenant_id)),
+            None => self.platform.invalidate(&identity_id),
+        }
 
         self.record(
             actor,
@@ -959,23 +1010,32 @@ impl ControlPlane {
         .await
     }
 
-    async fn has_live_membership(
+    async fn live_membership(
         &self,
         identity_id: IdentityId,
         tenant_id: TenantId,
-    ) -> Result<bool, AccessError> {
+    ) -> Result<Option<Role>, AccessError> {
         let found = sqlx::query_scalar!(
-            "SELECT 1 FROM membership
+            "SELECT role FROM membership
               WHERE identity_id = $1 AND tenant_id = $2 AND revoked_at IS NULL",
             identity_id.as_uuid(),
             tenant_id.as_uuid(),
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(found.is_some())
+
+        // A stored role this build does not know is an error, not a default.
+        // Defaulting down locks someone out silently; defaulting up lets them
+        // in silently.
+        found
+            .map(|role| {
+                role.parse::<Role>()
+                    .map_err(|e| AccessError::Corrupt(e.to_string()))
+            })
+            .transpose()
     }
 
-    async fn has_platform_membership(&self, identity_id: IdentityId) -> Result<bool, AccessError> {
+    async fn platform_membership(&self, identity_id: IdentityId) -> Result<bool, AccessError> {
         let found = sqlx::query_scalar!(
             "SELECT 1 FROM membership
               WHERE identity_id = $1 AND scope_kind = 'platform' AND revoked_at IS NULL",

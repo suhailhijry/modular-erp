@@ -10,6 +10,7 @@
 //! What the module does own is everything that matters: the aggregates, the
 //! invariant, and the read models. This file only translates.
 
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, Router, routing};
@@ -20,8 +21,9 @@ use spa_eventlog::{ExecuteError, Metadata};
 use spa_i18n::{Locale, Localize};
 use spa_types::{AggregateId, CurrencyCode, Money, Timestamp};
 
+use crate::consistency::{Consistency, nudge};
 use crate::error::ApiError;
-use crate::extract::{Language, Tenant};
+use crate::extract::{Allowed, Language, ManageAccounts, PostEntries, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
 
@@ -141,9 +143,14 @@ struct TrialBalanceView {
 // ---------------------------------------------------------------------------
 
 async fn list_accounts(
-    tenant: Tenant,
+    tenant: Allowed<Read>,
     Language(locale): Language,
+    consistency: Consistency,
 ) -> Result<Json<Vec<AccountView>>, Problem> {
+    consistency
+        .wait_for(&tenant.db, ledger::GROUP_NAME, locale)
+        .await?;
+
     let mut conn = tenant
         .db
         .read()
@@ -171,7 +178,8 @@ async fn list_accounts(
 }
 
 async fn open_account(
-    tenant: Tenant,
+    tenant: Allowed<ManageAccounts>,
+    State(state): State<AppState>,
     Language(locale): Language,
     Json(body): Json<NewAccount>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -204,11 +212,13 @@ async fn open_account(
     .await
     .map_err(|e| ledger_problem(&e, locale))?;
 
+    nudge(&state, tenant.db.tenant()).await;
     Ok(StatusCode::CREATED)
 }
 
 async fn post_entry(
-    tenant: Tenant,
+    tenant: Allowed<PostEntries>,
+    State(state): State<AppState>,
     Language(locale): Language,
     Json(body): Json<NewEntry>,
 ) -> Result<Json<EntryPosted>, Problem> {
@@ -239,6 +249,11 @@ async fn post_entry(
     .await
     .map_err(|e| ledger_problem(&e, locale))?;
 
+    // Ask the worker to look at this tenant now. Without it, the first write
+    // after a quiet period waits out the idle backoff before anything projects
+    // it, and `?consistent_after=` would time out on a healthy system.
+    nudge(&state, tenant.db.tenant()).await;
+
     Ok(Json(EntryPosted {
         id: body.id,
         position: committed.at.map(spa_types::LogPosition::get),
@@ -247,9 +262,14 @@ async fn post_entry(
 }
 
 async fn trial_balance(
-    tenant: Tenant,
+    tenant: Allowed<Read>,
     Language(locale): Language,
+    consistency: Consistency,
 ) -> Result<Json<Vec<TrialBalanceView>>, Problem> {
+    consistency
+        .wait_for(&tenant.db, ledger::GROUP_NAME, locale)
+        .await?;
+
     let mut conn = tenant
         .db
         .read()
@@ -277,7 +297,10 @@ async fn trial_balance(
 // ---------------------------------------------------------------------------
 
 /// Records who did it. Every event carries this (architecture L5).
-fn metadata(tenant: &Tenant) -> Metadata {
+///
+/// Generic over the capability, because every write here is behind a different
+/// one and they all derive to the same `Tenant`.
+fn metadata<C: crate::extract::Capability>(tenant: &Allowed<C>) -> Metadata {
     Metadata {
         actor: Some(tenant.session.identity.to_string()),
         ..Metadata::default()
@@ -403,7 +426,8 @@ struct ChartInstalled {
 }
 
 async fn install_chart(
-    tenant: Tenant,
+    tenant: Allowed<ManageAccounts>,
+    State(state): State<AppState>,
     Language(locale): Language,
     Json(body): Json<InstallChart>,
 ) -> Result<Json<ChartInstalled>, Problem> {
@@ -427,6 +451,8 @@ async fn install_chart(
     let installed = ledger::install_chart(&tenant.db, chart, currency, locale, &metadata(&tenant))
         .await
         .map_err(|e| ledger_problem(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
 
     Ok(Json(ChartInstalled {
         opened: installed.opened,

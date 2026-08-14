@@ -64,6 +64,9 @@ pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
 
 pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 
+/// This module's projection group name, for `?consistent_after=`.
+pub const GROUP_NAME: &str = <Ledger as spa_projection::ProjectionGroup>::NAME;
+
 /// This module's projection groups, as `(name, schema)`.
 const GROUPS: &[(&str, &str)] = &[(
     <Ledger as spa_projection::ProjectionGroup>::NAME,

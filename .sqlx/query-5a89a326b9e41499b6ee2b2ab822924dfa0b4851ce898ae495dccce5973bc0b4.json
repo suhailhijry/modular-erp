@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT identity_id as \"identity: IdentityId\" FROM authenticator\n                WHERE kind = 'password' AND handle = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "identity: IdentityId",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "authenticator",
+            "name": "identity_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5a89a326b9e41499b6ee2b2ab822924dfa0b4851ce898ae495dccce5973bc0b4"
+}

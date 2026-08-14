@@ -34,6 +34,11 @@ pub const SLUG_TAKEN: MessageCode = MessageCode::new("provisioning.slug_taken");
 /// share one.
 pub const INVALID_CREDENTIALS: MessageCode = MessageCode::new("auth.invalid_credentials");
 pub const SESSION_EXPIRED: MessageCode = MessageCode::new("auth.session_expired");
+/// 403, naming the capability. "Ask someone with permission" is only actionable
+/// when you know which permission.
+pub const NOT_PERMITTED: MessageCode = MessageCode::new("access.not_permitted");
+pub const ALREADY_A_MEMBER: MessageCode = MessageCode::new("members.already_a_member");
+pub const LAST_OWNER: MessageCode = MessageCode::new("members.last_owner");
 
 /// Every code this crate can produce. The completeness test walks this list.
 pub static CODES: &[MessageCode] = &[
@@ -49,6 +54,9 @@ pub static CODES: &[MessageCode] = &[
     SLUG_TAKEN,
     INVALID_CREDENTIALS,
     SESSION_EXPIRED,
+    NOT_PERMITTED,
+    ALREADY_A_MEMBER,
+    LAST_OWNER,
 ];
 
 // ---------------------------------------------------------------------------
@@ -210,5 +218,40 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         SESSION_EXPIRED,
         Locale::Arabic,
         Template::Simple("انتهت جلستك. يُرجى تسجيل الدخول مرة أخرى."),
+    ),
+    (
+        NOT_PERMITTED,
+        Locale::English,
+        Template::Simple(
+            "Your role does not allow this ({capability}). Ask someone with permission.",
+        ),
+    ),
+    (
+        NOT_PERMITTED,
+        Locale::Arabic,
+        Template::Simple("دورك لا يسمح بهذا الإجراء ({capability}). يُرجى طلبه ممن لديه الصلاحية."),
+    ),
+    // -- members -----------------------------------------------------------
+    (
+        ALREADY_A_MEMBER,
+        Locale::English,
+        Template::Simple("{handle} already has access. Change their role instead."),
+    ),
+    (
+        ALREADY_A_MEMBER,
+        Locale::Arabic,
+        Template::Simple("{handle} لديه صلاحية الوصول بالفعل. يمكنك تغيير دوره بدلاً من ذلك."),
+    ),
+    (
+        LAST_OWNER,
+        Locale::English,
+        Template::Simple(
+            "A workspace must keep at least one owner. Make someone else an owner first.",
+        ),
+    ),
+    (
+        LAST_OWNER,
+        Locale::Arabic,
+        Template::Simple("يجب أن يبقى للمساحة مالك واحد على الأقل. عيّن مالكًا آخر أولاً."),
     ),
 ];
