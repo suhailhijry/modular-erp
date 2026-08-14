@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n                 SELECT 1 FROM tenant\n                  WHERE id = $1\n                    AND demo_expires_at IS NOT NULL\n                    AND demo_expires_at <= now()\n             )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "412441313b281c29d81123509134d4c022fa304430166c8d48832779238f8483"
+}

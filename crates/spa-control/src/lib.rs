@@ -1299,7 +1299,7 @@ fn parse_tenant_status(raw: &str) -> Result<TenantStatus, AccessError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tenant_from_row(
+pub(crate) fn tenant_from_row(
     id: TenantId,
     slug: String,
     display_name: String,

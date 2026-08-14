@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tenant\n              WHERE id = $1\n                AND demo_expires_at IS NOT NULL\n                AND demo_expires_at <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "37fb7f3142d6158bd71ec9a5397e0d11ded04512f3f545f542356dbc8e65fb3e"
+}

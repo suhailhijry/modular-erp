@@ -9,6 +9,7 @@
 //! credential baked into a binary is one that is the same everywhere it runs.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use spa_api::AppState;
 use spa_control::{ClusterRegistry, ControlPlane, PoolConfig, TenantPools};
@@ -30,6 +31,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map_err(|_| "DEMO_PASSWORD is not set; refusing to invent one")?;
     let slug = std::env::var("DEMO_SLUG").unwrap_or_else(|_| "demo".to_owned());
 
+    // Demos expire by default. A demo is the most reachable thing a deployment
+    // exposes and the easiest to forget, so the safe behaviour is the one that
+    // needs no decision — `DEMO_TTL_DAYS=0` opts out.
+    let ttl_days: u64 = std::env::var("DEMO_TTL_DAYS")
+        .ok()
+        .map_or(Ok(7), |raw| raw.parse())
+        .map_err(|_| "DEMO_TTL_DAYS must be a whole number of days")?;
+    let ttl = (ttl_days > 0).then(|| Duration::from_secs(ttl_days * 24 * 60 * 60));
+
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(8)
         .connect(&control_url)
@@ -45,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // rather than assuming one has been prepared for it.
     spa_demo::bootstrap(&control, "primary", "PRIMARY_CLUSTER_URL").await?;
 
-    let seeded = spa_demo::seed(&AppState::new(control), &slug, &password).await?;
+    let seeded = spa_demo::seed(&AppState::new(control), &slug, &password, ttl).await?;
 
     println!("tenant   {}", seeded.tenant);
     println!("slug     {}", seeded.slug);
@@ -55,6 +65,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "seeded   {} invoices, {} payments, {} journal entries",
         seeded.invoices, seeded.payments, seeded.journal_entries
     );
+    match seeded.expires_after {
+        Some(_) => println!("expires  in {ttl_days} days, when the reaper next runs"),
+        None => println!("expires  never; nothing will clean this tenant up"),
+    }
 
     Ok(())
 }

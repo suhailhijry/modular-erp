@@ -345,29 +345,7 @@ impl ControlPlane {
             });
         }
 
-        // Pools first: `DROP DATABASE` fails while anything is connected, and
-        // installing modules will have opened one.
-        self.tenants.forget(tenant.id).await;
-
-        let options = self
-            .tenants
-            .cluster_options(&tenant.cluster)?
-            .database("postgres");
-        let maintenance = PgConnection::connect_with(&options)
-            .await
-            .map_err(AccessError::Database)?;
-
-        let quoted = quote_ident(&tenant.database_name)?;
-        // `WITH (FORCE)` terminates sessions rather than failing (Postgres 13+).
-        // Anything still connected to a tenant being abandoned is a leak, not a
-        // user.
-        let maintenance = run_ddl(
-            maintenance,
-            format!("DROP DATABASE IF EXISTS {quoted} WITH (FORCE)"),
-        )
-        .await
-        .map_err(AccessError::Database)?;
-        maintenance.close().await.ok();
+        self.drop_database(&tenant).await?;
 
         sqlx::query!(
             "DELETE FROM tenant WHERE id = $1 AND status = 'provisioning'",
@@ -382,6 +360,209 @@ impl ControlPlane {
             "abandoned a half-built tenant; its name is free again"
         );
         Ok(())
+    }
+
+    /// Destroys a tenant's database. **No guard of its own** — every caller
+    /// checks first, and there are exactly two.
+    ///
+    /// Private for that reason. The moment this is public it is a
+    /// delete-my-customer button with no confirmation on it.
+    async fn drop_database(&self, tenant: &Tenant) -> Result<(), AccessError> {
+        // Pools first: `DROP DATABASE` fails while anything is connected, and
+        // installing modules will have opened one.
+        self.tenants.forget(tenant.id).await;
+
+        let options = self
+            .tenants
+            .cluster_options(&tenant.cluster)?
+            .database("postgres");
+        let maintenance = PgConnection::connect_with(&options)
+            .await
+            .map_err(AccessError::Database)?;
+
+        let quoted = quote_ident(&tenant.database_name)?;
+        // `WITH (FORCE)` terminates sessions rather than failing (Postgres 13+).
+        // Anything still connected to a tenant being destroyed is a leak, not a
+        // user.
+        let maintenance = run_ddl(
+            maintenance,
+            format!("DROP DATABASE IF EXISTS {quoted} WITH (FORCE)"),
+        )
+        .await
+        .map_err(AccessError::Database)?;
+        maintenance.close().await.ok();
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Demo tenants
+    // -----------------------------------------------------------------------
+
+    /// Marks a tenant as a demo that expires after `ttl`.
+    ///
+    /// The instant is computed by Postgres rather than by this process, for the
+    /// same reason event times are: two machines' clocks disagree, and the one
+    /// that decides when a database is destroyed should be the one everybody
+    /// already agrees with.
+    ///
+    /// A demo that converts to a real tenant becomes real by clearing this
+    /// column. ponytail: no `convert` method until somebody converts one —
+    /// `UPDATE tenant SET demo_expires_at = NULL` is the whole of it.
+    pub async fn set_demo_expiry(
+        &self,
+        tenant_id: TenantId,
+        ttl: std::time::Duration,
+        actor: Actor,
+    ) -> Result<(), AccessError> {
+        let seconds = i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX);
+        sqlx::query!(
+            "UPDATE tenant
+                SET demo_expires_at = now() + ($2::BIGINT * INTERVAL '1 second')
+              WHERE id = $1",
+            tenant_id.as_uuid(),
+            seconds,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        self.record(
+            actor,
+            "tenant.demo_expiry_set",
+            "tenant",
+            &tenant_id.to_string(),
+            serde_json::json!({ "ttl_seconds": seconds }),
+        )
+        .await
+    }
+
+    /// Demo tenants whose time is up.
+    pub async fn expired_demos(&self, limit: i64) -> Result<Vec<Tenant>, AccessError> {
+        let rows = sqlx::query!(
+            r#"SELECT id, slug, display_name, status, cluster,
+                      database_name, demo_expires_at, created_at
+                 FROM tenant
+                WHERE demo_expires_at IS NOT NULL
+                  AND demo_expires_at <= now()
+                ORDER BY demo_expires_at
+                LIMIT $1"#,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                crate::tenant_from_row(
+                    TenantId::from_uuid(row.id),
+                    row.slug,
+                    row.display_name,
+                    &row.status,
+                    row.cluster,
+                    row.database_name,
+                    row.demo_expires_at,
+                    row.created_at,
+                )
+            })
+            .collect()
+    }
+
+    /// Destroys one expired demo.
+    ///
+    /// # Three guards, on purpose
+    ///
+    /// This is the only code in the system that deletes a live tenant, so
+    /// "which tenant" is checked more than once: the argument must carry an
+    /// expiry, the row is re-read under the same condition before anything is
+    /// dropped, and the final `DELETE` repeats it. A tenant converted to a real
+    /// one between the sweep and this call is skipped rather than destroyed.
+    ///
+    /// Returns whether it actually reaped one.
+    pub async fn reap_demo(&self, tenant: &Tenant) -> Result<bool, AccessError> {
+        if !tenant.is_demo() {
+            return Err(AccessError::Corrupt(format!(
+                "{} is not a demo tenant; refusing to destroy it",
+                tenant.id
+            )));
+        }
+
+        // Re-read under the condition rather than trusting the value passed in.
+        // The sweep and the reap are separate statements, and the gap between
+        // them is exactly where a demo becomes a customer.
+        let still_expired = sqlx::query_scalar!(
+            "SELECT EXISTS (
+                 SELECT 1 FROM tenant
+                  WHERE id = $1
+                    AND demo_expires_at IS NOT NULL
+                    AND demo_expires_at <= now()
+             )",
+            tenant.id.as_uuid(),
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .unwrap_or(false);
+
+        if !still_expired {
+            return Ok(false);
+        }
+
+        // Database first. The other order leaves a database no row points at,
+        // which nothing would ever find; this order leaves a row pointing at
+        // nothing, which the next sweep retries and `DROP ... IF EXISTS`
+        // absorbs.
+        self.drop_database(tenant).await?;
+
+        let deleted = sqlx::query!(
+            "DELETE FROM tenant
+              WHERE id = $1
+                AND demo_expires_at IS NOT NULL
+                AND demo_expires_at <= now()",
+            tenant.id.as_uuid(),
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        self.record(
+            Actor::system(),
+            "tenant.demo_reaped",
+            "tenant",
+            &tenant.id.to_string(),
+            serde_json::json!({ "slug": tenant.slug, "database": tenant.database_name }),
+        )
+        .await?;
+
+        tracing::info!(
+            tenant = %tenant.id,
+            slug = %tenant.slug,
+            "reaped an expired demo tenant"
+        );
+        Ok(deleted > 0)
+    }
+
+    /// Destroys every expired demo, up to `limit`. Returns how many went.
+    ///
+    /// One failure does not stop the sweep: a cluster that is unreachable
+    /// should not keep every other expired demo alive. Each failure is logged
+    /// and the next run retries it.
+    pub async fn reap_expired_demos(&self, limit: i64) -> Result<usize, AccessError> {
+        let expired = self.expired_demos(limit).await?;
+        let mut reaped = 0;
+
+        for tenant in &expired {
+            match self.reap_demo(tenant).await {
+                Ok(true) => reaped += 1,
+                Ok(false) => {}
+                Err(e) => tracing::error!(
+                    tenant = %tenant.id,
+                    slug = %tenant.slug,
+                    error = %e,
+                    "could not reap an expired demo; it will be retried"
+                ),
+            }
+        }
+
+        Ok(reaped)
     }
 }
 

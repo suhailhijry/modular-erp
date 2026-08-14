@@ -50,6 +50,11 @@ demo password:
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
       DEMO_PASSWORD="{{password}}" cargo run --quiet --bin demo
 
+# Destroy demo tenants whose time is up. Schedule it; it exits when done.
+reap:
+    CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
+      cargo run --quiet --bin reaper
+
 # Drop every database this project creates. Does not touch anything else.
 #
 # Includes `spa_tenant_%`: a soak test that fails an assertion panics before its

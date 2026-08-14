@@ -51,6 +51,8 @@ pub fn modules() -> Vec<&'static str> {
 #[derive(Debug, Clone)]
 pub struct Seeded {
     pub tenant: TenantId,
+    /// When the reaper will destroy it, if it was given a life span.
+    pub expires_after: Option<std::time::Duration>,
     pub slug: String,
     /// The tenant's own database. Derived from the id rather than the slug, so
     /// it is asked for rather than guessed.
@@ -125,7 +127,15 @@ const DEFAULT_CAPACITY: i32 = 10_000;
 /// Idempotent only in the sense that every write it makes is — re-running it
 /// against an existing slug fails at signup, which is the honest outcome. Drop
 /// the tenant and run it again.
-pub async fn seed(state: &AppState, slug: &str, password: &str) -> Result<Seeded, DemoError> {
+/// `ttl` is how long the tenant lives before the reaper destroys it. `None`
+/// makes it an ordinary tenant that nothing will ever clean up — right for a
+/// test that drops its own database, wrong for anything reachable from outside.
+pub async fn seed(
+    state: &AppState,
+    slug: &str,
+    password: &str,
+    ttl: Option<std::time::Duration>,
+) -> Result<Seeded, DemoError> {
     let app = router(state.clone());
 
     let signed_up = sign_up(&app, slug, password).await?;
@@ -143,6 +153,15 @@ pub async fn seed(state: &AppState, slug: &str, password: &str) -> Result<Seeded
     // without one.
     project(&state.control, tenant).await?;
 
+    // Last, so a demo that failed half-way through building is not one the
+    // reaper quietly tidies away before anyone sees why it failed.
+    if let Some(ttl) = ttl {
+        state
+            .control
+            .set_demo_expiry(tenant, ttl, spa_control::Actor::system())
+            .await?;
+    }
+
     let database = state
         .control
         .tenant(tenant)
@@ -159,6 +178,7 @@ pub async fn seed(state: &AppState, slug: &str, password: &str) -> Result<Seeded
         database,
         email: signed_up.email,
         token,
+        expires_after: ttl,
         invoices,
         payments,
         journal_entries,

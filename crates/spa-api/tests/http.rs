@@ -24,8 +24,7 @@ static TENANT: Schema = Schema::migrations("tenant", &spa_eventlog::MIGRATIONS);
 struct Fixture {
     app: Router,
     control: Arc<ControlPlane>,
-    _db: TestDb,
-    tenant_databases: Vec<String>,
+    db: TestDb,
 }
 
 impl Fixture {
@@ -60,8 +59,7 @@ impl Fixture {
         Self {
             app: router(AppState::new(Arc::clone(&control))),
             control,
-            _db: db,
-            tenant_databases: Vec::new(),
+            db,
         }
     }
 
@@ -88,7 +86,6 @@ impl Fixture {
         spa_testkit::create_named_database(&tenant.database_name, &TENANT)
             .await
             .expect("tenant database is created");
-        self.tenant_databases.push(tenant.database_name.clone());
         self.control
             .activate_tenant(tenant.id, Actor::system())
             .await
@@ -246,8 +243,21 @@ impl Fixture {
             .expect("an account with a balance")
     }
 
+    /// Drops every tenant database this test made, however it made it.
+    ///
+    /// Read from the control database rather than recorded as they are created:
+    /// tenants born from `POST /v1/signups` were never on the recorded list, and
+    /// the signup tests each tried to drop `spa_tenant_acme` — a name that has
+    /// not been right since database names stopped being derived from the slug.
+    /// Three databases leaked per green run, and nothing noticed. Asking the
+    /// rows cannot drift the way remembering can.
     async fn cleanup(self) {
-        for name in &self.tenant_databases {
+        let names: Vec<String> = sqlx::query_scalar("SELECT database_name FROM tenant")
+            .fetch_all(self.db.pool())
+            .await
+            .expect("reads the tenants this test made");
+
+        for name in &names {
             let _ = spa_testkit::drop_named_database(name).await;
         }
     }
@@ -799,12 +809,6 @@ async fn signing_up_gives_you_a_working_system() {
         "a brand-new tenant can keep books straight away"
     );
 
-    let _ = spa_testkit::drop_named_database(
-        body["tenant"]
-            .as_str()
-            .map_or("spa_tenant_acme", |_| "spa_tenant_acme"),
-    )
-    .await;
     fixture.cleanup().await;
 }
 
@@ -899,7 +903,6 @@ async fn a_taken_name_is_a_conflict() {
     assert_eq!(second, StatusCode::CONFLICT);
     assert_eq!(body["code"], "provisioning.slug_taken");
 
-    let _ = spa_testkit::drop_named_database("spa_tenant_acme").await;
     fixture.cleanup().await;
 }
 
@@ -1020,7 +1023,6 @@ async fn a_new_tenant_can_start_from_a_template() {
     assert!(codes.contains(&"2100"), "output VAT: {codes:?}");
     assert!(codes.contains(&"2300"), "Zakat: {codes:?}");
 
-    let _ = spa_testkit::drop_named_database("spa_tenant_acme").await;
     fixture.cleanup().await;
 }
 
@@ -1904,7 +1906,6 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
         "the receivable is settled"
     );
 
-    let _ = spa_testkit::drop_named_database("spa_tenant_acme").await;
     fixture.cleanup().await;
 }
 

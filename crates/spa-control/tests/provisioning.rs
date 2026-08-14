@@ -7,6 +7,8 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::time::Duration;
+
 use spa_control::{
     Actor, ClusterRegistry, ControlPlane, Lane, ModuleSetup, PoolConfig, TenantPools, TenantStatus,
 };
@@ -305,4 +307,170 @@ async fn provisioning_the_same_tenant_twice_is_safe() {
     drop(db);
 
     let _ = spa_testkit::drop_named_database(&tenant.database_name).await;
+}
+
+// ---------------------------------------------------------------------------
+// Demo tenants
+// ---------------------------------------------------------------------------
+
+/// Signs up a tenant and hands back what it needs to be found again.
+async fn tenant(fixture: &Fixture, slug: &str) -> spa_control::Tenant {
+    fixture
+        .control
+        .sign_up(
+            format!("owner@{slug}.test"),
+            "correct horse battery staple".to_owned(),
+            slug.to_owned(),
+            slug.to_owned(),
+            vec![],
+        )
+        .await
+        .expect("signs up")
+        .tenant
+}
+
+/// A demo lives its span and then stops existing — database and all.
+#[tokio::test]
+async fn an_expired_demo_is_destroyed_completely() {
+    let fixture = Fixture::new().await;
+    let tenant = tenant(&fixture, "demo").await;
+
+    // A zero TTL is `now()`, which is already in the past by the next statement.
+    fixture
+        .control
+        .set_demo_expiry(tenant.id, Duration::ZERO, Actor::system())
+        .await
+        .expect("marks as a demo");
+
+    assert!(
+        fixture.database_exists(&tenant.database_name).await,
+        "the demo's database is there to begin with"
+    );
+
+    let reaped = fixture
+        .control
+        .reap_expired_demos(10)
+        .await
+        .expect("sweeps");
+    assert_eq!(reaped, 1);
+
+    assert!(
+        !fixture.database_exists(&tenant.database_name).await,
+        "the database went with it"
+    );
+    assert!(
+        !fixture.slug_taken("demo").await,
+        "and so did the row, so the name is free again"
+    );
+}
+
+/// **The guard that matters.** Everything that is not an expired demo survives a
+/// sweep — the property that makes a process with `DROP DATABASE` in it safe to
+/// schedule.
+#[tokio::test]
+async fn a_sweep_leaves_everything_that_is_not_an_expired_demo_alone() {
+    let fixture = Fixture::new().await;
+
+    // An ordinary tenant, never marked.
+    let ordinary = tenant(&fixture, "acme").await;
+
+    // A demo with time left on it.
+    let live_demo = tenant(&fixture, "preview").await;
+    fixture
+        .control
+        .set_demo_expiry(live_demo.id, Duration::from_hours(1), Actor::system())
+        .await
+        .expect("marks as a demo");
+
+    let reaped = fixture
+        .control
+        .reap_expired_demos(10)
+        .await
+        .expect("sweeps");
+    assert_eq!(reaped, 0, "nothing was due");
+
+    for survivor in [&ordinary, &live_demo] {
+        assert!(
+            fixture.database_exists(&survivor.database_name).await,
+            "{}'s database survived",
+            survivor.slug
+        );
+        assert!(fixture.slug_taken(&survivor.slug).await);
+    }
+
+    // Not vacuous: the same sweep destroys the same tenant once it is due.
+    fixture
+        .control
+        .set_demo_expiry(live_demo.id, Duration::ZERO, Actor::system())
+        .await
+        .expect("expires it");
+    assert_eq!(
+        fixture
+            .control
+            .reap_expired_demos(10)
+            .await
+            .expect("sweeps"),
+        1
+    );
+    assert!(!fixture.database_exists(&live_demo.database_name).await);
+
+    let _ = spa_testkit::drop_named_database(&ordinary.database_name).await;
+}
+
+/// A demo that converts to a real tenant between the sweep and the reap is not
+/// destroyed, because the reap re-checks rather than trusting what it was
+/// handed.
+#[tokio::test]
+async fn a_demo_that_converts_before_the_reap_survives_it() {
+    let fixture = Fixture::new().await;
+    let converted = tenant(&fixture, "converts").await;
+
+    fixture
+        .control
+        .set_demo_expiry(converted.id, Duration::ZERO, Actor::system())
+        .await
+        .expect("marks as a demo");
+
+    // What the sweep saw.
+    let stale = fixture
+        .control
+        .expired_demos(10)
+        .await
+        .expect("sweeps")
+        .into_iter()
+        .find(|t| t.id == converted.id)
+        .expect("is due");
+
+    // What happened next: somebody paid. The schema's own answer to converting
+    // a demo is clearing the column.
+    sqlx::query("UPDATE tenant SET demo_expires_at = NULL WHERE id = $1")
+        .bind(converted.id.as_uuid())
+        .execute(fixture.db.pool())
+        .await
+        .expect("converts");
+
+    let reaped = fixture.control.reap_demo(&stale).await.expect("re-checks");
+    assert!(!reaped, "a converted tenant is skipped, not destroyed");
+    assert!(
+        fixture.database_exists(&converted.database_name).await,
+        "the customer still has their data"
+    );
+
+    let _ = spa_testkit::drop_named_database(&converted.database_name).await;
+}
+
+/// The Rust-side guard, for a caller that never went through `expired_demos`.
+#[tokio::test]
+async fn a_tenant_that_is_not_a_demo_cannot_be_reaped_at_all() {
+    let fixture = Fixture::new().await;
+    let real = tenant(&fixture, "real").await;
+
+    let result = fixture.control.reap_demo(&real).await;
+    assert!(
+        result.is_err(),
+        "destroying a tenant that was never a demo must be refused, got {result:?}"
+    );
+    assert!(fixture.database_exists(&real.database_name).await);
+
+    let _ = spa_testkit::drop_named_database(&real.database_name).await;
 }

@@ -310,8 +310,9 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       into rather than a thing a test builds
 - [x] `spa_demo::bootstrap` — migrates and registers the cluster, because a
       demo is usually the first thing pointed at an empty database
-- [ ] Demo tenant TTL and reaper *(needed before one is exposed publicly;
-      `tenant.demo_expires_at` is already in the schema)*
+- [x] Demo tenant TTL and reaper — `set_demo_expiry`, `expired_demos`,
+      `reap_demo`, and `bin/reaper` (`just reap`). Demos expire by default;
+      `DEMO_TTL_DAYS=0` opts out
 
 ### 4c · Entitlements a tenant can change
 
@@ -899,3 +900,31 @@ here and folded back into ARCHITECTURE.md.
   something another module is standing on — and two of them did not exist when
   the first was written. A `requires` field is not an abstraction; it is the
   question being asked in one place instead of three.
+
+- **The one place that deletes a live tenant has three guards.** `reap_demo`
+  refuses anything without an expiry in Rust, re-reads the row under
+  `demo_expires_at <= now()` before dropping anything, and repeats the condition
+  in the final `DELETE`. The gap between a sweep and a reap is exactly where a
+  demo becomes a paying customer, and a test converts one in that gap to prove
+  the re-read matters.
+
+  The expiry instant is computed by Postgres, not by the process — same
+  reasoning as event times. Two machines' clocks disagree, and the one deciding
+  when a database is destroyed should be the one everybody already agrees with.
+
+  Database first, row second. The other order leaves a database no row points
+  at, which nothing would ever find again; this order leaves a row pointing at
+  nothing, which the next sweep retries and `DROP ... IF EXISTS` absorbs.
+
+- **A green test run was leaking three tenant databases, and had been for a
+  while.** The API fixture recorded databases as `provision()` created them —
+  but tenants born from `POST /v1/signups` were never on that list, and each
+  signup test tried to drop `spa_tenant_acme`, a name that stopped being right
+  when database names became id-derived rather than slug-derived. Dead cleanup
+  that silently did nothing.
+
+  The fix is to stop remembering: `cleanup` reads `SELECT database_name FROM
+  tenant` out of the test's own control database and drops what is actually
+  there. Asking cannot drift the way recording can. Found by counting
+  `pg_database` before and after a run — worth doing again after anything that
+  creates tenants.
