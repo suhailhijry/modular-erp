@@ -73,7 +73,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .for_module(ledger_module()),
         ))
         .with_job(Arc::new(
-            HealthJob::every(Duration::from_mins(5)).with(Arc::new(TrialBalance)),
+            ProjectionJob::<sales::Sales>::new(
+                sales::projections(),
+                Arc::new(sales::upcasters().clone()),
+                200,
+            )
+            .for_module(sales::module_id()),
+        ))
+        .with_job(Arc::new(
+            HealthJob::every(Duration::from_mins(5))
+                .with(Arc::new(TrialBalance))
+                .with(Arc::new(NoOverpaidInvoice)),
         ));
 
     let shutdown = worker.run(shutdown_signal()).await;
@@ -129,4 +139,42 @@ impl Invariant for TrialBalance {
 
 fn ledger_module() -> ModuleId {
     ModuleId::new("ledger").unwrap_or_else(|_| unreachable!("a literal that satisfies ModuleId"))
+}
+
+/// No invoice may have taken more money than it asked for.
+///
+/// Unreachable through `sales::record_payment`, which refuses an overpayment
+/// against the invoice's own state — so a finding here means the pipeline is
+/// broken, in the same way a non-zero trial balance does.
+struct NoOverpaidInvoice;
+
+#[async_trait::async_trait]
+impl Invariant for NoOverpaidInvoice {
+    fn name(&self) -> &'static str {
+        "no_overpaid_invoice"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(sales::module_id())
+    }
+
+    async fn check(
+        &self,
+        db: &spa_control::TenantDb,
+    ) -> Result<Vec<Finding>, spa_worker::BoxError> {
+        let mut conn = db.acquire().await?;
+        Ok(sales::overpaid(&mut conn)
+            .await?
+            .into_iter()
+            .map(|i| {
+                Finding::new(
+                    "no_overpaid_invoice",
+                    format!(
+                        "invoice {} is for {} and has taken {}",
+                        i.invoice, i.gross, i.paid
+                    ),
+                )
+            })
+            .collect())
+    }
 }

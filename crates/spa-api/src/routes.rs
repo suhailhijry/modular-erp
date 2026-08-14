@@ -26,6 +26,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::signup::routes())
         .merge(crate::members::routes())
         .merge(crate::ledger_routes::routes())
+        .merge(crate::sales_routes::routes())
         .with_state(state)
 }
 

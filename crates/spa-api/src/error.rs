@@ -26,6 +26,9 @@ pub enum ApiError {
     /// A request that parsed but asked for something impossible.
     #[error("bad request: {}", .0.code)]
     BadRequest(Message),
+    /// A route or a record that is not there for this caller.
+    #[error("not found: {}", .0.code)]
+    NotFound(Message),
 }
 
 impl ApiError {
@@ -60,6 +63,7 @@ impl ApiError {
             | Self::Append(spa_eventlog::AppendError::Conflict { .. }) => StatusCode::CONFLICT,
 
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
 
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -71,7 +75,7 @@ impl ApiError {
             Self::Access(e) => e.message(),
             Self::Enqueue(e) => e.message(),
             Self::Append(e) => e.message(),
-            Self::BadRequest(message) => message.clone(),
+            Self::BadRequest(message) | Self::NotFound(message) => message.clone(),
         }
     }
 

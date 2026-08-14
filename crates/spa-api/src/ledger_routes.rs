@@ -17,15 +17,16 @@ use axum::{Json, Router, routing};
 use ledger::{AccountKind, BalancedLines, Line};
 use serde::{Deserialize, Serialize};
 use spa_control::CommandError;
-use spa_eventlog::{ExecuteError, Metadata};
+use spa_eventlog::ExecuteError;
 use spa_i18n::{Locale, Localize};
-use spa_types::{AggregateId, CurrencyCode, Money, Timestamp};
+use spa_types::{CurrencyCode, Timestamp};
 
 use crate::consistency::{Consistency, nudge};
 use crate::error::ApiError;
 use crate::extract::{Allowed, Language, ManageAccounts, PostEntries, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
+use crate::wire::{Amount, bad_request, metadata, parse_id, require_module};
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
@@ -53,32 +54,6 @@ pub(crate) fn routes() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 // Wire shapes
 // ---------------------------------------------------------------------------
-
-/// An amount, as a client sends it.
-///
-/// Minor units and an explicit currency — never a decimal string, and never a
-/// float. A client that sends `10.50` has already lost the argument about how
-/// many decimal places the currency has.
-#[derive(Debug, Deserialize)]
-struct Amount {
-    minor: i64,
-    currency: String,
-}
-
-impl Amount {
-    fn parse(&self, locale: Locale) -> Result<Money, Problem> {
-        let currency = CurrencyCode::new(&self.currency).map_err(|_| {
-            ApiError::BadRequest(
-                spa_i18n::Message::new(crate::messages::UNKNOWN_CURRENCY).with(
-                    "currency",
-                    spa_i18n::MessageArg::text(self.currency.clone()),
-                ),
-            )
-            .into_problem(locale)
-        })?;
-        Ok(Money::from_minor(self.minor, currency))
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct NewAccount {
@@ -147,6 +122,7 @@ async fn list_accounts(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<Vec<AccountView>>, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, ledger::GROUP_NAME, locale)
         .await?;
@@ -183,6 +159,7 @@ async fn open_account(
     Language(locale): Language,
     Json(body): Json<NewAccount>,
 ) -> Result<impl IntoResponse, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
     let code = parse_id(&body.code, locale)?;
     let kind: AccountKind = body.kind.parse().map_err(|_| {
         bad_request(
@@ -222,6 +199,7 @@ async fn post_entry(
     Language(locale): Language,
     Json(body): Json<NewEntry>,
 ) -> Result<Json<EntryPosted>, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
     let id = parse_id(&body.id, locale)?;
 
     let mut lines = Vec::with_capacity(body.lines.len());
@@ -266,6 +244,7 @@ async fn trial_balance(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<Vec<TrialBalanceView>>, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, ledger::GROUP_NAME, locale)
         .await?;
@@ -295,28 +274,6 @@ async fn trial_balance(
 }
 
 // ---------------------------------------------------------------------------
-
-/// Records who did it. Every event carries this (architecture L5).
-///
-/// Generic over the capability, because every write here is behind a different
-/// one and they all derive to the same `Tenant`.
-fn metadata<C: crate::extract::Capability>(tenant: &Allowed<C>) -> Metadata {
-    Metadata {
-        actor: Some(tenant.session.identity.to_string()),
-        ..Metadata::default()
-    }
-}
-
-fn parse_id(raw: &str, locale: Locale) -> Result<AggregateId, Problem> {
-    AggregateId::new(raw).map_err(|_| bad_request(crate::messages::INVALID_ID, "id", raw, locale))
-}
-
-fn bad_request(code: spa_i18n::MessageCode, arg: &str, value: &str, locale: Locale) -> Problem {
-    ApiError::BadRequest(
-        spa_i18n::Message::new(code).with(arg, spa_i18n::MessageArg::text(value.to_owned())),
-    )
-    .into_problem(locale)
-}
 
 /// Maps a command failure onto a status.
 ///
@@ -431,6 +388,7 @@ async fn install_chart(
     Language(locale): Language,
     Json(body): Json<InstallChart>,
 ) -> Result<Json<ChartInstalled>, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
     let chart = ledger::chart(&body.template).ok_or_else(|| {
         bad_request(
             crate::messages::UNKNOWN_CHART,

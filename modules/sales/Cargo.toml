@@ -1,31 +1,32 @@
 [package]
-name = "spa-worker"
+name = "sales"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The background worker: tenant visits, projection and outbox jobs, graceful drain."
+description = "Sales invoicing with Saudi VAT, posting to the ledger."
 
 [lints]
 workspace = true
 
 [dependencies]
+# The second module, and the first to depend on another one. See `lib.rs` on why
+# that is deliberate rather than a shortcut.
+ledger = { workspace = true }
+
 spa-control = { workspace = true }
 spa-eventlog = { workspace = true }
+spa-i18n = { workspace = true }
 spa-projection = { workspace = true }
-spa-types = { workspace = true }
-ledger = { workspace = true }
-sales = { workspace = true }
+spa-types = { workspace = true, features = ["sqlx"] }
 async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 spa-testkit = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+chrono = { workspace = true }
+proptest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

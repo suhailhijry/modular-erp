@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT reference as \"reference!\", amount as \"amount!\",\n                  received_on as \"received_on!\", account as \"account!\"\n             FROM proj_sales.invoice_payment\n            WHERE invoice_id = $1\n            ORDER BY received_on, reference",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reference!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_payment",
+            "name": "reference"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "amount!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_payment",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "received_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_payment",
+            "name": "received_on"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "account!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_payment",
+            "name": "account"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8f5b6715e2c82bb68d9b541b5cd38a2ff2097635e18f5bf83eecf20b9427c8d3"
+}

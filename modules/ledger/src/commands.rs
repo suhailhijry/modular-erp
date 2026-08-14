@@ -123,8 +123,8 @@ pub async fn close_account(
 ///
 /// That the lines balance is [`BalancedLines`]'s job, done before this is
 /// called — the type cannot hold an unbalanced set. That every account exists
-/// and is open is *this* function's job, because it needs state the type cannot
-/// see.
+/// and is open is [`post_entry_in`]'s job, because it needs state the type
+/// cannot see.
 ///
 /// Re-posting the same `id` is a no-op, which is what makes a retried request
 /// safe without an idempotency table.
@@ -136,27 +136,72 @@ pub async fn post_entry(
     lines: BalancedLines,
     metadata: &Metadata,
 ) -> Outcome<JournalEntryEvent> {
-    // Read once, outside the retry loop: accounts change far more slowly than
-    // entries are posted, and re-reading them on every attempt would triple the
-    // cost of contention for nothing.
-    let mut conn = db.acquire().await?;
+    for _ in 1..=spa_eventlog::MAX_ATTEMPTS {
+        let mut tx = db.begin().await?;
+        match post_entry_in(&mut tx, id, occurred_on, memo, &lines, metadata).await {
+            Ok(committed) => {
+                tx.commit().await.map_err(ExecuteError::from)?;
+                return Ok(committed);
+            }
+            Err(e) if e.is_conflict() => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+            }
+            Err(e) => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+                return Err(e.into());
+            }
+        }
+    }
+
+    Err(ExecuteError::Contended {
+        stream: spa_types::StreamId::new(
+            <JournalEntry as spa_eventlog::Aggregate>::domain(),
+            id.clone(),
+        ),
+        attempts: spa_eventlog::MAX_ATTEMPTS,
+    }
+    .into())
+}
+
+/// Posts a journal entry **inside the caller's transaction**, once.
+///
+/// # Who this is for
+///
+/// A module that produces its own events and must post alongside them — sales
+/// issuing an invoice, and every module after it. Both aggregates land in one
+/// transaction, so an invoice that exists without its accounting entry is not a
+/// state the system can reach, and nothing has to sweep for one afterwards.
+///
+/// No retry: the caller owns the transaction, so the caller owns the retry. See
+/// `spa_eventlog::try_execute` for why the two cannot be separated.
+///
+/// The account checks run inside that transaction on purpose. Reading them
+/// outside would be marginally cheaper and would let an account be closed
+/// between the check and the append.
+pub async fn post_entry_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    occurred_on: Timestamp,
+    memo: &str,
+    lines: &BalancedLines,
+    metadata: &Metadata,
+) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
     for line in lines.as_slice() {
-        let account = spa_eventlog::load::<Account>(&mut conn, &line.account, crate::upcasters())
-            .await
-            .map_err(|e| CommandError::Execute(e.into()))?;
+        let account =
+            spa_eventlog::load::<Account>(&mut *conn, &line.account, crate::upcasters()).await?;
 
         if !account.aggregate.exists {
-            return Err(rejected(LedgerError::NoSuchAccount(
+            return Err(ExecuteError::Rejected(LedgerError::NoSuchAccount(
                 line.account.as_str().to_owned(),
             )));
         }
         if !account.aggregate.accepts_postings() {
-            return Err(rejected(LedgerError::AccountClosed(
+            return Err(ExecuteError::Rejected(LedgerError::AccountClosed(
                 line.account.as_str().to_owned(),
             )));
         }
         if account.aggregate.currency != Some(lines.currency()) {
-            return Err(rejected(LedgerError::Unbalanced(
+            return Err(ExecuteError::Rejected(LedgerError::Unbalanced(
                 crate::lines::Unbalanced::MixedCurrencies {
                     index: 0,
                     expected: account
@@ -168,21 +213,26 @@ pub async fn post_entry(
             )));
         }
     }
-    drop(conn);
 
     let memo = memo.trim().to_owned();
-    db.execute::<JournalEntry, _, LedgerError>(id, crate::upcasters(), metadata, |loaded| {
-        if loaded.aggregate.posted {
-            // Already done. A no-op rather than an error, so a retried request
-            // succeeds instead of confusing the caller.
-            return Ok(Decision::nothing());
-        }
-        Ok(Decision::one(JournalEntryEvent::Posted {
-            occurred_on,
-            memo: memo.clone(),
-            lines: lines.clone(),
-        }))
-    })
+    spa_eventlog::try_execute::<JournalEntry, _, LedgerError>(
+        conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if loaded.aggregate.posted {
+                // Already done. A no-op rather than an error, so a retried
+                // request succeeds instead of confusing the caller.
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(JournalEntryEvent::Posted {
+                occurred_on,
+                memo: memo.clone(),
+                lines: lines.clone(),
+            }))
+        },
+    )
     .await
 }
 

@@ -14,6 +14,12 @@ pub const UNKNOWN_CHART: MessageCode = MessageCode::new("request.unknown_chart")
 pub const UNKNOWN_ROLE: MessageCode = MessageCode::new("request.unknown_role");
 /// 503. The caller asked to see a write that has not been projected yet.
 pub const NOT_CAUGHT_UP: MessageCode = MessageCode::new("request.not_caught_up");
+/// A module was asked for without one it cannot work without.
+pub const MODULE_REQUIRES: MessageCode = MessageCode::new("request.module_requires");
+/// 404. The tenant did not enable the module this route belongs to.
+pub const MODULE_NOT_ENABLED: MessageCode = MessageCode::new("request.module_not_enabled");
+pub const UNKNOWN_VAT_CATEGORY: MessageCode = MessageCode::new("request.unknown_vat_category");
+pub const NO_SUCH_INVOICE: MessageCode = MessageCode::new("request.no_such_invoice");
 
 pub static CODES: &[MessageCode] = &[
     UNKNOWN_CURRENCY,
@@ -24,6 +30,10 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_CHART,
     UNKNOWN_ROLE,
     NOT_CAUGHT_UP,
+    MODULE_REQUIRES,
+    MODULE_NOT_ENABLED,
+    UNKNOWN_VAT_CATEGORY,
+    NO_SUCH_INVOICE,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -124,5 +134,45 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_CAUGHT_UP,
         Locale::Arabic,
         Template::Simple("لا يزال التحديث جاريًا (متبقٍ {behind}). يُرجى المحاولة بعد لحظات."),
+    ),
+    (
+        MODULE_REQUIRES,
+        Locale::English,
+        Template::Simple("The {module} module needs {required}. Add it to the list."),
+    ),
+    (
+        MODULE_REQUIRES,
+        Locale::Arabic,
+        Template::Simple("تحتاج وحدة {module} إلى {required}. أضفها إلى القائمة."),
+    ),
+    (
+        MODULE_NOT_ENABLED,
+        Locale::English,
+        Template::Simple("The {module} module is not enabled for this tenant."),
+    ),
+    (
+        MODULE_NOT_ENABLED,
+        Locale::Arabic,
+        Template::Simple("وحدة {module} غير مفعَّلة لدى هذا المستأجر."),
+    ),
+    (
+        UNKNOWN_VAT_CATEGORY,
+        Locale::English,
+        Template::Simple("{vat} is not a VAT treatment. Use standard, zero or exempt."),
+    ),
+    (
+        UNKNOWN_VAT_CATEGORY,
+        Locale::Arabic,
+        Template::Simple("{vat} ليست معاملة ضريبية. استخدم standard أو zero أو exempt."),
+    ),
+    (
+        NO_SUCH_INVOICE,
+        Locale::English,
+        Template::Simple("There is no invoice {invoice}."),
+    ),
+    (
+        NO_SUCH_INVOICE,
+        Locale::Arabic,
+        Template::Simple("لا توجد فاتورة {invoice}."),
     ),
 ];

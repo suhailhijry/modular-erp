@@ -95,18 +95,40 @@ async fn sign_up(
 
 /// Turns requested module names into their setup descriptions.
 ///
-/// ponytail: a `match` over one module. The second adds an arm; the third earns
-/// a registry — described from three real cases rather than guessed from none.
+/// ponytail: a `match` over two modules. The third earns a registry — described
+/// from three real cases rather than guessed from none.
 fn parse_modules(requested: &[String], locale: Locale) -> Result<Vec<ModuleSetup>, Problem> {
-    requested
+    let setups: Vec<ModuleSetup> = requested
         .iter()
         .map(|name| match name.as_str() {
             "ledger" => Ok(ledger::setup()),
+            "sales" => Ok(sales::setup()),
             other => Err(ApiError::BadRequest(
                 spa_i18n::Message::new(crate::messages::UNKNOWN_MODULE)
                     .with("module", spa_i18n::MessageArg::text(other.to_owned())),
             )
             .into_problem(locale)),
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+
+    // Sales posts every invoice to the ledger, so a tenant that asked for one
+    // without the other would get a system that refuses its first invoice.
+    // Refused here rather than silently adding the ledger: what someone is
+    // signing up for should be what they asked for.
+    if requested.iter().any(|m| m == "sales") && !requested.iter().any(|m| m == "ledger") {
+        return Err(ApiError::BadRequest(
+            spa_i18n::Message::new(crate::messages::MODULE_REQUIRES)
+                .with(
+                    "module",
+                    spa_i18n::MessageArg::text(sales::module_id().to_string()),
+                )
+                .with(
+                    "required",
+                    spa_i18n::MessageArg::text(sales::requires().to_string()),
+                ),
+        )
+        .into_problem(locale));
+    }
+
+    Ok(setups)
 }

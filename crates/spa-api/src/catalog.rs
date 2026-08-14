@@ -13,6 +13,7 @@ static PARTS: &[&StaticCatalog] = &[
     &spa_control::CATALOG,
     &spa_eventlog::CATALOG,
     &ledger::CATALOG,
+    &sales::CATALOG,
 ];
 
 /// The catalog the API renders from.

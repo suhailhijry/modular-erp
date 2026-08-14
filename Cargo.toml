@@ -19,6 +19,7 @@ spa-control = { path = "crates/spa-control" }
 spa-worker = { path = "crates/spa-worker" }
 spa-api = { path = "crates/spa-api" }
 ledger = { path = "modules/ledger" }
+sales = { path = "modules/sales" }
 
 # Error handling
 anyhow = "1.0"

@@ -198,7 +198,10 @@ Built only where the ledger produced a second consumer.
       contributes the trial balance through the composition root
 - [x] `bin/worker` composes the kernel and the modules; neither crate depends on
       the other
-- [ ] `Module` trait and registry *(still one module; the second describes it)*
+- [ ] `Module` trait and registry *(now describable: name, install SQL,
+      projection groups, a router, a rejection-to-status mapping, an entitlement
+      check, and an optional `requires`. `ledger_routes` and `sales_routes`
+      differ only in the last three lines of each)*
 - [ ] `Idempotency-Key` *(the ledger's mutations take client-chosen ids, so both
       are already idempotent — this may turn out to be unnecessary)*
 - [ ] `ETag`/`If-Match` *(no update-in-place endpoint yet)*
@@ -260,7 +263,36 @@ and a module a tenant can decline. **Met.** 256 tests.
 
 ## Phase 4 — Modules, blueprints, provisioning, demo · 4–5 weeks
 
-- [ ] A second business module, proving cross-module integration by event
+### 4a · `modules/sales`
+
+The second module: invoicing with Saudi VAT, posting to the ledger.
+
+- [x] `Invoice` aggregate — issue and record payment, both idempotent by
+      client-chosen id
+- [x] VAT as `standard` / `zero` / `exempt`, with the **rate resolved at issue
+      and stored on the line** so a future rate change cannot restate a filed
+      return
+- [x] Tax computed per band, not per line — which is what the authority
+      computes, and provably different from summing line-level rounding
+- [x] Rounding half **away from zero**, so an invoice and its exact credit
+      reverse without leaving a halala in VAT payable
+- [x] The customer is a snapshot on the document, not a foreign key
+- [x] `sales → ledger` in **one transaction** (`ledger::post_entry_in`), rather
+      than by event through the outbox — see the running note and the amendment
+      in architecture §1.11
+- [x] `sales::requires()` — signup refuses sales without the ledger
+- [x] Module gating on routes: a tenant that did not enable a module gets a 404,
+      not a 500 from a missing table
+- [ ] A VAT return and ZATCA clearance *(the module's commercial reason to
+      exist; a return needs fiscal periods and clearance needs a certificate and
+      an outbox handler)*
+- [ ] Credit notes, cancellation, customers as records, quantities and unit
+      prices, statutory gapless numbering
+
+### 4b · The rest
+
+- [x] A second business module *(shipped as 4a — and it changed how
+      cross-module integration works, which is the point of building one)*
 - [ ] Entitlements → enable/disable durable workflows
 - [ ] `ModuleEnabled<M>` capability tokens
 - [ ] Blueprints: browse → parameterize → materialize → edit → preview → install
@@ -719,3 +751,43 @@ here and folded back into ARCHITECTURE.md.
   on writes brings that to ~0.1% of requests. The cost is a bounded staleness
   window on revocation, documented in `cache.rs`; shortening it below a few
   seconds needs out-of-band invalidation, which is a Phase 3 decision.
+
+- **The second module changed the answer, which is why it was worth building.**
+  The plan said "a second business module, proving cross-module integration *by
+  event*" — sales would emit, the outbox would carry a promise, and a handler
+  would post to the ledger a moment later. Two things fell out of trying it.
+
+  The first was mechanical: `EffectHandler::deliver` takes a `PendingEffect` and
+  nothing else. It cannot reach a `TenantDb`, because `TenantDb` lives in
+  `spa-control` and `spa-control` depends on `spa-eventlog`, not the other way
+  round. Making it possible meant a context type parameter threaded through
+  `Dispatcher`, `OutboxJob` and their tests — about a hundred lines of kernel
+  churn for a mechanism whose first genuine user (email, ZATCA clearance) does
+  not exist yet.
+
+  The second was the real one. The outbox exists because delivering to something
+  outside this process cannot be atomic with the commit. Between two aggregates
+  in the *same database* it can be, and choosing not to would mean an invoice
+  can exist without its journal entry — a state needing a dead-letter queue, a
+  sweeper, and an operator to explain it. That trade is worth taking against an
+  email server. It is not worth taking against a table two schemas over.
+
+  So `ledger::post_entry_in` is a new seam: one attempt, in the caller's
+  transaction, account checks included. `post_entry` became the retry loop
+  around it, which also moved those checks *inside* the transaction and closed a
+  TOCTOU nobody had noticed. `a_failed_posting_leaves_no_invoice_behind` is the
+  test that holds the line.
+
+  What the original design was actually protecting — that a module should not
+  hardcode which accounts a sale moves — survives intact, as
+  `sales::PostingAccounts`. Phase 6 supplies that value from configuration. It
+  was never the asynchrony that provided the decoupling.
+
+- **Two fixtures were installing a module without entitling the tenant to it.**
+  Adding the 404-if-not-enabled check to the module routes failed nine tests
+  that had been green. `enable_ledger` in `tests/http.rs` created `proj_ledger`
+  and never called `enable_module`, so every tenant in those tests had the
+  ledger's tables and no entitlement to use them — a discrepancy nothing could
+  detect until something read the entitlement. The gap was in the test harness,
+  but a harness that cannot represent a tenant without a module is a harness
+  that cannot test declining one.

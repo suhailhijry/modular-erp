@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", currency as \"currency!\",\n                  gross as \"gross!\", paid as \"paid!\"\n             FROM proj_sales.invoice_status\n            WHERE paid > gross\n            ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "gross"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "paid!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "paid"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "0819703ba6c60e526e47e13451f1a67a1aa76a948243556e514faceeb8eb2e05"
+}

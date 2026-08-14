@@ -1,0 +1,172 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", customer as \"customer!\", customer_vat,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\"\n             FROM proj_sales.invoice_status\n            ORDER BY issued_on DESC, id\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "customer!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "customer"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "customer_vat",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "customer_vat"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "issued_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "issued_on"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "due_on",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "due_on"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "tax!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "tax"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "gross"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "paid!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "paid"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "outstanding!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "outstanding"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "payments!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "payments"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "note!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "note"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "0976b149683d57ead96a4f74467c7d2ecef2e3461ebcc765853e64fe45fc5654"
+}

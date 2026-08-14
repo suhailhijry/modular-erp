@@ -29,8 +29,10 @@ mod members;
 pub mod messages;
 mod problem;
 mod routes;
+mod sales_routes;
 mod signup;
 mod state;
+mod wire;
 
 pub use catalog::CATALOG;
 

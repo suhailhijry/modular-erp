@@ -13,6 +13,7 @@ workspace = true
 spa-control = { workspace = true }
 spa-eventlog = { workspace = true }
 ledger = { workspace = true }
+sales = { workspace = true }
 spa-projection = { workspace = true }
 spa-i18n = { workspace = true }
 spa-types = { workspace = true }
@@ -30,6 +31,7 @@ tracing-subscriber = { workspace = true }
 spa-testkit = { workspace = true }
 spa-eventlog = { workspace = true }
 ledger = { workspace = true }
+sales = { workspace = true }
 spa-projection = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

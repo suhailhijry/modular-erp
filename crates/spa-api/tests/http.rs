@@ -145,8 +145,14 @@ impl Fixture {
         body["token"].as_str().expect("a token").to_owned()
     }
 
-    /// Installs the ledger module's read models, as `enable_module` will.
+    /// Entitles the tenant to the ledger and installs its read models — both
+    /// halves, which is what `sign_up` does and what a route now checks.
     async fn enable_ledger(&self, tenant: TenantId) {
+        self.control
+            .enable_module(tenant, &ledger::module_id(), Actor::system())
+            .await
+            .expect("entitlement");
+
         let db = self
             .control
             .enter_for_maintenance(tenant)
@@ -159,27 +165,46 @@ impl Fixture {
             .expect("group checkpoint");
     }
 
-    /// Drives the ledger projections, standing in for the worker.
-    async fn project_ledger(&self, tenant: TenantId) {
+    /// The same for sales, which needs the ledger underneath it.
+    async fn enable_sales(&self, tenant: TenantId) {
+        self.enable_ledger(tenant).await;
+        self.control
+            .enable_module(tenant, &sales::module_id(), Actor::system())
+            .await
+            .expect("entitlement");
+
         let db = self
             .control
             .enter_for_maintenance(tenant)
             .await
             .expect("maintenance entry");
-        let owned = ledger::projections();
-        let refs: Vec<&dyn spa_projection::Projection<Group = ledger::Ledger>> =
-            owned.iter().map(AsRef::as_ref).collect();
+        let mut conn = db.acquire().await.expect("connection");
+        sales::install(&mut conn).await.expect("module schema");
+        spa_projection::ensure_group_schema::<sales::Sales>(&mut conn)
+            .await
+            .expect("group checkpoint");
+    }
+
+    /// Drives one group's projections, standing in for the worker.
+    async fn project<G: spa_projection::ProjectionGroup>(
+        &self,
+        tenant: TenantId,
+        projections: &[std::sync::Arc<dyn spa_projection::Projection<Group = G>>],
+        upcasters: &spa_eventlog::Upcasters,
+    ) {
+        let db = self
+            .control
+            .enter_for_maintenance(tenant)
+            .await
+            .expect("maintenance entry");
+        let refs: Vec<&dyn spa_projection::Projection<Group = G>> =
+            projections.iter().map(AsRef::as_ref).collect();
 
         loop {
             let mut tx = db.begin().await.expect("transaction");
-            let progress = spa_projection::run_once_in::<ledger::Ledger>(
-                &mut tx,
-                &refs,
-                ledger::upcasters(),
-                200,
-            )
-            .await
-            .expect("projects");
+            let progress = spa_projection::run_once_in::<G>(&mut tx, &refs, upcasters, 200)
+                .await
+                .expect("projects");
             if matches!(progress, spa_projection::Progress::Advanced { .. }) {
                 tx.commit().await.expect("commits");
             } else {
@@ -187,6 +212,54 @@ impl Fixture {
                 break;
             }
         }
+    }
+
+    async fn project_ledger(&self, tenant: TenantId) {
+        self.project(tenant, &ledger::projections(), ledger::upcasters())
+            .await;
+    }
+
+    async fn project_sales(&self, tenant: TenantId) {
+        self.project_ledger(tenant).await;
+        self.project(tenant, &sales::projections(), sales::upcasters())
+            .await;
+    }
+
+    /// Installs a chart of accounts over HTTP.
+    async fn install_chart(&self, token: &str, slug: &str, template: &str) {
+        let (status, body, _) = self
+            .send(
+                Request::post(format!("/v1/tenants/{slug}/ledger/chart"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "template": template, "currency": "SAR" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// A ledger account's balance, read over HTTP so the assertion travels the
+    /// same path a client would.
+    async fn ledger_balance(&self, token: &str, slug: &str, code: &str) -> i64 {
+        let (status, accounts, _) = self
+            .send(
+                Request::get(format!("/v1/tenants/{slug}/ledger/accounts"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{accounts}");
+        accounts
+            .as_array()
+            .expect("a list")
+            .iter()
+            .find(|a| a["code"] == code)
+            .and_then(|a| a["balance"].as_i64())
+            .expect("an account with a balance")
     }
 
     async fn cleanup(self) {
@@ -1721,6 +1794,282 @@ async fn a_write_marks_the_tenant_as_needing_a_visit() {
         "without this the first write after a quiet period waits out the idle \
          backoff, and `consistent_after` times out on a healthy system"
     );
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Sales
+// ---------------------------------------------------------------------------
+
+/// **The loop a business actually runs, over HTTP.**
+///
+/// Invoice a customer, read it back, take the money, watch the receivable
+/// clear — and check the ledger agrees, without sales ever having been asked
+/// about accounting. Two modules, one request path.
+#[tokio::test]
+async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    // A chart, so the accounts the sale posts to exist.
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let (status, issued, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "INV-1",
+                        "customer": { "name": "Rawabi", "vat_number": "310000000000003" },
+                        "issued_on": "2026-03-01T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [
+                            { "description": "Consulting", "net": 100_000, "vat": "standard" },
+                            { "description": "Export", "net": 50_000, "vat": "zero" }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let position = issued["position"].as_i64().expect("a log position");
+
+    // Read your own write. Without the worker running, this is what the hint is
+    // for — so drive the projections first and then ask for exactly that point.
+    fixture.project_sales(tenant).await;
+
+    let (status, invoice, _) = fixture
+        .send(
+            bearer(Request::get(format!(
+                "/v1/tenants/acme/sales/invoices/INV-1?consistent_after={position}"
+            )))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{invoice}");
+    assert_eq!(invoice["net"], 150_000);
+    assert_eq!(
+        invoice["tax"], 15_000,
+        "15% of the standard-rated 1,000 only"
+    );
+    assert_eq!(invoice["gross"], 165_000);
+    assert_eq!(invoice["outstanding"], 165_000);
+    assert_eq!(invoice["customer_vat"], "310000000000003");
+    assert_eq!(
+        invoice["tax_breakdown"].as_array().expect("bands").len(),
+        2,
+        "one band per rate, which is what a tax invoice has to print"
+    );
+
+    // The books, without sales having touched them.
+    let balance = async |code: &str| fixture.ledger_balance(&token, "acme", code).await;
+    assert_eq!(balance("1100").await, 165_000, "receivable");
+    assert_eq!(balance("4000").await, -150_000, "revenue");
+    assert_eq!(balance("2100").await, -15_000, "VAT payable");
+
+    // And the money arrives.
+    let (status, paid, _) = fixture
+        .send(
+            bearer(Request::post(
+                "/v1/tenants/acme/sales/invoices/INV-1/payments",
+            ))
+            .body(Body::from(
+                serde_json::json!({
+                    "reference": "wire-77",
+                    "amount": { "minor": 165_000, "currency": "SAR" },
+                    "received_on": "2026-03-20T00:00:00Z",
+                    "account": "1010"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{paid}");
+    fixture.project_sales(tenant).await;
+
+    let (_, invoices, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let invoices = invoices.as_array().expect("a list");
+    assert_eq!(invoices.len(), 1);
+    assert_eq!(invoices[0]["outstanding"], 0);
+    assert_eq!(invoices[0]["paid"], 165_000);
+
+    assert_eq!(
+        fixture.ledger_balance(&token, "acme", "1100").await,
+        0,
+        "the receivable is settled"
+    );
+
+    let _ = spa_testkit::drop_named_database("spa_tenant_acme").await;
+    fixture.cleanup().await;
+}
+
+/// A module a tenant did not buy is not there — a 404, not a 403, so the
+/// response says nothing about what they are not paying for.
+#[tokio::test]
+async fn a_module_a_tenant_did_not_enable_is_not_there() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    // The ledger only. Sales is not enabled.
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme/sales/invoices")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "request.module_not_enabled");
+
+    // Not vacuous: the ledger's own routes work for this same tenant and token.
+    let (status, _, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme/ledger/accounts")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    fixture.cleanup().await;
+}
+
+/// Signing up for sales without the ledger is refused at the door, rather than
+/// producing a system that fails on its first invoice.
+#[tokio::test]
+async fn a_module_cannot_be_bought_without_what_it_needs() {
+    let fixture = Fixture::new().await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/signups")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT_LANGUAGE, "ar")
+                .body(Body::from(
+                    serde_json::json!({
+                        "slug": "solo",
+                        "company": "Solo",
+                        "email": "owner@solo.test",
+                        "password": "hunter2hunter2",
+                        "modules": ["sales"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.module_requires");
+    let detail = body["detail"].as_str().expect("a detail");
+    assert!(
+        detail
+            .chars()
+            .any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)),
+        "in the caller's language: {detail}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// The VAT treatment is a fixed vocabulary; the *rate* is never a client's to
+/// send, because it is statutory.
+#[tokio::test]
+async fn an_unknown_vat_treatment_is_refused() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/sales/invoices")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "INV-9",
+                        "customer": { "name": "Rawabi" },
+                        "issued_on": "2026-03-01T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [{ "description": "Work", "net": 100, "vat": "reduced" }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.unknown_vat_category");
+
+    fixture.cleanup().await;
+}
+
+/// An invoice posted against a chart that has no receivable account is refused
+/// with the ledger's own message — 422, because the request was well-formed and
+/// the tenant's setup was not.
+#[tokio::test]
+async fn an_invoice_the_chart_cannot_take_is_unprocessable() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // No chart installed at all.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/sales/invoices")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "INV-8",
+                        "customer": { "name": "Rawabi" },
+                        "issued_on": "2026-03-01T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [{ "description": "Work", "net": 100, "vat": "standard" }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "ledger.no_such_account");
+    assert_eq!(body["args"]["code"]["value"], "1100");
 
     fixture.cleanup().await;
 }

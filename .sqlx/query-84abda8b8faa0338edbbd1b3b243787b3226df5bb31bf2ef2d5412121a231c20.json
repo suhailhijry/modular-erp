@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT description as \"description!\", net as \"net!\",\n                  vat_category as \"vat_category!\", vat_rate_bp as \"vat_rate_bp!\"\n             FROM proj_sales.invoice_line\n            WHERE invoice_id = $1\n            ORDER BY line_index",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "description!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_line",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_line",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "vat_category!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_line",
+            "name": "vat_category"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "vat_rate_bp!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_line",
+            "name": "vat_rate_bp"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "84abda8b8faa0338edbbd1b3b243787b3226df5bb31bf2ef2d5412121a231c20"
+}
