@@ -1643,6 +1643,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "spa-demo"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "ledger",
+ "sales",
+ "serde_json",
+ "spa-api",
+ "spa-control",
+ "spa-eventlog",
+ "spa-projection",
+ "spa-testkit",
+ "spa-types",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "spa-eventlog"
 version = "0.1.0"
 dependencies = [

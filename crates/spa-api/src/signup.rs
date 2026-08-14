@@ -93,21 +93,41 @@ async fn sign_up(
     ))
 }
 
-/// Turns requested module names into their setup descriptions.
+/// Every module this build offers, as `(name, setup)`.
 ///
-/// ponytail: a `match` over two modules. The third earns a registry — described
-/// from three real cases rather than guessed from none.
+/// The list, in one place — because two things need it and they must not
+/// disagree: this endpoint, which refuses anything not here, and the demo
+/// tenant, which enables *all* of it. "The demo has every module enabled" is a
+/// requirement nothing could check while the set was a `match` arm.
+///
+/// ponytail: still not a `Module` trait. A trait would also have to carry the
+/// routes and the worker's jobs, and those cannot cross this boundary — a
+/// module must not depend on `spa-api` or `spa-worker`. Each composition root
+/// keeps listing what it composes; only the *set* is shared.
+#[must_use]
+pub fn modules() -> Vec<(&'static str, ModuleSetup)> {
+    vec![("ledger", ledger::setup()), ("sales", sales::setup())]
+}
+
+/// Turns requested module names into their setup descriptions.
 fn parse_modules(requested: &[String], locale: Locale) -> Result<Vec<ModuleSetup>, Problem> {
+    let available = modules();
     let setups: Vec<ModuleSetup> = requested
         .iter()
-        .map(|name| match name.as_str() {
-            "ledger" => Ok(ledger::setup()),
-            "sales" => Ok(sales::setup()),
-            other => Err(ApiError::BadRequest(
-                spa_i18n::Message::new(crate::messages::UNKNOWN_MODULE)
-                    .with("module", spa_i18n::MessageArg::text(other.to_owned())),
-            )
-            .into_problem(locale)),
+        .map(|name| {
+            available
+                .iter()
+                .find(|(known, _)| *known == name.as_str())
+                // Cheap: `ModuleSetup` holds a name, a `&'static str` of SQL and
+                // a slice of group names.
+                .map(|(_, setup)| setup.clone())
+                .ok_or_else(|| {
+                    ApiError::BadRequest(
+                        spa_i18n::Message::new(crate::messages::UNKNOWN_MODULE)
+                            .with("module", spa_i18n::MessageArg::text(name.clone())),
+                    )
+                    .into_problem(locale)
+                })
         })
         .collect::<Result<_, _>>()?;
 

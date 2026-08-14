@@ -41,6 +41,15 @@ prepare:
     for f in migrations/control/*.sql migrations/tenant/*.sql modules/*/schema/*.sql; do psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 -f "$f"; done
     DATABASE_URL="{{typecheck_url}}" SQLX_OFFLINE=false cargo sqlx prepare --workspace -- --all-targets
 
+# Build the demo tenant against the databases in `.env`.
+#
+# Every module enabled, filled through the public API. `just check` builds the
+# same thing on a throwaway database and asserts it works; this one leaves it
+# behind so a person can sign in.
+demo password:
+    CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
+      DEMO_PASSWORD="{{password}}" cargo run --quiet --bin demo
+
 # Drop every database this project creates. Does not touch anything else.
 #
 # Includes `spa_tenant_%`: a soak test that fails an assertion panics before its

@@ -678,9 +678,22 @@ impl ControlPlane {
         max_databases: i32,
         actor: Actor,
     ) -> Result<(), AccessError> {
+        // Declarative, not create-once: registering names a cluster's
+        // *configuration*, and an operator re-declaring it — to raise a
+        // capacity, or to repoint the variable its credentials come from —
+        // should not have to know whether this is the first time.
+        //
+        // `status` is deliberately untouched. It has its own command and means
+        // something operational; re-registering a draining cluster must not
+        // quietly put it back into service.
         sqlx::query!(
             "INSERT INTO cluster (name, dsn_env, replica_dsn_env, max_active_tenants, max_databases)
-             VALUES ($1, $2, $3, $4, $5)",
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (name) DO UPDATE
+                SET dsn_env            = EXCLUDED.dsn_env,
+                    replica_dsn_env    = EXCLUDED.replica_dsn_env,
+                    max_active_tenants = EXCLUDED.max_active_tenants,
+                    max_databases      = EXCLUDED.max_databases",
             name,
             dsn_env,
             replica_dsn_env,

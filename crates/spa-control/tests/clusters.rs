@@ -326,3 +326,43 @@ async fn packed_placement_fills_one_cluster_before_the_next() {
         .expect("registers");
     assert_eq!(overflow.cluster, "beta");
 }
+
+/// Registering is declaring a cluster's configuration, not creating a row once.
+///
+/// An operator raising a capacity, or repointing the variable a cluster's
+/// credentials come from, should not have to know whether the cluster was
+/// registered before. The first version was a bare `INSERT`, which made
+/// `just demo` fail the second time it was run against the same deployment.
+#[tokio::test]
+async fn registering_a_cluster_again_updates_it_rather_than_failing() {
+    let (control, _db) = control_plane().await;
+
+    register(&control, "primary", 100, 200).await;
+    register(&control, "primary", 500, 900).await;
+
+    let load = control.cluster_load().await.expect("reads load");
+    assert_eq!(load.len(), 1, "one cluster, not two");
+    assert_eq!(load[0].max_active_tenants, 500);
+    assert_eq!(load[0].max_databases, 900);
+}
+
+/// ...but it must not undo an operational decision.
+///
+/// A cluster is drained to retire hardware. Re-declaring its capacity while
+/// that is happening — a config-management run, a re-run of the seeder — must
+/// not put it back into service and start placing tenants on it.
+#[tokio::test]
+async fn re_registering_does_not_undrain_a_cluster() {
+    let (control, _db) = control_plane().await;
+
+    register(&control, "primary", 100, 200).await;
+    control
+        .set_cluster_status("primary", ClusterStatus::Draining, Actor::system())
+        .await
+        .expect("drains");
+
+    register(&control, "primary", 100, 200).await;
+
+    let load = control.cluster_load().await.expect("reads load");
+    assert_eq!(load[0].status, ClusterStatus::Draining);
+}

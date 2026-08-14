@@ -18,6 +18,7 @@ spa-testkit = { path = "crates/spa-testkit" }
 spa-control = { path = "crates/spa-control" }
 spa-worker = { path = "crates/spa-worker" }
 spa-api = { path = "crates/spa-api" }
+spa-demo = { path = "crates/spa-demo" }
 ledger = { path = "modules/ledger" }
 sales = { path = "modules/sales" }
 

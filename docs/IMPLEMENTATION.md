@@ -133,7 +133,8 @@ every projection, so they land before the first projection exists.
 - [x] Fault injection at transaction boundaries (carried from 1c) —
       `pg_terminate_backend`, not a simulated failure
 - [ ] Snapshots *(deferred — see above)*
-- [ ] Shadow replay wired into CI *(needs the demo tenant, Phase 4)*
+- [x] Shadow replay wired into CI *(done in Phase 4b, against the demo tenant —
+      every group, on every run)*
 
 **Exit:** a projection can be written, replayed into a shadow schema, and proven
 identical by a differ rather than by assertion. **Met.** 215 tests.
@@ -289,7 +290,30 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [ ] Credit notes, cancellation, customers as records, quantities and unit
       prices, statutory gapless numbering
 
-### 4b · The rest
+### 4b · The demo tenant
+
+- [x] `spa-demo`: a tenant with every module enabled, filled **through the
+      public HTTP API** — so a demo built out of internal calls cannot be
+      perfect while the API a customer would use is broken
+- [x] Deterministic: fixed dates, amounts and identifiers, so the numbers can be
+      screenshotted and a CI failure is never "did the data change?"
+- [x] Something in every state a screen has to render: settled, part-paid and
+      untouched invoices; all three VAT treatments; expenses as well as sales
+- [x] **A required CI check.** `cargo test --workspace` builds the whole demo
+      and asserts every module answers, every group replays, every invariant is
+      clean
+- [x] **Shadow replay wired into CI** *(carried from Phase 2 — it needed the
+      demo tenant, and now has one)*
+- [x] `spa_api::modules()` — the module set in one place, so "every module
+      enabled" is true by construction rather than by a second list agreeing
+- [x] `bin/demo` + `just demo <password>`, so the demo is a thing a person signs
+      into rather than a thing a test builds
+- [x] `spa_demo::bootstrap` — migrates and registers the cluster, because a
+      demo is usually the first thing pointed at an empty database
+- [ ] Demo tenant TTL and reaper *(needed before one is exposed publicly;
+      `tenant.demo_expires_at` is already in the schema)*
+
+### 4c · The rest
 
 - [x] A second business module *(shipped as 4a — and it changed how
       cross-module integration works, which is the point of building one)*
@@ -300,8 +324,8 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [ ] Chart-of-accounts templates: generic IFRS, SOCPA-aligned, retail, services, empty
 - [ ] Self-service signup as a durable workflow
 - [ ] Template databases per module combination, built in CI from blueprints
-- [ ] Demo tenant TTL and reaper
-- [ ] **Demo blueprint with every module enabled, as a required CI check**
+- [x] **Demo blueprint with every module enabled, as a required CI check**
+      *(4b)*
 - [ ] Fleet migrator; per-tenant health checks including the trial-balance invariant
 
 **Exit:** someone signs up online, picks a chart of accounts, and gets a working
@@ -791,3 +815,45 @@ here and folded back into ARCHITECTURE.md.
   detect until something read the entitlement. The gap was in the test harness,
   but a harness that cannot represent a tenant without a module is a harness
   that cannot test declining one.
+
+- **The demo is a client, and that is the whole value of it.** Every step goes
+  through the public API: sign up, install a chart, issue an invoice, take a
+  payment. A seeder that called commands directly would have been shorter and
+  would have proved nothing — the failure it needs to catch is an API that
+  cannot do what the internals can.
+
+  It caught one immediately. Signing the demo up with `["ledger"]` alone fails
+  at `POST /v1/tenants/demo/sales/invoices` with `request.module_not_enabled`,
+  which is how the "every module enabled" requirement went from a sentence in a
+  document to something that cannot be quietly false. That experiment is worth
+  repeating whenever this check changes: a demo that passes because it asks
+  nothing is worse than no demo.
+
+- **One list, because two things needed it.** `spa_api::modules()` replaced the
+  `match` in signup. Not a `Module` trait: a trait would also have to carry the
+  routes and the worker'"'"'s jobs, and neither can cross that boundary — a module
+  must not depend on `spa-api` or `spa-worker`. So each composition root still
+  lists what it composes, and only the *set* is shared. That is the part the
+  demo needed to make "all of them" mean something.
+
+- **`just demo` failed the first time a person ran it, and the second.** Two
+  bugs, both of the same kind: a method with no caller.
+
+  `relation "cluster" does not exist`. `bin/demo` assumed a migrated control
+  plane; `ControlPlane::migrate` had existed since Phase 1 and *nothing called
+  it*. Exactly the shape of the `request_visit` bug, and for the same reason —
+  the tests all start from a migrated template, so the one path that starts from
+  nothing was the one path nothing exercised.
+
+  Then `duplicate key value violates unique constraint "cluster_pkey"`, found by
+  the regression test written for the first bug. `register_cluster` was a bare
+  `INSERT`, so a second run against the same deployment failed — and, worse,
+  there was no way at all to change a cluster's capacity after registering it.
+  Registering now declares configuration: `ON CONFLICT DO UPDATE` on the
+  capacity and DSN columns, and deliberately **not** on `status`, so
+  re-declaring a draining cluster does not put it back into service.
+
+  The regression test builds on `Schema::sql("empty", &[])` — a database that
+  has run nothing — and asserts it really is bare before bootstrapping it. A
+  bootstrap test against an already-migrated fixture passes for the wrong
+  reason.

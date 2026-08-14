@@ -48,4 +48,5 @@ pub use extract::{
 };
 pub use problem::Problem;
 pub use routes::router;
+pub use signup::modules;
 pub use state::AppState;
