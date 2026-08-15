@@ -20,6 +20,7 @@
 //! is silent, security-relevant, and invisible in review — the same argument
 //! that gave `TenantDb` no public constructor.
 
+use spa_types::ModuleId;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -110,6 +111,63 @@ impl Role {
 
     /// Every role, for tests and for an "invite a colleague" form.
     pub const ALL: [Self; 4] = [Self::Owner, Self::Accountant, Self::Clerk, Self::Viewer];
+}
+
+/// What somebody may do in a tenant, module by module.
+///
+/// # Why a default and a handful of exceptions
+///
+/// Most people have one job. A structure that made every module's role explicit
+/// would turn "give Sara access" into a form with a row per module, most of them
+/// saying the same thing — and would silently give a new module *no* role rather
+/// than the obvious one.
+///
+/// So [`Access::role`] is what this person is here, and [`Access::in_module`]
+/// overrides it where the tenant said something different. A module nobody has
+/// spoken about falls back, which is what makes adding a module to the product
+/// not a permissions migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Access {
+    /// What they are in this tenant, and in any module not named below.
+    pub role: Role,
+    /// Where the tenant said something different. Small — the exception, not
+    /// the rule — so a `Vec` scan beats a map.
+    pub overrides: Vec<(ModuleId, Role)>,
+}
+
+impl Access {
+    #[must_use]
+    pub const fn new(role: Role) -> Self {
+        Self {
+            role,
+            overrides: Vec::new(),
+        }
+    }
+
+    /// The role that applies in a module, or tenant-wide when `module` is
+    /// `None`.
+    ///
+    /// `None` is not "no module" in the sense of no permission — it is the
+    /// tenant's own surface: members, invitations, entitlements. Those are not
+    /// any module's business and use the tenant-wide role, which is what stops
+    /// an accountant-for-sales from managing who else has access.
+    #[must_use]
+    pub fn role_in(&self, module: Option<&ModuleId>) -> Role {
+        module
+            .and_then(|m| {
+                self.overrides
+                    .iter()
+                    .find(|(known, _)| known == m)
+                    .map(|(_, role)| *role)
+            })
+            .unwrap_or(self.role)
+    }
+
+    /// Whether they may do this, there.
+    #[must_use]
+    pub fn allows(&self, capability: Capability, module: Option<&ModuleId>) -> bool {
+        self.role_in(module).allows(capability)
+    }
 }
 
 impl FromStr for Role {
@@ -207,5 +265,50 @@ mod tests {
         for role in Role::ALL {
             assert!(role.allows(Capability::Read), "{role}");
         }
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+
+    fn module(name: &str) -> ModuleId {
+        ModuleId::new(name.to_owned()).unwrap_or_else(|_| unreachable!())
+    }
+
+    #[test]
+    fn a_module_nobody_has_spoken_about_falls_back() {
+        let access = Access::new(Role::Accountant);
+        assert_eq!(access.role_in(Some(&module("sales"))), Role::Accountant);
+        assert_eq!(access.role_in(None), Role::Accountant);
+    }
+
+    #[test]
+    fn an_override_applies_only_where_it_was_set() {
+        let mut access = Access::new(Role::Viewer);
+        access.overrides.push((module("sales"), Role::Accountant));
+
+        assert_eq!(access.role_in(Some(&module("sales"))), Role::Accountant);
+        assert_eq!(access.role_in(Some(&module("ledger"))), Role::Viewer);
+        assert_eq!(
+            access.role_in(None),
+            Role::Viewer,
+            "the tenant's own surface is nobody's module"
+        );
+
+        assert!(access.allows(Capability::PostEntries, Some(&module("sales"))));
+        assert!(!access.allows(Capability::PostEntries, Some(&module("ledger"))));
+        assert!(!access.allows(Capability::ManageTenant, Some(&module("sales"))));
+    }
+
+    #[test]
+    fn an_override_can_hold_somebody_back_as_well_as_forward() {
+        // The other direction, and the one easier to get wrong: an accountant
+        // everywhere, deliberately not in sales.
+        let mut access = Access::new(Role::Accountant);
+        access.overrides.push((module("sales"), Role::Viewer));
+
+        assert!(access.allows(Capability::ManageAccounts, Some(&module("ledger"))));
+        assert!(!access.allows(Capability::PostEntries, Some(&module("sales"))));
     }
 }

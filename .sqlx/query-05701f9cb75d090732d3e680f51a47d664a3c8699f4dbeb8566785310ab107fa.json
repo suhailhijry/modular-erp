@@ -1,16 +1,16 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT role FROM membership\n              WHERE identity_id = $1 AND tenant_id = $2 AND revoked_at IS NULL",
+  "query": "SELECT id FROM membership\n              WHERE tenant_id = $1 AND identity_id = $2 AND revoked_at IS NULL",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "role",
-        "type_info": "Text",
+        "name": "id",
+        "type_info": "Uuid",
         "origin": {
           "Table": {
             "table": "membership",
-            "name": "role"
+            "name": "id"
           }
         }
       }
@@ -25,5 +25,5 @@
       false
     ]
   },
-  "hash": "21f1a37fd4e22cd1cff9e87c059ee1838f27217e32459a8ef25d7f7d707bd65a"
+  "hash": "05701f9cb75d090732d3e680f51a47d664a3c8699f4dbeb8566785310ab107fa"
 }

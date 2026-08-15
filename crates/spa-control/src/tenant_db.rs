@@ -44,9 +44,9 @@ pub struct TenantDb {
     modules: EnabledModules,
     pools: Arc<TenantPools>,
     lane: Lane,
-    /// What the caller may do here. `None` for background and support access,
-    /// which are not acting as anyone — see [`Self::role`].
-    role: Option<crate::Role>,
+    /// What the caller may do here, and where. `None` for background and
+    /// support access, which are not acting as anyone — see [`Self::role`].
+    access: Option<crate::Access>,
 }
 
 impl TenantDb {
@@ -65,12 +65,12 @@ impl TenantDb {
             modules,
             pools,
             lane,
-            role: None,
+            access: None,
         }
     }
 
-    pub(crate) const fn set_role(&mut self, role: Option<crate::Role>) {
-        self.role = role;
+    pub(crate) fn set_access(&mut self, access: Option<crate::Access>) {
+        self.access = access;
     }
 
     /// The caller's role, if a person is behind this handle.
@@ -80,8 +80,25 @@ impl TenantDb {
     /// refuse — background work that needs to write should say so in its own
     /// terms, not borrow a person's authority.
     #[must_use]
-    pub const fn role(&self) -> Option<crate::Role> {
-        self.role
+    pub fn role(&self) -> Option<crate::Role> {
+        self.access.as_ref().map(|a| a.role)
+    }
+
+    /// The caller's role **in a module**, which is what a module's routes are
+    /// judged against.
+    ///
+    /// Falls back to the tenant-wide role wherever the tenant has not said
+    /// otherwise, so adding a module to the product is not a permissions
+    /// migration for every existing member.
+    #[must_use]
+    pub fn role_in(&self, module: Option<&ModuleId>) -> Option<crate::Role> {
+        self.access.as_ref().map(|a| a.role_in(module))
+    }
+
+    /// Everything decided about this caller's access, for a members list.
+    #[must_use]
+    pub const fn access(&self) -> Option<&crate::Access> {
+        self.access.as_ref()
     }
 
     /// Whether the caller may do this.
@@ -90,7 +107,20 @@ impl TenantDb {
     /// `spa-api` is the type-level form; this is what it calls.
     #[must_use]
     pub fn allows(&self, capability: crate::Capability) -> bool {
-        self.role.is_some_and(|role| role.allows(capability))
+        self.allows_in(capability, None)
+    }
+
+    /// Whether the caller may do this **in this module**.
+    ///
+    /// `None` means the tenant's own surface — members, invitations,
+    /// entitlements — which is nobody's module and uses the tenant-wide role.
+    /// That is what stops an accountant-for-sales from managing who else has
+    /// access.
+    #[must_use]
+    pub fn allows_in(&self, capability: crate::Capability, module: Option<&ModuleId>) -> bool {
+        self.access
+            .as_ref()
+            .is_some_and(|access| access.allows(capability, module))
     }
 
     #[must_use]

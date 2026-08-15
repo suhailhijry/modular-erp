@@ -364,7 +364,28 @@ system.
 
 ---
 
-## Phase 5 — The rule engine and its simple surface · 3–4 weeks
+## Phase 5 — Granular permissions · 3–4 weeks
+
+**Resequenced.** The rule engine was to be built first and authorization moved
+onto it. But it had one real consumer and no concrete rules to describe it from
+— pricing does not exist — so building `Facts` and `DynCondition` now meant
+inventing which facts exist. Instead: the smallest real granularity gap first,
+and let two working cases describe the engine.
+
+### 5a · A different role in a different module
+
+- [x] `Access` — a tenant-wide role plus per-module exceptions, so "Sara does
+      the invoicing, Khalid does the books" is expressible
+- [x] The module comes from the **request path**, so a module route added
+      tomorrow is scoped without anybody remembering to scope it
+- [x] The tenant's own surface — members, invitations, entitlements — is nobody's
+      module and uses the tenant-wide role
+- [x] Clearing an exception restores the tenant-wide role, which is a different
+      thing from setting `viewer`
+- [x] Removing somebody clears their exceptions with their membership
+- [x] Invalidated on the spot, like every other authorization change
+
+### 5b · The engine, once there is something to describe it
 
 - [ ] `spa-rules`: `Facts`, `DynCondition`, `FactRegistry`, `Rule<E>`
 - [ ] Authorization and pricing both on it
@@ -1086,3 +1107,32 @@ here and folded back into ARCHITECTURE.md.
   contained the old code. The tell was `Finished in 0.10s` — a test run that did
   not rebuild after an edit did not edit anything. Every scripted replacement in
   this codebase should assert its target matched.
+
+- **The rule engine was deferred, and the deferral is the interesting part.**
+  Phase 5 was to build `Facts`, `DynCondition`, `FactRegistry` and `Rule<E>`,
+  then move authorization onto them. Authorization is its only real consumer —
+  pricing does not exist — and no concrete rule had been asked for, so every
+  decision about *which facts exist* would have been a guess dressed as an
+  interface.
+
+  What was concrete: the second module created a permissions gap a real business
+  has. One role per tenant means the person who does the invoicing must also be
+  an accountant for the books. That is a describable problem with a bounded fix,
+  and it produces the first genuine case for the engine rather than a
+  hypothetical one.
+
+- **Authorization now reads the URL, on purpose.** `Allowed<C>` derives the
+  module from the request path, because the URL namespace *is* the module
+  namespace by construction — every module mounts under its own name.
+
+  The alternative, an explicit marker per handler, fails the wrong way: a
+  handler that forgets it silently gets the tenant-wide role, which is the more
+  permissive answer. **Forgetting must never be the permissive option.** The
+  price is that authorization depends on URL shape, paid by
+  `module_paths_are_what_they_look_like` — a route that moves changes a test
+  rather than changing permissions quietly.
+
+  An unrecognised path segment is *not* treated as a module, which matters more
+  than it looks: if it were, somebody held back in every module they have could
+  reach `/v1/tenants/acme/anything/…` and fall back to a role they were
+  deliberately not given.

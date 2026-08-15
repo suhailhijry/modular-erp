@@ -222,6 +222,78 @@ impl Fixture {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
+    /// Gives somebody a different role in one module, or (with `None`) puts
+    /// them back on their tenant-wide one.
+    async fn module_role(
+        &self,
+        token: &str,
+        identity: IdentityId,
+        module: &str,
+        role: Option<&str>,
+    ) -> StatusCode {
+        let uri = format!("/v1/tenants/acme/members/{identity}/modules/{module}");
+        let request = Request::builder()
+            .method(if role.is_some() { "PUT" } else { "DELETE" })
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        let body = role.map_or_else(Body::empty, |role| {
+            Body::from(serde_json::json!({ "role": role }).to_string())
+        });
+
+        let (status, body, _) = self.send(request.body(body).unwrap()).await;
+        assert!(
+            status.is_success(),
+            "setting a module role: {status} {body}"
+        );
+        status
+    }
+
+    /// Issues an invoice as whoever holds `token`, returning only the status —
+    /// which is what the authorization tests are asking about.
+    async fn try_invoice(&self, token: &str, id: &str) -> StatusCode {
+        let (status, _, _) = self
+            .send(
+                Request::post("/v1/tenants/acme/sales/invoices")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": id,
+                            "customer": { "name": "Rawabi" },
+                            "issued_on": "2026-03-01T00:00:00Z",
+                            "currency": "SAR",
+                            "lines": [
+                                { "description": "Work", "net": 10_000, "vat": "standard" }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        status
+    }
+
+    /// Opens a ledger account as whoever holds `token`.
+    async fn try_open_account(&self, token: &str, code: &str) -> StatusCode {
+        let (status, _, _) = self
+            .send(
+                Request::post("/v1/tenants/acme/ledger/accounts")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "code": code, "name": "Test", "kind": "asset", "currency": "SAR"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        status
+    }
+
     /// A ledger account's balance, read over HTTP so the assertion travels the
     /// same path a client would.
     async fn ledger_balance(&self, token: &str, slug: &str, code: &str) -> i64 {
@@ -3170,6 +3242,230 @@ async fn configuring_posting_accounts_needs_manage_accounts() {
             "{role} setting posting accounts: {status} {body}"
         );
     }
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Per-module roles
+// ---------------------------------------------------------------------------
+
+/// **The arrangement two modules made possible.** Sara does the invoicing,
+/// Khalid does the books, and neither can do the other's job.
+#[tokio::test]
+async fn one_person_can_have_a_different_role_in_a_different_module() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture
+        .install_chart(&owner_token, "acme", "services")
+        .await;
+
+    // Sara: a viewer everywhere, an accountant in sales.
+    let sara = fixture.user("sara@acme.test", "hunter2hunter2").await;
+    fixture.join_as(sara, tenant, "viewer").await;
+    fixture
+        .module_role(&owner_token, sara, "sales", Some("accountant"))
+        .await;
+    let sara_token = fixture.token("sara@acme.test", "hunter2hunter2").await;
+
+    assert_eq!(
+        fixture.try_invoice(&sara_token, "INV-SARA").await,
+        StatusCode::CREATED,
+        "invoicing is her job"
+    );
+    assert_eq!(
+        fixture.try_open_account(&sara_token, "1234").await,
+        StatusCode::FORBIDDEN,
+        "the books are not"
+    );
+
+    // And the tenant itself is nobody's module: being an accountant in sales
+    // does not make her able to decide who else has access.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/invitations")
+                .header(header::AUTHORIZATION, format!("Bearer {sara_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "handle": "x@acme.test", "role": "owner" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Khalid: an accountant everywhere, a viewer in sales. The other direction,
+    // and the one easier to get wrong.
+    let khalid = fixture.user("khalid@acme.test", "hunter2hunter2").await;
+    fixture.join_as(khalid, tenant, "accountant").await;
+    fixture
+        .module_role(&owner_token, khalid, "sales", Some("viewer"))
+        .await;
+    let khalid_token = fixture.token("khalid@acme.test", "hunter2hunter2").await;
+
+    assert_eq!(
+        fixture.try_open_account(&khalid_token, "1234").await,
+        StatusCode::CREATED,
+        "the books are his job"
+    );
+    assert_eq!(
+        fixture.try_invoice(&khalid_token, "INV-KHALID").await,
+        StatusCode::FORBIDDEN,
+        "invoicing is not"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Clearing an override is not the same as setting `viewer`: it puts somebody
+/// back on their tenant-wide role, so a later promotion reaches that module too.
+#[tokio::test]
+async fn clearing_a_module_role_restores_the_tenant_wide_one() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture
+        .install_chart(&owner_token, "acme", "services")
+        .await;
+
+    let sara = fixture.user("sara@acme.test", "hunter2hunter2").await;
+    fixture.join_as(sara, tenant, "accountant").await;
+    let sara_token = fixture.token("sara@acme.test", "hunter2hunter2").await;
+
+    fixture
+        .module_role(&owner_token, sara, "sales", Some("viewer"))
+        .await;
+    assert_eq!(
+        fixture.try_invoice(&sara_token, "INV-1").await,
+        StatusCode::FORBIDDEN
+    );
+
+    fixture.module_role(&owner_token, sara, "sales", None).await;
+    assert_eq!(
+        fixture.try_invoice(&sara_token, "INV-2").await,
+        StatusCode::CREATED,
+        "her accountant role reaches sales again"
+    );
+
+    // And the members list stops mentioning it.
+    let (_, members, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme/members")
+                .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let entry = members
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|m| m["identity"] == sara.to_string())
+        .expect("is a member");
+    assert_eq!(entry["role"], "accountant");
+    assert!(
+        entry["module_roles"].as_array().expect("a list").is_empty(),
+        "{entry}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Removing somebody takes away everything about their access, exceptions
+/// included — so re-adding them later starts from their new role rather than a
+/// rule nobody remembers setting.
+#[tokio::test]
+async fn removing_somebody_clears_their_module_exceptions() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let sara = fixture.user("sara@acme.test", "hunter2hunter2").await;
+    fixture.join_as(sara, tenant, "owner").await;
+    fixture
+        .module_role(&token, sara, "sales", Some("viewer"))
+        .await;
+
+    let (status, _, _) = fixture
+        .send(
+            Request::delete(format!("/v1/tenants/acme/members/{sara}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Back as an accountant, with no lingering exception.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/members")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "email": "sara@acme.test",
+                        "password": "hunter2hunter2",
+                        "role": "accountant"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let sara_token = fixture.token("sara@acme.test", "hunter2hunter2").await;
+    assert_eq!(
+        fixture.try_invoice(&sara_token, "INV-BACK").await,
+        StatusCode::CREATED,
+        "no ghost exception"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A demotion in one module takes effect at once, not after the cache expires.
+#[tokio::test]
+async fn a_module_demotion_takes_effect_immediately() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let sara = fixture.user("sara@acme.test", "hunter2hunter2").await;
+    fixture.join_as(sara, tenant, "accountant").await;
+    let sara_token = fixture.token("sara@acme.test", "hunter2hunter2").await;
+
+    // Warms the membership cache with her accountant role.
+    assert_eq!(
+        fixture.try_invoice(&sara_token, "INV-BEFORE").await,
+        StatusCode::CREATED
+    );
+
+    fixture
+        .module_role(&token, sara, "sales", Some("viewer"))
+        .await;
+
+    assert_eq!(
+        fixture.try_invoice(&sara_token, "INV-AFTER").await,
+        StatusCode::FORBIDDEN,
+        "seconds of doing what you were just told you cannot is not acceptable"
+    );
 
     fixture.cleanup().await;
 }

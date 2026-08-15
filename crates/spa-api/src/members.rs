@@ -26,13 +26,26 @@ pub(crate) fn routes() -> Router<AppState> {
             "/v1/tenants/{slug}/members/{identity}",
             routing::patch(change_role).delete(remove),
         )
+        .route(
+            "/v1/tenants/{slug}/members/{identity}/modules/{module}",
+            routing::put(set_module_role).delete(clear_module_role),
+        )
+}
+
+#[derive(Debug, Serialize)]
+struct ModuleRoleView {
+    module: String,
+    role: &'static str,
 }
 
 #[derive(Debug, Serialize)]
 struct MemberView {
     identity: IdentityId,
     handle: Option<String>,
+    /// What they are here, and in any module not listed below.
     role: &'static str,
+    /// Where the tenant said something different. Usually empty.
+    module_roles: Vec<ModuleRoleView>,
     since: Timestamp,
     suspended: bool,
 }
@@ -80,6 +93,14 @@ async fn list(
                 identity: m.identity,
                 handle: m.handle,
                 role: m.role.as_str(),
+                module_roles: m
+                    .module_roles
+                    .into_iter()
+                    .map(|(module, role)| ModuleRoleView {
+                        module: module.as_str().to_owned(),
+                        role: role.as_str(),
+                    })
+                    .collect(),
                 since: m.since,
                 suspended: m.suspended,
             })
@@ -140,6 +161,60 @@ async fn remove(
     state
         .control
         .remove_member(tenant.db.tenant(), identity, actor(&tenant))
+        .await
+        .map_err(|e| member_problem(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Gives somebody a different role in one module.
+///
+/// # Why this is a separate route rather than a field on the member
+///
+/// Because it is the exception. "Sara does the invoicing, Khalid does the
+/// books" is a real arrangement and this is how a tenant says so — but most
+/// people have one job, and a members form with a row per module per person
+/// would put that in front of everybody who does not need it.
+async fn set_module_role(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path((_slug, identity, module)): Path<(String, IdentityId, String)>,
+    Json(body): Json<RoleChange>,
+) -> Result<StatusCode, Problem> {
+    let role = parse_role(&body.role, locale)?;
+    let module = crate::modules::find(&module, locale)?.module;
+
+    state
+        .control
+        .set_module_role(
+            tenant.db.tenant(),
+            identity,
+            &module,
+            Some(role),
+            actor(&tenant),
+        )
+        .await
+        .map_err(|e| member_problem(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Puts somebody back on their tenant-wide role in a module.
+///
+/// Different from setting them to `viewer` there: the exception is gone, so a
+/// later change to their tenant-wide role reaches this module too.
+async fn clear_module_role(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path((_slug, identity, module)): Path<(String, IdentityId, String)>,
+) -> Result<StatusCode, Problem> {
+    let module = crate::modules::find(&module, locale)?.module;
+
+    state
+        .control
+        .set_module_role(tenant.db.tenant(), identity, &module, None, actor(&tenant))
         .await
         .map_err(|e| member_problem(&e, locale))?;
 

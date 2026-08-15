@@ -24,6 +24,8 @@ use crate::{AccessError, ControlPlane, Role};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     pub identity: IdentityId,
+    /// Where this person's role differs from their tenant-wide one.
+    pub module_roles: Vec<(spa_types::ModuleId, Role)>,
     /// The login handle. `None` for an identity with no password authenticator
     /// — which today means one created some other way, and later an invitation
     /// nobody has accepted.
@@ -82,7 +84,13 @@ impl ControlPlane {
                       i.status,
                       (SELECT a.handle FROM authenticator a
                         WHERE a.identity_id = m.identity_id AND a.kind = 'password'
-                        LIMIT 1) as handle
+                        LIMIT 1) as handle,
+                      COALESCE(
+                          (SELECT array_agg(r.module_id || '=' || r.role ORDER BY r.module_id)
+                             FROM membership_module_role r
+                            WHERE r.membership_id = m.id),
+                          '{}'
+                      ) as "module_roles!: Vec<String>"
                  FROM membership m
                  JOIN identity i ON i.id = m.identity_id
                 WHERE m.tenant_id = $1 AND m.revoked_at IS NULL
@@ -97,6 +105,11 @@ impl ControlPlane {
                 Ok(Member {
                     identity: row.identity,
                     handle: row.handle,
+                    module_roles: row
+                        .module_roles
+                        .iter()
+                        .map(|pair| parse_module_role(pair))
+                        .collect::<Result<_, _>>()?,
                     // A role this build cannot read is an error, not a guess.
                     role: row
                         .role
@@ -221,6 +234,78 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// Gives somebody a different role in one module, or clears the exception.
+    ///
+    /// `None` removes the override, putting them back on their tenant-wide
+    /// role — which is a different thing from setting them to `Viewer` there,
+    /// and the difference matters when the tenant-wide role later changes.
+    pub async fn set_module_role(
+        &self,
+        tenant_id: TenantId,
+        identity: IdentityId,
+        module: &spa_types::ModuleId,
+        role: Option<Role>,
+        actor: Actor,
+    ) -> Result<(), MemberError> {
+        let membership = sqlx::query_scalar!(
+            "SELECT id FROM membership
+              WHERE tenant_id = $1 AND identity_id = $2 AND revoked_at IS NULL",
+            tenant_id.as_uuid(),
+            identity.as_uuid(),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AccessError::Database)?
+        .ok_or(MemberError::NotAMember)?;
+
+        match role {
+            Some(role) => {
+                sqlx::query!(
+                    "INSERT INTO membership_module_role (membership_id, module_id, role)
+                     VALUES ($1, $2, $3)
+                     ON CONFLICT (membership_id, module_id)
+                     DO UPDATE SET role = EXCLUDED.role, set_at = now()",
+                    membership,
+                    module.as_str(),
+                    role.as_str(),
+                )
+                .execute(&self.pool)
+                .await
+                .map_err(AccessError::Database)?;
+            }
+            None => {
+                sqlx::query!(
+                    "DELETE FROM membership_module_role
+                      WHERE membership_id = $1 AND module_id = $2",
+                    membership,
+                    module.as_str(),
+                )
+                .execute(&self.pool)
+                .await
+                .map_err(AccessError::Database)?;
+            }
+        }
+
+        // Now, not after the TTL — same reason a demotion is invalidated at
+        // once: the seconds in between are seconds of somebody doing what they
+        // have just been told they cannot.
+        self.memberships.invalidate(&(identity, tenant_id));
+
+        self.record(
+            actor,
+            "membership.module_role_changed",
+            "identity",
+            &identity.to_string(),
+            serde_json::json!({
+                "tenant": tenant_id.to_string(),
+                "module": module.as_str(),
+                "role": role.map(Role::as_str),
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Whether removing or demoting this identity would leave the tenant
     /// ownerless.
     async fn is_last_owner(
@@ -242,7 +327,26 @@ impl ControlPlane {
 
         // Only a problem if *this* identity is currently an owner: demoting a
         // clerk in a tenant with one owner is fine.
-        let is_owner = self.cached_membership(identity, tenant_id).await? == Some(Role::Owner);
+        let is_owner = self
+            .cached_membership(identity, tenant_id)
+            .await?
+            .is_some_and(|access| access.role == Role::Owner);
         Ok(is_owner && others == 0)
     }
+}
+
+/// One `module=role` pair, as [`ControlPlane::members`] reads them back.
+///
+/// Validated rather than trusted: this is data coming *out* of the database,
+/// which is where values written by an older version of the system arrive.
+fn parse_module_role(pair: &str) -> Result<(spa_types::ModuleId, Role), AccessError> {
+    let (module, role) = pair
+        .split_once('=')
+        .ok_or_else(|| AccessError::Corrupt(format!("module role {pair:?}")))?;
+    Ok((
+        spa_types::ModuleId::new(module.to_owned())
+            .map_err(|e| AccessError::Corrupt(format!("module role: {e}")))?,
+        role.parse::<Role>()
+            .map_err(|e| AccessError::Corrupt(e.to_string()))?,
+    ))
 }

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM membership_module_role\n                      WHERE membership_id = $1 AND module_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "90e76721b289fc7344e6992bda7e422bf64672e16b1ce2c53c45848bec4dcad8"
+}

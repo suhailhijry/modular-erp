@@ -10,6 +10,8 @@ use spa_i18n::Locale;
 
 use crate::error::ApiError;
 use crate::problem::Problem;
+use spa_types::ModuleId;
+
 use crate::state::AppState;
 
 /// The caller's language, from `Accept-Language`.
@@ -210,6 +212,40 @@ impl<C: Capability> std::ops::Deref for Allowed<C> {
     }
 }
 
+/// Which module a request is about, from its path.
+///
+/// # Why the path decides
+///
+/// `/v1/tenants/{slug}/sales/invoices` is a sales request; `/v1/tenants/{slug}/members`
+/// is not any module's business. The URL namespace *is* the module namespace,
+/// by construction — every module mounts under its own name — so reading it
+/// here means a module route added tomorrow is scoped without anybody
+/// remembering to scope it.
+///
+/// The alternative, an explicit marker on each handler, fails the other way: a
+/// handler that forgets it silently gets the *tenant-wide* role, which is the
+/// more permissive answer. Forgetting must never be the permissive option.
+///
+/// `module_paths_are_what_they_look_like` pins the mapping, so a route that
+/// moves changes a test rather than changing permissions quietly.
+fn module_of(path: &str) -> Option<ModuleId> {
+    // /v1/tenants/{slug}/{module}/...
+    let mut segments = path.split('/').filter(|s| !s.is_empty());
+    if segments.next()? != "v1" || segments.next()? != "tenants" {
+        return None;
+    }
+    segments.next()?; // the slug
+    let candidate = segments.next()?;
+
+    // Only names this build actually offers. An unknown segment is a route that
+    // does not exist, and treating it as a module would let a request opt out of
+    // its tenant-wide role by inventing a path.
+    crate::modules::available()
+        .into_iter()
+        .find(|(name, _)| *name == candidate)
+        .map(|(_, setup)| setup.module)
+}
+
 impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
     type Rejection = Problem;
 
@@ -218,8 +254,9 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
             .await
             .unwrap_or(Language(Locale::DEFAULT));
         let tenant = Tenant::from_request_parts(parts, state).await?;
+        let module = module_of(parts.uri.path());
 
-        if !tenant.db.allows(C::CAPABILITY) {
+        if !tenant.db.allows_in(C::CAPABILITY, module.as_ref()) {
             // 403, not 404. The caller has already proved they are a member, so
             // hiding the tenant's existence buys nothing — and "you cannot do
             // this" is the answer they need in order to ask someone who can.
@@ -238,5 +275,87 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
             tenant,
             capability: std::marker::PhantomData,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Authorization now depends on URL shape, so the shape is pinned here.**
+    ///
+    /// A route that moves changes this test rather than changing permissions
+    /// quietly, which is the whole price of deriving the module from the path.
+    #[test]
+    fn module_paths_are_what_they_look_like() {
+        let module = |path: &str| module_of(path).map(|m| m.as_str().to_owned());
+
+        // Every module's routes, scoped to it.
+        assert_eq!(
+            module("/v1/tenants/acme/sales/invoices").as_deref(),
+            Some("sales")
+        );
+        assert_eq!(
+            module("/v1/tenants/acme/sales/invoices/INV-1/payments").as_deref(),
+            Some("sales")
+        );
+        assert_eq!(
+            module("/v1/tenants/acme/ledger/accounts").as_deref(),
+            Some("ledger")
+        );
+        assert_eq!(
+            module("/v1/tenants/acme/ledger/chart").as_deref(),
+            Some("ledger")
+        );
+
+        // The tenant's own surface belongs to no module, so it is judged on the
+        // tenant-wide role. This is what stops an accountant-for-sales from
+        // deciding who else has access.
+        for tenant_wide in [
+            "/v1/tenants/acme",
+            "/v1/tenants/acme/members",
+            "/v1/tenants/acme/members/01a00000-0000-7000-8000-000000000000",
+            "/v1/tenants/acme/modules",
+            "/v1/tenants/acme/invitations",
+        ] {
+            assert_eq!(module(tenant_wide), None, "{tenant_wide}");
+        }
+
+        // Nothing outside a tenant is a module's business either.
+        for outside in [
+            "/v1/health",
+            "/v1/sessions",
+            "/v1/signups",
+            "/v1/modules",
+            "/",
+        ] {
+            assert_eq!(module(outside), None, "{outside}");
+        }
+    }
+
+    /// A request cannot opt out of its tenant-wide role by inventing a segment.
+    ///
+    /// If an unknown segment counted as "some module", a caller held back in
+    /// every module they have would find that `/v1/tenants/acme/anything/…`
+    /// fell back to a role they were deliberately not given there.
+    #[test]
+    fn an_invented_module_segment_is_not_a_module() {
+        assert_eq!(module_of("/v1/tenants/acme/nonsense/x"), None);
+        assert_eq!(module_of("/v1/tenants/acme/Sales/invoices"), None);
+        assert_eq!(module_of("/v1/tenants/acme/../sales/invoices"), None);
+    }
+
+    /// Every module this build offers is reachable as a path segment, so no
+    /// module's routes are silently judged tenant-wide.
+    #[test]
+    fn every_module_is_addressable_by_its_own_name() {
+        for (name, setup) in crate::modules::available() {
+            let path = format!("/v1/tenants/acme/{name}/anything");
+            assert_eq!(
+                module_of(&path).as_ref(),
+                Some(&setup.module),
+                "{name} routes are not scoped to {name}"
+            );
+        }
     }
 }

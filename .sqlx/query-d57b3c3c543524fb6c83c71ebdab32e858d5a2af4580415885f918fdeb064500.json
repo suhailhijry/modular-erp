@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM membership_module_role r\n              USING membership m\n              WHERE r.membership_id = m.id\n                AND m.identity_id = $1\n                AND m.tenant_id IS NOT DISTINCT FROM $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d57b3c3c543524fb6c83c71ebdab32e858d5a2af4580415885f918fdeb064500"
+}

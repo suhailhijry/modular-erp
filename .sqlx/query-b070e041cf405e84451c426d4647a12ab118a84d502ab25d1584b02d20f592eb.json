@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.role as \"role!\", r.module_id, r.role as \"module_role?\"\n                 FROM membership m\n                 LEFT JOIN membership_module_role r ON r.membership_id = m.id\n                WHERE m.identity_id = $1 AND m.tenant_id = $2 AND m.revoked_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "membership",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "module_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "membership_module_role",
+            "name": "module_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "module_role?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "membership_module_role",
+            "name": "role"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "b070e041cf405e84451c426d4647a12ab118a84d502ab25d1584b02d20f592eb"
+}

@@ -52,7 +52,7 @@ pub use model::{
 pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
 pub use pools::{ClusterRegistry, Conn, Lane, PoolConfig, PoolError, TenantPools, Tx};
 pub use provision::{ModuleSetup, SignedUp as ProvisionedTenant};
-pub use roles::{Capability, Role, UnknownRole};
+pub use roles::{Access, Capability, Role, UnknownRole};
 pub use tenant_db::{CommandError, TenantDb};
 
 use spa_i18n::{Localize, Message, MessageArg, StaticCatalog};
@@ -134,7 +134,7 @@ pub struct ControlPlane {
     tenants_cache: TtlCache<TenantId, Option<Tenant>>,
     /// A caller's role in a tenant. Cached as the parsed [`Role`], so
     /// authorization needs no second query.
-    memberships: TtlCache<(IdentityId, TenantId), Option<Role>>,
+    memberships: TtlCache<(IdentityId, TenantId), Option<Access>>,
     /// Whether an identity is platform staff.
     ///
     /// A separate cache because it is a separate question with a separate
@@ -260,13 +260,13 @@ impl ControlPlane {
             });
         }
 
-        let role = self
+        let access = self
             .cached_membership(identity_id, tenant_id)
             .await?
             .ok_or(AccessError::NotAMember)?;
 
         let mut db = self.open(&tenant, lane).await?;
-        db.set_role(Some(role));
+        db.set_access(Some(access));
         Ok(db)
     }
 
@@ -544,15 +544,15 @@ impl ControlPlane {
         &self,
         identity_id: IdentityId,
         tenant_id: TenantId,
-    ) -> Result<Option<Role>, AccessError> {
+    ) -> Result<Option<Access>, AccessError> {
         let key = (identity_id, tenant_id);
         if let Some(hit) = self.memberships.get(&key) {
             self.hit();
             return Ok(hit);
         }
         self.miss();
-        let fresh = self.live_membership(identity_id, tenant_id).await?;
-        self.memberships.put(key, fresh);
+        let fresh = self.live_access(identity_id, tenant_id).await?;
+        self.memberships.put(key, fresh.clone());
         Ok(fresh)
     }
 
@@ -1066,6 +1066,22 @@ impl ControlPlane {
         .execute(&self.pool)
         .await?
         .rows_affected();
+
+        // Per-module exceptions go with the membership. Removing somebody takes
+        // away everything about their access, so re-adding them later starts
+        // from their new role rather than from a rule nobody remembers setting.
+        sqlx::query!(
+            "DELETE FROM membership_module_role r
+              USING membership m
+              WHERE r.membership_id = m.id
+                AND m.identity_id = $1
+                AND m.tenant_id IS NOT DISTINCT FROM $2",
+            identity_id.as_uuid(),
+            scope.tenant().map(TenantId::into_uuid),
+        )
+        .execute(&self.pool)
+        .await?;
+
         // A grant or revocation must take effect now on this node, not after
         // the TTL. Both caches, because the scope decides which one holds it.
         match scope.tenant() {
@@ -1088,29 +1104,47 @@ impl ControlPlane {
         Ok(revoked > 0)
     }
 
-    async fn live_membership(
+    /// Everything that decides what somebody may do here: their tenant-wide
+    /// role and wherever the tenant said something different per module.
+    ///
+    /// One round trip, because it is on the entry path of every request and the
+    /// overrides are almost always empty.
+    async fn live_access(
         &self,
         identity_id: IdentityId,
         tenant_id: TenantId,
-    ) -> Result<Option<Role>, AccessError> {
-        let found = sqlx::query_scalar!(
-            "SELECT role FROM membership
-              WHERE identity_id = $1 AND tenant_id = $2 AND revoked_at IS NULL",
+    ) -> Result<Option<Access>, AccessError> {
+        let rows = sqlx::query!(
+            r#"SELECT m.role as "role!", r.module_id, r.role as "module_role?"
+                 FROM membership m
+                 LEFT JOIN membership_module_role r ON r.membership_id = m.id
+                WHERE m.identity_id = $1 AND m.tenant_id = $2 AND m.revoked_at IS NULL"#,
             identity_id.as_uuid(),
             tenant_id.as_uuid(),
         )
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
+
+        let Some(first) = rows.first() else {
+            return Ok(None);
+        };
 
         // A stored role this build does not know is an error, not a default.
         // Defaulting down locks someone out silently; defaulting up lets them
         // in silently.
-        found
-            .map(|role| {
-                role.parse::<Role>()
-                    .map_err(|e| AccessError::Corrupt(e.to_string()))
-            })
-            .transpose()
+        let mut access = Access::new(parse_role(&first.role)?);
+
+        for row in &rows {
+            let (Some(module), Some(role)) = (row.module_id.as_ref(), row.module_role.as_ref())
+            else {
+                continue;
+            };
+            let module = ModuleId::new(module.clone())
+                .map_err(|e| AccessError::Corrupt(format!("module_role.module_id: {e}")))?;
+            access.overrides.push((module, parse_role(role)?));
+        }
+
+        Ok(Some(access))
     }
 
     async fn platform_membership(&self, identity_id: IdentityId) -> Result<bool, AccessError> {
@@ -1365,6 +1399,16 @@ fn parse_tenant_status(raw: &str) -> Result<TenantStatus, AccessError> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// A stored role this build must recognise.
+fn parse_role(raw: &str) -> Result<Role, AccessError> {
+    raw.parse::<Role>()
+        .map_err(|e| AccessError::Corrupt(e.to_string()))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per column of the row it decodes; a struct here would be `Tenant` with different validation"
+)]
 pub(crate) fn tenant_from_row(
     id: TenantId,
     slug: String,
