@@ -978,3 +978,28 @@ here and folded back into ARCHITECTURE.md.
   with its password, and a new one is created under that address and no other.
   Wrong password does not burn the invitation — a typo should not become a
   support ticket.
+
+- **The takeover was a class, so the class got audited.** Every `ON CONFLICT DO
+  UPDATE` in the codebase, every write to `session`, `membership` and
+  `identity`, and every privileged control-plane method checked for a route that
+  reaches it. Two more findings, one real:
+
+  **Removing a member made them permanently un-addable.** The unique constraint
+  on `(identity_id, tenant_id)` covers revoked rows, and `grant_membership` was
+  a plain `INSERT` — so re-adding anyone hit a 500 that named nothing. An
+  employee who leaves and comes back is not an edge case.
+
+  Granting now revives a revoked membership, and the `WHERE membership.revoked_at
+  IS NOT NULL` on the `DO UPDATE` is the whole safety of it: without that clause
+  the same statement would be a way around `change_role`'s last-owner guard.
+  That is the lesson from `set_password` applied on the spot — an upsert that
+  means two things is the thing to be suspicious of.
+
+  **Managing a stranger answered 204.** Changing or removing an identity that
+  belongs to a different tenant updated no rows and reported success. Isolation
+  held — a test asserts the other tenant's membership was untouched, and it
+  passed before the fix — but an owner who mistyped an id was told something had
+  happened. Now a 404.
+
+  `suspend_identity`, `log_out_everywhere` and `Actor::impersonating` turned out
+  to have no HTTP route at all, which is the right answer for all three.

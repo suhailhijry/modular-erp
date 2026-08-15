@@ -179,6 +179,9 @@ fn member_problem(error: &MemberError, locale: Locale) -> Problem {
         MemberError::AlreadyAMember(_) => StatusCode::CONFLICT,
         // Well-formed and refused on the state of the tenant, not the request.
         MemberError::LastOwner => StatusCode::UNPROCESSABLE_ENTITY,
+        // Names somebody who is not here. Not an oracle: the caller can already
+        // list this tenant's members.
+        MemberError::NotAMember => StatusCode::NOT_FOUND,
         MemberError::Access(_) | MemberError::Auth(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     if status.is_server_error() {

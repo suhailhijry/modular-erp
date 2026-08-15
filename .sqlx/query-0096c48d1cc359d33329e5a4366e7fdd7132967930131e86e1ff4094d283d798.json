@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO membership (id, identity_id, scope_kind, tenant_id, role)\n             VALUES ($1, $2, $3, $4, $5)\n             ON CONFLICT ON CONSTRAINT membership_is_unique_per_scope DO UPDATE\n                SET role = EXCLUDED.role, revoked_at = NULL, created_at = now()\n              WHERE membership.revoked_at IS NOT NULL\n            RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "membership",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0096c48d1cc359d33329e5a4366e7fdd7132967930131e86e1ff4094d283d798"
+}

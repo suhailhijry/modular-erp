@@ -39,6 +39,7 @@ pub const SESSION_EXPIRED: MessageCode = MessageCode::new("auth.session_expired"
 /// when you know which permission.
 pub const NOT_PERMITTED: MessageCode = MessageCode::new("access.not_permitted");
 pub const ALREADY_A_MEMBER: MessageCode = MessageCode::new("members.already_a_member");
+pub const NOT_A_MEMBER: MessageCode = MessageCode::new("members.not_a_member");
 pub const INVITATION_NOT_VALID: MessageCode = MessageCode::new("invitations.not_valid");
 pub const LAST_OWNER: MessageCode = MessageCode::new("members.last_owner");
 
@@ -59,6 +60,7 @@ pub static CODES: &[MessageCode] = &[
     SESSION_EXPIRED,
     NOT_PERMITTED,
     ALREADY_A_MEMBER,
+    NOT_A_MEMBER,
     INVITATION_NOT_VALID,
     LAST_OWNER,
 ];
@@ -279,5 +281,15 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         HANDLE_TAKEN,
         Locale::Arabic,
         Template::Simple("لدى {handle} حساب بالفعل. سجّل الدخول به بدلًا من ذلك."),
+    ),
+    (
+        NOT_A_MEMBER,
+        Locale::English,
+        Template::Simple("That person is not a member of this tenant."),
+    ),
+    (
+        NOT_A_MEMBER,
+        Locale::Arabic,
+        Template::Simple("هذا الشخص ليس عضوًا لدى هذا المستأجر."),
     ),
 ];

@@ -963,17 +963,47 @@ impl ControlPlane {
         actor: Actor,
     ) -> Result<MembershipId, AccessError> {
         let id = MembershipId::new();
-        sqlx::query!(
+
+        // # Why this is an upsert, and why its `WHERE` matters
+        //
+        // The unique constraint covers revoked rows, so a plain `INSERT` made
+        // *removing* someone permanent: an employee who left and came back, or
+        // anyone removed by mistake, could never be added again — and the
+        // failure was a 500 that named nothing.
+        //
+        // The `WHERE membership.revoked_at IS NOT NULL` is the whole safety of
+        // it. Reviving a revoked membership is this function's job; quietly
+        // changing a *live* member's role is not, and without that clause this
+        // would be a way around `change_role`'s last-owner guard.
+        let revived = sqlx::query_scalar!(
             "INSERT INTO membership (id, identity_id, scope_kind, tenant_id, role)
-             VALUES ($1, $2, $3, $4, $5)",
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT ON CONSTRAINT membership_is_unique_per_scope DO UPDATE
+                SET role = EXCLUDED.role, revoked_at = NULL, created_at = now()
+              WHERE membership.revoked_at IS NOT NULL
+            RETURNING id",
             id.as_uuid(),
             identity_id.as_uuid(),
             scope.kind_str(),
             scope.tenant().map(TenantId::into_uuid),
             role,
         )
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
+
+        let Some(id) = revived.map(MembershipId::from_uuid) else {
+            // A live membership was already there. Idempotent success, and
+            // deliberately without touching the role — callers that mean to
+            // change one call `change_role`, which knows about last owners.
+            return self
+                .membership_id(identity_id, scope)
+                .await?
+                .ok_or_else(|| {
+                    AccessError::Corrupt(
+                        "a membership conflicted and then could not be found".to_owned(),
+                    )
+                });
+        };
         // A grant or revocation must take effect now on this node, not after
         // the TTL. Both caches, because the scope decides which one holds it.
         match scope.tenant() {
@@ -997,13 +1027,33 @@ impl ControlPlane {
         Ok(id)
     }
 
+    /// The live membership joining an identity to a scope, if there is one.
+    async fn membership_id(
+        &self,
+        identity_id: IdentityId,
+        scope: Scope,
+    ) -> Result<Option<MembershipId>, AccessError> {
+        Ok(sqlx::query_scalar!(
+            "SELECT id FROM membership
+              WHERE identity_id = $1
+                AND tenant_id IS NOT DISTINCT FROM $2
+                AND revoked_at IS NULL",
+            identity_id.as_uuid(),
+            scope.tenant().map(TenantId::into_uuid),
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(MembershipId::from_uuid))
+    }
+
+    /// Takes a membership away. Returns whether there was one to take.
     pub async fn revoke_membership(
         &self,
         identity_id: IdentityId,
         scope: Scope,
         actor: Actor,
-    ) -> Result<(), AccessError> {
-        sqlx::query!(
+    ) -> Result<bool, AccessError> {
+        let revoked = sqlx::query!(
             "UPDATE membership SET revoked_at = now()
               WHERE identity_id = $1
                 AND tenant_id IS NOT DISTINCT FROM $2
@@ -1012,7 +1062,8 @@ impl ControlPlane {
             scope.tenant().map(TenantId::into_uuid),
         )
         .execute(&self.pool)
-        .await?;
+        .await?
+        .rows_affected();
         // A grant or revocation must take effect now on this node, not after
         // the TTL. Both caches, because the scope decides which one holds it.
         match scope.tenant() {
@@ -1030,7 +1081,9 @@ impl ControlPlane {
                 "tenant": scope.tenant().map(|t| t.to_string()),
             }),
         )
-        .await
+        .await?;
+
+        Ok(revoked > 0)
     }
 
     async fn live_membership(

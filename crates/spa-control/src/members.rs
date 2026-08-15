@@ -38,6 +38,13 @@ pub struct Member {
 pub enum MemberError {
     #[error("{0} already has access to this tenant")]
     AlreadyAMember(String),
+    /// The identity named is not a member of *this* tenant.
+    ///
+    /// A 404 rather than a silent success. Changing or removing a stranger used
+    /// to update no rows and answer `204`, which told an owner who mistyped an
+    /// id that something had happened when nothing had.
+    #[error("that identity is not a member of this tenant")]
+    NotAMember,
     /// The last owner cannot be removed or demoted.
     ///
     /// Not paternalism: a tenant with no owner has nobody who can add one, and
@@ -57,6 +64,7 @@ impl spa_i18n::Localize for MemberError {
         match self {
             Self::AlreadyAMember(handle) => Message::new(messages::ALREADY_A_MEMBER)
                 .with("handle", MessageArg::text(handle.clone())),
+            Self::NotAMember => Message::new(messages::NOT_A_MEMBER),
             Self::LastOwner => Message::new(messages::LAST_OWNER),
             Self::Access(e) => e.message(),
             Self::Auth(e) => e.message(),
@@ -163,7 +171,7 @@ impl ControlPlane {
             return Err(MemberError::LastOwner);
         }
 
-        sqlx::query!(
+        let changed = sqlx::query!(
             "UPDATE membership SET role = $3
               WHERE tenant_id = $1 AND identity_id = $2 AND revoked_at IS NULL",
             tenant_id.as_uuid(),
@@ -172,7 +180,12 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await
-        .map_err(AccessError::Database)?;
+        .map_err(AccessError::Database)?
+        .rows_affected();
+
+        if changed == 0 {
+            return Err(MemberError::NotAMember);
+        }
 
         // Now, not after the TTL: a demotion that takes five seconds to apply is
         // five seconds of someone doing what they were just told they cannot.
@@ -199,8 +212,12 @@ impl ControlPlane {
         if self.is_last_owner(tenant_id, identity).await? {
             return Err(MemberError::LastOwner);
         }
-        self.revoke_membership(identity, Scope::Tenant(tenant_id), actor)
-            .await?;
+        if !self
+            .revoke_membership(identity, Scope::Tenant(tenant_id), actor)
+            .await?
+        {
+            return Err(MemberError::NotAMember);
+        }
         Ok(())
     }
 

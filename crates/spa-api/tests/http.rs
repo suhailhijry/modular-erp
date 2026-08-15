@@ -2912,3 +2912,119 @@ async fn signing_up_again_with_your_own_address_gives_you_a_second_tenant() {
 
     fixture.cleanup().await;
 }
+
+/// **Regression: removing a member made them permanently un-addable.**
+///
+/// The unique constraint on `(identity_id, tenant_id)` covers revoked rows, and
+/// `grant_membership` was a plain `INSERT` — so an employee who left and came
+/// back, or anyone removed by mistake, hit a 500 that named nothing. Granting
+/// now revives a revoked membership, and only a revoked one.
+#[tokio::test]
+async fn somebody_removed_can_be_added_again() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let add = |role: &'static str| {
+        Request::post("/v1/tenants/acme/members")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "email": "sara@acme.test", "password": "sara's own password", "role": role
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture.send(add("clerk")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let identity = body["identity"].as_str().expect("an identity").to_owned();
+
+    let (status, _, _) = fixture
+        .send(
+            Request::delete(format!("/v1/tenants/acme/members/{identity}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Back, with a different role, and as the same person rather than a second
+    // account for the same address.
+    let (status, body, _) = fixture.send(add("accountant")).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["identity"], identity, "the same account, revived");
+
+    let (_, members, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme/members")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let sara = members
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|m| m["identity"] == identity)
+        .expect("is back");
+    assert_eq!(
+        sara["role"], "accountant",
+        "with the role they were re-added as"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Managing a member of another tenant does nothing to them — and now says so
+/// rather than answering `204` to a request that changed nothing.
+#[tokio::test]
+async fn managing_somebody_who_is_not_a_member_here_is_a_404() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let stranger = fixture.user("other@globex.test", "hunter2hunter2").await;
+    let acme = fixture.provision("acme").await;
+    let globex = fixture.provision("globex").await;
+    fixture.join(owner, acme).await;
+    fixture.join(stranger, globex).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::patch(format!("/v1/tenants/acme/members/{stranger}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "role": "owner" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "members.not_a_member");
+
+    let (status, _, _) = fixture
+        .send(
+            Request::delete(format!("/v1/tenants/acme/members/{stranger}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // And the isolation held throughout: their membership elsewhere is exactly
+    // as it was. This is the assertion that would have caught a leak, and it
+    // passed even before the status was corrected.
+    let members = fixture.control.members(globex).await.expect("reads");
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].role, spa_control::Role::Owner);
+
+    fixture.cleanup().await;
+}
