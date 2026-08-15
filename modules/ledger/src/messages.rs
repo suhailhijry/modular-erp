@@ -6,6 +6,8 @@ pub const ACCOUNT_EXISTS: MessageCode = MessageCode::new("ledger.account_exists"
 pub const NO_SUCH_ACCOUNT: MessageCode = MessageCode::new("ledger.no_such_account");
 pub const ACCOUNT_CLOSED: MessageCode = MessageCode::new("ledger.account_closed");
 pub const ALREADY_POSTED: MessageCode = MessageCode::new("ledger.already_posted");
+pub const NO_SUCH_ENTRY: MessageCode = MessageCode::new("ledger.no_such_entry");
+pub const ALREADY_REVERSED: MessageCode = MessageCode::new("ledger.already_reversed");
 pub const TOO_FEW_LINES: MessageCode = MessageCode::new("ledger.too_few_lines");
 pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("ledger.mixed_currencies");
 pub const DOES_NOT_BALANCE: MessageCode = MessageCode::new("ledger.does_not_balance");
@@ -17,6 +19,8 @@ pub static CODES: &[MessageCode] = &[
     NO_SUCH_ACCOUNT,
     ACCOUNT_CLOSED,
     ALREADY_POSTED,
+    NO_SUCH_ENTRY,
+    ALREADY_REVERSED,
     TOO_FEW_LINES,
     MIXED_CURRENCIES,
     DOES_NOT_BALANCE,
@@ -131,5 +135,25 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         AMOUNT_OUT_OF_RANGE,
         Locale::Arabic,
         Template::Simple("هذا المبلغ أكبر من أن يُسجَّل."),
+    ),
+    (
+        NO_SUCH_ENTRY,
+        Locale::English,
+        Template::Simple("There is no entry {entry}."),
+    ),
+    (
+        NO_SUCH_ENTRY,
+        Locale::Arabic,
+        Template::Simple("لا يوجد قيد {entry}."),
+    ),
+    (
+        ALREADY_REVERSED,
+        Locale::English,
+        Template::Simple("That entry was already reversed by {by}."),
+    ),
+    (
+        ALREADY_REVERSED,
+        Locale::Arabic,
+        Template::Simple("تم عكس هذا القيد بالفعل بواسطة {by}."),
     ),
 ];

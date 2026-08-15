@@ -20,6 +20,10 @@ pub enum LedgerError {
     AccountClosed(String),
     #[error("entry {0} has already been posted")]
     AlreadyPosted(String),
+    #[error("there is no entry {0}")]
+    NoSuchEntry(String),
+    #[error("entry {entry} was already reversed by {by}")]
+    AlreadyReversed { entry: String, by: String },
     #[error(transparent)]
     Unbalanced(#[from] Unbalanced),
     /// A chart shipped a code that is not a usable identifier. A build bug, not
@@ -45,6 +49,12 @@ impl spa_i18n::Localize for LedgerError {
             // Not an error a user should see as a failure — the entry is there.
             // The route turns this into a 200 with the existing entry.
             Self::AlreadyPosted(_) => Message::new(messages::ALREADY_POSTED),
+            Self::NoSuchEntry(id) => {
+                Message::new(messages::NO_SUCH_ENTRY).with("entry", MessageArg::text(id.clone()))
+            }
+            Self::AlreadyReversed { by, .. } => {
+                Message::new(messages::ALREADY_REVERSED).with("by", MessageArg::text(by.clone()))
+            }
             Self::Unbalanced(e) => e.message(),
             Self::BadAccountCode(_) => Message::new(spa_control::messages::INTERNAL),
         }
@@ -230,6 +240,145 @@ pub async fn post_entry_in(
                 occurred_on,
                 memo: memo.clone(),
                 lines: lines.clone(),
+            }))
+        },
+    )
+    .await
+}
+
+/// Undoes an entry by posting its opposite.
+///
+/// # Why accounting does not delete
+///
+/// A posted entry is a statement about what happened, and someone may have
+/// filed a return against it. Correcting one means saying something *else* —
+/// the same lines with the signs flipped, on a date of its own — so the books
+/// show both the mistake and the correction. Deleting it would silently restate
+/// a period that has already been reported.
+///
+/// # What happens, in one transaction
+///
+/// The opposite entry is posted under `reversal`, and the original records that
+/// it was reversed and by what. Both, or neither: an entry marked reversed with
+/// no reversal to show for it is a hole in the trial balance, and a reversal
+/// with nothing marked is a double-count.
+///
+/// Re-running with the same `reversal` id is a no-op, so a retried request is
+/// safe. Re-running with a *different* one is refused, because an entry that
+/// has already been undone cannot be undone again — the second attempt would
+/// swing the balance the other way.
+pub async fn reverse_entry(
+    db: &TenantDb,
+    original: &AggregateId,
+    reversal: &AggregateId,
+    occurred_on: Timestamp,
+    memo: &str,
+    metadata: &Metadata,
+) -> Outcome<JournalEntryEvent> {
+    for _ in 1..=spa_eventlog::MAX_ATTEMPTS {
+        let mut tx = db.begin().await?;
+        match reverse_in(&mut tx, original, reversal, occurred_on, memo, metadata).await {
+            Ok(committed) => {
+                tx.commit().await.map_err(ExecuteError::from)?;
+                return Ok(committed);
+            }
+            Err(e) if e.is_conflict() => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+            }
+            Err(e) => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+                return Err(e.into());
+            }
+        }
+    }
+
+    Err(ExecuteError::Contended {
+        stream: spa_types::StreamId::new(
+            <JournalEntry as spa_eventlog::Aggregate>::domain(),
+            original.clone(),
+        ),
+        attempts: spa_eventlog::MAX_ATTEMPTS,
+    }
+    .into())
+}
+
+/// One attempt at reversing, in the caller's transaction.
+///
+/// Public for the same reason [`post_entry_in`] is: a module that reverses its
+/// own document — a credit note — has to do it alongside its own events.
+pub async fn reverse_in(
+    conn: &mut sqlx::PgConnection,
+    original: &AggregateId,
+    reversal: &AggregateId,
+    occurred_on: Timestamp,
+    memo: &str,
+    metadata: &Metadata,
+) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
+    let loaded =
+        spa_eventlog::load::<JournalEntry>(&mut *conn, original, crate::upcasters()).await?;
+
+    if !loaded.aggregate.posted {
+        return Err(ExecuteError::Rejected(LedgerError::NoSuchEntry(
+            original.as_str().to_owned(),
+        )));
+    }
+
+    // A retry, not a second reversal.
+    if loaded.aggregate.reversed_by.as_deref() == Some(reversal.as_str()) {
+        return Ok(Committed {
+            events: Vec::new(),
+            at: None,
+            version: loaded.version,
+            effects_enqueued: 0,
+        });
+    }
+    if let Some(by) = loaded.aggregate.reversed_by {
+        return Err(ExecuteError::Rejected(LedgerError::AlreadyReversed {
+            entry: original.as_str().to_owned(),
+            by,
+        }));
+    }
+
+    let lines = loaded.aggregate.lines.ok_or_else(|| {
+        ExecuteError::Rejected(LedgerError::NoSuchEntry(original.as_str().to_owned()))
+    })?;
+
+    // Negating a balanced set leaves it balanced, so this cannot produce an
+    // entry the ledger would refuse — but it goes through `BalancedLines::new`
+    // anyway, because the type's guarantee is worth more than the shortcut.
+    let flipped = lines
+        .as_slice()
+        .iter()
+        .map(|line| {
+            Ok(crate::lines::Line {
+                account: line.account.clone(),
+                amount: line
+                    .amount
+                    .checked_neg()
+                    .map_err(|e| ExecuteError::Rejected(LedgerError::Unbalanced(e.into())))?,
+                memo: line.memo.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, ExecuteError<LedgerError>>>()?;
+
+    let flipped = BalancedLines::new(flipped)
+        .map_err(|e| ExecuteError::Rejected(LedgerError::Unbalanced(e)))?;
+
+    post_entry_in(&mut *conn, reversal, occurred_on, memo, &flipped, metadata).await?;
+
+    let by = reversal.as_str().to_owned();
+    spa_eventlog::try_execute::<JournalEntry, _, LedgerError>(
+        conn,
+        original,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if loaded.aggregate.is_reversed() {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(JournalEntryEvent::Reversed {
+                by: by.clone(),
+                occurred_on,
             }))
         },
     )

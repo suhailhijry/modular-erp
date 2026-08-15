@@ -254,7 +254,13 @@ first `Idempotency-Key` and `ETag` have a real mutation to attach to.
       stored postings must still sum to zero
 - [x] Shadow replay proves the ledger rebuilds identically
 - [x] HTTP routes; the same `Tenant` extractor, so isolation is inherited
-- [ ] Fiscal periods, drafts, reversals, multi-currency entries with FX
+- [x] Reversals — an entry posted in error is undone by posting its opposite,
+      both in one transaction, refused if already undone
+- [ ] Fiscal periods, drafts, multi-currency entries with FX
+- [ ] An entry-level read model *(a `proj_ledger.entry` table would show which
+      entry reversed which, and let entries be listed at all — but adding a
+      table to a module's install script needs the fleet-wide module refresh
+      that nothing needs yet, and nothing displays the link today)*
       *(each needs someone to want it before its shape is decided)*
 - [x] Chart-of-accounts templates — `services` and `retail`, bilingual, with
       Saudi VAT and Zakat accounts in both
@@ -1136,3 +1142,31 @@ here and folded back into ARCHITECTURE.md.
   than it looks: if it were, somebody held back in every module they have could
   reach `/v1/tenants/acme/anything/…` and fall back to a role they were
   deliberately not given.
+
+- **`JournalEntryEvent::Reversed` had existed since Phase 3 with no command that
+  produced it.** Declared, named, upcast-registered, applied by the aggregate,
+  written by nothing — the fourth instance this session of a thing that exists
+  and has no caller, and the pattern behind three of the real bugs found so far.
+
+  It mattered more than the others: without it, **a mistake was permanent.** An
+  entry posted for the wrong amount could not be corrected by any route, which
+  is not a missing feature in an accounting system so much as a missing
+  premise.
+
+  `reverse_entry` posts the opposite lines and marks the original, both in one
+  transaction — an entry marked reversed with no reversal to show for it is a
+  hole in the trial balance, and a reversal with nothing marked is a
+  double-count. Reversing again with the *same* id is a no-op, so a retry is
+  safe; with a different one it is refused and says what already undid it,
+  because the second attempt would swing the balance the other way.
+
+  The aggregate now keeps its lines, so undoing one does not need a second
+  place that knows how a `Posted` event is shaped.
+
+- **What was deliberately not built with it.** The obvious companion is a
+  `proj_ledger.entry` table showing which entry reversed which. It was left out:
+  adding a table to a module's install script means re-running it across the
+  fleet and replaying the group, which is the module-refresh machinery deferred
+  in Phase 4 — and nothing displays the link today, because there is no
+  entry-list endpoint either. The correction works, the books balance, and the
+  read model arrives with the screen that wants it.

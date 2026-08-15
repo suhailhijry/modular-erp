@@ -10,7 +10,7 @@
 //! What the module does own is everything that matters: the aggregates, the
 //! invariant, and the read models. This file only translates.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Json, Router, routing};
@@ -37,6 +37,10 @@ pub(crate) fn routes() -> Router<AppState> {
         .route(
             "/v1/tenants/{slug}/ledger/entries",
             routing::post(post_entry),
+        )
+        .route(
+            "/v1/tenants/{slug}/ledger/entries/{entry}/reversal",
+            routing::post(reverse_entry),
         )
         .route(
             "/v1/tenants/{slug}/ledger/trial-balance",
@@ -239,6 +243,59 @@ async fn post_entry(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct NewReversal {
+    /// The client's own identifier for the *reversing* entry. Sending the same
+    /// one twice is a no-op; a different one against an already-reversed entry
+    /// is refused.
+    id: String,
+    /// When the correction is treated as happening. Usually today, not the date
+    /// of the mistake — reversing into a closed period is how a filed return
+    /// stops matching the books.
+    occurred_on: Timestamp,
+    #[serde(default)]
+    memo: String,
+}
+
+/// Undoes an entry by posting its opposite.
+///
+/// A `POST`, not a `DELETE`: nothing is removed. The books end up showing both
+/// the mistake and the correction, which is what makes them auditable.
+async fn reverse_entry(
+    tenant: Allowed<PostEntries>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+    Json(body): Json<NewReversal>,
+) -> Result<Json<EntryPosted>, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
+
+    let original = parse_id(params.get("entry").map_or("", String::as_str), locale)?;
+    let reversal = parse_id(&body.id, locale)?;
+
+    let committed = ledger::reverse_entry(
+        &tenant.db,
+        &original,
+        &reversal,
+        body.occurred_on,
+        &body.memo,
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| ledger_problem(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+
+    Ok(Json(EntryPosted {
+        id: body.id,
+        position: committed.at.map(spa_types::LogPosition::get),
+        // The reversal has exactly the lines the original had. Reporting the
+        // count would mean loading it again to say something the client already
+        // knows.
+        lines: committed.events.len(),
+    }))
+}
+
 async fn trial_balance(
     tenant: Allowed<Read>,
     Language(locale): Language,
@@ -285,12 +342,14 @@ fn ledger_problem(error: &CommandError<ledger::LedgerError>, locale: Locale) -> 
         // The client's fault, and the message says which part.
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
-                // The code is taken; picking another is the client's move.
-                ledger::LedgerError::AccountExists(_) => StatusCode::CONFLICT,
+                // Both mean "look at what is there now and decide again": a
+                // code somebody else took, and an entry somebody else undid.
+                ledger::LedgerError::AccountExists(_)
+                | ledger::LedgerError::AlreadyReversed { .. } => StatusCode::CONFLICT,
                 // Well-formed, but refers to something that is not there.
-                ledger::LedgerError::NoSuchAccount(_) | ledger::LedgerError::AccountClosed(_) => {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                }
+                ledger::LedgerError::NoSuchAccount(_)
+                | ledger::LedgerError::AccountClosed(_)
+                | ledger::LedgerError::NoSuchEntry(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::BAD_REQUEST,
             },
             rejection.message(),

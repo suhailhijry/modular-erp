@@ -3469,3 +3469,96 @@ async fn a_module_demotion_takes_effect_immediately() {
 
     fixture.cleanup().await;
 }
+
+/// **A mistake can be corrected, over HTTP.** A `POST`, not a `DELETE`: the
+/// books end up showing both the entry and its correction.
+#[tokio::test]
+async fn an_entry_posted_in_error_can_be_reversed_over_http() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/ledger/entries"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "E-OOPS",
+                        "occurred_on": "2026-03-01T00:00:00Z",
+                        "memo": "wrong amount",
+                        "lines": [
+                            { "account": "1000", "amount": { "minor": 50_000, "currency": "SAR" } },
+                            { "account": "4000", "amount": { "minor": -50_000, "currency": "SAR" } }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    fixture.project_ledger(tenant).await;
+    assert_eq!(fixture.ledger_balance(&token, "acme", "1000").await, 50_000);
+
+    let reverse = |id: &'static str| {
+        bearer(Request::post(
+            "/v1/tenants/acme/ledger/entries/E-OOPS/reversal",
+        ))
+        .body(Body::from(
+            serde_json::json!({
+                "id": id,
+                "occurred_on": "2026-03-05T00:00:00Z",
+                "memo": "correcting E-OOPS"
+            })
+            .to_string(),
+        ))
+        .unwrap()
+    };
+
+    let (status, body, _) = fixture.send(reverse("E-OOPS-R")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    fixture.project_ledger(tenant).await;
+    assert_eq!(
+        fixture.ledger_balance(&token, "acme", "1000").await,
+        0,
+        "undone"
+    );
+
+    // A second, different reversal is refused rather than swinging the balance
+    // the other way.
+    let (status, body, _) = fixture.send(reverse("E-OOPS-R2")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "ledger.already_reversed");
+    assert_eq!(body["args"]["by"]["value"], "E-OOPS-R");
+
+    // Reversing something that was never posted is about the tenant's state,
+    // not the request's shape.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post(
+                "/v1/tenants/acme/ledger/entries/NOPE/reversal",
+            ))
+            .body(Body::from(
+                serde_json::json!({ "id": "NOPE-R", "occurred_on": "2026-03-05T00:00:00Z" })
+                    .to_string(),
+            ))
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "ledger.no_such_entry");
+
+    fixture.cleanup().await;
+}

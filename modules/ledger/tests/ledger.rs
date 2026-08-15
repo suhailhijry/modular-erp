@@ -150,6 +150,16 @@ impl Fixture {
         .expect("opens");
     }
 
+    /// One account's balance, or zero if it has never been posted to.
+    async fn balance(&self, account: &str) -> Money {
+        let mut conn = self.db.acquire().await.expect("connection");
+        let accounts = account_balances(&mut conn).await.expect("reads");
+        accounts
+            .into_iter()
+            .find(|a| a.code == account)
+            .map_or_else(|| money(0), |a| a.balance)
+    }
+
     async fn imbalances(&self) -> Vec<ledger::TrialBalance> {
         let mut conn = self.db.acquire().await.expect("connection");
         imbalances(&mut conn).await.expect("reads")
@@ -807,4 +817,219 @@ async fn an_installed_chart_is_ordinary_accounts() {
     assert!(fixture.imbalances().await.is_empty());
 
     fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Reversal
+// ---------------------------------------------------------------------------
+
+/// **The requirement.** A mistake can be corrected, and the books show both.
+#[tokio::test]
+async fn an_entry_posted_in_error_can_be_reversed() {
+    let fixture = Fixture::new().await;
+    fixture.account("1000", AccountKind::Asset, sar()).await;
+    fixture.account("4000", AccountKind::Revenue, sar()).await;
+
+    let lines = BalancedLines::new(vec![
+        Line::new(code("1000"), riyals(500)),
+        Line::new(code("4000"), riyals(-500)),
+    ])
+    .expect("balances");
+
+    post_entry(
+        &fixture.db,
+        &code("E-1"),
+        when(),
+        "wrong",
+        lines,
+        &Metadata::default(),
+    )
+    .await
+    .expect("posts");
+    fixture.project().await;
+    assert_eq!(fixture.balance("1000").await, riyals(500));
+
+    ledger::reverse_entry(
+        &fixture.db,
+        &code("E-1"),
+        &code("E-1R"),
+        when(),
+        "correcting E-1",
+        &Metadata::default(),
+    )
+    .await
+    .expect("reverses");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1000").await, money(0), "undone");
+    assert_eq!(fixture.balance("4000").await, money(0));
+
+    // Nothing was deleted: both the mistake and the correction are on the
+    // books, which is what makes them auditable.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let postings: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM proj_ledger.posting WHERE entry_id IN ($1, $2)")
+            .bind("E-1")
+            .bind("E-1R")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("counts");
+    drop(conn);
+    assert_eq!(postings, 4, "two lines each, both still there");
+
+    assert!(fixture.imbalances().await.is_empty());
+    fixture.cleanup().await;
+}
+
+/// Reversing twice would swing the balance the other way, so the second attempt
+/// is refused — unless it is the same request arriving again.
+#[tokio::test]
+async fn an_entry_cannot_be_reversed_twice() {
+    let fixture = Fixture::new().await;
+    fixture.account("1000", AccountKind::Asset, sar()).await;
+    fixture.account("4000", AccountKind::Revenue, sar()).await;
+
+    let lines = BalancedLines::new(vec![
+        Line::new(code("1000"), riyals(500)),
+        Line::new(code("4000"), riyals(-500)),
+    ])
+    .expect("balances");
+    post_entry(
+        &fixture.db,
+        &code("E-2"),
+        when(),
+        "",
+        lines,
+        &Metadata::default(),
+    )
+    .await
+    .expect("posts");
+
+    reverse(&fixture, "E-2R").await.expect("reverses");
+
+    // The same request again: a no-op, so a retry is safe.
+    let retry = reverse(&fixture, "E-2R").await.expect("is not an error");
+    assert!(retry.events.is_empty(), "a retry writes nothing");
+
+    // A different one: refused, and it says what already undid it.
+    let error = reverse(&fixture, "E-2R2")
+        .await
+        .expect_err("already reversed");
+    assert!(
+        matches!(
+            rejection(&error),
+            Some(LedgerError::AlreadyReversed { by, .. }) if by == "E-2R"
+        ),
+        "{error:?}"
+    );
+
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("1000").await,
+        money(0),
+        "reversed exactly once"
+    );
+    fixture.cleanup().await;
+}
+
+/// An entry nobody posted cannot be undone, and the attempt writes nothing.
+#[tokio::test]
+async fn reversing_an_entry_that_does_not_exist_leaves_no_trace() {
+    let fixture = Fixture::new().await;
+    fixture.account("1000", AccountKind::Asset, sar()).await;
+
+    let error = ledger::reverse_entry(
+        &fixture.db,
+        &code("NOPE"),
+        &code("NOPE-R"),
+        when(),
+        "",
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("there is no such entry");
+    assert!(matches!(
+        rejection(&error),
+        Some(LedgerError::NoSuchEntry(_))
+    ));
+
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let postings: i64 = sqlx::query_scalar("SELECT count(*) FROM proj_ledger.posting")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("counts");
+    drop(conn);
+    assert_eq!(postings, 0, "the failed attempt posted nothing");
+
+    fixture.cleanup().await;
+}
+
+/// A reversal is an ordinary entry, so the log still rebuilds to what is live.
+#[tokio::test]
+async fn reversals_replay_like_anything_else() {
+    let fixture = Fixture::new().await;
+    fixture.account("1000", AccountKind::Asset, sar()).await;
+    fixture.account("4000", AccountKind::Revenue, sar()).await;
+
+    for n in 0..4_i64 {
+        let id = format!("E-R{n}");
+        let lines = BalancedLines::new(vec![
+            Line::new(code("1000"), money(n * 101 + 7)),
+            Line::new(code("4000"), money(-(n * 101 + 7))),
+        ])
+        .expect("balances");
+        post_entry(
+            &fixture.db,
+            &code(&id),
+            when(),
+            "",
+            lines,
+            &Metadata::default(),
+        )
+        .await
+        .expect("posts");
+
+        if n % 2 == 0 {
+            ledger::reverse_entry(
+                &fixture.db,
+                &code(&id),
+                &code(&format!("{id}-REV")),
+                when(),
+                "",
+                &Metadata::default(),
+            )
+            .await
+            .expect("reverses");
+        }
+    }
+    fixture.project().await;
+
+    let pool = fixture.tenant_pool().await;
+    let owned = projections();
+    let refs: Vec<&dyn Projection<Group = Ledger>> = owned.iter().map(AsRef::as_ref).collect();
+    let report = replay_shadow::<Ledger>(&pool, &refs, ledger::upcasters(), 200)
+        .await
+        .expect("replays");
+    pool.close().await;
+
+    assert!(report.is_reproducible(), "{:?}", report.differences());
+    assert!(fixture.imbalances().await.is_empty());
+    fixture.cleanup().await;
+}
+
+/// Reverses `E-2` under a chosen id, for the twice-reversal test.
+async fn reverse(
+    fixture: &Fixture,
+    reversal: &str,
+) -> Result<spa_eventlog::Committed<ledger::JournalEntryEvent>, CommandError<LedgerError>> {
+    ledger::reverse_entry(
+        &fixture.db,
+        &code("E-2"),
+        &code(reversal),
+        when(),
+        "",
+        &Metadata::default(),
+    )
+    .await
 }

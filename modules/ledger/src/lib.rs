@@ -33,7 +33,7 @@ pub use account::{Account, AccountEvent, AccountKind};
 pub use charts::{CHARTS, Chart, Installed, TemplateAccount, chart};
 pub use commands::{
     LedgerError, accepts_postings, close_account, install_chart, open_account, post_entry,
-    post_entry_in, rename_account,
+    post_entry_in, rename_account, reverse_entry, reverse_in,
 };
 pub use entry::{JournalEntry, JournalEntryEvent};
 pub use lines::{BalancedLines, Line, Unbalanced};
