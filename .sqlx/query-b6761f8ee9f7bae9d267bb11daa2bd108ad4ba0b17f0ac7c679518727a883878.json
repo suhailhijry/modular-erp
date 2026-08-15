@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO authenticator (id, identity_id, kind, handle, secret)\n             VALUES ($1, $2, 'password', $3, $4)\n             ON CONFLICT (kind, handle) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b6761f8ee9f7bae9d267bb11daa2bd108ad4ba0b17f0ac7c679518727a883878"
+}

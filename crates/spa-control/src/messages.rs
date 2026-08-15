@@ -33,11 +33,13 @@ pub const SLUG_TAKEN: MessageCode = MessageCode::new("provisioning.slug_taken");
 /// message for all four, for the same reason `NoSuchTenant` and `NotAMember`
 /// share one.
 pub const INVALID_CREDENTIALS: MessageCode = MessageCode::new("auth.invalid_credentials");
+pub const HANDLE_TAKEN: MessageCode = MessageCode::new("auth.handle_taken");
 pub const SESSION_EXPIRED: MessageCode = MessageCode::new("auth.session_expired");
 /// 403, naming the capability. "Ask someone with permission" is only actionable
 /// when you know which permission.
 pub const NOT_PERMITTED: MessageCode = MessageCode::new("access.not_permitted");
 pub const ALREADY_A_MEMBER: MessageCode = MessageCode::new("members.already_a_member");
+pub const INVITATION_NOT_VALID: MessageCode = MessageCode::new("invitations.not_valid");
 pub const LAST_OWNER: MessageCode = MessageCode::new("members.last_owner");
 
 /// Every code this crate can produce. The completeness test walks this list.
@@ -53,9 +55,11 @@ pub static CODES: &[MessageCode] = &[
     CLUSTERS_AT_LIMIT,
     SLUG_TAKEN,
     INVALID_CREDENTIALS,
+    HANDLE_TAKEN,
     SESSION_EXPIRED,
     NOT_PERMITTED,
     ALREADY_A_MEMBER,
+    INVITATION_NOT_VALID,
     LAST_OWNER,
 ];
 
@@ -253,5 +257,27 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         LAST_OWNER,
         Locale::Arabic,
         Template::Simple("يجب أن يبقى للمساحة مالك واحد على الأقل. عيّن مالكًا آخر أولاً."),
+    ),
+    (
+        INVITATION_NOT_VALID,
+        Locale::English,
+        Template::Simple(
+            "That invitation is no longer valid. Ask whoever invited you for a new link.",
+        ),
+    ),
+    (
+        INVITATION_NOT_VALID,
+        Locale::Arabic,
+        Template::Simple("لم تعد هذه الدعوة صالحة. اطلب رابطًا جديدًا ممن دعاك."),
+    ),
+    (
+        HANDLE_TAKEN,
+        Locale::English,
+        Template::Simple("{handle} already has an account. Sign in with it instead."),
+    ),
+    (
+        HANDLE_TAKEN,
+        Locale::Arabic,
+        Template::Simple("لدى {handle} حساب بالفعل. سجّل الدخول به بدلًا من ذلك."),
     ),
 ];

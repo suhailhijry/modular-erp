@@ -24,6 +24,7 @@ mod catalog;
 mod consistency;
 mod error;
 mod extract;
+mod invitations;
 mod ledger_routes;
 mod members;
 pub mod messages;

@@ -71,7 +71,7 @@ impl Fixture {
             .await
             .expect("identity is created");
         self.control
-            .set_password(identity.id, handle.to_owned(), password.to_owned())
+            .register_login(identity.id, handle.to_owned(), password.to_owned())
             .await
             .expect("password is set");
         identity.id
@@ -241,6 +241,23 @@ impl Fixture {
             .find(|a| a["code"] == code)
             .and_then(|a| a["balance"].as_i64())
             .expect("an account with a balance")
+    }
+
+    /// Invites somebody and returns the link's token.
+    async fn invite(&self, token: &str, slug: &str, handle: &str, role: &str) -> String {
+        let (status, body, _) = self
+            .send(
+                Request::post(format!("/v1/tenants/{slug}/invitations"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "handle": handle, "role": role }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        body["token"].as_str().expect("a token").to_owned()
     }
 
     /// Drops every tenant database this test made, however it made it.
@@ -2363,6 +2380,535 @@ async fn the_module_catalogue_is_readable_without_signing_in() {
         .find(|m| m["name"] == "sales")
         .expect("sales is offered");
     assert_eq!(sales["requires"][0], "ledger");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Invitations
+// ---------------------------------------------------------------------------
+
+/// **The requirement, end to end.** A colleague gets access without the owner
+/// ever choosing — or knowing — their password.
+#[tokio::test]
+async fn an_invited_colleague_sets_their_own_password_and_gets_to_work() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, invitation, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/invitations")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "handle": "Sara@Acme.test", "role": "accountant" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{invitation}");
+    assert_eq!(
+        invitation["handle"], "sara@acme.test",
+        "the address is normalised, so the login they end up with is predictable"
+    );
+    let link = invitation["token"].as_str().expect("a token").to_owned();
+
+    // What Sara sees before accepting: what she is joining, and as what.
+    let (status, pending, _) = fixture
+        .send(
+            Request::get(format!("/v1/invitations/{link}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pending}");
+    assert_eq!(pending["slug"], "acme");
+    assert_eq!(pending["role"], "accountant");
+    assert_eq!(pending["has_account"], false, "she is new here");
+
+    let (status, accepted, _) = fixture
+        .send(
+            Request::post(format!("/v1/invitations/{link}/acceptance"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "password": "sara's own password" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{accepted}");
+    let sara = accepted["token"].as_str().expect("a session token");
+
+    // Accepting signed her in, and the role took effect: an accountant may
+    // manage accounts.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/ledger/accounts")
+                .header(header::AUTHORIZATION, format!("Bearer {sara}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "code": "1000", "name": "Cash", "kind": "asset", "currency": "SAR"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // ...but not the tenant itself, because she was invited as an accountant.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/invitations")
+                .header(header::AUTHORIZATION, format!("Bearer {sara}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "handle": "x@acme.test", "role": "owner" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // And she can log in again later with the password she chose — which is the
+    // whole point, and which the owner never saw.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/sessions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "handle": "sara@acme.test", "password": "sara's own password"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    fixture.cleanup().await;
+}
+
+/// An invitation is single use, and a spent link is indistinguishable from one
+/// that never existed.
+#[tokio::test]
+async fn an_invitation_works_once_and_then_says_nothing() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let link = fixture
+        .invite(&token, "acme", "sara@acme.test", "clerk")
+        .await;
+
+    let accept = |link: String, password: &'static str| {
+        Request::post(format!("/v1/invitations/{link}/acceptance"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "password": password }).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, _, _) = fixture.send(accept(link.clone(), "sara's password")).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body, _) = fixture.send(accept(link.clone(), "sara's password")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "spent: {body}");
+    assert_eq!(body["code"], "invitations.not_valid");
+
+    // Byte-identical to a link that was never issued.
+    let (fake, _, _) = fixture
+        .send(
+            Request::get(
+                "/v1/invitations/0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    let (spent, _, _) = fixture
+        .send(
+            Request::get(format!("/v1/invitations/{link}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        fake, spent,
+        "a spent link tells you nothing a fake one does not"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The guard that matters.** A link cannot become somebody else's account: an
+/// address that already has one must prove it with its password.
+#[tokio::test]
+async fn accepting_for_an_existing_account_needs_that_accounts_password() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    // Sara already works somewhere else on this platform.
+    fixture.user("sara@acme.test", "sara's real password").await;
+
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let link = fixture
+        .invite(&token, "acme", "sara@acme.test", "clerk")
+        .await;
+
+    let (status, pending, _) = fixture
+        .send(
+            Request::get(format!("/v1/invitations/{link}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(pending["has_account"], true, "{status}");
+
+    // Somebody who got hold of the link, guessing.
+    let (status, body, _) = fixture
+        .send(
+            Request::post(format!("/v1/invitations/{link}/acceptance"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "password": "not sara's password" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "auth.invalid_credentials");
+
+    // And the invitation is not burnt by the attempt — a typo must not turn
+    // into a support ticket.
+    let (status, _, _) = fixture
+        .send(
+            Request::post(format!("/v1/invitations/{link}/acceptance"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "password": "sara's real password" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "the real Sara still gets in");
+
+    fixture.cleanup().await;
+}
+
+/// Revoking actually revokes: the link stops working, and re-inviting does not
+/// leave the old one alive alongside the new.
+#[tokio::test]
+async fn revoking_and_re_inviting_leave_exactly_one_live_link() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let first = fixture
+        .invite(&token, "acme", "sara@acme.test", "clerk")
+        .await;
+    let second = fixture
+        .invite(&token, "acme", "sara@acme.test", "accountant")
+        .await;
+    assert_ne!(first, second);
+
+    let live = |link: &str| {
+        Request::get(format!("/v1/invitations/{link}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (status, _, _) = fixture.send(live(&first)).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "re-inviting replaces rather than accumulates"
+    );
+    let (status, pending, _) = fixture.send(live(&second)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pending["role"], "accountant");
+
+    // Only one outstanding, and revoking it leaves none.
+    let (_, list, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme/invitations")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let list = list.as_array().expect("a list");
+    assert_eq!(list.len(), 1);
+
+    let id = list[0]["id"].as_str().expect("an id");
+    let (status, _, _) = fixture
+        .send(
+            Request::delete(format!("/v1/tenants/acme/invitations/{id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, _) = fixture.send(live(&second)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a revoked link is dead");
+
+    fixture.cleanup().await;
+}
+
+/// One tenant's invitation id cannot be used to revoke another tenant's.
+#[tokio::test]
+async fn an_invitation_cannot_be_revoked_from_another_tenant() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let acme = fixture.provision("acme").await;
+    let globex = fixture.provision("globex").await;
+    fixture.join(owner, acme).await;
+    fixture.join(owner, globex).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let link = fixture
+        .invite(&token, "acme", "sara@acme.test", "clerk")
+        .await;
+    let (_, list, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme/invitations")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let id = list[0]["id"].as_str().expect("an id").to_owned();
+
+    // Same owner, same id, wrong tenant in the path.
+    let (status, _, _) = fixture
+        .send(
+            Request::delete(format!("/v1/tenants/globex/invitations/{id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "revoking is idempotent");
+
+    let (status, _, _) = fixture
+        .send(
+            Request::get(format!("/v1/invitations/{link}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "but it did not touch acme's invitation"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Somebody who is already in does not need an invitation.
+#[tokio::test]
+async fn inviting_an_existing_member_is_refused() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/tenants/acme/invitations")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT_LANGUAGE, "ar")
+                .body(Body::from(
+                    serde_json::json!({ "handle": "owner@acme.test", "role": "viewer" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "members.already_a_member");
+
+    fixture.cleanup().await;
+}
+
+/// A password chosen through an invitation gets the same rule as one chosen at
+/// signup, and the rule is applied before the token is looked at.
+#[tokio::test]
+async fn an_invitation_will_not_accept_a_short_password() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let link = fixture
+        .invite(&token, "acme", "sara@acme.test", "clerk")
+        .await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post(format!("/v1/invitations/{link}/acceptance"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "password": "short" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.password_too_short");
+
+    // The invitation survives it.
+    let (status, _, _) = fixture
+        .send(
+            Request::get(format!("/v1/invitations/{link}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    fixture.cleanup().await;
+}
+
+/// **Regression: unauthenticated account takeover.**
+///
+/// `set_password` upserted on `(kind, handle)`, so signing up with somebody
+/// else's address overwrote their password while leaving the row pointing at
+/// their identity. The attacker then logged in as them — as an owner of their
+/// tenant — and the victim could not log in at all. From a public endpoint,
+/// with no credential.
+///
+/// The fix is that registering a login and changing one are different
+/// operations: `register_login` refuses a taken handle, and signing up with an
+/// address that already has an account must prove it with that account's
+/// password.
+#[tokio::test]
+async fn signing_up_with_someone_elses_address_cannot_take_their_account() {
+    let mut fixture = Fixture::new().await;
+    let victim = fixture
+        .user("victim@acme.test", "the victim's password")
+        .await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(victim, tenant).await;
+
+    let signup = |password: &'static str| {
+        Request::post("/v1/signups")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "slug": "attacker",
+                    "company": "Attacker",
+                    "email": "victim@acme.test",
+                    "password": password,
+                    "modules": []
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture.send(signup("chosen by the attacker")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "auth.invalid_credentials");
+
+    // The attacker's chosen password is not a way in.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/sessions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "handle": "victim@acme.test", "password": "chosen by the attacker"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // And the victim's own password still is.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/sessions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "handle": "victim@acme.test", "password": "the victim's password"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the victim never lost anything"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// The same address signing up for a second company is a real thing people do,
+/// and it works — by logging in on the way through.
+#[tokio::test]
+async fn signing_up_again_with_your_own_address_gives_you_a_second_tenant() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let first = fixture.provision("acme").await;
+    fixture.join(owner, first).await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/signups")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "slug": "second",
+                        "company": "Second Company",
+                        "email": "owner@acme.test",
+                        "password": "hunter2hunter2",
+                        "modules": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // One account, two tenants — the session it returns reaches both.
+    let token = body["token"].as_str().expect("a token");
+    for slug in ["acme", "second"] {
+        let (status, _, _) = fixture
+            .send(
+                Request::get(format!("/v1/tenants/{slug}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{slug}");
+    }
 
     fixture.cleanup().await;
 }

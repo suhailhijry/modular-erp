@@ -133,11 +133,12 @@ impl ControlPlane {
             identity
         } else {
             let created = self.create_identity(actor).await?;
-            // The password is the caller's to choose and to hand over. An
-            // invitation flow would instead leave this unset and let the
-            // recipient choose one; `add_member` is what it would call once they
-            // had.
-            self.set_password(created.id, handle.clone(), password)
+            // The password is the caller's to choose and to hand over — which is
+            // what invitations exist to avoid. Registering rather than
+            // upserting: the branch above already established this handle is
+            // free, and a race that says otherwise must fail rather than
+            // overwrite somebody.
+            self.register_login(created.id, handle.clone(), password)
                 .await?;
             created.id
         };

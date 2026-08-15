@@ -216,8 +216,10 @@ Built only where the ledger produced a second consumer.
 - [x] A 403 names the capability, in the caller's language
 - [x] Member management: list, add, change role, remove — `ManageTenant`, and
       the last owner cannot remove or demote themselves
-- [ ] Invitations *(the owner sets the password and hands it over today; an
-      emailed token needs an outbox handler nothing has written)*
+- [x] Invitations — a link the inviter passes on, single-use, expiring,
+      revocable. The recipient sets their own password and the owner never sees
+      it. No email: sending one is an outbox effect and belongs with the first
+      real handler
 - [ ] Tenant-local authorization as a projection (L7) *(roles live in the
       control plane for now; the projection is for fact-derived permissions)*
 - [ ] `spa-config`: declarations, layers, versioned resolution, provenance
@@ -928,3 +930,51 @@ here and folded back into ARCHITECTURE.md.
   there. Asking cannot drift the way recording can. Found by counting
   `pg_database` before and after a run — worth doing again after anything that
   creates tenants.
+
+- **An unauthenticated account takeover, found while wiring invitations up.**
+  `set_password` ended with `ON CONFLICT (kind, handle) DO UPDATE SET secret`.
+  That is the right shape for *changing your own password* and a full takeover
+  for *registering a new one* — and the function had both kinds of caller.
+
+  Signing up with somebody else's email overwrote their password and left the
+  authenticator row pointing at **their** identity. Proved before fixing:
+
+  ```
+  signup with victim@acme.test          → 201
+  login as victim, attacker's password  → 201
+  read the victim's tenant as owner     → 200
+  victim's own password                 → 401
+  ```
+
+  Public endpoint, no credential, complete loss of the account and everything
+  the account owned.
+
+  The fix is that the two operations are different operations.
+  `register_login` inserts and refuses a taken handle; a future "change my
+  password" gets its own function whose `WHERE identity_id = $1` is the clause
+  that makes the difference. Signing up with an address that already has an
+  account now has to prove it — which also turns out to be the *right product
+  behaviour*, because the same person opening a second company should not need
+  a second email address. `log_in` split into `authenticate` + `start_session`
+  so signup and invitation-acceptance can check a password at exactly the cost
+  a login checks one.
+
+  What is worth taking from this: **the bug was in a function with a name that
+  described neither caller correctly.** "Set the password" is true of both, and
+  the difference between them is the whole of the security property. It sat
+  there through the auth phase, the API phase and an authorization-matrix test
+  suite, and was only found because a third caller needed the same code and its
+  semantics had to be stated out loud.
+
+- **Invitations without email.** The link is returned to the inviter, once, and
+  they pass it on however they already talk to that person — which for a small
+  business in this market is frequently better than mail, and does not wait on a
+  decision about a provider. Sending it by email is an outbox effect (D9); the
+  control plane has no outbox table, and adding one to carry a handler nobody
+  has written would be building the mechanism before the need.
+
+  What the link cannot do is become somebody else's account. Acceptance always
+  binds to the invited address: an existing account for it must prove itself
+  with its password, and a new one is created under that address and no other.
+  Wrong password does not burn the invitation — a typo should not become a
+  support ticket.

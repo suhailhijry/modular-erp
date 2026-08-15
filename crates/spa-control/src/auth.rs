@@ -20,6 +20,13 @@ pub enum AuthError {
     InvalidCredentials,
     #[error("the session is expired or unknown")]
     NoSession,
+    /// That login handle already belongs to somebody.
+    ///
+    /// Deliberately *not* folded into `InvalidCredentials`: this one reaches a
+    /// caller that has already established who it is talking to, and the answer
+    /// they need is "pick another address", not "wrong password".
+    #[error("{0} already has an account")]
+    HandleTaken(String),
     #[error("password hashing failed: {0}")]
     Hash(String),
     #[error(transparent)]
@@ -31,6 +38,8 @@ impl spa_i18n::Localize for AuthError {
         use crate::messages;
         match self {
             Self::InvalidCredentials => spa_i18n::Message::new(messages::INVALID_CREDENTIALS),
+            Self::HandleTaken(handle) => spa_i18n::Message::new(messages::HANDLE_TAKEN)
+                .with("handle", spa_i18n::MessageArg::text(handle.clone())),
             Self::NoSession => spa_i18n::Message::new(messages::SESSION_EXPIRED),
             Self::Hash(_) | Self::Database(_) => spa_i18n::Message::new(messages::INTERNAL),
         }
@@ -67,6 +76,40 @@ impl std::fmt::Debug for SessionToken {
 pub struct Session {
     pub identity: IdentityId,
     pub expires_at: Timestamp,
+}
+
+/// A one-time link, such as an invitation.
+///
+/// A separate type from [`SessionToken`] rather than a reuse of it: they are
+/// both opaque strings and they are not interchangeable, and the compiler is
+/// the cheapest place to find that out. `Debug` is redacted for the same reason
+/// — an invitation link in a log line is a working way into a tenant.
+#[derive(Clone)]
+pub struct InvitationToken(String);
+
+impl InvitationToken {
+    /// Mints one, returning it with what should be stored.
+    pub(crate) fn mint() -> Result<(Self, Vec<u8>), AuthError> {
+        let token = hex(&random_bytes()?);
+        let digest = SessionToken::digest(&token);
+        Ok((Self(token), digest))
+    }
+
+    /// What to look a presented token up by.
+    pub(crate) fn digest_of(token: &str) -> Vec<u8> {
+        SessionToken::digest(token)
+    }
+
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for InvitationToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InvitationToken(***)")
+    }
 }
 
 /// 32 bytes from the OS. The one random source in this file.
@@ -114,27 +157,48 @@ fn dummy_hash() -> &'static str {
 impl crate::ControlPlane {
     /// Registers a password login for an identity.
     ///
+    /// # Why this insert has no `ON CONFLICT`
+    ///
+    /// It used to. `ON CONFLICT (kind, handle) DO UPDATE SET secret` is the
+    /// right shape for *changing your own password* and a full account takeover
+    /// for *registering a new one* — and this function had both callers. Signing
+    /// up with somebody else's address overwrote their password, left the row
+    /// pointing at their identity, and let the attacker log in as them. From an
+    /// unauthenticated endpoint.
+    ///
+    /// So: a taken handle is an error, and every caller decides what that means.
+    /// A future "change my password" gets its own function with
+    /// `WHERE identity_id = $1` in it, which is the clause that makes the
+    /// difference.
+    ///
     /// Arguments are owned. Elided lifetimes on an `async fn` are what stop
     /// rustc proving a caller's future `Send`, and signup calls this — see
     /// `provision.rs`.
-    pub async fn set_password(
+    pub async fn register_login(
         &self,
         identity: IdentityId,
         handle: String,
         password: String,
     ) -> Result<(), AuthError> {
         let secret = hash_password(&password)?;
-        sqlx::query!(
+        let handle = handle.trim().to_lowercase();
+
+        let inserted = sqlx::query!(
             "INSERT INTO authenticator (id, identity_id, kind, handle, secret)
              VALUES ($1, $2, 'password', $3, $4)
-             ON CONFLICT (kind, handle) DO UPDATE SET secret = EXCLUDED.secret",
+             ON CONFLICT (kind, handle) DO NOTHING",
             uuid::Uuid::now_v7(),
             identity.as_uuid(),
-            handle.trim().to_lowercase(),
+            handle,
             secret,
         )
         .execute(&self.pool)
-        .await?;
+        .await?
+        .rows_affected();
+
+        if inserted == 0 {
+            return Err(AuthError::HandleTaken(handle));
+        }
         Ok(())
     }
 
@@ -147,6 +211,22 @@ impl crate::ControlPlane {
         handle: &str,
         password: &str,
     ) -> Result<(SessionToken, Session), AuthError> {
+        let identity = self.authenticate(handle, password).await?;
+        self.start_session(identity).await
+    }
+
+    /// Checks a password without issuing anything.
+    ///
+    /// The credential half of [`Self::log_in`], separated because two other
+    /// flows need to know *who this is* without starting a session: signing up
+    /// when the address already has an account, and accepting an invitation to
+    /// one. Both must cost what a login costs — every failure is
+    /// [`AuthError::InvalidCredentials`] and every failure takes the same time.
+    pub async fn authenticate(
+        &self,
+        handle: &str,
+        password: &str,
+    ) -> Result<IdentityId, AuthError> {
         let row = sqlx::query!(
             r#"SELECT a.identity_id as "identity_id: IdentityId", a.secret, i.status
                  FROM authenticator a
@@ -168,7 +248,7 @@ impl crate::ControlPlane {
             return Err(AuthError::InvalidCredentials);
         }
 
-        self.start_session(row.identity_id).await
+        Ok(row.identity_id)
     }
 
     /// Issues a session without checking a credential.

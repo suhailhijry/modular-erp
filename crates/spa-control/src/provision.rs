@@ -128,22 +128,36 @@ impl ControlPlane {
     ) -> Result<SignedUp, AccessError> {
         // The identity first: it is the only step with no cleanup, so a failure
         // later leaves an account with no tenant rather than a tenant with no
-        // owner. The same person can sign up again with the same email.
-        let identity = self.create_identity(Actor::system()).await?;
-        self.set_password(identity.id, email, password)
-            .await
-            .map_err(|e| AccessError::Corrupt(e.to_string()))?;
+        // owner.
+        //
+        // An address that already has an account has to **prove it**. This used
+        // to be an upsert that overwrote the existing password — signing up with
+        // somebody else's email took their account over. Now the same person
+        // signing up for a second company logs in on the way through, and
+        // anybody else gets `InvalidCredentials`.
+        let identity = if let Some(existing) = self.identity_for_handle(&email).await? {
+            self.authenticate(&email, &password)
+                .await
+                .map_err(AccessError::Auth)?;
+            existing
+        } else {
+            let created = self.create_identity(Actor::system()).await?;
+            self.register_login(created.id, email, password)
+                .await
+                .map_err(AccessError::Auth)?;
+            created.id
+        };
 
-        let tenant = self.provision(slug, company, identity.id, modules).await?;
+        let tenant = self.provision(slug, company, identity, modules).await?;
 
         let (token, session) = self
-            .start_session(identity.id)
+            .start_session(identity)
             .await
             .map_err(|e| AccessError::Corrupt(e.to_string()))?;
 
         Ok(SignedUp {
             tenant,
-            identity: identity.id,
+            identity,
             token,
             session,
         })
@@ -688,7 +702,7 @@ const _: fn() = || {
     fn assert_send<T: Send>(_: T) {}
     fn provision_is_send(control: &ControlPlane, modules: Vec<ModuleSetup>) {
         assert_send(control.create_identity(Actor::system()));
-        assert_send(control.set_password(IdentityId::new(), String::new(), String::new()));
+        assert_send(control.register_login(IdentityId::new(), String::new(), String::new()));
         assert_send(control.start_session(IdentityId::new()));
         assert_send(control.sign_up(
             String::new(),

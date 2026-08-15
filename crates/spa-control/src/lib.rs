@@ -24,6 +24,7 @@
 
 mod auth;
 mod cache;
+mod invitations;
 mod leases;
 mod members;
 pub mod messages;
@@ -34,7 +35,12 @@ mod provision;
 mod roles;
 mod tenant_db;
 
-pub use auth::{AuthError, SESSION_LIFETIME, Session, SessionToken, hash_password};
+pub use auth::{
+    AuthError, InvitationToken, SESSION_LIFETIME, Session, SessionToken, hash_password,
+};
+pub use invitations::{
+    Accepted, INVITATION_LIFETIME, Invitation, InvitationError, PendingInvitation,
+};
 pub use leases::WorkSchedule;
 pub use members::{Member, MemberError};
 pub use model::{
@@ -111,6 +117,10 @@ pub enum AccessError {
     NoCapacity { clusters_at_limit: usize },
     #[error("the name {0:?} is already taken")]
     SlugTaken(String),
+    /// A credential failed on a path that is not a login — signing up with an
+    /// address that already has an account, most of all.
+    #[error(transparent)]
+    Auth(#[from] crate::AuthError),
 }
 
 /// Handle on the core database.
@@ -1244,6 +1254,7 @@ impl Localize for AccessError {
             Self::SlugTaken(slug) => {
                 Message::new(messages::SLUG_TAKEN).with("slug", MessageArg::text(slug))
             }
+            Self::Auth(e) => e.message(),
             // A database failure or corrupt row is never described to a user.
             // They get "something went wrong"; the detail goes to the log.
             Self::Database(_) | Self::Corrupt(_) => Message::new(messages::INTERNAL),

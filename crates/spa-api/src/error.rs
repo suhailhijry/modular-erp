@@ -59,8 +59,15 @@ impl ApiError {
             // Two different conflicts, one status: a name someone else took, and
             // a record someone else changed first. Both mean "look at what is
             // there now and decide again".
-            Self::Access(AccessError::SlugTaken(_))
+            Self::Access(
+                AccessError::SlugTaken(_) | AccessError::Auth(AuthError::HandleTaken(_)),
+            )
             | Self::Append(spa_eventlog::AppendError::Conflict { .. }) => StatusCode::CONFLICT,
+
+            // Signing up with an address that already has an account, without
+            // that account's password. A credential failure, so 401 — the same
+            // answer a login gives, because it is the same question.
+            Self::Access(AccessError::Auth(_)) => StatusCode::UNAUTHORIZED,
 
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,

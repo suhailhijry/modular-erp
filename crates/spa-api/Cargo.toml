@@ -17,6 +17,7 @@ sales = { workspace = true }
 spa-projection = { workspace = true }
 spa-i18n = { workspace = true }
 spa-types = { workspace = true }
+uuid = { workspace = true }
 thiserror = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
