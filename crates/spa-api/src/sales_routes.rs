@@ -9,7 +9,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Json, Router, routing};
-use sales::{Customer, Draft, InvoiceLine, PostingAccounts, Receipt, SalesError, Vat, VatCategory};
+use sales::{Customer, Draft, InvoiceLine, Receipt, SalesError, Vat, VatCategory};
 use serde::{Deserialize, Serialize};
 use spa_control::CommandError;
 use spa_eventlog::ExecuteError;
@@ -18,7 +18,7 @@ use spa_types::{CurrencyCode, Timestamp};
 
 use crate::consistency::{Consistency, nudge};
 use crate::error::ApiError;
-use crate::extract::{Allowed, Language, PostEntries, Read};
+use crate::extract::{Allowed, Language, ManageAccounts, PostEntries, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
 use crate::wire::{Amount, bad_request, metadata, parse_id, require_module};
@@ -36,6 +36,13 @@ pub(crate) fn routes() -> Router<AppState> {
         .route(
             "/v1/tenants/{slug}/sales/invoices/{invoice}/payments",
             routing::post(record_payment),
+        )
+        // Typed on purpose. The store underneath is key-value; this is not, so
+        // a value that reaches it has already been through the type that gives
+        // it meaning. See `spa_eventlog::config`.
+        .route(
+            "/v1/tenants/{slug}/sales/posting-accounts",
+            routing::get(posting_accounts).put(set_posting_accounts),
         )
 }
 
@@ -222,15 +229,9 @@ async fn issue_invoice(
         note: body.note,
     };
 
-    let committed = sales::issue_invoice(
-        &tenant.db,
-        &id,
-        &draft,
-        &PostingAccounts::conventional(),
-        &metadata(&tenant),
-    )
-    .await
-    .map_err(|e| sales_problem(&e, locale))?;
+    let committed = sales::issue_invoice(&tenant.db, &id, &draft, &metadata(&tenant))
+        .await
+        .map_err(|e| sales_problem(&e, locale))?;
 
     nudge(&state, tenant.db.tenant()).await;
 
@@ -265,7 +266,6 @@ async fn record_payment(
             received_on: body.received_on,
             into: account,
         },
-        &PostingAccounts::conventional(),
         &metadata(&tenant),
     )
     .await
@@ -367,6 +367,145 @@ async fn get_invoice(
             .collect(),
         invoice: view(detail.summary),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AccountsView {
+    /// Debited by what customers owe. Defaults to 1100.
+    receivable: String,
+    /// Credited by what was earned, excluding tax. Defaults to 4000.
+    revenue: String,
+    /// Credited by tax charged and owed to ZATCA. Defaults to 2100.
+    output_vat: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfiguredAccounts {
+    #[serde(flatten)]
+    accounts: AccountsView,
+    /// `false` when nothing has been configured and these are the shipped
+    /// defaults — so a settings screen can say "using the standard chart"
+    /// rather than implying somebody chose this.
+    configured: bool,
+}
+
+/// What sales posts to. Answers with the shipped defaults when the tenant has
+/// never chosen.
+async fn posting_accounts(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<ConfiguredAccounts>, Problem> {
+    require_module(&tenant, &sales::module_id(), locale)?;
+
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+
+    let stored = spa_eventlog::configuration::get::<sales::PostingAccounts>(
+        &mut conn,
+        sales::PostingAccounts::KEY,
+    )
+    .await
+    .map_err(|e| config_problem(&e, locale))?;
+    drop(conn);
+
+    let configured = stored.is_some();
+    let accounts = stored.map_or_else(sales::PostingAccounts::conventional, |c| c.value);
+
+    Ok(Json(ConfiguredAccounts {
+        accounts: AccountsView {
+            receivable: accounts.receivable.as_str().to_owned(),
+            revenue: accounts.revenue.as_str().to_owned(),
+            output_vat: accounts.output_vat.as_str().to_owned(),
+        },
+        configured,
+    }))
+}
+
+/// Chooses what sales posts to.
+///
+/// `ManageAccounts`, not `ManageTenant`: this is a decision about the chart of
+/// accounts, and the person who maintains the chart is the person who should
+/// make it.
+///
+/// **Not retrospective.** Invoices already issued keep the accounts they were
+/// posted to, because those went into the journal entry as values. Changing
+/// this changes the next invoice and nothing before it (L5).
+async fn set_posting_accounts(
+    tenant: Allowed<ManageAccounts>,
+    Language(locale): Language,
+    Json(body): Json<AccountsView>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant, &sales::module_id(), locale)?;
+
+    let accounts = sales::PostingAccounts {
+        receivable: parse_id(&body.receivable, locale)?,
+        revenue: parse_id(&body.revenue, locale)?,
+        output_vat: parse_id(&body.output_vat, locale)?,
+    };
+
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+
+    // Checked against the tenant's own chart before storing. The alternative is
+    // a configuration that looks fine and refuses every invoice, discovered by
+    // whoever raises the next one.
+    //
+    // Asked of the **log**, not of `proj_ledger.account`. The read model is
+    // driven by a worker and lags, so validating against it refuses a chart the
+    // tenant installed a second ago — which is exactly what the first version of
+    // this check did. `ledger::accepts_postings` is the same question
+    // `post_entry_in` asks, asked the same way, and a guard that disagrees with
+    // the command it guards is worse than no guard.
+    for code in [
+        &accounts.receivable,
+        &accounts.revenue,
+        &accounts.output_vat,
+    ] {
+        let usable = ledger::accepts_postings(&mut conn, code)
+            .await
+            .map_err(|e| {
+                ApiError::Access(sqlx::Error::Decode(Box::new(e)).into()).into_problem(locale)
+            })?;
+
+        if !usable {
+            return Err(ApiError::BadRequest(
+                spa_i18n::Message::new(ledger::messages::NO_SUCH_ACCOUNT)
+                    .with("code", spa_i18n::MessageArg::text(code.as_str().to_owned())),
+            )
+            .into_problem(locale));
+        }
+    }
+
+    spa_eventlog::configuration::set(
+        &mut conn,
+        sales::PostingAccounts::KEY,
+        &accounts,
+        Some(&tenant.session.identity.to_string()),
+    )
+    .await
+    .map_err(|e| config_problem(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn config_problem(error: &spa_eventlog::ConfigError, locale: Locale) -> Problem {
+    tracing::error!(error = %error, "configuration failed");
+    Problem::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &error.message(),
+        locale,
+        &crate::catalog::CATALOG,
+    )
 }
 
 // ---------------------------------------------------------------------------

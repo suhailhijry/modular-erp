@@ -45,6 +45,8 @@ pub enum SalesError {
     #[error(transparent)]
     Tax(#[from] TaxError),
     #[error(transparent)]
+    Config(#[from] spa_eventlog::ConfigError),
+    #[error(transparent)]
     Unbalanced(#[from] ledger::Unbalanced),
     /// The ledger refused the posting — a missing or closed account, almost
     /// always. Passed through rather than reworded: the ledger's message names
@@ -76,7 +78,8 @@ impl spa_i18n::Localize for SalesError {
                 .with("reference", MessageArg::text(reference.clone())),
             Self::Tax(TaxError::MixedCurrencies) => Message::new(messages::MIXED_CURRENCIES),
             Self::Tax(TaxError::OutOfRange) => Message::new(messages::AMOUNT_OUT_OF_RANGE),
-            // Both already say the right thing in both languages.
+            // All three already say the right thing in both languages.
+            Self::Config(e) => e.message(),
             Self::Unbalanced(e) => e.message(),
             Self::Ledger(e) => e.message(),
         }
@@ -123,7 +126,6 @@ pub async fn issue_invoice(
     db: &TenantDb,
     id: &AggregateId,
     draft: &Draft,
-    accounts: &PostingAccounts,
     metadata: &Metadata,
 ) -> Outcome {
     if draft.lines.is_empty() {
@@ -135,32 +137,12 @@ pub async fn issue_invoice(
     let totals = crate::vat::total(draft.lines.iter().map(|l| (l.vat, l.net)), draft.currency)
         .map_err(|e| rejected(SalesError::Tax(e)))?;
 
-    let entry_lines = entry_for_issue(&totals, accounts).map_err(|e| {
-        rejected(match e {
-            // Every line cancelled out. A document that moves nothing is not an
-            // invoice, and posting it would be an empty journal entry.
-            ledger::Unbalanced::TooFewLines(_) => SalesError::NothingToInvoice,
-            other => SalesError::Unbalanced(other),
-        })
-    })?;
-
     let entry_id = derived_id("si", &[id.as_str()])?;
     let memo = format!("Invoice {id} · {}", draft.customer.name);
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
-        match issue_in(
-            &mut tx,
-            id,
-            &entry_id,
-            draft,
-            &totals,
-            &entry_lines,
-            &memo,
-            metadata,
-        )
-        .await
-        {
+        match issue_in(&mut tx, id, &entry_id, draft, &totals, &memo, metadata).await {
             Ok(committed) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
                 return Ok(committed);
@@ -180,25 +162,35 @@ pub async fn issue_invoice(
 
 /// One attempt at issuing: the invoice event and its journal entry, in the
 /// caller's transaction.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "everything here is already computed; bundling it would be a struct that exists for the lint"
-)]
 async fn issue_in(
     conn: &mut sqlx::PgConnection,
     id: &AggregateId,
     entry_id: &AggregateId,
     draft: &Draft,
     totals: &Totals,
-    entry_lines: &ledger::BalancedLines,
     memo: &str,
     metadata: &Metadata,
 ) -> Result<Committed<InvoiceEvent>, ExecuteError<SalesError>> {
+    // Resolved **in this transaction**, so what the invoice was posted to and
+    // what the tenant had configured cannot disagree — and the generation goes
+    // into the metadata, which is how "what was configured when this was
+    // decided?" stays answerable without ever being read back (L5).
+    let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
+
+    let entry_lines = entry_for_issue(totals, &accounts).map_err(|e| {
+        ExecuteError::Rejected(match e {
+            // Every line cancelled out. A document that moves nothing is not an
+            // invoice, and posting it would be an empty journal entry.
+            ledger::Unbalanced::TooFewLines(_) => SalesError::NothingToInvoice,
+            other => SalesError::Unbalanced(other),
+        })
+    })?;
+
     let committed = try_execute::<Invoice, _, SalesError>(
         &mut *conn,
         id,
         crate::upcasters(),
-        metadata,
+        &metadata,
         |loaded| {
             if loaded.aggregate.issued {
                 return Ok(Decision::nothing());
@@ -219,9 +211,16 @@ async fn issue_in(
     // Runs even when the invoice was already issued, and is a no-op then too.
     // That is what heals a half-finished write from an older, less careful
     // version of this code — and it costs one load.
-    ledger::post_entry_in(conn, entry_id, draft.issued_on, memo, entry_lines, metadata)
-        .await
-        .map_err(lift)?;
+    ledger::post_entry_in(
+        conn,
+        entry_id,
+        draft.issued_on,
+        memo,
+        &entry_lines,
+        &metadata,
+    )
+    .await
+    .map_err(lift)?;
 
     Ok(committed)
 }
@@ -233,15 +232,11 @@ pub async fn record_payment(
     db: &TenantDb,
     invoice: &AggregateId,
     receipt: &Receipt,
-    accounts: &PostingAccounts,
     metadata: &Metadata,
 ) -> Outcome {
     if !receipt.amount.is_positive() {
         return Err(rejected(SalesError::NotAPayment));
     }
-
-    let entry_lines = entry_for_payment(receipt.amount, &receipt.into, accounts)
-        .map_err(|e| rejected(SalesError::Unbalanced(e)))?;
 
     // Scoped by invoice as well as reference: two customers can both call their
     // transfer "march".
@@ -250,17 +245,7 @@ pub async fn record_payment(
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
-        match pay_in(
-            &mut tx,
-            invoice,
-            &entry_id,
-            receipt,
-            &entry_lines,
-            &memo,
-            metadata,
-        )
-        .await
-        {
+        match pay_in(&mut tx, invoice, &entry_id, receipt, &memo, metadata).await {
             Ok(committed) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
                 return Ok(committed);
@@ -283,15 +268,19 @@ async fn pay_in(
     invoice: &AggregateId,
     entry_id: &AggregateId,
     receipt: &Receipt,
-    entry_lines: &ledger::BalancedLines,
     memo: &str,
     metadata: &Metadata,
 ) -> Result<Committed<InvoiceEvent>, ExecuteError<SalesError>> {
+    let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
+
+    let entry_lines = entry_for_payment(receipt.amount, &receipt.into, &accounts)
+        .map_err(|e| ExecuteError::Rejected(SalesError::Unbalanced(e)))?;
+
     let committed = try_execute::<Invoice, _, SalesError>(
         &mut *conn,
         invoice,
         crate::upcasters(),
-        metadata,
+        &metadata,
         |loaded| {
             let state = &loaded.aggregate;
             if !state.issued {
@@ -341,8 +330,8 @@ async fn pay_in(
             entry_id,
             receipt.received_on,
             memo,
-            entry_lines,
-            metadata,
+            &entry_lines,
+            &metadata,
         )
         .await
         .map_err(lift)?;
@@ -361,6 +350,28 @@ async fn pay_in(
 fn derived_id(prefix: &str, parts: &[&str]) -> Result<AggregateId, CommandError<SalesError>> {
     let joined = format!("{prefix}.{}", parts.join("."));
     AggregateId::new(&joined).map_err(|_| rejected(SalesError::InvalidReference(parts.join("."))))
+}
+
+/// The accounts a sale moves, plus metadata stamped with the generation they
+/// came from.
+async fn resolve_accounts(
+    conn: &mut sqlx::PgConnection,
+    metadata: &Metadata,
+) -> Result<(PostingAccounts, Metadata), ExecuteError<SalesError>> {
+    let accounts = PostingAccounts::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(SalesError::Config(e)))?;
+    let version = spa_eventlog::configuration::version(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(SalesError::Config(e)))?;
+
+    Ok((
+        accounts,
+        Metadata {
+            config_version: Some(version),
+            ..metadata.clone()
+        },
+    ))
 }
 
 fn rejected(error: SalesError) -> CommandError<SalesError> {
@@ -406,11 +417,10 @@ const _: fn() = || {
         id: &AggregateId,
         draft: &Draft,
         receipt: &Receipt,
-        accounts: &PostingAccounts,
         metadata: &Metadata,
     ) {
-        assert_send(issue_invoice(db, id, draft, accounts, metadata));
-        assert_send(record_payment(db, id, receipt, accounts, metadata));
+        assert_send(issue_invoice(db, id, draft, metadata));
+        assert_send(record_payment(db, id, receipt, metadata));
     }
     let _ = commands_are_send;
 };

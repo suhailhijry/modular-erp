@@ -3028,3 +3028,148 @@ async fn managing_somebody_who_is_not_a_member_here_is_a_404() {
 
     fixture.cleanup().await;
 }
+
+/// **Configuration, over HTTP.** A tenant chooses where sales post, and the
+/// next invoice goes there.
+#[tokio::test]
+async fn a_tenant_can_configure_where_sales_post() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    // Untouched: the shipped defaults, and honest about being defaults.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tenants/acme/sales/posting-accounts"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["receivable"], "1100");
+    assert_eq!(body["configured"], false);
+
+    // An account this tenant does not have is refused here rather than by every
+    // future invoice.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::put("/v1/tenants/acme/sales/posting-accounts"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "receivable": "9999", "revenue": "4000", "output_vat": "2100"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "ledger.no_such_account");
+
+    // The services chart has 4900 "Discounts given" — a real account to move to.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::put("/v1/tenants/acme/sales/posting-accounts"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "receivable": "1100", "revenue": "4900", "output_vat": "2100"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (_, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tenants/acme/sales/posting-accounts"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(body["revenue"], "4900");
+    assert_eq!(body["configured"], true);
+
+    // And the next invoice goes there.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "INV-CONFIGURED",
+                        "customer": { "name": "Rawabi" },
+                        "issued_on": "2026-03-01T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [{ "description": "Work", "net": 100_000, "vat": "zero" }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    fixture.project_sales(tenant).await;
+
+    assert_eq!(
+        fixture.ledger_balance(&token, "acme", "4900").await,
+        -100_000,
+        "revenue landed where the tenant said"
+    );
+    assert_eq!(
+        fixture.ledger_balance(&token, "acme", "4000").await,
+        0,
+        "and not where it ships"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Choosing the accounts is a chart decision, so it needs the capability that
+/// maintains the chart.
+#[tokio::test]
+async fn configuring_posting_accounts_needs_manage_accounts() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    fixture.enable_sales(tenant).await;
+
+    for (role, may) in [("accountant", true), ("clerk", false), ("viewer", false)] {
+        let email = format!("{role}@acme.test");
+        let user = fixture.user(&email, "hunter2hunter2").await;
+        fixture.join_as(user, tenant, role).await;
+        let token = fixture.token(&email, "hunter2hunter2").await;
+
+        let (status, body, _) = fixture
+            .send(
+                Request::put("/v1/tenants/acme/sales/posting-accounts")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "receivable": "1100", "revenue": "4000", "output_vat": "2100"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+
+        assert_eq!(
+            status != StatusCode::FORBIDDEN,
+            may,
+            "{role} setting posting accounts: {status} {body}"
+        );
+    }
+
+    fixture.cleanup().await;
+}

@@ -21,12 +21,18 @@
 
 mod aggregate;
 mod append;
+mod config;
 mod envelope;
 pub mod messages;
 mod outbox;
 mod read;
 mod upcast;
 
+pub use config::{ConfigError, Configured};
+pub mod configuration {
+    //! Tenant configuration: the store, not the meaning. See [`crate::config`].
+    pub use crate::config::{get, set, version};
+}
 pub use aggregate::{
     Aggregate, Committed, Decision, DomainEvent, ExecuteError, LoadError, Loaded, MAX_ATTEMPTS,
     append_events, execute, load, load_since, try_execute,

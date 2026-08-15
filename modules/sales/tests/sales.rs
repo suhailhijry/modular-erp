@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use ledger::{AccountKind, Ledger, account_balances, open_account, trial_balance};
 use sales::{
-    Customer, Draft, InvoiceLine, PostingAccounts, Receipt, Sales, SalesError, Vat, VatCategory,
-    issue_invoice, record_payment,
+    Customer, Draft, InvoiceLine, Receipt, Sales, SalesError, Vat, VatCategory, issue_invoice,
+    record_payment,
 };
 use spa_control::{
     Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
@@ -235,14 +235,7 @@ impl Fixture {
 }
 
 async fn issue(fixture: &Fixture, id: &str, lines: Vec<InvoiceLine>) -> Outcome {
-    issue_invoice(
-        &fixture.db,
-        &code(id),
-        &draft(lines),
-        &PostingAccounts::conventional(),
-        &Metadata::default(),
-    )
-    .await
+    issue_invoice(&fixture.db, &code(id), &draft(lines), &Metadata::default()).await
 }
 
 async fn pay(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> Outcome {
@@ -255,7 +248,6 @@ async fn pay(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> Out
             received_on: when(),
             into: code("1010"),
         },
-        &PostingAccounts::conventional(),
         &Metadata::default(),
     )
     .await
@@ -852,6 +844,231 @@ async fn the_rate_on_a_line_is_the_rate_that_applied() {
     assert_eq!(standard.category, VatCategory::Standard);
     assert_eq!(standard.basis_points, 1_500, "15%, stored on the line");
     assert_eq!(invoice.lines[1].basis_points, 0);
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// **The requirement.** A tenant whose chart does not use the conventional
+/// codes tells sales where to post, and it posts there.
+#[tokio::test]
+async fn a_tenant_can_choose_which_accounts_a_sale_posts_to() {
+    let fixture = Fixture::new().await;
+
+    // A chart of their own, alongside the conventional one.
+    for (account, kind) in [
+        ("AR", AccountKind::Asset),
+        ("SALES", AccountKind::Revenue),
+        ("VAT-OUT", AccountKind::Liability),
+    ] {
+        fixture.open(account, kind, sar()).await;
+    }
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    spa_eventlog::configuration::set(
+        &mut conn,
+        sales::PostingAccounts::KEY,
+        &sales::PostingAccounts {
+            receivable: code("AR"),
+            revenue: code("SALES"),
+            output_vat: code("VAT-OUT"),
+        },
+        Some("owner"),
+    )
+    .await
+    .expect("configures");
+    drop(conn);
+
+    issue(
+        &fixture,
+        "INV-CFG-1",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("AR").await, riyals(1_150));
+    assert_eq!(fixture.balance("SALES").await, riyals(-1_000));
+    assert_eq!(fixture.balance("VAT-OUT").await, riyals(-150));
+
+    // And the conventional accounts were left alone, which is what makes this
+    // about configuration rather than about there being two charts.
+    assert_eq!(fixture.balance("1100").await, money(0));
+    assert_eq!(fixture.balance("4000").await, money(0));
+
+    fixture.cleanup().await;
+}
+
+/// **Changing configuration does not restate history.**
+///
+/// Architecture L5: the event carries the resolved accounts, not a reference to
+/// the configuration. An invoice issued before the change stays where it was
+/// posted, and a replay reproduces it — which is the property that would break
+/// if a projection resolved config at read time.
+#[tokio::test]
+async fn changing_where_sales_post_leaves_earlier_invoices_alone() {
+    let fixture = Fixture::new().await;
+    for (account, kind) in [("AR", AccountKind::Asset), ("SALES", AccountKind::Revenue)] {
+        fixture.open(account, kind, sar()).await;
+    }
+
+    // Issued against the shipped defaults.
+    issue(
+        &fixture,
+        "INV-CFG-BEFORE",
+        vec![line("Consulting", riyals(100), VatCategory::Zero)],
+    )
+    .await
+    .expect("issues");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    spa_eventlog::configuration::set(
+        &mut conn,
+        sales::PostingAccounts::KEY,
+        &sales::PostingAccounts {
+            receivable: code("AR"),
+            revenue: code("SALES"),
+            output_vat: code("2100"),
+        },
+        Some("owner"),
+    )
+    .await
+    .expect("configures");
+    drop(conn);
+
+    issue(
+        &fixture,
+        "INV-CFG-AFTER",
+        vec![line("Consulting", riyals(200), VatCategory::Zero)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    assert_eq!(
+        fixture.balance("1100").await,
+        riyals(100),
+        "the earlier invoice is exactly where it was posted"
+    );
+    assert_eq!(fixture.balance("AR").await, riyals(200));
+    assert!(fixture.imbalances().await.is_empty());
+
+    // The books still rebuild from the log, which they could not if the
+    // accounts were resolved at read time.
+    let pool = fixture.tenant_pool().await;
+    let owned = ledger::projections();
+    let refs: Vec<&dyn Projection<Group = Ledger>> = owned.iter().map(AsRef::as_ref).collect();
+    let report = replay_shadow::<Ledger>(&pool, &refs, ledger::upcasters(), 200)
+        .await
+        .expect("replays");
+    pool.close().await;
+    assert!(report.is_reproducible(), "{:?}", report.differences());
+
+    fixture.cleanup().await;
+}
+
+/// A command records which generation of configuration it decided against.
+#[tokio::test]
+async fn a_command_stamps_the_configuration_it_resolved_against() {
+    let fixture = Fixture::new().await;
+
+    let committed = issue(
+        &fixture,
+        "INV-CFG-2",
+        vec![line("Consulting", riyals(100), VatCategory::Zero)],
+    )
+    .await
+    .expect("issues");
+
+    let position = committed.at.expect("wrote an event");
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    let unconfigured: Option<i64> = sqlx::query_scalar(
+        "SELECT (metadata->>'config_version')::BIGINT FROM event WHERE position = $1",
+    )
+    .bind(position.get())
+    .fetch_one(&mut *conn)
+    .await
+    .expect("reads");
+    assert_eq!(
+        unconfigured,
+        Some(0),
+        "nothing configured is a real answer, not a missing one"
+    );
+
+    spa_eventlog::configuration::set(
+        &mut conn,
+        sales::PostingAccounts::KEY,
+        &sales::PostingAccounts::conventional(),
+        Some("owner"),
+    )
+    .await
+    .expect("configures");
+    drop(conn);
+
+    let committed = issue(
+        &fixture,
+        "INV-CFG-3",
+        vec![line("Consulting", riyals(100), VatCategory::Zero)],
+    )
+    .await
+    .expect("issues");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let after: Option<i64> = sqlx::query_scalar(
+        "SELECT (metadata->>'config_version')::BIGINT FROM event WHERE position = $1",
+    )
+    .bind(committed.at.expect("wrote an event").get())
+    .fetch_one(&mut *conn)
+    .await
+    .expect("reads");
+    drop(conn);
+
+    assert!(
+        after > unconfigured,
+        "the generation moved: {after:?} should be later than {unconfigured:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A stored value that no longer fits its type stops the command rather than
+/// falling back to the shipped default.
+#[tokio::test]
+async fn unusable_configuration_refuses_rather_than_pretending() {
+    let fixture = Fixture::new().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    sqlx::query(
+        "INSERT INTO configuration (key, value, version)
+         VALUES ($1, '{\"receivable\": \"1100\"}'::jsonb, nextval('configuration_version'))",
+    )
+    .bind(sales::PostingAccounts::KEY)
+    .execute(&mut *conn)
+    .await
+    .expect("writes something unusable");
+    drop(conn);
+
+    let error = issue(
+        &fixture,
+        "INV-CFG-4",
+        vec![line("Consulting", riyals(100), VatCategory::Zero)],
+    )
+    .await
+    .expect_err("cannot post against configuration it cannot read");
+
+    assert!(
+        matches!(rejection(&error), Some(SalesError::Config(_))),
+        "expected a configuration failure, got {error:?}"
+    );
+
+    // Nothing was written — a half-configured tenant does not get a half-issued
+    // invoice.
+    assert!(!fixture.is_issued("INV-CFG-4").await);
 
     fixture.cleanup().await;
 }

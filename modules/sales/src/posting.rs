@@ -19,7 +19,7 @@ use crate::vat::Totals;
 /// [`Self::conventional`] fills it from the codes the shipped charts use, and
 /// the only thing that changes when configuration arrives is where this value
 /// comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PostingAccounts {
     /// Debited by what customers owe.
     pub receivable: AggregateId,
@@ -30,6 +30,22 @@ pub struct PostingAccounts {
 }
 
 impl PostingAccounts {
+    /// Where a tenant's choice is stored.
+    pub const KEY: &'static str = "sales.posting_accounts";
+
+    /// What this tenant has configured, or what ships.
+    ///
+    /// A tenant who never opens the settings gets [`Self::conventional`], which
+    /// is the whole of "simplify for the people who do not want the dynamism".
+    /// A tenant who *has* configured it and stored something unusable gets an
+    /// error rather than the default — silently falling back would hide a
+    /// misconfiguration until a month-end reconciliation found it.
+    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, spa_eventlog::ConfigError> {
+        Ok(spa_eventlog::configuration::get::<Self>(conn, Self::KEY)
+            .await?
+            .map_or_else(Self::conventional, |configured| configured.value))
+    }
+
     /// The codes every chart in `ledger::CHARTS` ships.
     ///
     /// A tenant that renamed them is fine — names are cosmetic, codes are the

@@ -222,7 +222,11 @@ Built only where the ledger produced a second consumer.
       real handler
 - [ ] Tenant-local authorization as a projection (L7) *(roles live in the
       control plane for now; the projection is for fact-derived permissions)*
-- [ ] `spa-config`: declarations, layers, versioned resolution, provenance
+- [x] Configuration — the **store**, not the system. A versioned key-value table
+      in the tenant database, a typed surface on top, and posting accounts as
+      its first and only consumer. Declarations, layers and resolution rules are
+      Phase 6's, and they are what §6 describes; this is what sits underneath
+      them
 - [ ] Numbering (gapless per-tenant document sequences)
 - [ ] OpenAPI generation with CI drift check
 - [ ] Authorization matrix tests
@@ -1044,3 +1048,41 @@ here and folded back into ARCHITECTURE.md.
   Verified end to end afterwards: two seeded tenants, add a migration, `check`
   reports both behind and exits 1, apply, the table is confirmed present in both
   tenant databases by `psql`, `check` exits 0.
+
+- **Configuration, built for the one thing that needed it.** `PostingAccounts`
+  was a constant with a comment saying it was the seam. It is now resolved from
+  a tenant's own configuration, and everything else that looked configurable on
+  inspection turned out not to be: the VAT rate is statutory, session and
+  invitation lifetimes are platform decisions, currency is chosen per chart and
+  carried by each invoice. One consumer, so one key.
+
+  The store is versioned by a shared sequence, which makes `max(version)` a
+  single number describing a tenant's whole configuration at a moment — and that
+  number is what finally fills `Metadata.config_version`, declared in Phase 2
+  and never written until now.
+
+  **Resolved inside the command's transaction.** What the invoice posted to and
+  what the tenant had configured cannot disagree, and the generation is stamped
+  on the event. The values themselves go into the journal entry, so changing the
+  configuration changes the next invoice and nothing before it (L5) — there is a
+  test that changes it between two invoices and then replays the ledger to prove
+  the earlier one still rebuilds.
+
+  The mechanism is key-value; the *surface* is not. `PUT .../sales/posting-accounts`
+  is typed, validated, and behind `ManageAccounts`. A generic "set any key to any
+  JSON" endpoint would make every reader's decode the only thing between a typo
+  and a broken module.
+
+- **A guard that disagreed with the command it guarded.** The first version of
+  the posting-accounts validation checked the accounts against
+  `proj_ledger.account` — a read model driven by a worker. A tenant who
+  installed a chart and immediately configured where to post it was told the
+  accounts did not exist. `ledger::accepts_postings` now asks the log, which is
+  the same question `post_entry_in` asks and asks it the same way.
+
+- **Process note: two edits silently did nothing.** A scripted
+  `str.replace` whose target had already been reflowed by `cargo fmt` is a no-op
+  that reports success, and I spent three rounds debugging a handler that still
+  contained the old code. The tell was `Finished in 0.10s` — a test run that did
+  not rebuild after an edit did not edit anything. Every scripted replacement in
+  this codebase should assert its target matched.

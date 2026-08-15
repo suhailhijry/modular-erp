@@ -236,6 +236,22 @@ pub async fn post_entry_in(
     .await
 }
 
+/// Whether an account exists and can take a posting **right now**.
+///
+/// Reads the log, not `proj_ledger.account`. The read model is driven by a
+/// worker and lags, so a chart installed a moment ago is not in it yet —
+/// validating against it tells a tenant that the account they just created does
+/// not exist. This is the same question `post_entry_in` asks, asked the same
+/// way, which is the point: a check that disagrees with the command it is
+/// guarding is worse than no check.
+pub async fn accepts_postings(
+    conn: &mut sqlx::PgConnection,
+    code: &AggregateId,
+) -> Result<bool, spa_eventlog::LoadError> {
+    let account = spa_eventlog::load::<Account>(conn, code, crate::upcasters()).await?;
+    Ok(account.aggregate.accepts_postings())
+}
+
 fn rejected(error: LedgerError) -> CommandError<LedgerError> {
     CommandError::Execute(spa_eventlog::ExecuteError::Rejected(error))
 }
