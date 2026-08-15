@@ -50,6 +50,13 @@ demo password:
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
       DEMO_PASSWORD="{{password}}" cargo run --quiet --bin demo
 
+# Bring every tenant database up to the migrations this build expects.
+# `just migrate-fleet check` looks without touching, and exits non-zero if any
+# tenant is behind — run that before deploying code that needs a migration.
+migrate-fleet mode="":
+    CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
+      cargo run --quiet --bin migrator -- {{mode}}
+
 # Destroy demo tenants whose time is up. Schedule it; it exits when done.
 reap:
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \

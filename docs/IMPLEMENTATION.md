@@ -346,7 +346,14 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [ ] Template databases per module combination, built in CI from blueprints
 - [x] **Demo blueprint with every module enabled, as a required CI check**
       *(4b)*
-- [ ] Fleet migrator; per-tenant health checks including the trial-balance invariant
+- [x] Fleet migrator — `survey_fleet` looks, `migrate_fleet` applies, `bin/migrator`
+      (`just migrate-fleet [check]`) is the deploy step. Exits non-zero when the
+      fleet is not uniform, so `check` gates a deploy
+- [x] Per-tenant health checks including the trial-balance invariant *(shipped
+      with `HealthJob` in Phase 3c; sales added the overpaid-invoice check)*
+- [ ] Module schema refresh across the fleet *(a changed read model is a
+      drop-and-rebuild plus a checkpoint reset and a replay — a different
+      operation from a migration, and one nothing needs yet)*
 
 **Exit:** someone signs up online, picks a chart of accounts, and gets a working
 system.
@@ -1003,3 +1010,37 @@ here and folded back into ARCHITECTURE.md.
 
   `suspend_identity`, `log_out_everywhere` and `Actor::impersonating` turned out
   to have no HTTP route at all, which is the right answer for all three.
+
+- **Nothing had ever migrated an existing tenant.** `provision` runs the
+  tenant-plane migrations when it builds a database, and that was the only
+  caller. The day `migrations/tenant/0004_*.sql` shipped, new tenants would get
+  it and every existing one would not — while the code that needs it deployed to
+  all of them. Queries would compile, because they are checked against a
+  database that *has* the migration, and fail at runtime per tenant across the
+  live fleet.
+
+  `survey_fleet` answers "who is behind?" without writing anything, which is the
+  thing to run *before* a deploy. `migrate_fleet` does the work. It does not
+  stop on a failure — one unreachable cluster must not leave the rest of the
+  fleet un-migrated — and it is idempotent, so a partial run is resumed by
+  running it again. Suspended tenants are included: a suspended tenant is one
+  that may come back, and coming back to a schema three versions behind is the
+  whole failure.
+
+- **And underneath it, a worse one: adding a migration did not trigger a
+  rebuild.** Found immediately, by adding a real migration to a real two-tenant
+  fleet and watching `just migrate-fleet check` report everything current.
+
+  `sqlx::migrate!` embeds the files at compile time. With no build script, cargo
+  never learns the directory is an input — so the binary keeps an old migrator
+  baked in and reports a fleet that is up to date with a migration it has never
+  heard of. That is precisely the silent failure the fleet migrator exists to
+  prevent, sitting one layer below it.
+
+  Two `build.rs` files fix it, each emitting `rerun-if-changed` for its
+  migrations directory **and every file in it** — the directory alone covers
+  adding and removing files but not editing one in place.
+
+  Verified end to end afterwards: two seeded tenants, add a migration, `check`
+  reports both behind and exits 1, apply, the table is confirmed present in both
+  tenant databases by `psql`, `check` exits 0.

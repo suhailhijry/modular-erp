@@ -587,7 +587,9 @@ impl ControlPlane {
 /// bound into the caller's future — where rustc cannot discharge it, and reports
 /// so at whatever HTTP route eventually awaits it. Handing the connection over
 /// and getting it back keeps the bound local to this function.
-fn migrate(mut conn: PgConnection) -> BoxFuture<Result<PgConnection, sqlx::migrate::MigrateError>> {
+pub(crate) fn migrate(
+    mut conn: PgConnection,
+) -> BoxFuture<Result<PgConnection, sqlx::migrate::MigrateError>> {
     Box::pin(async move {
         // `run_direct` rather than `run`. sqlx marks it `#[doc(hidden)]` with the
         // comment "getting around the annoying `implementation of Acquire is not
