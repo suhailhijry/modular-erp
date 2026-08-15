@@ -228,7 +228,10 @@ Built only where the ledger produced a second consumer.
       Phase 6's, and they are what §6 describes; this is what sits underneath
       them
 - [ ] Numbering (gapless per-tenant document sequences)
-- [ ] OpenAPI generation with CI drift check
+- [x] `docs/ERRORS.md` — every error code in both languages, generated from the
+      catalog the API renders from, with a CI drift check (`just errors`)
+- [ ] OpenAPI generation with CI drift check *(the endpoint shapes; the codes
+      are done)*
 - [ ] Authorization matrix tests
 
 **Exit for 3a+3b:** a person signs in and reads their own tenant over HTTP, in
@@ -256,7 +259,10 @@ first `Idempotency-Key` and `ETag` have a real mutation to attach to.
 - [x] HTTP routes; the same `Tenant` extractor, so isolation is inherited
 - [x] Reversals — an entry posted in error is undone by posting its opposite,
       both in one transaction, refused if already undone
-- [ ] Fiscal periods, drafts, multi-currency entries with FX
+- [x] Credit notes — an invoice issued in error is cancelled by crediting it,
+      which reverses its journal entry. Whole-invoice only, and refused while
+      payments stand against it
+- [ ] Partial credit notes, fiscal periods, drafts, multi-currency entries with FX
 - [ ] An entry-level read model *(a `proj_ledger.entry` table would show which
       entry reversed which, and let entries be listed at all — but adding a
       table to a module's install script needs the fleet-wide module refresh
@@ -296,9 +302,10 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [x] `sales::requires()` — signup refuses sales without the ledger
 - [x] Module gating on routes: a tenant that did not enable a module gets a 404,
       not a 500 from a missing table
-- [ ] A VAT return and ZATCA clearance *(the module's commercial reason to
-      exist; a return needs fiscal periods and clearance needs a certificate and
-      an outbox handler)*
+- [x] A VAT return — output tax by rate for a half-open period, per currency,
+      with credited invoices excluded
+- [ ] ZATCA clearance *(needs a certificate and the first real outbox handler)*
+- [ ] The input-tax side *(needs a purchases module; a full return nets the two)*
 - [ ] Credit notes, cancellation, customers as records, quantities and unit
       prices, statutory gapless numbering
 
@@ -361,9 +368,9 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       fleet is not uniform, so `check` gates a deploy
 - [x] Per-tenant health checks including the trial-balance invariant *(shipped
       with `HealthJob` in Phase 3c; sales added the overpaid-invoice check)*
-- [ ] Module schema refresh across the fleet *(a changed read model is a
-      drop-and-rebuild plus a checkpoint reset and a replay — a different
-      operation from a migration, and one nothing needs yet)*
+- [x] Module schema refresh across the fleet — `refresh_module`,
+      `refresh_module_fleet`, `just migrate-fleet refresh <module>`. Drop the
+      schema, install it again, rewind the checkpoint, let the worker replay
 
 **Exit:** someone signs up online, picks a chart of accounts, and gets a working
 system.
@@ -1170,3 +1177,122 @@ here and folded back into ARCHITECTURE.md.
   in Phase 4 — and nothing displays the link today, because there is no
   entry-list endpoint either. The correction works, the books balance, and the
   read model arrives with the screen that wants it.
+
+- **A changed read model needed the refresh, so the refresh got built.** Credit
+  notes have to be *visible* — a cancelled invoice still showing as outstanding
+  is worse than no cancellation at all, because somebody chases a customer for
+  money that was credited back. That meant a new column on
+  `proj_sales.invoice`, and `install.sql` is `CREATE TABLE IF NOT EXISTS`
+  throughout, so re-running it would never have added one.
+
+  This is the trigger the Phase 4 deferral was waiting for. `refresh_module`
+  drops the module's schema, installs it again and rewinds its checkpoint — all
+  in one transaction, holding the same checkpoint lock a projection run takes,
+  so a run in flight finishes rather than finding its tables gone mid-batch.
+  Resetting the checkpoint in that same transaction matters just as much: there
+  is no moment where the tables are gone and the checkpoint still claims they
+  are current, which a worker would read as "nothing to do".
+
+  Proved against a real fleet rather than only in tests: seed a tenant on the
+  old schema (5 invoices, no `cancelled_on`), ship the new one, run
+  `just migrate-fleet refresh sales`, watch the column appear and the tables
+  empty with the checkpoint at zero, start the worker, watch all five invoices
+  come back. A second refresh is harmless.
+
+  It also caught a mistake in its own reporting: the first version exited
+  non-zero after a *successful* rebuild, because it asked `is_uniform()` — and
+  for a refresh, "tenants that were behind and have now been rebuilt" is the
+  success case, not the failure one.
+
+- **Crediting an invoice reuses the seam reversal created.** `ledger::reverse_in`
+  is to cancelling what `post_entry_in` was to issuing: the ledger owns what
+  undoing a posting means, sales owns when. Both events commit in one
+  transaction, for the same reason as before.
+
+  Refused while payments stand against it. The money is somewhere, cancelling
+  the document without moving it back would leave cash on the books against a
+  sale that no longer exists, and there is no way to model a refund yet.
+  Refusing says so; guessing would not.
+
+- **The VAT return is the module's commercial reason to exist, and it was a
+  view and a query.** Everything it needs was already stored: the tax bands, the
+  rate that applied, the tax point. That is what banding by rate at issue bought
+  — the return is `GROUP BY`, not a recomputation, and it cannot disagree with
+  what the invoice printed.
+
+  The period is **half-open**, `[from, until)`. "31 March inclusive" is a
+  comparison somebody gets wrong once a quarter, and two consecutive returns
+  built that way either double-count the boundary day or drop it. The test
+  states that as a property rather than as arithmetic: the two quarters
+  together equal the whole span. An earlier version asserted a hand-computed
+  total instead, which passed and said nothing.
+
+  Credited invoices leave the return, which is right when the credit lands in
+  the same period and wrong across a boundary — a credit note in a *later*
+  period is a supply and then an adjustment, and each belongs in the period it
+  happened. That needs the credit note to be a document with its own tax point,
+  which is the partial-credit-note work. The view says so rather than pretending
+  otherwise.
+
+- **The demo had stopped demonstrating.** Credit notes, reversals and per-module
+  roles all shipped without reaching the seeder, so the CI check that proves the
+  system works end to end was proving a subset of it. That is the omission my own
+  note predicted — "what still needs a person is teaching the seeder to use it" —
+  arriving three increments later.
+
+  It now issues an invoice against the wrong customer and credits it, posts a
+  utilities entry for the wrong amount and reverses it, and adds a second person
+  who does the invoicing and not the books. Each is asserted, so the next feature
+  that skips the seeder fails a test rather than quietly narrowing the demo.
+
+  A demo of an accounting system in which nothing was ever *wrong* is not a demo
+  of an accounting system. It is also the first thing a prospective customer asks
+  about and the last thing a description is convincing about.
+
+- **Fifty-five error codes, and nothing listed them.** A client branches on
+  `code` — that is the contract — and finding out what the codes are meant
+  reading Rust across five crates.
+
+  `docs/ERRORS.md` is generated from the same catalog the API renders from, so it
+  cannot claim a code that does not exist, and a test fails when the codebase
+  grows one the document does not mention. Checked by adding a code and watching
+  the check fail, then removing it.
+
+  Generated rather than written for the usual reason: a hand-maintained list is
+  wrong within a month, and wrong in the direction that costs an integrator a
+  day — a code that exists and is undocumented looks like a bug in their client.
+
+- **I wrote a vacuous test, and the check for vacuity is what caught it.**
+  `refresh_module` takes the checkpoint lock before dropping anything, so a
+  projection run in flight is not left mid-transaction with its tables gone. I
+  had asserted that in a comment. The first test asserted only that the refresh
+  *had not finished* while a run held the lease — and it **passed with the lock
+  removed**.
+
+  It passed for the wrong reason. Without the explicit lock the refresh still
+  blocks, at the checkpoint `UPDATE` — but that comes *after* `DROP SCHEMA`, so
+  by the time it blocks the damage is done. "The refresh waits" was never the
+  property. "The run's tables are still there while it is in flight" is.
+
+  The rewritten test has the in-flight batch write a row after the refresh has
+  started, and fails when the lock is removed. Verified both ways, which is the
+  only thing that distinguishes a test from a comment that compiles.
+
+  Worth stating plainly: the window is the *start* of a batch, when a run has
+  taken its lease and written nothing, so it holds no lock on the tables
+  themselves. That is the moment every projection run passes through.
+
+- **A performance instinct that measurement refused.** `Allowed<C>` derives the
+  module from the request path, which calls `modules::available()` — and
+  `ModuleId` holds a `String`, so that is two allocations and two validations on
+  every authenticated request, on the authorization path. It looked like an
+  obvious regression to fix with a `OnceLock`.
+
+  Measured first: 82ns for `available()`, 35ns for `module_id()`. Against a
+  request that makes several database round trips that is roughly a hundredth of
+  a percent, and three small allocations next to the ones JSON parsing already
+  makes. Left alone.
+
+  Recorded because the reflex was wrong, not because the outcome was
+  interesting: "allocation on a hot path" is a shape, not a measurement, and
+  this codebase has a soak test precisely so the difference can be settled.

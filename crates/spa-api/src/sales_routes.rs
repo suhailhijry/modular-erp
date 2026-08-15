@@ -6,7 +6,7 @@
 //! router, and a mapping from the module's rejections onto statuses. That is
 //! Phase 4's to build, and it is now a description rather than a guess.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Json, Router, routing};
 use sales::{Customer, Draft, InvoiceLine, Receipt, SalesError, Vat, VatCategory};
@@ -36,6 +36,14 @@ pub(crate) fn routes() -> Router<AppState> {
         .route(
             "/v1/tenants/{slug}/sales/invoices/{invoice}/payments",
             routing::post(record_payment),
+        )
+        .route(
+            "/v1/tenants/{slug}/sales/invoices/{invoice}/credit-note",
+            routing::post(credit_note),
+        )
+        .route(
+            "/v1/tenants/{slug}/sales/vat-return",
+            routing::get(vat_return),
         )
         // Typed on purpose. The store underneath is key-value; this is not, so
         // a value that reaches it has already been through the type that gives
@@ -105,9 +113,25 @@ struct Written {
     position: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct NewCreditNote {
+    /// The credit note's own number. Crediting the same invoice twice with the
+    /// same one is a no-op; a different one is refused.
+    id: String,
+    #[serde(default)]
+    reason: String,
+    /// When the credit is treated as happening. Usually today, not the date of
+    /// the invoice.
+    on: Timestamp,
+}
+
 #[derive(Debug, Serialize)]
 struct InvoiceView {
     id: String,
+    /// Set once a credit note has cancelled it. A cancelled invoice owes
+    /// nothing, and `outstanding` says so too.
+    cancelled_on: Option<Timestamp>,
+    credit_note: Option<String>,
     customer: String,
     customer_vat: Option<String>,
     issued_on: Timestamp,
@@ -161,6 +185,8 @@ struct PaymentView {
 fn view(summary: sales::InvoiceSummary) -> InvoiceView {
     InvoiceView {
         id: summary.id,
+        cancelled_on: summary.cancelled_on,
+        credit_note: summary.credit_note,
         customer: summary.customer,
         customer_vat: summary.customer_vat,
         issued_on: summary.issued_on,
@@ -279,6 +305,41 @@ async fn record_payment(
     }))
 }
 
+/// Cancels an invoice by crediting it.
+///
+/// A `POST`, not a `DELETE`: the invoice stays, its journal entry is reversed,
+/// and the books show both.
+async fn credit_note(
+    tenant: Allowed<PostEntries>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+    Json(body): Json<NewCreditNote>,
+) -> Result<Json<Written>, Problem> {
+    require_module(&tenant, &sales::module_id(), locale)?;
+
+    let raw = params.get("invoice").map_or("", String::as_str);
+    let invoice = parse_id(raw, locale)?;
+
+    let committed = sales::cancel_invoice(
+        &tenant.db,
+        &invoice,
+        &body.id,
+        &body.reason,
+        body.on,
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| sales_problem(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+
+    Ok(Json(Written {
+        id: body.id,
+        position: committed.at.map(spa_types::LogPosition::get),
+    }))
+}
+
 async fn list_invoices(
     tenant: Allowed<Read>,
     Language(locale): Language,
@@ -366,6 +427,101 @@ async fn get_invoice(
             })
             .collect(),
         invoice: view(detail.summary),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct Period {
+    /// Inclusive.
+    from: Timestamp,
+    /// **Exclusive.** A period ending "31 March inclusive" is a comparison
+    /// somebody gets wrong once a quarter, and two consecutive returns built
+    /// that way either double-count the boundary or drop it.
+    until: Timestamp,
+    currency: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VatBandView {
+    vat: &'static str,
+    vat_rate: i32,
+    net: i64,
+    tax: i64,
+    invoices: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct VatReturnView {
+    from: Timestamp,
+    until: Timestamp,
+    currency: String,
+    bands: Vec<VatBandView>,
+    net: i64,
+    /// What goes on the return.
+    tax: i64,
+}
+
+/// The output-tax side of a VAT return, for a period.
+///
+/// What the business *charged*. A full return also nets off input tax on
+/// purchases, which needs a purchases module — this is the side that exists.
+async fn vat_return(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(period): Query<Period>,
+) -> Result<Json<VatReturnView>, Problem> {
+    require_module(&tenant, &sales::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, sales::GROUP_NAME, locale)
+        .await?;
+
+    let currency = CurrencyCode::new(&period.currency).map_err(|_| {
+        bad_request(
+            crate::messages::UNKNOWN_CURRENCY,
+            "currency",
+            &period.currency,
+            locale,
+        )
+    })?;
+
+    if period.until <= period.from {
+        return Err(bad_request(
+            crate::messages::EMPTY_PERIOD,
+            "period",
+            &period.from.to_rfc3339(),
+            locale,
+        ));
+    }
+
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+
+    let filed = sales::vat_return(&mut conn, currency, period.from, period.until)
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    drop(conn);
+
+    Ok(Json(VatReturnView {
+        from: filed.from,
+        until: filed.until,
+        currency: filed.currency.to_string(),
+        bands: filed
+            .bands
+            .iter()
+            .map(|b| VatBandView {
+                vat: b.category.as_str(),
+                vat_rate: b.basis_points,
+                net: b.net.minor(),
+                tax: b.tax.minor(),
+                invoices: b.invoices,
+            })
+            .collect(),
+        net: filed.net.minor(),
+        tax: filed.tax.minor(),
     }))
 }
 
@@ -526,7 +682,11 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
                 }
                 // The invoice moved on between the client reading it and paying
                 // it. Look again and decide.
-                SalesError::Overpayment { .. } => StatusCode::CONFLICT,
+                SalesError::Overpayment { .. } | SalesError::AlreadyCancelled { .. } => {
+                    StatusCode::CONFLICT
+                }
+                // Well-formed, and refused on the state of the invoice.
+                SalesError::HasPayments(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::BAD_REQUEST,
             },
             rejection.message(),

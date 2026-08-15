@@ -40,6 +40,10 @@ pub enum SalesError {
     },
     #[error("a payment must be a positive amount")]
     NotAPayment,
+    #[error("invoice {invoice} was already cancelled by {by}")]
+    AlreadyCancelled { invoice: String, by: String },
+    #[error("invoice {0} has been paid; refund it before crediting it")]
+    HasPayments(String),
     #[error("{0} cannot be used as a reference")]
     InvalidReference(String),
     #[error(transparent)]
@@ -74,6 +78,11 @@ impl spa_i18n::Localize for SalesError {
                 .with("expected", MessageArg::text(expected.to_string()))
                 .with("found", MessageArg::text(found.to_string())),
             Self::NotAPayment => Message::new(messages::NOT_A_PAYMENT),
+            Self::AlreadyCancelled { by, .. } => {
+                Message::new(messages::ALREADY_CANCELLED).with("by", MessageArg::text(by.clone()))
+            }
+            Self::HasPayments(invoice) => Message::new(messages::HAS_PAYMENTS)
+                .with("invoice", MessageArg::text(invoice.clone())),
             Self::InvalidReference(reference) => Message::new(messages::INVALID_REFERENCE)
                 .with("reference", MessageArg::text(reference.clone())),
             Self::Tax(TaxError::MixedCurrencies) => Message::new(messages::MIXED_CURRENCIES),
@@ -352,6 +361,133 @@ fn derived_id(prefix: &str, parts: &[&str]) -> Result<AggregateId, CommandError<
     AggregateId::new(&joined).map_err(|_| rejected(SalesError::InvalidReference(parts.join("."))))
 }
 
+/// Cancels an invoice by crediting it: the journal entry it made is reversed,
+/// and the invoice records which credit note did it.
+///
+/// # What this is not
+///
+/// Not a deletion. The invoice was issued, the customer may hold a copy, and
+/// the books end up showing both it and the credit — which is the same reason
+/// the ledger reverses rather than deletes.
+///
+/// Not a *partial* credit either. Crediting some lines and not others is a
+/// document with lines of its own, and nobody has asked for one. ponytail: when
+/// they do, it is a second command and this one stays as the whole-invoice case.
+///
+/// # Why an invoice with payments is refused
+///
+/// The money is somewhere. Cancelling the document without moving it back would
+/// leave cash on the books against a sale that no longer exists, and this system
+/// has no way to model the refund yet. Refusing says so; guessing would not.
+pub async fn cancel_invoice(
+    db: &TenantDb,
+    invoice: &AggregateId,
+    credit_note: &str,
+    reason: &str,
+    on: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    let entry_id = derived_id("si", &[invoice.as_str()])?;
+    let credit_id = derived_id("cn", &[invoice.as_str(), credit_note])?;
+    let memo = format!("Credit note {credit_note} · invoice {invoice}");
+
+    for _ in 1..=MAX_ATTEMPTS {
+        let mut tx = db.begin().await?;
+        match cancel_in(
+            &mut tx,
+            invoice,
+            &entry_id,
+            &credit_id,
+            credit_note,
+            reason,
+            on,
+            &memo,
+            metadata,
+        )
+        .await
+        {
+            Ok(committed) => {
+                tx.commit().await.map_err(ExecuteError::from)?;
+                return Ok(committed);
+            }
+            Err(e) if e.is_conflict() => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+            }
+            Err(e) => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+                return Err(e.into());
+            }
+        }
+    }
+
+    Err(contended(invoice))
+}
+
+/// One attempt at crediting: the ledger reversal and the invoice's own event,
+/// in the caller's transaction.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every one is a value computed before the transaction opened"
+)]
+async fn cancel_in(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    entry_id: &AggregateId,
+    credit_id: &AggregateId,
+    credit_note: &str,
+    reason: &str,
+    on: Timestamp,
+    memo: &str,
+    metadata: &Metadata,
+) -> Result<Committed<InvoiceEvent>, ExecuteError<SalesError>> {
+    let credit_note = credit_note.to_owned();
+    let reason = reason.trim().to_owned();
+    let mut already = false;
+
+    let committed = try_execute::<Invoice, _, SalesError>(
+        &mut *conn,
+        invoice,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            let state = &loaded.aggregate;
+            if !state.issued {
+                return Err(SalesError::NotIssued(invoice.as_str().to_owned()));
+            }
+            // A retry, not a second credit.
+            if state.cancelled_by.as_deref() == Some(credit_note.as_str()) {
+                return Ok(Decision::nothing());
+            }
+            if let Some(by) = &state.cancelled_by {
+                return Err(SalesError::AlreadyCancelled {
+                    invoice: invoice.as_str().to_owned(),
+                    by: by.clone(),
+                });
+            }
+            if state.payments.is_empty() {
+                Ok(Decision::one(InvoiceEvent::Cancelled {
+                    credit_note: credit_note.clone(),
+                    reason: reason.clone(),
+                    on,
+                }))
+            } else {
+                Err(SalesError::HasPayments(invoice.as_str().to_owned()))
+            }
+        },
+    )
+    .await?;
+
+    already |= committed.events.is_empty();
+
+    if !already {
+        ledger::reverse_in(conn, entry_id, credit_id, on, memo, metadata)
+            .await
+            .map_err(lift)?;
+    }
+
+    Ok(committed)
+}
+
 /// The accounts a sale moves, plus metadata stamped with the generation they
 /// came from.
 async fn resolve_accounts(
@@ -421,6 +557,14 @@ const _: fn() = || {
     ) {
         assert_send(issue_invoice(db, id, draft, metadata));
         assert_send(record_payment(db, id, receipt, metadata));
+        assert_send(cancel_invoice(
+            db,
+            id,
+            "",
+            "",
+            spa_types::Timestamp::UNIX_EPOCH,
+            metadata,
+        ));
     }
     let _ = commands_are_send;
 };

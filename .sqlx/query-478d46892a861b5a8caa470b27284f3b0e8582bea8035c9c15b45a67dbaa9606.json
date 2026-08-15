@@ -1,0 +1,63 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT vat_category as \"vat_category!\", vat_rate_bp as \"vat_rate_bp!\",\n                  sum(net)::BIGINT as \"net!\", sum(tax)::BIGINT as \"tax!\",\n                  count(DISTINCT invoice_id) as \"invoices!\"\n             FROM proj_sales.taxable_supply\n            WHERE currency = $1 AND issued_on >= $2 AND issued_on < $3\n            GROUP BY vat_category, vat_rate_bp\n            ORDER BY vat_category, vat_rate_bp",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "vat_category!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.taxable_supply",
+            "name": "vat_category"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "vat_rate_bp!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.taxable_supply",
+            "name": "vat_rate_bp"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "tax!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "invoices!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bpchar",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "478d46892a861b5a8caa470b27284f3b0e8582bea8035c9c15b45a67dbaa9606"
+}

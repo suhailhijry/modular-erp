@@ -77,6 +77,18 @@ pub enum InvoiceEvent {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
     },
+    /// Cancelled by a credit note, which reversed its journal entry.
+    ///
+    /// Not a deletion: the invoice was issued, somebody may hold a copy, and
+    /// the books show both it and the credit. What changes is that nothing is
+    /// owed on it.
+    Cancelled {
+        /// The credit note's own identifier, and the id of the reversing
+        /// journal entry.
+        credit_note: String,
+        reason: String,
+        on: Timestamp,
+    },
     PaymentRecorded {
         /// The payer's or the client's own reference. Recording it twice is a
         /// no-op, which is what makes a retried request safe.
@@ -90,7 +102,11 @@ pub enum InvoiceEvent {
 }
 
 impl InvoiceEvent {
-    pub const NAMES: [&'static str; 2] = ["sales.invoice.issued", "sales.invoice.payment_recorded"];
+    pub const NAMES: [&'static str; 3] = [
+        "sales.invoice.issued",
+        "sales.invoice.payment_recorded",
+        "sales.invoice.cancelled",
+    ];
 }
 
 impl DomainEvent for InvoiceEvent {
@@ -98,6 +114,7 @@ impl DomainEvent for InvoiceEvent {
         crate::name(match self {
             Self::Issued { .. } => Self::NAMES[0],
             Self::PaymentRecorded { .. } => Self::NAMES[1],
+            Self::Cancelled { .. } => Self::NAMES[2],
         })
     }
 
@@ -114,6 +131,8 @@ pub struct Invoice {
     pub gross: Option<Money>,
     /// Total received so far. `None` until the invoice is issued.
     pub paid: Option<Money>,
+    /// Cancelled, and by which credit note.
+    pub cancelled_by: Option<String>,
     /// Payment references already recorded. Small — an invoice is settled in a
     /// handful of instalments at most — and the only way to make recording a
     /// payment idempotent without a separate table.
@@ -137,6 +156,9 @@ impl Aggregate for Invoice {
                 self.gross = Some(totals.gross);
                 self.paid = Some(Money::zero(*currency));
             }
+            InvoiceEvent::Cancelled { credit_note, .. } => {
+                self.cancelled_by = Some(credit_note.clone());
+            }
             InvoiceEvent::PaymentRecorded {
                 payment, amount, ..
             } => {
@@ -159,6 +181,12 @@ impl Invoice {
     #[must_use]
     pub fn outstanding(&self) -> Option<Money> {
         self.gross?.checked_sub(self.paid?).ok()
+    }
+
+    /// Whether a credit note has cancelled this invoice.
+    #[must_use]
+    pub const fn is_cancelled(&self) -> bool {
+        self.cancelled_by.is_some()
     }
 
     /// Whether this payment reference has already been recorded.

@@ -253,6 +253,18 @@ async fn pay(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> Out
     .await
 }
 
+async fn credit(fixture: &Fixture, invoice: &str, note: &str) -> Outcome {
+    sales::cancel_invoice(
+        &fixture.db,
+        &code(invoice),
+        note,
+        "issued in error",
+        when(),
+        &Metadata::default(),
+    )
+    .await
+}
+
 type Outcome = Result<spa_eventlog::Committed<sales::InvoiceEvent>, CommandError<SalesError>>;
 
 fn rejection(error: &CommandError<SalesError>) -> Option<&SalesError> {
@@ -1069,6 +1081,428 @@ async fn unusable_configuration_refuses_rather_than_pretending() {
     // Nothing was written — a half-configured tenant does not get a half-issued
     // invoice.
     assert!(!fixture.is_issued("INV-CFG-4").await);
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Credit notes
+// ---------------------------------------------------------------------------
+
+/// **An invoice issued in error can be credited**, and the books show both.
+#[tokio::test]
+async fn a_credit_note_cancels_an_invoice_and_reverses_its_posting() {
+    let fixture = Fixture::new().await;
+
+    issue(
+        &fixture,
+        "INV-CN-1",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, riyals(1_150));
+
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("INV-CN-1"),
+        "CN-1",
+        "wrong customer",
+        when(),
+        &Metadata::default(),
+    )
+    .await
+    .expect("credits");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1100").await, money(0), "nothing owed");
+    assert_eq!(fixture.balance("4000").await, money(0), "revenue undone");
+    assert_eq!(
+        fixture.balance("2100").await,
+        money(0),
+        "and the VAT with it"
+    );
+
+    // The invoice is still there — it was issued, and somebody may hold a copy.
+    let invoice = fixture.invoice("INV-CN-1").await.expect("is still there");
+    assert_eq!(invoice.summary.gross, riyals(1_150), "as issued");
+    assert_eq!(
+        invoice.summary.outstanding,
+        money(0),
+        "but nobody owes it, or a receivables list would keep chasing it"
+    );
+    assert_eq!(invoice.summary.credit_note.as_deref(), Some("CN-1"));
+    assert!(invoice.summary.cancelled_on.is_some());
+
+    assert!(fixture.imbalances().await.is_empty());
+    fixture.cleanup().await;
+}
+
+/// Crediting twice would swing the balance the other way; the same credit note
+/// again is a retry.
+#[tokio::test]
+async fn an_invoice_can_only_be_credited_once() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-CN-2",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+
+    credit(&fixture, "INV-CN-2", "CN-2").await.expect("credits");
+
+    let retry = credit(&fixture, "INV-CN-2", "CN-2")
+        .await
+        .expect("is not an error");
+    assert!(retry.events.is_empty(), "a retry writes nothing");
+
+    let error = credit(&fixture, "INV-CN-2", "CN-2b")
+        .await
+        .expect_err("already cancelled");
+    assert!(
+        matches!(
+            rejection(&error),
+            Some(SalesError::AlreadyCancelled { by, .. }) if by == "CN-2"
+        ),
+        "{error:?}"
+    );
+
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("1100").await,
+        money(0),
+        "credited exactly once"
+    );
+    fixture.cleanup().await;
+}
+
+/// An invoice that has been paid cannot simply be cancelled — the money is
+/// somewhere, and this system has no way to model the refund.
+#[tokio::test]
+async fn an_invoice_with_payments_is_refused_rather_than_left_inconsistent() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-CN-3",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    pay(&fixture, "INV-CN-3", "wire-1", riyals(50))
+        .await
+        .expect("records");
+
+    let error = credit(&fixture, "INV-CN-3", "CN-3")
+        .await
+        .expect_err("it has been paid");
+    assert!(matches!(
+        rejection(&error),
+        Some(SalesError::HasPayments(_))
+    ));
+
+    fixture.project().await;
+    let invoice = fixture.invoice("INV-CN-3").await.expect("is there");
+    assert!(invoice.summary.cancelled_on.is_none(), "still live");
+    assert_eq!(invoice.summary.paid, riyals(50), "and still paid");
+
+    fixture.cleanup().await;
+}
+
+/// Crediting an invoice nobody issued does nothing at all.
+#[tokio::test]
+async fn crediting_an_invoice_that_does_not_exist_leaves_no_trace() {
+    let fixture = Fixture::new().await;
+
+    let error = credit(&fixture, "INV-NOPE", "CN-X")
+        .await
+        .expect_err("there is no such invoice");
+    assert!(matches!(rejection(&error), Some(SalesError::NotIssued(_))));
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, money(0));
+    fixture.cleanup().await;
+}
+
+/// Both sides still rebuild from the log, which is what a new event type is
+/// most likely to break.
+#[tokio::test]
+async fn credited_invoices_replay_to_exactly_what_is_live() {
+    let fixture = Fixture::new().await;
+
+    for n in 0..4_i64 {
+        let id = format!("INV-CN-R{n}");
+        issue(
+            &fixture,
+            &id,
+            vec![line(
+                "Consulting",
+                money(n * 733 + 41),
+                VatCategory::Standard,
+            )],
+        )
+        .await
+        .expect("issues");
+        if n % 2 == 0 {
+            credit(&fixture, &id, &format!("CN-R{n}"))
+                .await
+                .expect("credits");
+        }
+    }
+    fixture.project().await;
+
+    let pool = fixture.tenant_pool().await;
+
+    let owned = sales::projections();
+    let refs: Vec<&dyn Projection<Group = Sales>> = owned.iter().map(AsRef::as_ref).collect();
+    let sales_report = replay_shadow::<Sales>(&pool, &refs, sales::upcasters(), 200)
+        .await
+        .expect("replays");
+
+    let owned = ledger::projections();
+    let refs: Vec<&dyn Projection<Group = Ledger>> = owned.iter().map(AsRef::as_ref).collect();
+    let ledger_report = replay_shadow::<Ledger>(&pool, &refs, ledger::upcasters(), 200)
+        .await
+        .expect("replays");
+
+    pool.close().await;
+
+    assert!(
+        sales_report.is_reproducible(),
+        "{:?}",
+        sales_report.differences()
+    );
+    assert!(
+        ledger_report.is_reproducible(),
+        "{:?}",
+        ledger_report.differences()
+    );
+    assert!(fixture.imbalances().await.is_empty());
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// The VAT return
+// ---------------------------------------------------------------------------
+
+fn on(day: &str) -> Timestamp {
+    format!("{day}T00:00:00Z").parse().expect("a valid instant")
+}
+
+/// Issues an invoice on a given date, so a return has periods to separate.
+async fn issue_on(fixture: &Fixture, id: &str, day: &str, lines: Vec<InvoiceLine>) -> Outcome {
+    issue_invoice(
+        &fixture.db,
+        &code(id),
+        &Draft {
+            customer: Customer::new("Rawabi Trading"),
+            issued_on: on(day),
+            due_on: None,
+            currency: sar(),
+            lines,
+            note: String::new(),
+        },
+        &Metadata::default(),
+    )
+    .await
+}
+
+/// **What a Saudi business files.** Output tax by rate, for a period.
+#[tokio::test]
+async fn a_vat_return_reports_what_was_charged_by_rate() {
+    let fixture = Fixture::new().await;
+
+    issue_on(
+        &fixture,
+        "Q1-A",
+        "2026-01-15",
+        vec![
+            line("Consulting", riyals(1_000), VatCategory::Standard),
+            line("Export", riyals(500), VatCategory::Zero),
+        ],
+    )
+    .await
+    .expect("issues");
+    issue_on(
+        &fixture,
+        "Q1-B",
+        "2026-03-31",
+        vec![line("Consulting", riyals(400), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    // The next quarter, which must not appear.
+    issue_on(
+        &fixture,
+        "Q2-A",
+        "2026-04-01",
+        vec![line("Consulting", riyals(9_999), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let filed = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-04-01"))
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(filed.bands.len(), 2, "standard and zero-rated");
+
+    let standard = filed
+        .bands
+        .iter()
+        .find(|b| b.category == VatCategory::Standard)
+        .expect("a standard band");
+    assert_eq!(standard.net, riyals(1_400), "both quarter-one invoices");
+    assert_eq!(standard.tax, riyals(210), "15% of 1,400");
+    assert_eq!(standard.invoices, 2);
+
+    assert_eq!(filed.net, riyals(1_900));
+    assert_eq!(filed.tax, riyals(210), "the number that goes on the return");
+
+    // The boundary is exclusive, so consecutive returns neither double-count a
+    // day nor drop one. Stated as the property rather than as arithmetic: the
+    // two quarters together are exactly the whole span.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let q2 = sales::vat_return(&mut conn, sar(), on("2026-04-01"), on("2026-07-01"))
+        .await
+        .expect("reads");
+    let whole = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-07-01"))
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(
+        q2.net,
+        riyals(9_999),
+        "the invoice on the boundary day is Q2's"
+    );
+    assert_eq!(
+        filed.tax.minor() + q2.tax.minor(),
+        whole.tax.minor(),
+        "every riyal charged appears in exactly one of the two"
+    );
+    assert_eq!(filed.net.minor() + q2.net.minor(), whole.net.minor());
+
+    fixture.cleanup().await;
+}
+
+/// A credited invoice is not a supply, so it leaves the return.
+#[tokio::test]
+async fn a_credited_invoice_drops_out_of_the_return() {
+    let fixture = Fixture::new().await;
+
+    issue_on(
+        &fixture,
+        "VR-KEEP",
+        "2026-02-01",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    issue_on(
+        &fixture,
+        "VR-DROP",
+        "2026-02-02",
+        vec![line("Consulting", riyals(3_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let read = async |fixture: &Fixture| {
+        let mut conn = fixture.db.acquire().await.expect("connection");
+        let filed = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-04-01"))
+            .await
+            .expect("reads");
+        drop(conn);
+        filed
+    };
+
+    let before = read(&fixture).await;
+    assert_eq!(before.tax, riyals(600), "15% of 4,000");
+
+    credit(&fixture, "VR-DROP", "CN-VR").await.expect("credits");
+    fixture.project().await;
+
+    let after = read(&fixture).await;
+    assert_eq!(
+        after.tax,
+        riyals(150),
+        "only the invoice that still stands is declared"
+    );
+    assert_eq!(after.bands[0].invoices, 1);
+
+    // And the ledger agrees: the VAT account holds exactly what the return says.
+    assert_eq!(fixture.balance("2100").await, riyals(-150));
+
+    fixture.cleanup().await;
+}
+
+/// A business with nothing to declare still files, so an empty period is a
+/// return with no bands rather than an error.
+#[tokio::test]
+async fn a_quiet_period_is_an_empty_return_not_a_failure() {
+    let fixture = Fixture::new().await;
+    issue_on(
+        &fixture,
+        "VR-OLD",
+        "2026-01-05",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let filed = sales::vat_return(&mut conn, sar(), on("2026-07-01"), on("2026-10-01"))
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert!(filed.bands.is_empty());
+    assert_eq!(filed.tax, money(0));
+    assert_eq!(filed.net, money(0));
+
+    fixture.cleanup().await;
+}
+
+/// The return is per currency: a business invoicing in two does not add them up.
+#[tokio::test]
+async fn a_return_covers_one_currency() {
+    let fixture = Fixture::new().await;
+    fixture.open("1101", AccountKind::Asset, usd()).await;
+
+    issue_on(
+        &fixture,
+        "VR-SAR",
+        "2026-02-01",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let sar_return = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-04-01"))
+        .await
+        .expect("reads");
+    let usd_return = sales::vat_return(&mut conn, usd(), on("2026-01-01"), on("2026-04-01"))
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(sar_return.tax, riyals(150));
+    assert_eq!(usd_return.currency, usd());
+    assert!(
+        usd_return.bands.is_empty(),
+        "SAR supplies are not USD supplies"
+    );
 
     fixture.cleanup().await;
 }

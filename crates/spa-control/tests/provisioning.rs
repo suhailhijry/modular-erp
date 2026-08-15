@@ -14,6 +14,7 @@ use spa_control::{
 };
 use spa_testkit::{Schema, TestDb};
 use spa_types::ModuleId;
+use sqlx::Connection as _;
 
 static CONTROL: Schema = Schema::migrations("control", &spa_control::MIGRATIONS);
 
@@ -70,6 +71,42 @@ impl Fixture {
             .await
             .expect("counts")
             > 0
+    }
+
+    /// A direct connection to a tenant's own database, for assertions about
+    /// what is actually in it.
+    async fn tenant_connection(&self, tenant: &spa_control::Tenant) -> sqlx::PgConnection {
+        use sqlx::Connection;
+        let url = spa_testkit::database_url();
+        let base = url.rsplit_once('/').map_or(url.as_str(), |(head, _)| head);
+        sqlx::PgConnection::connect(&format!("{base}/{}", tenant.database_name))
+            .await
+            .expect("connects")
+    }
+
+    async fn column_exists(
+        &self,
+        tenant: &spa_control::Tenant,
+        schema: &str,
+        table: &str,
+        column: &str,
+    ) -> bool {
+        let mut conn = self.tenant_connection(tenant).await;
+        let found: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.columns
+              WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+        )
+        .bind(schema)
+        .bind(table)
+        .bind(column)
+        .fetch_one(&mut conn)
+        .await
+        .expect("counts");
+        found > 0
+    }
+
+    async fn cleanup_tenant(&self, tenant: &spa_control::Tenant) {
+        let _ = spa_testkit::drop_named_database(&tenant.database_name).await;
     }
 
     async fn slug_taken(&self, slug: &str) -> bool {
@@ -473,4 +510,218 @@ async fn a_tenant_that_is_not_a_demo_cannot_be_reaped_at_all() {
     assert!(fixture.database_exists(&real.database_name).await);
 
     let _ = spa_testkit::drop_named_database(&real.database_name).await;
+}
+
+// ---------------------------------------------------------------------------
+// Module refresh
+// ---------------------------------------------------------------------------
+
+/// The toy module after somebody changed its read model — a new column, which
+/// `CREATE TABLE IF NOT EXISTS` alone would never add.
+fn toy_module_v2() -> ModuleSetup {
+    ModuleSetup::new(
+        ModuleId::new("toy").expect("valid"),
+        "CREATE SCHEMA IF NOT EXISTS proj_toy;
+         CREATE TABLE IF NOT EXISTS proj_toy.thing (id INT PRIMARY KEY, label TEXT NOT NULL);",
+        &[("toy", "proj_toy")],
+    )
+}
+
+/// **A changed read model is a rebuild, not a migration.**
+///
+/// Everything a module projects is derived, so the answer to a schema change is
+/// to drop it, install it again, and replay — which is what makes it safe, and
+/// why `install.sql` is allowed to be `IF NOT EXISTS` throughout.
+#[tokio::test]
+async fn refreshing_a_module_rebuilds_its_schema_and_rewinds_its_checkpoint() {
+    let fixture = Fixture::new().await;
+    let tenant = tenant_with_toy(&fixture, "acme").await;
+
+    // Pretend the worker has been running: some rows, and a checkpoint that has
+    // moved on.
+    let mut conn = fixture.tenant_connection(&tenant).await;
+    sqlx::query("INSERT INTO proj_toy.thing (id) VALUES (1), (2)")
+        .execute(&mut conn)
+        .await
+        .expect("projects something");
+    sqlx::query("UPDATE projection_checkpoint SET position = 42 WHERE group_name = 'toy'")
+        .execute(&mut conn)
+        .await
+        .expect("advances");
+    drop(conn);
+
+    // Not vacuous: the new column is genuinely absent beforehand, so installing
+    // again without dropping would change nothing.
+    assert!(
+        !fixture
+            .column_exists(&tenant, "proj_toy", "thing", "label")
+            .await,
+        "the old shape is what we start from"
+    );
+
+    fixture
+        .control
+        .refresh_module(tenant.id, toy_module_v2())
+        .await
+        .expect("refreshes");
+
+    assert!(
+        fixture
+            .column_exists(&tenant, "proj_toy", "thing", "label")
+            .await,
+        "the new shape is installed"
+    );
+
+    let mut conn = fixture.tenant_connection(&tenant).await;
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM proj_toy.thing")
+        .fetch_one(&mut conn)
+        .await
+        .expect("counts");
+    let checkpoint: i64 =
+        sqlx::query_scalar("SELECT position FROM projection_checkpoint WHERE group_name = 'toy'")
+            .fetch_one(&mut conn)
+            .await
+            .expect("reads");
+    drop(conn);
+
+    assert_eq!(rows, 0, "the derived rows went with the schema");
+    assert_eq!(
+        checkpoint, 0,
+        "and the checkpoint rewound, or the worker would think it had nothing to do"
+    );
+
+    fixture.cleanup_tenant(&tenant).await;
+}
+
+/// Only tenants that have the module, and one failure does not stop the rest.
+#[tokio::test]
+async fn a_fleet_refresh_covers_the_tenants_with_the_module_and_carries_on() {
+    let fixture = Fixture::new().await;
+
+    let with = tenant_with_toy(&fixture, "acme").await;
+    let without = fixture
+        .control
+        .sign_up(
+            "owner@plain.test".to_owned(),
+            "correct horse battery staple".to_owned(),
+            "plain".to_owned(),
+            "Plain".to_owned(),
+            vec![],
+        )
+        .await
+        .expect("signs up")
+        .tenant;
+
+    let plan = fixture
+        .control
+        .refresh_module_fleet(toy_module_v2())
+        .await
+        .expect("refreshes");
+
+    assert_eq!(plan.behind.len(), 1, "one tenant has the module");
+    assert_eq!(plan.behind[0].tenant, with.id);
+    assert!(plan.failed.is_empty());
+
+    assert!(
+        fixture
+            .column_exists(&with, "proj_toy", "thing", "label")
+            .await
+    );
+    assert!(
+        !fixture.database_exists("proj_toy_nowhere").await,
+        "and the tenant without it was untouched"
+    );
+
+    let _ = spa_testkit::drop_named_database(&without.database_name).await;
+    fixture.cleanup_tenant(&with).await;
+}
+
+/// A tenant with the toy module installed at its original shape.
+async fn tenant_with_toy(fixture: &Fixture, slug: &str) -> spa_control::Tenant {
+    fixture
+        .control
+        .sign_up(
+            format!("owner@{slug}.test"),
+            "correct horse battery staple".to_owned(),
+            slug.to_owned(),
+            slug.to_owned(),
+            vec![toy_module()],
+        )
+        .await
+        .expect("signs up")
+        .tenant
+}
+
+/// **The claim the refresh's comment makes, tested rather than asserted.**
+///
+/// A refresh drops a module's tables. A projection run holds the checkpoint row
+/// with `SELECT ... FOR UPDATE` for the length of its batch, and at the *start*
+/// of that batch it has written nothing yet — so it holds no lock on the tables
+/// themselves. Without taking the checkpoint lock first, `DROP SCHEMA` sails
+/// straight past and the run's next write finds its table gone, mid-transaction.
+///
+/// The first version of this test asserted only that the refresh had not
+/// finished, and **passed with the lock removed** — because the checkpoint
+/// `UPDATE` blocks either way, just *after* the drop rather than before it. The
+/// property is not "the refresh waits"; it is "the run's tables are still there
+/// while it is in flight".
+#[tokio::test]
+async fn a_refresh_does_not_drop_tables_under_a_projection_run() {
+    let fixture = Fixture::new().await;
+    let tenant = tenant_with_toy(&fixture, "acme").await;
+
+    // A batch that has taken its lease and not yet written anything — the
+    // window every projection run opens with.
+    let mut runner = fixture.tenant_connection(&tenant).await;
+    let mut run = runner.begin().await.expect("begins");
+    sqlx::query("SELECT 1 FROM projection_checkpoint WHERE group_name = 'toy' FOR UPDATE")
+        .fetch_optional(&mut *run)
+        .await
+        .expect("takes the lease");
+
+    let Fixture { control, db } = fixture;
+    let control = std::sync::Arc::new(control);
+    let refreshing = control.clone();
+    let tenant_id = tenant.id;
+    let refresh = tokio::spawn(async move {
+        refreshing
+            .refresh_module(tenant_id, toy_module_v2())
+            .await
+            .expect("refreshes");
+    });
+
+    // Long enough that a refresh which ignored the lease would have dropped the
+    // schema by now.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // The assertion that matters: the batch can still do its work.
+    let wrote = sqlx::query("INSERT INTO proj_toy.thing (id) VALUES (7)")
+        .execute(&mut *run)
+        .await;
+    assert!(
+        wrote.is_ok(),
+        "the refresh dropped this run's tables out from under it: {wrote:?}"
+    );
+
+    run.commit().await.expect("commits");
+    drop(runner);
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), refresh)
+        .await
+        .expect("the refresh is no longer blocked")
+        .expect("completes");
+
+    // And it did happen, once the run was out of the way.
+    let fixture = Fixture {
+        control: std::sync::Arc::try_unwrap(control).unwrap_or_else(|_| unreachable!()),
+        db,
+    };
+    assert!(
+        fixture
+            .column_exists(&tenant, "proj_toy", "thing", "label")
+            .await,
+        "the refresh eventually did its job"
+    );
+
+    fixture.cleanup_tenant(&tenant).await;
 }

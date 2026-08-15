@@ -72,67 +72,27 @@ impl Projection for Invoices {
                 totals,
                 note,
             } => {
-                sqlx::query(
-                    "INSERT INTO invoice
-                         (id, customer, customer_vat, issued_on, due_on, currency,
-                          net, tax, gross, note, recorded_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-                )
-                .bind(id)
-                .bind(&customer.name)
-                .bind(customer.vat_number.as_deref())
-                .bind(issued_on)
-                .bind(due_on)
-                .bind(currency.as_str())
-                .bind(totals.net.minor())
-                .bind(totals.tax.minor())
-                .bind(totals.gross.minor())
-                .bind(&note)
-                // The event's time, never the wall clock (L2).
-                .bind(ctx.event_time())
-                .execute(&mut *conn)
-                .await?;
+                let invoice = NewInvoice {
+                    customer,
+                    issued_on,
+                    due_on,
+                    currency,
+                    lines,
+                    totals,
+                    note,
+                };
+                write_issued(ctx, conn, id, invoice).await?;
+            }
 
-                for (index, line) in lines.iter().enumerate() {
-                    let index = i32::try_from(index).unwrap_or(i32::MAX);
-                    sqlx::query(
-                        "INSERT INTO invoice_line
-                             (id, invoice_id, line_index, description, net,
-                              vat_category, vat_rate_bp)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                    )
-                    // Derived from the position, so a rebuild produces the same
-                    // key. `Uuid::new_v4()` here would make every replay differ.
-                    .bind(ctx.derive_id(&format!("line-{index}")))
+            InvoiceEvent::Cancelled {
+                credit_note, on, ..
+            } => {
+                sqlx::query("UPDATE invoice SET cancelled_on = $2, credit_note = $3 WHERE id = $1")
                     .bind(id)
-                    .bind(index)
-                    .bind(&line.description)
-                    .bind(line.net.minor())
-                    .bind(line.vat.category.as_str())
-                    .bind(line.vat.basis_points)
+                    .bind(on)
+                    .bind(&credit_note)
                     .execute(&mut *conn)
                     .await?;
-                }
-
-                for band in &totals.bands {
-                    sqlx::query(
-                        "INSERT INTO invoice_tax
-                             (id, invoice_id, vat_category, vat_rate_bp, net, tax)
-                         VALUES ($1, $2, $3, $4, $5, $6)",
-                    )
-                    .bind(ctx.derive_id(&format!(
-                        "tax-{}-{}",
-                        band.category.as_str(),
-                        band.basis_points
-                    )))
-                    .bind(id)
-                    .bind(band.category.as_str())
-                    .bind(band.basis_points)
-                    .bind(band.net.minor())
-                    .bind(band.tax.minor())
-                    .execute(&mut *conn)
-                    .await?;
-                }
             }
 
             InvoiceEvent::PaymentRecorded {
@@ -161,6 +121,91 @@ impl Projection for Invoices {
     }
 }
 
+/// Everything an `Issued` event carries, so writing it is one call rather than
+/// nine arguments.
+struct NewInvoice {
+    customer: crate::invoice::Customer,
+    issued_on: Timestamp,
+    due_on: Option<Timestamp>,
+    currency: CurrencyCode,
+    lines: Vec<crate::invoice::InvoiceLine>,
+    totals: crate::vat::Totals,
+    note: String,
+}
+
+/// The invoice, its lines and its tax bands — three inserts that belong
+/// together, kept out of the match arm so `apply` stays readable.
+async fn write_issued(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    invoice: NewInvoice,
+) -> Result<(), ProjectionError> {
+    sqlx::query(
+        "INSERT INTO invoice
+             (id, customer, customer_vat, issued_on, due_on, currency,
+              net, tax, gross, note, recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(id)
+    .bind(&invoice.customer.name)
+    .bind(invoice.customer.vat_number.as_deref())
+    .bind(invoice.issued_on)
+    .bind(invoice.due_on)
+    .bind(invoice.currency.as_str())
+    .bind(invoice.totals.net.minor())
+    .bind(invoice.totals.tax.minor())
+    .bind(invoice.totals.gross.minor())
+    .bind(&invoice.note)
+    // The event's time, never the wall clock (L2).
+    .bind(ctx.event_time())
+    .execute(&mut *conn)
+    .await?;
+
+    for (index, line) in invoice.lines.iter().enumerate() {
+        let index = i32::try_from(index).unwrap_or(i32::MAX);
+        sqlx::query(
+            "INSERT INTO invoice_line
+                 (id, invoice_id, line_index, description, net,
+                  vat_category, vat_rate_bp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        // Derived from the position, so a rebuild produces the same key.
+        // `Uuid::new_v4()` here would make every replay differ.
+        .bind(ctx.derive_id(&format!("line-{index}")))
+        .bind(id)
+        .bind(index)
+        .bind(&line.description)
+        .bind(line.net.minor())
+        .bind(line.vat.category.as_str())
+        .bind(line.vat.basis_points)
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    for band in &invoice.totals.bands {
+        sqlx::query(
+            "INSERT INTO invoice_tax
+                 (id, invoice_id, vat_category, vat_rate_bp, net, tax)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(ctx.derive_id(&format!(
+            "tax-{}-{}",
+            band.category.as_str(),
+            band.basis_points
+        )))
+        .bind(id)
+        .bind(band.category.as_str())
+        .bind(band.basis_points)
+        .bind(band.net.minor())
+        .bind(band.tax.minor())
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    Ok(())
+}
+
 /// Every projection this module contributes.
 #[must_use]
 pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = Sales>>> {
@@ -175,6 +220,9 @@ pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = Sales>>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvoiceSummary {
     pub id: String,
+    /// When a credit note cancelled it, and which one.
+    pub cancelled_on: Option<Timestamp>,
+    pub credit_note: Option<String>,
     pub customer: String,
     pub customer_vat: Option<String>,
     pub issued_on: Timestamp,
@@ -240,7 +288,8 @@ pub async fn invoices(
                   currency as "currency!",
                   net as "net!", tax as "tax!", gross as "gross!",
                   paid as "paid!", outstanding as "outstanding!",
-                  payments as "payments!", note as "note!"
+                  payments as "payments!", note as "note!",
+                  cancelled_on, credit_note
              FROM proj_sales.invoice_status
             ORDER BY issued_on DESC, id
             LIMIT $1"#,
@@ -265,6 +314,8 @@ pub async fn invoices(
                 outstanding: Money::from_minor(row.outstanding, currency),
                 payments: row.payments,
                 note: row.note,
+                cancelled_on: row.cancelled_on,
+                credit_note: row.credit_note,
             })
         })
         .collect()
@@ -283,7 +334,8 @@ pub async fn invoice(
                   currency as "currency!",
                   net as "net!", tax as "tax!", gross as "gross!",
                   paid as "paid!", outstanding as "outstanding!",
-                  payments as "payments!", note as "note!"
+                  payments as "payments!", note as "note!",
+                  cancelled_on, credit_note
              FROM proj_sales.invoice_status
             WHERE id = $1"#,
         id,
@@ -343,6 +395,8 @@ pub async fn invoice(
             outstanding: Money::from_minor(header.outstanding, currency),
             payments: header.payments,
             note: header.note,
+            cancelled_on: header.cancelled_on,
+            credit_note: header.credit_note,
         },
         lines: lines
             .into_iter()
@@ -385,6 +439,102 @@ fn parse_currency(raw: &str) -> Result<CurrencyCode, sqlx::Error> {
 fn parse_category(raw: &str) -> Result<VatCategory, sqlx::Error> {
     raw.parse()
         .map_err(|e: String| sqlx::Error::Decode(Box::new(std::io::Error::other(e))))
+}
+
+// ---------------------------------------------------------------------------
+// The VAT return
+// ---------------------------------------------------------------------------
+
+/// One rate's line on a VAT return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VatBand {
+    pub category: VatCategory,
+    pub basis_points: i32,
+    /// Taxable supplies at this rate, excluding tax.
+    pub net: Money,
+    /// Tax charged on them, and owed to ZATCA.
+    pub tax: Money,
+    pub invoices: i64,
+}
+
+/// What a business declares for a period.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VatReturn {
+    pub from: Timestamp,
+    /// Exclusive, so consecutive periods neither overlap nor leave a day out.
+    pub until: Timestamp,
+    pub currency: CurrencyCode,
+    pub bands: Vec<VatBand>,
+    pub net: Money,
+    /// The number that goes on the return.
+    pub tax: Money,
+}
+
+/// The output-tax side of a VAT return, by rate, for a period.
+///
+/// # What this is and is not
+///
+/// It is what a business *charged*. A full return also nets off input tax on
+/// purchases, which needs a purchases module — so this is one side of it, and
+/// the side that exists.
+///
+/// # Why the period is half-open
+///
+/// `[from, until)`. A period ending "31 March inclusive" is a timestamp
+/// comparison somebody gets wrong once a quarter, and two consecutive returns
+/// built that way either double-count the boundary or drop it.
+///
+/// Returns `None` when the tenant has no supplies in the period at all, which
+/// is a real answer — a business with nothing to declare still files.
+pub async fn vat_return(
+    conn: &mut PgConnection,
+    currency: CurrencyCode,
+    from: Timestamp,
+    until: Timestamp,
+) -> Result<VatReturn, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT vat_category as "vat_category!", vat_rate_bp as "vat_rate_bp!",
+                  sum(net)::BIGINT as "net!", sum(tax)::BIGINT as "tax!",
+                  count(DISTINCT invoice_id) as "invoices!"
+             FROM proj_sales.taxable_supply
+            WHERE currency = $1 AND issued_on >= $2 AND issued_on < $3
+            GROUP BY vat_category, vat_rate_bp
+            ORDER BY vat_category, vat_rate_bp"#,
+        currency.as_str(),
+        from,
+        until,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let bands = rows
+        .into_iter()
+        .map(|row| {
+            Ok(VatBand {
+                category: parse_category(&row.vat_category)?,
+                basis_points: row.vat_rate_bp,
+                net: Money::from_minor(row.net, currency),
+                tax: Money::from_minor(row.tax, currency),
+                invoices: row.invoices,
+            })
+        })
+        .collect::<Result<Vec<VatBand>, sqlx::Error>>()?;
+
+    let total = |amounts: &dyn Fn(&VatBand) -> Money| {
+        Money::checked_sum(bands.iter().map(amounts), currency)
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))
+    };
+    let net = total(&|b| b.net)?;
+    let tax = total(&|b| b.tax)?;
+
+    Ok(VatReturn {
+        from,
+        until,
+        currency,
+        bands,
+        net,
+        tax,
+    })
 }
 
 // ---------------------------------------------------------------------------

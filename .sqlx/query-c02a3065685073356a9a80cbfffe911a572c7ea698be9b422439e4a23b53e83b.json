@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", customer as \"customer!\", customer_vat,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\"\n             FROM proj_sales.invoice_status\n            WHERE id = $1",
+  "query": "SELECT id as \"id!\", customer as \"customer!\", customer_vat,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\",\n                  cancelled_on, credit_note\n             FROM proj_sales.invoice_status\n            WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -145,6 +145,28 @@
             "name": "note"
           }
         }
+      },
+      {
+        "ordinal": 13,
+        "name": "cancelled_on",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "cancelled_on"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "credit_note",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "credit_note"
+          }
+        }
       }
     ],
     "parameters": {
@@ -165,8 +187,10 @@
       true,
       true,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "5478b12720c1f1a7c90e3c75d2bb611dc41b150af15d38c2fa4a446e6e6d6fe1"
+  "hash": "c02a3065685073356a9a80cbfffe911a572c7ea698be9b422439e4a23b53e83b"
 }

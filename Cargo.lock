@@ -1742,6 +1742,7 @@ dependencies = [
  "sales",
  "serde",
  "serde_json",
+ "spa-api",
  "spa-control",
  "spa-eventlog",
  "spa-projection",

@@ -3,7 +3,14 @@
 //! ```text
 //! CONTROL_DATABASE_URL=… PRIMARY_CLUSTER_URL=… cargo run --bin migrator          # apply
 //! CONTROL_DATABASE_URL=… PRIMARY_CLUSTER_URL=… cargo run --bin migrator -- check # look only
+//! CONTROL_DATABASE_URL=… PRIMARY_CLUSTER_URL=… cargo run --bin migrator -- refresh sales
 //! ```
+//!
+//! `refresh <module>` rebuilds one module's read models across the fleet: drop
+//! the schema, install it again, rewind the checkpoint, and let the worker
+//! replay. That is what a *changed* read model needs — `install.sql` is
+//! `IF NOT EXISTS` throughout and will not add a column to a table that already
+//! exists.
 //!
 //! # Where this goes in a deploy
 //!
@@ -36,7 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .json()
         .init();
 
-    let check_only = std::env::args().nth(1).is_some_and(|a| a == "check");
+    let mode = std::env::args().nth(1).unwrap_or_default();
+    let check_only = mode == "check";
 
     let control_url =
         std::env::var("CONTROL_DATABASE_URL").map_err(|_| "CONTROL_DATABASE_URL is not set")?;
@@ -53,6 +61,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         pool,
         TenantPools::new(clusters, PoolConfig::default()),
     ));
+
+    if mode == "refresh" {
+        let name = std::env::args()
+            .nth(2)
+            .ok_or("refresh needs a module name, e.g. `refresh sales`")?;
+        let setup = spa_api::modules()
+            .into_iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, setup)| setup)
+            .ok_or_else(|| format!("{name} is not a module this build offers"))?;
+
+        let plan = control.refresh_module_fleet(setup).await?;
+        println!(
+            "{} tenants have {name}: {} rebuilt, {} failed",
+            plan.total(),
+            plan.behind.len(),
+            plan.failed.len()
+        );
+        for (tenant, reason) in &plan.failed {
+            println!("  {tenant} FAILED: {reason}");
+        }
+        // Only failures are failures. A rebuild that *did* work leaves tenants
+        // in `behind` — they were behind, and now they are replaying — so
+        // `is_uniform` is the wrong question here.
+        if !plan.failed.is_empty() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     let plan = if check_only {
         control.survey_fleet().await?

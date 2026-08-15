@@ -38,12 +38,12 @@ mod posting;
 mod projections;
 mod vat;
 
-pub use commands::{Draft, Receipt, SalesError, issue_invoice, record_payment};
+pub use commands::{Draft, Receipt, SalesError, cancel_invoice, issue_invoice, record_payment};
 pub use invoice::{Customer, Invoice, InvoiceEvent, InvoiceLine};
 pub use posting::{PostingAccounts, entry_for_issue, entry_for_payment};
 pub use projections::{
     InvoiceDetail, InvoiceLineRow, InvoiceSummary, Invoices, Overpaid, PaymentRow, Sales, TaxRow,
-    invoice, invoices, overpaid, projections,
+    VatBand, VatReturn, invoice, invoices, overpaid, projections, vat_return,
 };
 pub use vat::{TaxBand, TaxError, Totals, Vat, VatCategory, total};
 

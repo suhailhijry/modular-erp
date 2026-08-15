@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS proj_sales.invoice (
     gross        BIGINT NOT NULL CHECK (gross = net + tax),
 
     note         TEXT NOT NULL DEFAULT '',
+
+    -- Cancelled by a credit note. The invoice stays: accounting does not
+    -- delete, and a document that was issued was issued. What changes is that
+    -- nobody owes anything on it.
+    cancelled_on TIMESTAMPTZ,
+    credit_note  TEXT,
+
     -- The event's own timestamp, never `now()` (architecture L2).
     recorded_at  TIMESTAMPTZ NOT NULL
 );
@@ -85,6 +92,33 @@ CREATE TABLE IF NOT EXISTS proj_sales.invoice_payment (
 CREATE INDEX IF NOT EXISTS invoice_payment_by_invoice_idx
     ON proj_sales.invoice_payment (invoice_id);
 
+-- The output-tax side of a VAT return.
+--
+-- One row per invoice per rate, carrying the tax point so a return can be run
+-- for a period. A view rather than a table for the same reason balances are:
+-- summing is exact and needs no code, and a maintained total is a second thing
+-- that can be wrong.
+--
+-- **Cancelled invoices are excluded**, not netted to zero. A credit note in the
+-- same period removes the supply; one in a *later* period is a supply and then
+-- an adjustment, and ZATCA wants those reported in the periods they happened.
+-- ponytail: that distinction needs the credit note to be a document with its own
+-- tax point, which is the partial-credit-note work. Until then a credited
+-- invoice leaves the return entirely, which is right when the credit lands in
+-- the same period and wrong across a boundary — so this view is honest about
+-- being the simple case and `vat_return` refuses to span one silently.
+CREATE OR REPLACE VIEW proj_sales.taxable_supply AS
+SELECT i.id           AS invoice_id,
+       i.issued_on,
+       i.currency,
+       t.vat_category,
+       t.vat_rate_bp,
+       t.net,
+       t.tax
+  FROM proj_sales.invoice i
+  JOIN proj_sales.invoice_tax t ON t.invoice_id = i.id
+ WHERE i.cancelled_on IS NULL;
+
 -- What is still owed, summed rather than maintained.
 --
 -- A `paid` column on `invoice` would be a second thing that can be wrong, and
@@ -102,9 +136,16 @@ SELECT i.id,
        i.tax,
        i.gross,
        i.note,
+       i.cancelled_on,
+       i.credit_note,
        i.recorded_at,
        COALESCE(sum(p.amount), 0)::BIGINT            AS paid,
-       (i.gross - COALESCE(sum(p.amount), 0))::BIGINT AS outstanding,
+       -- A cancelled invoice owes nothing. Without this it keeps appearing in
+       -- a receivables list, and somebody chases a customer for money that was
+       -- credited back to them.
+       CASE WHEN i.cancelled_on IS NOT NULL THEN 0
+            ELSE (i.gross - COALESCE(sum(p.amount), 0))
+       END::BIGINT                                   AS outstanding,
        count(p.id)                                   AS payments
   FROM proj_sales.invoice i
   LEFT JOIN proj_sales.invoice_payment p ON p.invoice_id = i.id

@@ -7,6 +7,8 @@ pub const NOT_ISSUED: MessageCode = MessageCode::new("sales.not_issued");
 pub const OVERPAYMENT: MessageCode = MessageCode::new("sales.overpayment");
 pub const PAYMENT_CURRENCY: MessageCode = MessageCode::new("sales.payment_currency");
 pub const NOT_A_PAYMENT: MessageCode = MessageCode::new("sales.not_a_payment");
+pub const ALREADY_CANCELLED: MessageCode = MessageCode::new("sales.already_cancelled");
+pub const HAS_PAYMENTS: MessageCode = MessageCode::new("sales.has_payments");
 pub const INVALID_REFERENCE: MessageCode = MessageCode::new("sales.invalid_reference");
 pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("sales.mixed_currencies");
 pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("sales.amount_out_of_range");
@@ -17,6 +19,8 @@ pub static CODES: &[MessageCode] = &[
     OVERPAYMENT,
     PAYMENT_CURRENCY,
     NOT_A_PAYMENT,
+    ALREADY_CANCELLED,
+    HAS_PAYMENTS,
     INVALID_REFERENCE,
     MIXED_CURRENCIES,
     AMOUNT_OUT_OF_RANGE,
@@ -104,5 +108,27 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         AMOUNT_OUT_OF_RANGE,
         Locale::Arabic,
         Template::Simple("هذا المبلغ أكبر من أن يُسجَّل."),
+    ),
+    (
+        ALREADY_CANCELLED,
+        Locale::English,
+        Template::Simple("That invoice was already cancelled by credit note {by}."),
+    ),
+    (
+        ALREADY_CANCELLED,
+        Locale::Arabic,
+        Template::Simple("تم إلغاء هذه الفاتورة بالفعل بإشعار دائن {by}."),
+    ),
+    (
+        HAS_PAYMENTS,
+        Locale::English,
+        Template::Simple(
+            "Invoice {invoice} has payments against it. Refund them before crediting it.",
+        ),
+    ),
+    (
+        HAS_PAYMENTS,
+        Locale::Arabic,
+        Template::Simple("توجد دفعات على الفاتورة {invoice}. أعِد المبالغ قبل إصدار إشعار دائن."),
     ),
 ];

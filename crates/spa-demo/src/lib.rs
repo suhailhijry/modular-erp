@@ -60,7 +60,12 @@ pub struct Seeded {
     pub email: String,
     /// A live session for the owner. Signing up logs you in.
     pub token: String,
+    /// The colleague, and their password. A demo of a permissions model needs
+    /// two people in it or there is nothing to demonstrate.
+    pub colleague: String,
     pub invoices: usize,
+    /// Invoices cancelled by a credit note. Part of `invoices`, not extra.
+    pub credited: usize,
     pub payments: usize,
     pub journal_entries: usize,
 }
@@ -147,6 +152,14 @@ pub async fn seed(
     let invoices = seed_invoices(&app, slug, &token).await?;
     let payments = seed_payments(&app, slug, &token).await?;
 
+    // A mistake and its correction, because a demo of an accounting system in
+    // which nothing was ever *wrong* is not a demo of an accounting system —
+    // and because these are the paths a prospective customer asks about first.
+    let credited = seed_corrections(&app, slug, &token).await?;
+    let invoices = invoices + credited;
+
+    let colleague = seed_colleague(&app, slug, &token, password).await?;
+
     // Drive the projections, so the demo has something to show the moment it
     // finishes rather than whenever a worker next visits. A deployment with a
     // worker running would get there on its own; this makes the demo usable
@@ -179,7 +192,9 @@ pub async fn seed(
         email: signed_up.email,
         token,
         expires_after: ttl,
+        colleague,
         invoices,
+        credited,
         payments,
         journal_entries,
     })
@@ -468,7 +483,139 @@ async fn seed_payments(app: &axum::Router, slug: &str, token: &str) -> Result<us
     Ok(payments.len())
 }
 
+/// One credited invoice and one reversed journal entry.
+///
+/// Both corrections, and both leaving their originals on the books — which is
+/// the thing about this system that is hardest to believe from a description
+/// and obvious from a screen.
+async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    // An invoice raised against the wrong customer, and put right.
+    post(
+        app,
+        &format!("/v1/tenants/{slug}/sales/invoices"),
+        Some(token),
+        &serde_json::json!({
+            "id": "INV-2026-006",
+            "customer": { "name": "Najd Logistics", "vat_number": "311234567800003" },
+            "issued_on": "2026-03-11T00:00:00Z",
+            "due_on": "2026-04-10T00:00:00Z",
+            "currency": "SAR",
+            "lines": [
+                { "description": "Raised against the wrong customer", "net": 750_000,
+                  "vat": "standard" }
+            ],
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+
+    post(
+        app,
+        &format!("/v1/tenants/{slug}/sales/invoices/INV-2026-006/credit-note"),
+        Some(token),
+        &serde_json::json!({
+            "id": "CN-2026-001",
+            "reason": "Raised against the wrong customer",
+            "on": "2026-03-12T00:00:00Z",
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    // And a journal entry posted for the wrong amount, reversed.
+    post(
+        app,
+        &format!("/v1/tenants/{slug}/ledger/entries"),
+        Some(token),
+        &serde_json::json!({
+            "id": "UTILITIES-2026-02",
+            "occurred_on": "2026-02-28T00:00:00Z",
+            "memo": "February utilities — wrong amount",
+            "lines": [
+                { "account": "5200", "amount": { "minor": 480_000, "currency": "SAR" } },
+                { "account": "1010", "amount": { "minor": -480_000, "currency": "SAR" } },
+            ],
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    post(
+        app,
+        &format!("/v1/tenants/{slug}/ledger/entries/UTILITIES-2026-02/reversal"),
+        Some(token),
+        &serde_json::json!({
+            "id": "UTILITIES-2026-02-R",
+            "occurred_on": "2026-03-02T00:00:00Z",
+            "memo": "Reversing the February utilities entry",
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    Ok(1)
+}
+
+/// A second person, who does the invoicing and not the books.
+///
+/// Returns their login. Per-module roles are invisible with one user in the
+/// tenant, and "Sara can raise invoices but cannot touch the chart of accounts"
+/// is the whole point of them.
+async fn seed_colleague(
+    app: &axum::Router,
+    slug: &str,
+    token: &str,
+    password: &str,
+) -> Result<String, DemoError> {
+    let handle = format!("sara@{slug}.example");
+
+    let added = post(
+        app,
+        &format!("/v1/tenants/{slug}/members"),
+        Some(token),
+        &serde_json::json!({ "email": handle, "password": password, "role": "viewer" }),
+        StatusCode::CREATED,
+    )
+    .await?;
+
+    let identity = added["identity"]
+        .as_str()
+        .ok_or_else(|| DemoError::Unexpected {
+            path: format!("/v1/tenants/{slug}/members"),
+            body: added.to_string(),
+        })?;
+
+    put(
+        app,
+        &format!("/v1/tenants/{slug}/members/{identity}/modules/sales"),
+        token,
+        &serde_json::json!({ "role": "accountant" }),
+    )
+    .await?;
+
+    Ok(handle)
+}
+
 // ---------------------------------------------------------------------------
+
+/// A `PUT`, for the handful of things that are settings rather than events.
+async fn put(
+    app: &axum::Router,
+    path: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, DemoError> {
+    let request = Request::put(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::from(body.to_string()))
+        .map_err(|e| DemoError::Unexpected {
+            path: path.to_owned(),
+            body: e.to_string(),
+        })?;
+
+    send(app, "PUT", path, request, StatusCode::NO_CONTENT).await
+}
 
 async fn post(
     app: &axum::Router,

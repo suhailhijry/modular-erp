@@ -53,14 +53,19 @@ demo password:
 # Bring every tenant database up to the migrations this build expects.
 # `just migrate-fleet check` looks without touching, and exits non-zero if any
 # tenant is behind — run that before deploying code that needs a migration.
-migrate-fleet mode="":
+migrate-fleet mode="" module="":
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
-      cargo run --quiet --bin migrator -- {{mode}}
+      cargo run --quiet --bin migrator -- {{mode}} {{module}}
 
 # Destroy demo tenants whose time is up. Schedule it; it exits when done.
 reap:
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
       cargo run --quiet --bin reaper
+
+# Regenerate the error-code reference from the message catalog.
+# `just check` fails when `docs/ERRORS.md` no longer matches.
+errors:
+    REGENERATE_DOCS=1 cargo test --quiet -p spa-api --test errors
 
 # Drop every database this project creates. Does not touch anything else.
 #

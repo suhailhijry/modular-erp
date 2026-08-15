@@ -3562,3 +3562,145 @@ async fn an_entry_posted_in_error_can_be_reversed_over_http() {
 
     fixture.cleanup().await;
 }
+
+/// **An invoice issued in error can be credited, over HTTP** — and the module
+/// refresh that made the read model able to say so is what got it there.
+#[tokio::test]
+async fn an_invoice_can_be_credited_and_stops_being_owed() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    assert_eq!(
+        fixture.try_invoice(&token, "INV-OOPS").await,
+        StatusCode::CREATED
+    );
+    fixture.project_sales(tenant).await;
+    assert_eq!(fixture.ledger_balance(&token, "acme", "1100").await, 11_500);
+
+    let credit = |id: &'static str| {
+        Request::post("/v1/tenants/acme/sales/invoices/INV-OOPS/credit-note")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "id": id, "reason": "wrong customer", "on": "2026-03-05T00:00:00Z"
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture.send(credit("CN-1")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    fixture.project_sales(tenant).await;
+    assert_eq!(
+        fixture.ledger_balance(&token, "acme", "1100").await,
+        0,
+        "the receivable is reversed"
+    );
+
+    let (_, invoices, _) = fixture
+        .send(
+            Request::get("/v1/tenants/acme/sales/invoices")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let invoice = &invoices.as_array().expect("a list")[0];
+    assert_eq!(invoice["gross"], 11_500, "the document is still there");
+    assert_eq!(
+        invoice["outstanding"], 0,
+        "but nobody owes it, so nobody chases it"
+    );
+    assert_eq!(invoice["credit_note"], "CN-1");
+
+    // A second, different credit note is refused.
+    let (status, body, _) = fixture.send(credit("CN-2")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "sales.already_cancelled");
+
+    fixture.cleanup().await;
+}
+
+/// **The VAT return, over HTTP** — what a Saudi business files, by rate.
+#[tokio::test]
+async fn a_tenant_can_read_the_vat_it_has_charged() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "INV-VAT",
+                        "customer": { "name": "Rawabi" },
+                        "issued_on": "2026-02-10T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [
+                            { "description": "Consulting", "net": 100_000, "vat": "standard" },
+                            { "description": "Export", "net": 50_000, "vat": "zero" }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    fixture.project_sales(tenant).await;
+
+    let period = "from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR";
+    let (status, filed, _) = fixture
+        .send(
+            bearer(Request::get(format!(
+                "/v1/tenants/acme/sales/vat-return?{period}"
+            )))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{filed}");
+    assert_eq!(filed["tax"], 15_000, "15% of the standard-rated 1,000 only");
+    assert_eq!(filed["net"], 150_000);
+    assert_eq!(
+        filed["bands"].as_array().expect("bands").len(),
+        2,
+        "standard and zero-rated are reported apart"
+    );
+
+    // A period that ends before it starts is a mistake worth naming rather than
+    // an empty return.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get(
+                "/v1/tenants/acme/sales/vat-return\
+                 ?from=2026-04-01T00:00:00Z&until=2026-01-01T00:00:00Z&currency=SAR",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.empty_period");
+
+    fixture.cleanup().await;
+}

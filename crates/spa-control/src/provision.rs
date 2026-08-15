@@ -348,6 +348,132 @@ impl ControlPlane {
         self.enable_module(tenant_id, &module, actor).await
     }
 
+    /// Rebuilds a module's read models from the log.
+    ///
+    /// # When a module's schema changes
+    ///
+    /// `install.sql` is `CREATE TABLE IF NOT EXISTS` throughout, so re-running
+    /// it will not add a column to a table that already exists. That is
+    /// deliberate: everything a module projects is *derived*, so the answer to
+    /// a changed read model is not a migration but a rebuild — drop the schema,
+    /// install it again, and replay the log into it.
+    ///
+    /// # Why it is one transaction, and why it takes the checkpoint lock first
+    ///
+    /// `SELECT ... FOR UPDATE` on the checkpoint row is the same lock a
+    /// projection run takes, so this waits for a run in flight rather than
+    /// dropping the tables out from under it. Resetting the checkpoint in the
+    /// same transaction as the drop means there is no moment where the tables
+    /// are gone and the checkpoint still claims they are current — which a
+    /// worker would read as "nothing to do".
+    ///
+    /// The tenant sees an empty read model until the worker catches up. That is
+    /// the cost of the rebuild and the reason this is a deploy step rather than
+    /// something a request does.
+    pub async fn refresh_module(
+        &self,
+        tenant_id: TenantId,
+        setup: ModuleSetup,
+    ) -> Result<(), AccessError> {
+        let tenant = self
+            .tenant(tenant_id)
+            .await?
+            .ok_or(AccessError::NoSuchTenant)?;
+
+        let options = self
+            .tenants
+            .cluster_options(&tenant.cluster)?
+            .database(&tenant.database_name);
+
+        let conn = Box::pin(PgConnection::connect_with(&options)).await?;
+        let conn = rebuild_schema(conn, setup).await?;
+        conn.close().await.ok();
+
+        tracing::info!(
+            tenant = %tenant.id,
+            slug = %tenant.slug,
+            "rebuilt a module's read models; the worker will replay them"
+        );
+        Ok(())
+    }
+
+    /// The same, for every tenant that has the module enabled.
+    ///
+    /// Does not stop on a failure, for the same reason the fleet migrator does
+    /// not: one unreachable cluster must not leave the rest of the fleet on a
+    /// schema this build cannot read.
+    pub async fn refresh_module_fleet(
+        &self,
+        setup: ModuleSetup,
+    ) -> Result<crate::FleetPlan, AccessError> {
+        let module = setup.module.clone();
+        let tenants = self.tenants_with_module(&module).await?;
+        let mut plan = crate::FleetPlan::default();
+
+        for tenant in tenants {
+            let schema = crate::TenantSchema {
+                tenant: tenant.id,
+                slug: tenant.slug.clone(),
+                version: None,
+            };
+            match self.refresh_module(tenant.id, setup.clone()).await {
+                Ok(()) => plan.behind.push(schema),
+                Err(e) => {
+                    tracing::error!(
+                        tenant = %tenant.id,
+                        slug = %tenant.slug,
+                        error = %e,
+                        "could not rebuild a module; the next run will retry it"
+                    );
+                    plan.failed.push((tenant.id, e.to_string()));
+                }
+            }
+        }
+
+        tracing::info!(
+            module = %module,
+            rebuilt = plan.behind.len(),
+            failed = plan.failed.len(),
+            "module refresh finished"
+        );
+        Ok(plan)
+    }
+
+    /// Every live tenant with a module enabled.
+    async fn tenants_with_module(
+        &self,
+        module: &ModuleId,
+    ) -> Result<Vec<crate::model::Tenant>, AccessError> {
+        let rows = sqlx::query!(
+            r#"SELECT t.id, t.slug, t.display_name, t.status, t.cluster,
+                      t.database_name, t.demo_expires_at, t.created_at
+                 FROM tenant t
+                 JOIN entitlement e ON e.tenant_id = t.id
+                WHERE t.status IN ('active', 'suspended')
+                  AND e.module_id = $1
+                  AND e.disabled_at IS NULL
+                ORDER BY t.created_at"#,
+            module.as_str(),
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                crate::tenant_from_row(
+                    TenantId::from_uuid(row.id),
+                    row.slug,
+                    row.display_name,
+                    &row.status,
+                    row.cluster,
+                    row.database_name,
+                    row.demo_expires_at,
+                    row.created_at,
+                )
+            })
+            .collect()
+    }
+
     /// Drops a half-built tenant's database and row.
     ///
     /// Refuses anything that is not still `provisioning`, so it cannot become a
@@ -660,6 +786,57 @@ fn install_schema(
         }
 
         Ok(conn)
+    })
+}
+
+/// Drops a module's schemas, installs them again, and rewinds its checkpoints.
+///
+/// All in one transaction, holding the same checkpoint lock a projection run
+/// takes. See [`ControlPlane::refresh_module`].
+fn rebuild_schema(
+    conn: PgConnection,
+    setup: ModuleSetup,
+) -> BoxFuture<Result<PgConnection, AccessError>> {
+    Box::pin(async move {
+        let mut conn = run_ddl(conn, "BEGIN".to_owned())
+            .await
+            .map_err(AccessError::Database)?;
+
+        // The lock first, so a projection run in flight finishes rather than
+        // finding its tables gone mid-batch.
+        for index in 0..setup.groups.len() {
+            let (name, _) = setup.groups[index];
+            conn = run_ddl(
+                conn,
+                format!(
+                    "SELECT 1 FROM projection_checkpoint WHERE group_name = '{name}' FOR UPDATE"
+                ),
+            )
+            .await
+            .map_err(AccessError::Database)?;
+        }
+
+        for index in 0..setup.groups.len() {
+            let (name, schema) = setup.groups[index];
+            let quoted = quote_ident(schema)?;
+            conn = run_ddl(conn, format!("DROP SCHEMA IF EXISTS {quoted} CASCADE"))
+                .await
+                .map_err(AccessError::Database)?;
+            conn = run_ddl(
+                conn,
+                format!(
+                    "UPDATE projection_checkpoint SET position = 0 WHERE group_name = '{name}'"
+                ),
+            )
+            .await
+            .map_err(AccessError::Database)?;
+        }
+
+        conn = install_schema(conn, setup).await?;
+
+        run_ddl(conn, "COMMIT".to_owned())
+            .await
+            .map_err(AccessError::Database)
     })
 }
 

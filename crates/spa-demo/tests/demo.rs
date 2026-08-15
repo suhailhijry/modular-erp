@@ -191,6 +191,23 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
         );
     }
 
+    // A mistake and its correction, because that is what a prospective customer
+    // asks about first and what a description is least convincing about.
+    let credited = invoices
+        .iter()
+        .filter(|i| i["credit_note"].is_string())
+        .count();
+    assert_eq!(
+        credited, demo.seeded.credited,
+        "the demo shows an invoice put right, not only invoices that went well"
+    );
+    assert!(
+        invoices
+            .iter()
+            .any(|i| i["credit_note"].is_string() && i["outstanding"] == 0),
+        "and a credited invoice owes nothing"
+    );
+
     // And the books are not made only of sales — an accounting demo in which
     // nothing was ever spent is not a demo of accounting.
     let accounts = demo.get("/v1/tenants/demo-shape/ledger/accounts").await;
@@ -377,7 +394,65 @@ async fn the_demo_bootstraps_a_database_nobody_prepared() {
         .await
         .expect("the demo builds on a database it prepared itself");
 
-    assert_eq!(seeded.invoices, 5);
+    // Six invoices, one of them credited — the whole seed, not a truncated one.
+    assert_eq!(seeded.invoices, 6);
+    assert_eq!(seeded.credited, 1);
 
     let _ = spa_testkit::drop_named_database(&seeded.database).await;
+}
+
+/// The demo has two people in it, with different jobs — which is the only way a
+/// permissions model is visible at all.
+#[tokio::test]
+async fn the_demo_has_somebody_who_cannot_do_everything() {
+    let demo = Demo::build("demo-people").await;
+    let app = spa_api::router(demo.state.clone());
+
+    let sign_in = |handle: String| {
+        axum::http::Request::post("/v1/sessions")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "handle": handle, "password": PASSWORD }).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let response = tower::ServiceExt::oneshot(app.clone(), sign_in(demo.seeded.colleague.clone()))
+        .await
+        .expect("responds");
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("body reads");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let sara = body["token"].as_str().expect("a token");
+
+    // She can see the invoices she is responsible for...
+    spa_demo::get(&app, "/v1/tenants/demo-people/sales/invoices", sara)
+        .await
+        .expect("sales is her job");
+
+    // ...and cannot restructure the chart of accounts.
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::post("/v1/tenants/demo-people/ledger/accounts")
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {sara}"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "code": "9999", "name": "Nope", "kind": "asset", "currency": "SAR"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .expect("responds");
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::FORBIDDEN,
+        "the books are not"
+    );
+
+    demo.cleanup().await;
 }

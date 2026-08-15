@@ -22,6 +22,8 @@ pub const UNKNOWN_VAT_CATEGORY: MessageCode = MessageCode::new("request.unknown_
 pub const NO_SUCH_INVOICE: MessageCode = MessageCode::new("request.no_such_invoice");
 /// A module cannot be turned off while another is standing on it.
 pub const MODULE_IN_USE: MessageCode = MessageCode::new("request.module_in_use");
+/// A reporting period that ends before it begins, or on the day it begins.
+pub const EMPTY_PERIOD: MessageCode = MessageCode::new("request.empty_period");
 
 pub static CODES: &[MessageCode] = &[
     UNKNOWN_CURRENCY,
@@ -37,6 +39,7 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_VAT_CATEGORY,
     NO_SUCH_INVOICE,
     MODULE_IN_USE,
+    EMPTY_PERIOD,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -187,5 +190,15 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         MODULE_IN_USE,
         Locale::Arabic,
         Template::Simple("تحتاج وحدة {dependent} إلى {module}. أوقف {dependent} أولًا."),
+    ),
+    (
+        EMPTY_PERIOD,
+        Locale::English,
+        Template::Simple("A period must end after it starts. `until` is exclusive."),
+    ),
+    (
+        EMPTY_PERIOD,
+        Locale::Arabic,
+        Template::Simple("يجب أن تنتهي الفترة بعد بدايتها. تاريخ الانتهاء غير شامل."),
     ),
 ];
