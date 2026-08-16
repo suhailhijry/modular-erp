@@ -1,0 +1,22 @@
+# Migrations exempted from the expand-only rule.
+#
+# `crates/spa-control/tests/migrations.rs` refuses a migration that takes away
+# something a draining pod still uses. This file is where one says it means it.
+#
+#     <chain>/<file>  <rule>  <why this is safe to run while the previous build serves>
+#
+# # Why this is a separate file and not a comment in the migration
+#
+# Because a migration that has been applied is immutable. sqlx checksums the
+# file and refuses a database whose recorded hash no longer matches — so editing
+# one, *even to add a comment*, strands every environment that already ran it.
+#
+# The first version of this mechanism put the marker in the SQL, and `just demo`
+# failed with `VersionMismatch` on the next run. A rule about not changing what
+# is already deployed, enforced by changing what was already deployed.
+
+control/0002_clusters.sql  add-constraint  Ran before this system had a tenant, a
+    cluster row, or a pod, so there was nothing to overlap with and no row that
+    could violate it. The rule is about a constraint added to a *live* table: the
+    draining build keeps writing rows that satisfied the previous rules, and a new
+    constraint starts rejecting them mid-deploy.

@@ -62,38 +62,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The composition root, and the only place that knows both the kernel and
     // the modules. `spa-worker` itself depends on no module, which is what keeps
     // the dependency arrow pointing one way.
-    let worker = Worker::new(control, config)
+    let mut worker = Worker::new(control, config)
         .with_job(Arc::new(OutboxJob::new(dispatcher, 64)))
-        .with_job(Arc::new(
-            ProjectionJob::<ledger::Ledger>::new(
-                ledger::projections(),
-                Arc::new(ledger::upcasters().clone()),
-                200,
-            )
-            .for_module(ledger_module()),
-        ))
-        .with_job(Arc::new(
-            ProjectionJob::<sales::Sales>::new(
-                sales::projections(),
-                Arc::new(sales::upcasters().clone()),
-                200,
-            )
-            .for_module(sales::module_id()),
-        ))
-        .with_job(Arc::new(
-            ProjectionJob::<purchases::Purchases>::new(
-                purchases::projections(),
-                Arc::new(purchases::upcasters().clone()),
-                200,
-            )
-            .for_module(purchases::module_id()),
-        ))
         .with_job(Arc::new(
             HealthJob::every(Duration::from_mins(5))
                 .with(Arc::new(TrialBalance))
                 .with(Arc::new(NoOverpaidInvoice))
                 .with(Arc::new(NoOverpaidBill)),
         ));
+    for job in module_jobs() {
+        worker = worker.with_job(job);
+    }
 
     let shutdown = worker.run(shutdown_signal()).await;
 
@@ -122,7 +101,7 @@ impl Invariant for TrialBalance {
     }
 
     fn module(&self) -> Option<ModuleId> {
-        Some(ledger_module())
+        Some(ledger::module_id())
     }
 
     async fn check(
@@ -146,8 +125,41 @@ impl Invariant for TrialBalance {
     }
 }
 
-fn ledger_module() -> ModuleId {
-    ModuleId::new("ledger").unwrap_or_else(|_| unreachable!("a literal that satisfies ModuleId"))
+/// **Every module's projections, in one list.**
+///
+/// A function rather than a chain of `with_job` calls so that a test can look at
+/// it. A module missing from here is the worst omission this system has: the
+/// events still commit, the ledger still balances, and the module's read models
+/// stay **permanently empty** — no bill list, no input tax, and a VAT return
+/// quietly under-reporting what can be reclaimed. Nothing else in the suite
+/// notices, which was checked by removing one and watching everything pass.
+fn module_jobs() -> Vec<Arc<dyn spa_worker::Job>> {
+    vec![
+        Arc::new(
+            ProjectionJob::<ledger::Ledger>::new(
+                ledger::projections(),
+                Arc::new(ledger::upcasters().clone()),
+                200,
+            )
+            .for_module(ledger::module_id()),
+        ),
+        Arc::new(
+            ProjectionJob::<sales::Sales>::new(
+                sales::projections(),
+                Arc::new(sales::upcasters().clone()),
+                200,
+            )
+            .for_module(sales::module_id()),
+        ),
+        Arc::new(
+            ProjectionJob::<purchases::Purchases>::new(
+                purchases::projections(),
+                Arc::new(purchases::upcasters().clone()),
+                200,
+            )
+            .for_module(purchases::module_id()),
+        ),
+    ]
 }
 
 /// No bill may have been paid more than it was for.
@@ -224,5 +236,61 @@ impl Invariant for NoOverpaidInvoice {
                 )
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::module_jobs;
+    use std::collections::BTreeSet;
+
+    /// **Every module this build offers has a projection job here.**
+    ///
+    /// The list of modules comes from `spa_api::modules()`, which is the one
+    /// place they are enumerated — so a fourth module cannot be added to the
+    /// product and left out of the worker.
+    ///
+    /// This is the omission nothing else catches. A module registered
+    /// everywhere *except* here still signs up, still installs its tables, still
+    /// accepts writes, and still posts to the ledger correctly — and its read
+    /// models never fill. Verified by deleting one and watching the whole
+    /// workspace stay green.
+    #[test]
+    fn every_module_has_a_projection_job() {
+        let offered: BTreeSet<String> = spa_api::modules()
+            .into_iter()
+            .map(|(_, setup)| setup.module.as_str().to_owned())
+            .collect();
+
+        let worked: BTreeSet<String> = module_jobs()
+            .iter()
+            .filter_map(|job| job.module())
+            .map(|module| module.as_str().to_owned())
+            .collect();
+
+        assert_eq!(
+            offered,
+            worked,
+            "a module is offered and never projected — its read models would \
+             stay empty forever. Missing: {:?}",
+            offered.difference(&worked).collect::<Vec<_>>()
+        );
+    }
+
+    /// And every one of them is scoped to its module.
+    ///
+    /// A projection job with no `module()` runs for every tenant, including the
+    /// ones that declined it — which is the other half of what "modular" has to
+    /// mean, and a `for_module` somebody forgot looks identical until the bill
+    /// arrives.
+    #[test]
+    fn no_module_job_runs_for_tenants_that_declined_it() {
+        for job in module_jobs() {
+            assert!(
+                job.module().is_some(),
+                "{} runs for every tenant, including the ones that did not buy it",
+                job.name()
+            );
+        }
     }
 }

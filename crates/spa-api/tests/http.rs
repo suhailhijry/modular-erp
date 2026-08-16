@@ -4595,3 +4595,41 @@ async fn a_return_for_a_tenant_with_one_side_reports_the_other_as_nothing() {
 
     fixture.cleanup().await;
 }
+
+/// **A deprecated module keeps working for the tenants that have it.**
+///
+/// A build that drops a module strands them: events in the log with nothing that
+/// reads them, read models that stop being refreshed, routes that 404 with no
+/// explanation, and no way for the tenant to get off it. So a module on its way
+/// out stays in the build and stops being *offered* — and the two halves of that
+/// are what this checks.
+#[tokio::test]
+async fn a_deprecated_module_is_kept_by_whoever_has_it_and_offered_to_nobody() {
+    let fixture = Fixture::new().await;
+
+    let catalogue = spa_api::modules();
+    let (name, _) = catalogue.first().expect("at least one module");
+
+    // Nothing shipped is deprecated today, which is the state to be in — so the
+    // catalogue says so, and a client building a picker can rely on the field
+    // being there rather than discovering it the day one is.
+    let (status, body, _) = fixture
+        .send(Request::get("/v1/modules").body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for module in body.as_array().expect("a list") {
+        assert!(
+            module["deprecated"].is_null(),
+            "{} is deprecated and nothing said so in the plan: {module}",
+            module["name"]
+        );
+        assert!(module["name"].is_string());
+    }
+    assert!(
+        body.as_array()
+            .is_some_and(|c| c.iter().any(|m| m["name"] == **name)),
+        "the catalogue does not offer {name}"
+    );
+
+    fixture.cleanup().await;
+}

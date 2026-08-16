@@ -3,9 +3,7 @@
 -- Derived from the event log and dropped-and-rebuilt rather than migrated, for
 -- the reasons in `modules/ledger/schema/install.sql`.
 
-CREATE SCHEMA IF NOT EXISTS proj_sales;
-
-CREATE TABLE IF NOT EXISTS proj_sales.invoice (
+CREATE TABLE IF NOT EXISTS invoice (
     -- The client's own key for this invoice, and the aggregate id. Sending the
     -- same one twice is a no-op, which is what makes a retry safe.
     id           TEXT PRIMARY KEY,
@@ -52,15 +50,15 @@ CREATE TABLE IF NOT EXISTS proj_sales.invoice (
 -- A repeated number would mean the series went backwards, which is the one
 -- failure mode gaplessness exists to prevent. A constraint rather than a test,
 -- because a projection that could write it twice must fail loudly (L6).
-CREATE UNIQUE INDEX IF NOT EXISTS invoice_number_is_unique ON proj_sales.invoice (number);
+CREATE UNIQUE INDEX IF NOT EXISTS invoice_number_is_unique ON invoice (number);
 
-CREATE INDEX IF NOT EXISTS invoice_by_date_idx ON proj_sales.invoice (issued_on DESC);
-CREATE INDEX IF NOT EXISTS invoice_by_customer_idx ON proj_sales.invoice (customer);
+CREATE INDEX IF NOT EXISTS invoice_by_date_idx ON invoice (issued_on DESC);
+CREATE INDEX IF NOT EXISTS invoice_by_customer_idx ON invoice (customer);
 
-CREATE TABLE IF NOT EXISTS proj_sales.invoice_line (
+CREATE TABLE IF NOT EXISTS invoice_line (
     -- Derived from the event's log position, so a rebuild reproduces it.
     id            UUID PRIMARY KEY,
-    invoice_id    TEXT NOT NULL REFERENCES proj_sales.invoice (id) ON DELETE CASCADE,
+    invoice_id    TEXT NOT NULL REFERENCES invoice (id) ON DELETE CASCADE,
     line_index    INT  NOT NULL CHECK (line_index >= 0),
 
     description   TEXT NOT NULL,
@@ -75,13 +73,13 @@ CREATE TABLE IF NOT EXISTS proj_sales.invoice_line (
 );
 
 CREATE INDEX IF NOT EXISTS invoice_line_by_invoice_idx
-    ON proj_sales.invoice_line (invoice_id, line_index);
+    ON invoice_line (invoice_id, line_index);
 
 -- The tax breakdown a Saudi invoice has to print: one row per rate, taxed once
 -- on the subtotal rather than line by line.
-CREATE TABLE IF NOT EXISTS proj_sales.invoice_tax (
+CREATE TABLE IF NOT EXISTS invoice_tax (
     id            UUID PRIMARY KEY,
-    invoice_id    TEXT NOT NULL REFERENCES proj_sales.invoice (id) ON DELETE CASCADE,
+    invoice_id    TEXT NOT NULL REFERENCES invoice (id) ON DELETE CASCADE,
     vat_category  TEXT NOT NULL CHECK (vat_category IN ('standard', 'zero', 'exempt')),
     vat_rate_bp   INT  NOT NULL CHECK (vat_rate_bp >= 0),
     net           BIGINT NOT NULL,
@@ -90,9 +88,9 @@ CREATE TABLE IF NOT EXISTS proj_sales.invoice_tax (
     CONSTRAINT invoice_tax_is_unique UNIQUE (invoice_id, vat_category, vat_rate_bp)
 );
 
-CREATE TABLE IF NOT EXISTS proj_sales.invoice_payment (
+CREATE TABLE IF NOT EXISTS invoice_payment (
     id           UUID PRIMARY KEY,
-    invoice_id   TEXT NOT NULL REFERENCES proj_sales.invoice (id) ON DELETE CASCADE,
+    invoice_id   TEXT NOT NULL REFERENCES invoice (id) ON DELETE CASCADE,
     -- The payer's own reference. Unique per invoice, which is what makes
     -- recording one twice a no-op.
     reference    TEXT NOT NULL,
@@ -106,7 +104,7 @@ CREATE TABLE IF NOT EXISTS proj_sales.invoice_payment (
 );
 
 CREATE INDEX IF NOT EXISTS invoice_payment_by_invoice_idx
-    ON proj_sales.invoice_payment (invoice_id);
+    ON invoice_payment (invoice_id);
 
 -- The output-tax side of a VAT return, as entries on a tax point.
 --
@@ -130,7 +128,7 @@ CREATE INDEX IF NOT EXISTS invoice_payment_by_invoice_idx
 --
 -- So both are entries, each on its own tax point, and the period does the rest.
 -- Same-period credits still net to zero; cross-period ones no longer reach back.
-CREATE OR REPLACE VIEW proj_sales.vat_entry AS
+CREATE OR REPLACE VIEW vat_entry AS
 -- The supply.
 SELECT i.id            AS document_id,
        i.number        AS document_number,
@@ -141,8 +139,8 @@ SELECT i.id            AS document_id,
        t.vat_rate_bp,
        t.net,
        t.tax
-  FROM proj_sales.invoice i
-  JOIN proj_sales.invoice_tax t ON t.invoice_id = i.id
+  FROM invoice i
+  JOIN invoice_tax t ON t.invoice_id = i.id
 
 UNION ALL
 
@@ -160,8 +158,8 @@ SELECT i.credit_note   AS document_id,
        t.vat_rate_bp,
        -t.net,
        -t.tax
-  FROM proj_sales.invoice i
-  JOIN proj_sales.invoice_tax t ON t.invoice_id = i.id
+  FROM invoice i
+  JOIN invoice_tax t ON t.invoice_id = i.id
  WHERE i.cancelled_on IS NOT NULL;
 
 -- What is still owed, summed rather than maintained.
@@ -170,7 +168,7 @@ SELECT i.credit_note   AS document_id,
 -- keeping it in step is the projection code most likely to double-count. Same
 -- reasoning as `proj_ledger.account_balance`, and the same upgrade path if a
 -- tenant ever has enough invoices for the scan to matter.
-CREATE OR REPLACE VIEW proj_sales.invoice_status AS
+CREATE OR REPLACE VIEW invoice_status AS
 SELECT i.id,
        i.number,
        i.customer,
@@ -193,6 +191,6 @@ SELECT i.id,
             ELSE (i.gross - COALESCE(sum(p.amount), 0))
        END::BIGINT                                   AS outstanding,
        count(p.id)                                   AS payments
-  FROM proj_sales.invoice i
-  LEFT JOIN proj_sales.invoice_payment p ON p.invoice_id = i.id
+  FROM invoice i
+  LEFT JOIN invoice_payment p ON p.invoice_id = i.id
  GROUP BY i.id;

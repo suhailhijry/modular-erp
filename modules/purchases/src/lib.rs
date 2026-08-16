@@ -67,7 +67,21 @@ pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messag
 /// Idempotent, and deliberately not a numbered migration chain — see
 /// `modules/ledger/schema/install.sql`.
 pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    // **The install SQL is schema-relative**, so this is what aims it — the same
+    // thing `ControlPlane::install_schema` and `spa_projection::rebuild_swap` do,
+    // and the reason a rebuild can aim it somewhere else.
+    sqlx::raw_sql(
+        "CREATE SCHEMA IF NOT EXISTS proj_purchases; SET search_path TO proj_purchases, public;",
+    )
+    .execute(&mut *conn)
+    .await?;
+
     sqlx::raw_sql(include_str!("../schema/install.sql"))
+        .execute(&mut *conn)
+        .await?;
+
+    // Handed back the way it was found; it goes on to a pool either way.
+    sqlx::raw_sql("SET search_path TO public")
         .execute(&mut *conn)
         .await?;
     Ok(())
@@ -89,8 +103,13 @@ const GROUPS: &[(&str, &str)] = &[(
 /// cannot post is a filing cabinet, not accounting.
 #[must_use]
 pub fn setup() -> spa_control::ModuleSetup {
-    spa_control::ModuleSetup::new(module_id(), include_str!("../schema/install.sql"), GROUPS)
-        .requiring(&["ledger"])
+    spa_control::ModuleSetup::new(
+        module_id(),
+        include_str!("../schema/install.sql"),
+        GROUPS,
+        upcasters,
+    )
+    .requiring(&["ledger"])
 }
 
 /// This module's entitlement name.

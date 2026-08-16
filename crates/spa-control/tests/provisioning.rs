@@ -16,6 +16,13 @@ use spa_testkit::{Schema, TestDb};
 use spa_types::ModuleId;
 use sqlx::Connection as _;
 
+/// A toy module writes no events, so it declares none. `Upcasters::new()` is the
+/// honest answer rather than a stand-in for somebody else's.
+fn no_events() -> &'static spa_eventlog::Upcasters {
+    static NONE: std::sync::OnceLock<spa_eventlog::Upcasters> = std::sync::OnceLock::new();
+    NONE.get_or_init(spa_eventlog::Upcasters::new)
+}
+
 static CONTROL: Schema = Schema::migrations("control", &spa_control::MIGRATIONS);
 
 /// A module with a trivial schema, so these tests do not depend on the ledger.
@@ -25,6 +32,7 @@ fn toy_module() -> ModuleSetup {
         "CREATE SCHEMA IF NOT EXISTS proj_toy;
          CREATE TABLE IF NOT EXISTS proj_toy.thing (id INT PRIMARY KEY);",
         &[("toy", "proj_toy")],
+        no_events,
     )
 }
 
@@ -210,6 +218,7 @@ async fn a_failed_signup_frees_the_name_it_took() {
         ModuleId::new("broken").expect("valid"),
         "CREATE TABLE proj_broken.thing (id INT);", // no such schema
         &[],
+        no_events,
     );
 
     let result = fixture
@@ -524,6 +533,7 @@ fn toy_module_v2() -> ModuleSetup {
         "CREATE SCHEMA IF NOT EXISTS proj_toy;
          CREATE TABLE IF NOT EXISTS proj_toy.thing (id INT PRIMARY KEY, label TEXT NOT NULL);",
         &[("toy", "proj_toy")],
+        no_events,
     )
 }
 
@@ -609,49 +619,6 @@ async fn refreshing_a_module_rebuilds_its_schema_and_rewinds_its_checkpoint() {
     );
 
     fixture.cleanup_tenant(&tenant).await;
-}
-
-/// Only tenants that have the module, and one failure does not stop the rest.
-#[tokio::test]
-async fn a_fleet_refresh_covers_the_tenants_with_the_module_and_carries_on() {
-    let fixture = Fixture::new().await;
-
-    let with = tenant_with_toy(&fixture, "acme").await;
-    let without = fixture
-        .control
-        .sign_up(
-            "owner@plain.test".to_owned(),
-            "correct horse battery staple".to_owned(),
-            "plain".to_owned(),
-            "Plain".to_owned(),
-            vec![],
-        )
-        .await
-        .expect("signs up")
-        .tenant;
-
-    let plan = fixture
-        .control
-        .refresh_module_fleet(toy_module_v2())
-        .await
-        .expect("refreshes");
-
-    assert_eq!(plan.behind.len(), 1, "one tenant has the module");
-    assert_eq!(plan.behind[0].tenant, with.id);
-    assert!(plan.failed.is_empty());
-
-    assert!(
-        fixture
-            .column_exists(&with, "proj_toy", "thing", "label")
-            .await
-    );
-    assert!(
-        !fixture.database_exists("proj_toy_nowhere").await,
-        "and the tenant without it was untouched"
-    );
-
-    let _ = spa_testkit::drop_named_database(&without.database_name).await;
-    fixture.cleanup_tenant(&with).await;
 }
 
 /// A tenant with the toy module installed at its original shape.

@@ -138,6 +138,7 @@ fn parse_modules(requested: &[String], locale: Locale) -> Result<Vec<ModuleSetup
     // for sales without the ledger is refused at the door rather than producing
     // a system that fails on its first invoice.
     for setup in &setups {
+        crate::modules::check_offered(setup, locale)?;
         crate::modules::check_requirements(setup, requested, locale)?;
     }
 

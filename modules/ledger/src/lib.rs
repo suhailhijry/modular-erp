@@ -61,7 +61,21 @@ pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messag
 /// Called when a tenant enables the module. Pair it with
 /// `spa_projection::ensure_group_schema::<Ledger>` so the checkpoint exists too.
 pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    // **The install SQL is schema-relative**, so this is what aims it — the same
+    // thing `ControlPlane::install_schema` and `spa_projection::rebuild_swap` do,
+    // and the reason a rebuild can aim it somewhere else.
+    sqlx::raw_sql(
+        "CREATE SCHEMA IF NOT EXISTS proj_ledger; SET search_path TO proj_ledger, public;",
+    )
+    .execute(&mut *conn)
+    .await?;
+
     sqlx::raw_sql(include_str!("../schema/install.sql"))
+        .execute(&mut *conn)
+        .await?;
+
+    // Handed back the way it was found; it goes on to a pool either way.
+    sqlx::raw_sql("SET search_path TO public")
         .execute(&mut *conn)
         .await?;
     Ok(())
@@ -84,7 +98,12 @@ const GROUPS: &[(&str, &str)] = &[(
 /// provisioning, and neither crate has to know what the other is for.
 #[must_use]
 pub fn setup() -> spa_control::ModuleSetup {
-    spa_control::ModuleSetup::new(module_id(), include_str!("../schema/install.sql"), GROUPS)
+    spa_control::ModuleSetup::new(
+        module_id(),
+        include_str!("../schema/install.sql"),
+        GROUPS,
+        upcasters,
+    )
 }
 
 /// This module's entitlement name.

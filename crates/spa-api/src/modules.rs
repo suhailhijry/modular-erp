@@ -66,6 +66,24 @@ pub(crate) fn find(name: &str, locale: Locale) -> Result<ModuleSetup, Problem> {
         })
 }
 
+/// Refuses a module that is no longer offered.
+///
+/// Called where a module is **added** — signing up and enabling — and
+/// deliberately not in [`find`], because `find` also serves disabling and module
+/// roles. A tenant on a deprecated module has to be able to turn it off, and to
+/// keep managing who uses it in the meantime; refusing there would trap them.
+pub(crate) fn check_offered(setup: &ModuleSetup, locale: Locale) -> Result<(), Problem> {
+    let Some(why) = setup.deprecated else {
+        return Ok(());
+    };
+    Err(ApiError::BadRequest(
+        Message::new(crate::messages::MODULE_DEPRECATED)
+            .with("module", MessageArg::text(setup.module.as_str().to_owned()))
+            .with("why", MessageArg::text(why.to_owned())),
+    )
+    .into_problem(locale))
+}
+
 /// Refuses a module whose dependencies are not in `present`.
 ///
 /// Shared by signup (where `present` is what was asked for) and enabling (where
@@ -97,6 +115,9 @@ pub(crate) fn check_requirements(
 #[derive(Debug, Serialize, ToSchema)]
 struct ModuleView {
     name: &'static str,
+    /// Set when the module is no longer offered, and says why. A tenant that has
+    /// it keeps it; nobody new can turn it on.
+    deprecated: Option<&'static str>,
     /// What this module needs underneath it. A client building a picker needs
     /// this to grey out the impossible combinations rather than discover them.
     requires: &'static [&'static str],
@@ -106,6 +127,8 @@ struct ModuleView {
 #[derive(Debug, Serialize, ToSchema)]
 struct CatalogueView {
     name: &'static str,
+    /// Set when the module is no longer offered. A picker should hide it.
+    deprecated: Option<&'static str>,
     requires: &'static [&'static str],
 }
 
@@ -137,6 +160,7 @@ async fn catalogue() -> Json<Vec<CatalogueView>> {
             .into_iter()
             .map(|(name, setup)| CatalogueView {
                 name,
+                deprecated: setup.deprecated,
                 requires: setup.requires,
             })
             .collect(),
@@ -162,6 +186,7 @@ async fn list_modules(tenant: Allowed<Read>) -> Json<Vec<ModuleView>> {
             .into_iter()
             .map(|(name, setup)| ModuleView {
                 name,
+                deprecated: setup.deprecated,
                 requires: setup.requires,
                 enabled: tenant.db.has_module(&setup.module),
             })
@@ -197,6 +222,7 @@ async fn enable_module(
     Json(body): Json<Enable>,
 ) -> Result<StatusCode, Problem> {
     let setup = find(&body.module, locale)?;
+    check_offered(&setup, locale)?;
 
     let enabled: Vec<String> = tenant
         .db

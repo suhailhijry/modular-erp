@@ -262,6 +262,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — The request body could not be read: {reason}
 - **ar** — تعذّرت قراءة محتوى الطلب: {reason}
 
+### `request.module_deprecated`
+
+- **en** — The {module} module is no longer offered: {why}. Tenants already using it keep it.
+- **ar** — لم تعد وحدة {module} متاحة: {why}. تحتفظ الجهات التي تستخدمها بها.
+
 ### `request.module_in_use`
 
 - **en** — {dependent} needs {module}. Turn {dependent} off first.

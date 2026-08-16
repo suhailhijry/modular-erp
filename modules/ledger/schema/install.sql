@@ -13,9 +13,7 @@
 -- migrator hard-codes `_sqlx_migrations`, and the tenant schema already owns
 -- that one.
 
-CREATE SCHEMA IF NOT EXISTS proj_ledger;
-
-CREATE TABLE IF NOT EXISTS proj_ledger.account (
+CREATE TABLE IF NOT EXISTS account (
     -- The account code, as the tenant chose it: "1000", "4100.02". The
     -- aggregate id, so it is also the natural key.
     code       TEXT PRIMARY KEY,
@@ -27,11 +25,11 @@ CREATE TABLE IF NOT EXISTS proj_ledger.account (
     opened_at  TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS account_kind_idx ON proj_ledger.account (kind) WHERE NOT closed;
+CREATE INDEX IF NOT EXISTS account_kind_idx ON account (kind) WHERE NOT closed;
 
 -- One row per line of every entry. The ledger's detail, and what everything
 -- else is summed from.
-CREATE TABLE IF NOT EXISTS proj_ledger.posting (
+CREATE TABLE IF NOT EXISTS posting (
     -- Derived from the event's log position (`ProjectionCtx::derive_id`), so a
     -- rebuild reproduces it exactly.
     id          UUID PRIMARY KEY,
@@ -53,8 +51,8 @@ CREATE TABLE IF NOT EXISTS proj_ledger.posting (
     CONSTRAINT posting_line_is_unique UNIQUE (entry_id, line_index)
 );
 
-CREATE INDEX IF NOT EXISTS posting_by_account_idx ON proj_ledger.posting (account, occurred_on);
-CREATE INDEX IF NOT EXISTS posting_by_entry_idx ON proj_ledger.posting (entry_id);
+CREATE INDEX IF NOT EXISTS posting_by_account_idx ON posting (account, occurred_on);
+CREATE INDEX IF NOT EXISTS posting_by_entry_idx ON posting (entry_id);
 
 -- ---------------------------------------------------------------------------
 -- Balances are views, not tables.
@@ -72,7 +70,7 @@ CREATE INDEX IF NOT EXISTS posting_by_entry_idx ON proj_ledger.posting (entry_id
 -- `sum(BIGINT)` is NUMERIC in Postgres, so every total is cast back. A sum of
 -- minor units that will not fit in a BIGINT means the ledger has become
 -- nonsense, and the cast raising is the correct outcome (L6).
-CREATE OR REPLACE VIEW proj_ledger.account_balance AS
+CREATE OR REPLACE VIEW account_balance AS
 SELECT a.code,
        a.name,
        a.kind,
@@ -80,8 +78,8 @@ SELECT a.code,
        a.closed,
        COALESCE(sum(p.amount), 0)::BIGINT AS balance,
        count(p.id)                        AS postings
-  FROM proj_ledger.account a
-  LEFT JOIN proj_ledger.posting p ON p.account = a.code
+  FROM account a
+  LEFT JOIN posting p ON p.account = a.code
  GROUP BY a.code, a.name, a.kind, a.currency, a.closed;
 
 -- The invariant, as a query.
@@ -90,11 +88,11 @@ SELECT a.code,
 -- events, projections and replays are all correct, so one number catches an
 -- entire class of pipeline bug — which is why the platform health check runs it
 -- per tenant (architecture §7).
-CREATE OR REPLACE VIEW proj_ledger.trial_balance AS
+CREATE OR REPLACE VIEW trial_balance AS
 SELECT currency,
        sum(amount)::BIGINT                                          AS difference,
        COALESCE(sum(amount) FILTER (WHERE amount > 0), 0)::BIGINT   AS debits,
        COALESCE(-sum(amount) FILTER (WHERE amount < 0), 0)::BIGINT  AS credits,
        count(*)                                                     AS postings
-  FROM proj_ledger.posting
+  FROM posting
  GROUP BY currency;

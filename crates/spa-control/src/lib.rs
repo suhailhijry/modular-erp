@@ -39,7 +39,7 @@ mod tenant_db;
 pub use auth::{
     AuthError, InvitationToken, SESSION_LIFETIME, Session, SessionToken, hash_password,
 };
-pub use fleet::{FleetPlan, TenantSchema};
+pub use fleet::{EventVersions, FleetPlan, TenantSchema};
 pub use invitations::{
     Accepted, INVITATION_LIFETIME, Invitation, InvitationError, PendingInvitation,
 };

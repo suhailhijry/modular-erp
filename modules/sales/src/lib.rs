@@ -90,7 +90,19 @@ pub fn format_number(prefix: &str, value: i64) -> String {
 /// `schema/install.sql`. Pair it with `spa_projection::ensure_group_schema`
 /// so the checkpoint exists too.
 pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    // **The install SQL is schema-relative**, so this is what aims it — the same
+    // thing `ControlPlane::install_schema` and `spa_projection::rebuild_swap` do,
+    // and the reason a rebuild can aim it somewhere else.
+    sqlx::raw_sql("CREATE SCHEMA IF NOT EXISTS proj_sales; SET search_path TO proj_sales, public;")
+        .execute(&mut *conn)
+        .await?;
+
     sqlx::raw_sql(include_str!("../schema/install.sql"))
+        .execute(&mut *conn)
+        .await?;
+
+    // Handed back the way it was found; it goes on to a pool either way.
+    sqlx::raw_sql("SET search_path TO public")
         .execute(&mut *conn)
         .await?;
     Ok(())
@@ -116,8 +128,13 @@ const GROUPS: &[(&str, &str)] = &[(
 /// ledger all give the same answer.
 #[must_use]
 pub fn setup() -> spa_control::ModuleSetup {
-    spa_control::ModuleSetup::new(module_id(), include_str!("../schema/install.sql"), GROUPS)
-        .requiring(&["ledger"])
+    spa_control::ModuleSetup::new(
+        module_id(),
+        include_str!("../schema/install.sql"),
+        GROUPS,
+        upcasters,
+    )
+    .requiring(&["ledger"])
 }
 
 /// This module's entitlement name.

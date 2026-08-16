@@ -468,3 +468,31 @@ fn every_role_the_document_names_exists() {
         "only {described} descriptions and {exampled} examples — did they register?"
     );
 }
+
+/// Every module this build offers has routes in the document.
+///
+/// The fifth composition root. A module can be signed up for, installed,
+/// entitled, projected and invariant-checked and still have no way in — and
+/// "the module is enabled and nothing happens" is a support call nobody can
+/// diagnose from the outside.
+///
+/// Modules mount under their own name by construction (`Allowed<C>` derives the
+/// module from the path), so this is also what keeps that mapping honest.
+#[test]
+fn every_module_has_routes() {
+    let doc = document();
+    let paths: Vec<&String> = doc["paths"]
+        .as_object()
+        .expect("there are paths")
+        .keys()
+        .collect();
+
+    for (name, setup) in spa_api::modules() {
+        let prefix = format!("/v1/tenants/{{slug}}/{}/", setup.module.as_str());
+        assert!(
+            paths.iter().any(|path| path.starts_with(&prefix)),
+            "the {name} module has no routes; a tenant could enable it and find \
+             nothing there"
+        );
+    }
+}

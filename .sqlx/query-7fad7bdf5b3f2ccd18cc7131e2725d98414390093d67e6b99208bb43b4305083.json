@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT event_name as \"event_name!\", max(schema_version)::BIGINT as \"version!\"\n                 FROM event\n                GROUP BY event_name\n                ORDER BY event_name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "event",
+            "name": "event_name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "version!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "7fad7bdf5b3f2ccd18cc7131e2725d98414390093d67e6b99208bb43b4305083"
+}

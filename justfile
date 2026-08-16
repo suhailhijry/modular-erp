@@ -38,7 +38,17 @@ prepare:
     psql "{{admin_url}}" -q -c "CREATE DATABASE spa_typecheck"
     # Both schemas live in one type-check database. Table names do not collide,
     # and sqlx validates every query against a single connection.
-    for f in migrations/control/*.sql migrations/tenant/*.sql modules/*/schema/*.sql; do psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 -f "$f"; done
+    for f in migrations/control/*.sql migrations/tenant/*.sql; do psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 -f "$f"; done
+    # A module's install SQL is schema-relative — it says `invoice`, not
+    # `proj_sales.invoice`, which is what lets a rebuild aim it at a staging
+    # schema. So the schema has to be created and pointed at here too, the same
+    # way `install_schema` does it.
+    for f in modules/*/schema/*.sql; do \
+      m=$(basename $(dirname $(dirname "$f"))); \
+      psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 \
+        -c "CREATE SCHEMA IF NOT EXISTS proj_$m" \
+        -c "SET search_path TO proj_$m, public" -f "$f"; \
+    done
     DATABASE_URL="{{typecheck_url}}" SQLX_OFFLINE=false cargo sqlx prepare --workspace -- --all-targets
 
 # Build the demo tenant against the databases in `.env`.
@@ -51,8 +61,11 @@ demo password:
       DEMO_PASSWORD="{{password}}" cargo run --quiet --bin demo
 
 # Bring every tenant database up to the migrations this build expects.
-# `just migrate-fleet check` looks without touching, and exits non-zero if any
-# tenant is behind — run that before deploying code that needs a migration.
+#
+# Two gates, and a deploy runs both before the pods go up:
+#   `just migrate-fleet check`    is the fleet's *schema* where this build expects?
+#   `just migrate-fleet versions` can this build *read* what is already in the logs?
+# Both look without touching and exit non-zero when the answer is no.
 migrate-fleet mode="" module="":
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
       cargo run --quiet --bin migrator -- {{mode}} {{module}}

@@ -23,6 +23,8 @@ pub const NO_SUCH_INVOICE: MessageCode = MessageCode::new("request.no_such_invoi
 pub const NO_SUCH_BILL: MessageCode = MessageCode::new("request.no_such_bill");
 /// A module cannot be turned off while another is standing on it.
 pub const MODULE_IN_USE: MessageCode = MessageCode::new("request.module_in_use");
+/// A module still in the build, no longer offered to anybody new.
+pub const MODULE_DEPRECATED: MessageCode = MessageCode::new("request.module_deprecated");
 /// A reporting period that ends before it begins, or on the day it begins.
 pub const EMPTY_PERIOD: MessageCode = MessageCode::new("request.empty_period");
 /// 400 or 422. The body is not JSON, or not the JSON this route wanted.
@@ -47,6 +49,7 @@ pub static CODES: &[MessageCode] = &[
     NO_SUCH_INVOICE,
     NO_SUCH_BILL,
     MODULE_IN_USE,
+    MODULE_DEPRECATED,
     EMPTY_PERIOD,
     MALFORMED_BODY,
     UNSUPPORTED_MEDIA_TYPE,
@@ -96,6 +99,19 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_BILL,
         Locale::Arabic,
         Template::Simple("لا توجد فاتورة مورّد {bill}."),
+    ),
+    (
+        MODULE_DEPRECATED,
+        Locale::English,
+        Template::Simple(
+            "The {module} module is no longer offered: {why}. Tenants already \
+             using it keep it.",
+        ),
+    ),
+    (
+        MODULE_DEPRECATED,
+        Locale::Arabic,
+        Template::Simple("لم تعد وحدة {module} متاحة: {why}. تحتفظ الجهات التي تستخدمها بها."),
     ),
     (
         UNKNOWN_CURRENCY,

@@ -338,6 +338,13 @@
       },
       "CatalogueView": {
         "properties": {
+          "deprecated": {
+            "description": "Set when the module is no longer offered. A picker should hide it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -915,6 +922,13 @@
       },
       "ModuleView": {
         "properties": {
+          "deprecated": {
+            "description": "Set when the module is no longer offered, and says why. A tenant that has\nit keeps it; nobody new can turn it on.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "enabled": {
             "type": "boolean"
           },

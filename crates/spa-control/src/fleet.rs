@@ -288,3 +288,92 @@ mod tests {
         assert!(ControlPlane::latest_tenant_migration() > 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The event-version gate
+// ---------------------------------------------------------------------------
+
+/// What event versions a tenant's log actually contains.
+///
+/// Raw counts, with no opinion about what they mean — the comparison against
+/// what a build understands needs the modules' upcasters, and the control plane
+/// holds no domain (D11). The migrator binary has both and does the judging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventVersions {
+    pub tenant: TenantId,
+    pub slug: String,
+    /// The highest `schema_version` present, per event name.
+    pub highest: Vec<(String, i64)>,
+}
+
+impl ControlPlane {
+    /// **The pre-deploy gate for the two-deploy rule.**
+    ///
+    /// `spa_eventlog::upcast` refuses an event written by a newer build rather
+    /// than guessing at it (L6) — which is right, and which means a build
+    /// deployed out of order does not fail at deploy time. It fails later, when
+    /// a projection reaches the first event it cannot read and stops. By then
+    /// the pods are up and the read models are falling behind.
+    ///
+    /// So the fleet is asked *first*: what is in the logs, and can this build
+    /// read all of it? A build that cannot is one somebody is deploying
+    /// backwards, and the answer is to roll forward rather than to start it.
+    ///
+    /// Failures are collected rather than returned, for the same reason
+    /// [`survey_fleet`](Self::survey_fleet) collects them: one unreachable
+    /// cluster must not hide what the rest of the fleet says.
+    pub async fn survey_event_versions(
+        &self,
+    ) -> Result<(Vec<EventVersions>, Vec<(TenantId, String)>), AccessError> {
+        let tenants = self.tenants_with_databases().await?;
+        let mut found = Vec::with_capacity(tenants.len());
+        let mut failed = Vec::new();
+
+        for tenant in tenants {
+            match self.event_versions_of(&tenant).await {
+                Ok(highest) => found.push(EventVersions {
+                    tenant: tenant.id,
+                    slug: tenant.slug,
+                    highest,
+                }),
+                Err(e) => {
+                    tracing::error!(
+                        tenant = %tenant.id,
+                        slug = %tenant.slug,
+                        error = %e,
+                        "could not read a tenant's event versions"
+                    );
+                    failed.push((tenant.id, e.to_string()));
+                }
+            }
+        }
+
+        Ok((found, failed))
+    }
+
+    async fn event_versions_of(
+        &self,
+        tenant: &crate::model::Tenant,
+    ) -> Result<Vec<(String, i64)>, AccessError> {
+        let options = self
+            .tenants
+            .cluster_options(&tenant.cluster)?
+            .database(&tenant.database_name);
+
+        let mut conn = Box::pin(PgConnection::connect_with(&options)).await?;
+        let rows = sqlx::query!(
+            r#"SELECT event_name as "event_name!", max(schema_version)::BIGINT as "version!"
+                 FROM event
+                GROUP BY event_name
+                ORDER BY event_name"#
+        )
+        .fetch_all(&mut conn)
+        .await;
+        conn.close().await.ok();
+
+        Ok(rows?
+            .into_iter()
+            .map(|row| (row.event_name, row.version))
+            .collect())
+    }
+}

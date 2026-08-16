@@ -265,3 +265,210 @@ async fn diff_table(
         only_in_replay: replay_only,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Rebuilding without an outage
+// ---------------------------------------------------------------------------
+
+/// **Rebuilds a group's read models beside the live ones, then swaps.**
+///
+/// # What it replaces
+///
+/// `ControlPlane::refresh_module` drops the schema, installs it again, and
+/// rewinds the checkpoint. Correct, and it leaves the tenant reading empty
+/// tables until the worker catches up — seconds on a small tenant, minutes on a
+/// large one, and every screen in the product wrong for the whole of it. That is
+/// an outage with a nicer name.
+///
+/// Here the new tables are built in a staging schema from position zero while
+/// the live ones keep serving, and the two are exchanged at the end. Readers see
+/// the old shape, then the new one, and nothing in between.
+///
+/// # The swap
+///
+/// Everything after the build happens in one transaction:
+///
+/// 1. take the checkpoint's `FOR UPDATE` lock, which is the same lock a
+///    projection run takes — so a run in flight finishes rather than being
+///    swapped out from under itself
+/// 2. read the log's head, and catch staging up to it. Bounded by whatever
+///    arrived during the build, which is the only part of this that scales with
+///    write rate
+/// 3. drop the live schema and rename staging over it
+/// 4. set the checkpoint to that head
+///
+/// Postgres makes DDL transactional, so a failure anywhere leaves the live
+/// schema exactly as it was. **Readers block only for step 3**, which is two
+/// catalogue updates, because the catch-up is done before the drop rather than
+/// after it.
+///
+/// # What it does not do
+///
+/// It does not make the *shape* change backwards-compatible. A column a
+/// draining pod still selects has to survive this rebuild — expand now, contract
+/// in a later deploy, the same rule
+/// `crates/spa-control/tests/migrations.rs` enforces for migrations.
+pub async fn rebuild_swap<G: ProjectionGroup>(
+    pool: &PgPool,
+    install_sql: &str,
+    projections: &[&dyn Projection<Group = G>],
+    upcasters: &Upcasters,
+    batch_size: i64,
+) -> Result<LogPosition, RunError> {
+    let live = G::SCHEMA;
+    let staging = format!("{live}_next");
+
+    // A leftover from a run that died half way: its tables are stale, and
+    // building on top of them would swap in a mixture of two rebuilds.
+    let mut conn = pool.acquire().await?;
+    build_staging(&mut conn, &staging, install_sql).await?;
+
+    // Whatever the tables *should* look like, they must at least exist. A module
+    // whose install SQL still names `proj_sales.invoice` outright would have
+    // built them in the live schema and left staging empty — and the swap would
+    // then rename an empty schema over a working one.
+    let built = tables_in(&mut conn, &staging).await?;
+    if built.is_empty() {
+        return Err(RunError::Database(sqlx::Error::Protocol(format!(
+            "{staging} is empty after installing the module's schema — its SQL is \
+             probably still schema-qualified, which would build into {live} and \
+             swap nothing over it"
+        ))));
+    }
+    drop(conn);
+
+    // The long part, outside any transaction the tenant can feel: replay
+    // everything up to wherever the log is now.
+    let mut conn = pool.acquire().await?;
+    let mut reached = crate::runner::checkpoint::<G>(&mut conn).await?;
+    drop(conn);
+    rebuild_into(pool, &staging, projections, upcasters, reached, batch_size).await?;
+
+    // And the swap.
+    let mut tx = pool.begin().await?;
+
+    // The same lock a projection run takes, so one in flight finishes first.
+    sqlx::query("SELECT 1 FROM projection_checkpoint WHERE group_name = $1 FOR UPDATE")
+        .bind(G::NAME)
+        .execute(&mut *tx)
+        .await?;
+
+    // Nothing can advance the live checkpoint now, so this is the last catch-up
+    // staging needs. It covers whatever was appended while the build ran.
+    // Pinned once. Writers keep appending while this runs, and chasing a moving
+    // head under the checkpoint lock is how a swap never finishes on a busy
+    // tenant — the events after this point are the next run's, which is what
+    // every other reader here does too.
+    let head = sqlx::query_scalar!(r#"SELECT COALESCE(max(position), 0) as "head!" FROM event"#)
+        .fetch_one(&mut *tx)
+        .await?;
+    let head = LogPosition::new(head).unwrap_or(LogPosition::ZERO);
+    while reached < head {
+        let batch = spa_eventlog::read_since(&mut tx, reached, batch_size).await?;
+        if batch.is_empty() {
+            break;
+        }
+        catch_up(
+            &mut tx,
+            &staging,
+            projections,
+            upcasters,
+            &batch,
+            head,
+            &mut reached,
+        )
+        .await?;
+    }
+
+    for statement in [
+        format!("DROP SCHEMA {} CASCADE", quote_ident(live)),
+        format!(
+            "ALTER SCHEMA {} RENAME TO {}",
+            quote_ident(&staging),
+            quote_ident(live)
+        ),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    sqlx::query("UPDATE projection_checkpoint SET position = $2 WHERE group_name = $1")
+        .bind(G::NAME)
+        .bind(reached.get())
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(reached)
+}
+
+/// A clean staging schema with the module's tables in it.
+async fn build_staging(
+    conn: &mut sqlx::PgConnection,
+    staging: &str,
+    install_sql: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE;
+         CREATE SCHEMA {schema};
+         SET search_path TO {schema}, public;",
+        schema = quote_ident(staging)
+    )))
+    .execute(&mut *conn)
+    .await?;
+
+    // Schema-relative, which is the whole point — see `rebuild_swap`.
+    let installed = sqlx::raw_sql(sqlx::AssertSqlSafe(install_sql.to_owned()))
+        .execute(&mut *conn)
+        .await
+        .map(|_| ());
+
+    // Put the connection back the way it was found whether that worked or not;
+    // it goes back to a pool either way.
+    sqlx::raw_sql(sqlx::AssertSqlSafe("SET search_path TO public".to_owned()))
+        .execute(&mut *conn)
+        .await?;
+
+    installed
+}
+
+/// One batch, applied into `staging` inside the caller's transaction.
+async fn catch_up<G: ProjectionGroup>(
+    tx: &mut sqlx::PgConnection,
+    staging: &str,
+    projections: &[&dyn Projection<Group = G>],
+    upcasters: &Upcasters,
+    batch: &[spa_eventlog::Envelope],
+    head: LogPosition,
+    reached: &mut LogPosition,
+) -> Result<(), RunError> {
+    use crate::group::ProjectionCtx;
+
+    // Read the log first, narrow afterwards: once `search_path` points at the
+    // staging schema the `event` table is out of scope, which is L3 working as
+    // intended.
+    set_search_path(&mut *tx, staging).await?;
+
+    for envelope in batch {
+        if envelope.position > head {
+            break;
+        }
+        let ctx = ProjectionCtx::new(envelope.position, envelope.recorded_at, upcasters);
+        for projection in projections {
+            projection
+                .apply(&ctx, envelope, &mut *tx)
+                .await
+                .map_err(|source| RunError::Projection {
+                    projection: projection.name(),
+                    position: envelope.position,
+                    source,
+                })?;
+        }
+        *reached = envelope.position;
+    }
+
+    // Back, so the next `read_since` in this transaction can see the log.
+    set_search_path(&mut *tx, "public").await?;
+    Ok(())
+}

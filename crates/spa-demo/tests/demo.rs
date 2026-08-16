@@ -208,6 +208,55 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
         "and a credited invoice owes nothing"
     );
 
+    // The other side of the return. A demo that shows output tax and calls it a
+    // VAT return shows half a number, and the wrong half to somebody deciding
+    // whether this can file for them.
+    //
+    // This also covers the demo's own projection list: a module the demo signs
+    // up for and never advances has empty read models, and reads as "the demo is
+    // broken" rather than "somebody forgot a line".
+    let bills = demo.get("/v1/tenants/demo-shape/purchases/bills").await;
+    let bills = bills.as_array().expect("a list");
+    assert_eq!(
+        bills.len(),
+        demo.seeded.bills,
+        "the demo signed up for purchases and its bills were never projected"
+    );
+    assert!(
+        bills.iter().any(|b| b["outstanding"] == 0),
+        "something is paid off"
+    );
+    assert!(
+        bills.iter().any(|b| b["outstanding"] != 0),
+        "and something is still owed, so a payables list has both"
+    );
+
+    // The whole return: charged, reclaimed, and the difference.
+    let filed = demo
+        .get(
+            "/v1/tenants/demo-shape/vat-return\
+             ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
+        )
+        .await;
+    let output = filed["output"]["tax"].as_i64().expect("output tax");
+    let input = filed["input"]["tax"].as_i64().expect("input tax");
+    assert!(output > 0, "the demo charged VAT");
+    assert!(input > 0, "and paid some it can reclaim");
+    assert_eq!(
+        filed["payable"].as_i64(),
+        Some(output - input),
+        "the number that gets filed is the difference"
+    );
+    assert!(
+        filed["input"]["bands"]
+            .as_array()
+            .expect("bands")
+            .iter()
+            .any(|b| b["vat"] == "exempt" && b["tax"] == 0),
+        "the demo has an exempt purchase reclaiming nothing — the distinction \
+         between zero-rated and exempt is invisible until a return has both"
+    );
+
     // And the books are not made only of sales — an accounting demo in which
     // nothing was ever spent is not a demo of accounting.
     let accounts = demo.get("/v1/tenants/demo-shape/ledger/accounts").await;

@@ -199,10 +199,13 @@ Built only where the ledger produced a second consumer.
       contributes the trial balance through the composition root
 - [x] `bin/worker` composes the kernel and the modules; neither crate depends on
       the other
-- [ ] `Module` trait and registry *(now describable: name, install SQL,
-      projection groups, a router, a rejection-to-status mapping, an entitlement
-      check, and an optional `requires`. `ledger_routes` and `sales_routes`
-      differ only in the last three lines of each)*
+- [ ] `Module` trait and registry *(still blocked on a real contradiction: the
+      trait would carry a router, and a module must not depend on `spa-api`. What
+      a third module showed is that the **registry** half is the part that was
+      actually load-bearing — five composition roots each list every module, and
+      one of them was unchecked. That is now closed by tests rather than by a
+      trait; see the running note. The trait itself waits for the router problem
+      to have an answer, and building it without one would be guessing twice)*
 - [ ] `Idempotency-Key` *(the ledger's mutations take client-chosen ids, so both
       are already idempotent — this may turn out to be unnecessary)*
 - [ ] `ETag`/`If-Match` *(no update-in-place endpoint yet)*
@@ -1665,3 +1668,166 @@ here and folded back into ARCHITECTURE.md.
   against a tenant whose database was gone. Found by running it, which is the
   only way a developer-tool bug gets found. The recipe now clears rows whose
   database no longer exists.
+
+- **Five composition roots list every module, and one of them was unchecked.**
+  Adding a module means editing `spa_api::modules()`, the message catalog, the
+  routes, the worker's job list, and the demo's projection advance. The question
+  worth asking after a third module is not "can this be a trait" but **"what
+  happens if somebody forgets one of the five?"**
+
+  So I removed `purchases` from two of them and ran the workspace. The catalog
+  omission was caught immediately — by the `docs/ERRORS.md` drift check, which
+  turns out to cover it for free. The **worker omission was caught by nothing at
+  all**: 476 tests green with a module whose read models would never fill.
+
+  That is the worst failure this system has. The events still commit, the ledger
+  still balances, the module still accepts writes and posts correctly — and
+  `proj_purchases` stays permanently empty. No bill list, no input tax, and a VAT
+  return quietly under-reporting what can be reclaimed, so a business pays tax it
+  does not owe. Nothing about it looks like a bug from the inside.
+
+- **The fix is a list a test can look at.** `bin/worker.rs` built its jobs with a
+  chain of `with_job` calls, which nothing could inspect. They are a
+  `module_jobs()` function now, and two tests read it: every module in
+  `spa_api::modules()` has a job, and every job is scoped to its module — because
+  a `for_module` somebody forgot looks identical until a tenant is billed for
+  projections they declined.
+
+  The other two roots are checked behaviourally rather than structurally, which
+  is better where it is available: `every_module_has_routes` reads the OpenAPI
+  document (a module a tenant can enable and find nothing behind), and the demo
+  test asserts its bills were projected (which is what a missing advance looks
+  like from outside). All four were confirmed by breaking them.
+
+- **This is the registry the plan asked for, and not the trait.** The `Module`
+  trait is still blocked on a genuine contradiction — it would carry a router,
+  and a module must not depend on `spa-api`. What three modules made clear is
+  that the *registry* half was the load-bearing part, and it did not need a trait
+  to be closed. The trait can wait for the router problem to have an answer
+  rather than being built around a guess at one.
+
+## Deploying without an outage
+
+Three of the four zero-downtime pieces landed. Build-then-swap projection
+rebuilds is the fourth and is its own increment — see the note at the end.
+
+- **Expand-only migrations, enforced.** A migration that removes something an
+  old pod still uses turns the overlap window into an outage — and it is an
+  outage nobody sees in staging, because staging deploys one pod. Eleven rules,
+  each a phrase that only appears in an `ALTER`-shaped statement (`set not null`
+  is; the `not null` in every `CREATE TABLE` is not), checked over both migration
+  chains with comments stripped first, because half these files explain in prose
+  why something is *not* dropped.
+
+  One migration in the repo needed an exemption: `0002_clusters.sql` adds a
+  foreign key, which is unsafe on a live table and was entirely safe there
+  because it ran before the system had a tenant.
+
+- **The exemption mechanism broke the rule it enforces.** First version put the
+  marker in a comment in the migration. `just demo` then failed with
+  `VersionMismatch(2)`: sqlx checksums migration files, so editing one — *even to
+  add a comment* — strands every database that already ran it.
+
+  A rule about not changing what is already deployed, enforced by changing what
+  was already deployed. Exemptions live in `migrations/EXEMPTIONS` now, and the
+  reason that file is separate is written at the top of it.
+
+- **The pre-deploy version gate.** `spa_eventlog::upcast` refuses an event from a
+  newer build rather than guessing (L6), which is right — and means a build
+  deployed out of order does not fail *at deploy time*. It fails later, when a
+  projection reaches the first event it cannot read and stops, by which point the
+  pods are up and the read models are silently falling behind.
+
+  `just migrate-fleet versions` asks the fleet first, and reports two different
+  failures: an event at a version higher than this build declares (somebody is
+  deploying backwards) and an event name this build declares nothing for at all
+  (a module was dropped rather than deprecated). Verified by planting one of each
+  in the demo tenant's log and watching both fire — and the log refused the
+  cleanup `DELETE`, which is the append-only trigger doing its job.
+
+- **The gate made `upcasters` part of a module's declaration.** Comparing needed
+  the union of every module's event versions, and building that by hand would
+  have been a *sixth* place listing modules — in the increment whose whole
+  finding was that the fifth was wrong. `ModuleSetup::new` now takes it, as a
+  required argument rather than a builder method: a module that forgot it would
+  be invisible to the gate, and invisible is exactly the answer that lets a bad
+  build ship.
+
+- **Modules are deprecated, never removed.** `ModuleSetup::deprecated(why)`.
+  Signing up for one and enabling one are refused; **disabling one is not**, and
+  neither is managing who uses it — a tenant on a deprecated module has to be
+  able to get off it, and refusing there would trap them. The catalogue carries
+  the reason so a picker can hide it. It leaves the build when the last
+  entitlement does, which is a fact somebody can check rather than a date
+  somebody guessed.
+
+- **A third silent-corruption bug from writing Rust through Python.** Two format
+  strings came out with twenty spaces in the middle: `\`-continuations in a
+  Python heredoc are consumed by *Python*, so the Rust source never had them and
+  the indentation landed inside the string literal. Third time. The tell is a run
+  of spaces inside a quoted string, and it is now something to grep for after any
+  scripted edit.
+
+- **Build-then-swap projection rebuilds.** Done — see below.
+
+## Rebuilding read models without an outage
+
+- **The blocker was an asymmetry nobody had noticed.** Projections wrote
+  unqualified (`INSERT INTO invoice`) through `search_path`; the install SQL that
+  *created* those tables named `proj_sales.invoice` outright. So the DDL could
+  only ever build one schema — the live one — and a rebuild had no choice but to
+  drop it first.
+
+  The install SQL is schema-relative now, and `install_schema` aims it by setting
+  `search_path` to the group's schema, which is exactly what the projections
+  already did. `just prepare` does the same for the type-check database, because
+  the reads are still qualified and the tables have to land where they expect.
+
+- **`rebuild_swap` builds beside, then exchanges.** Staging schema, install,
+  replay from zero while the live tables keep serving. Then one transaction: take
+  the checkpoint's `FOR UPDATE` lock (so a projection run in flight finishes),
+  pin the log head, catch staging up to it, drop the live schema, rename staging
+  over it, set the checkpoint. Postgres makes DDL transactional, so a failure
+  anywhere leaves live exactly as it was — asserted rather than assumed.
+
+  **Readers block only for the drop-and-rename**, two catalogue updates, because
+  the catch-up happens before it rather than after.
+
+- **The catch-up window is where a rebuild silently loses data**, and it is the
+  test worth having. Events appended *between* the build finishing and the swap
+  happening would be missing from the new tables while the checkpoint claimed
+  they were there — permanently. Confirmed by disabling the catch-up and watching
+  five events vanish.
+
+- **A guard against the mistake this whole change invites.** If a module's
+  install SQL is still schema-qualified, it builds into the *live* schema and
+  leaves staging empty — and the swap would then rename an empty schema over a
+  working one, deleting a tenant's read models. So staging is checked for tables
+  before the swap, and the refusal says why. Confirmed by removing the check and
+  watching the failure become an unrelated "relation does not exist".
+
+- **Wired, not left as a library.** `just migrate-fleet refresh <module>` uses
+  it. That needed `ControlPlane::maintenance_pool` — `TenantDb` deliberately
+  exposes no pool because it is the request path, and a rebuild is not a request:
+  no member behind it, several transactions, and the same trust level as
+  `enter_for_maintenance`. Verified on the real demo tenant: six invoices before,
+  six after, checkpoint unmoved at 55, no leftover staging schema. Under the old
+  path that was six, then zero, then six.
+
+  `refresh_module_fleet` is **deleted** — the migrator does the loop now, and a
+  function with no callers is the bug class this project keeps finding.
+  `refresh_module` stays as the fallback for a caller with no projections, with
+  its cost written on it.
+
+- **Deleting nearly took a hard-won test with it.** The first cut removed
+  `a_refresh_does_not_drop_tables_under_a_projection_run` — the one proved
+  non-vacuous several increments ago — because it sat between the dead test and
+  the helper they shared. Caught by the compiler, not by me. The redo asserts
+  what it is *not* allowed to remove before writing anything, which is what a
+  scripted deletion should have done in the first place.
+
+- **`every_module_can_be_rebuilt`.** `rebuild_swap` is generic over the
+  projection group, and a group is a type, so the migrator matches on the module
+  name — one more place a module can be left out, and leaving one out means a
+  change to its read models could never be deployed. Same shape and same reason
+  as `every_module_has_a_projection_job`.

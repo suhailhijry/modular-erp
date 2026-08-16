@@ -55,7 +55,7 @@
 //! here, next to the cause, rather than three crates away at a route table.
 
 use spa_types::{IdentityId, ModuleId, TenantId};
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, PgConnection, PgPool};
 
 use crate::model::{Actor, Scope, Tenant};
 use crate::{AccessError, ControlPlane, PlacementPolicy, TenantStatus};
@@ -71,12 +71,37 @@ pub struct ModuleSetup {
     pub install_sql: &'static str,
     /// The projection groups this module owns, as `(name, schema)`.
     pub groups: &'static [(&'static str, &'static str)],
+    /// Every event shape this module can read, and the version it writes.
+    ///
+    /// Declared here, and **required** in [`Self::new`] rather than added by a
+    /// builder method, because a module that forgot it would be invisible to the
+    /// pre-deploy version gate — and invisible is exactly the answer that lets a
+    /// build ship that cannot read the fleet's logs.
+    ///
+    /// A function pointer rather than a reference so the whole thing stays
+    /// const-constructible; every module's is a `OnceLock` behind one.
+    pub upcasters: fn() -> &'static spa_eventlog::Upcasters,
     /// Modules this one cannot work without, by name.
     ///
     /// Declared here rather than checked at each call site, because three
     /// places need the same answer: signing up, enabling later, and refusing to
     /// disable something another module is standing on.
     pub requires: &'static [&'static str],
+    /// Why this module is no longer offered, if it is not.
+    ///
+    /// # Why modules are deprecated and never removed
+    ///
+    /// A build that drops a module strands every tenant entitled to it: their
+    /// events are in the log with nothing that can read them, their read models
+    /// stop being refreshed, and their routes 404 with no explanation. Nothing
+    /// about that is recoverable by the tenant.
+    ///
+    /// So a module on its way out stays in the build and stops being *offered*.
+    /// Nobody new can enable it, the catalogue says why, and the tenants who
+    /// have it keep working until they are migrated off deliberately. It leaves
+    /// the build when the last entitlement does, which is a fact somebody can
+    /// check rather than a date somebody guessed.
+    pub deprecated: Option<&'static str>,
 }
 
 impl ModuleSetup {
@@ -85,13 +110,25 @@ impl ModuleSetup {
         module: ModuleId,
         install_sql: &'static str,
         groups: &'static [(&'static str, &'static str)],
+        upcasters: fn() -> &'static spa_eventlog::Upcasters,
     ) -> Self {
         Self {
             module,
             install_sql,
             groups,
+            upcasters,
             requires: &[],
+            deprecated: None,
         }
+    }
+
+    /// Marks a module as no longer offered, and says why.
+    ///
+    /// Existing tenants keep it. See [`Self::deprecated`].
+    #[must_use]
+    pub const fn deprecated(mut self, why: &'static str) -> Self {
+        self.deprecated = Some(why);
+        self
     }
 
     /// Names the modules this one needs underneath it.
@@ -367,9 +404,17 @@ impl ControlPlane {
     /// are gone and the checkpoint still claims they are current — which a
     /// worker would read as "nothing to do".
     ///
-    /// The tenant sees an empty read model until the worker catches up. That is
-    /// the cost of the rebuild and the reason this is a deploy step rather than
-    /// something a request does.
+    /// # Why this is not the deploy path any more
+    ///
+    /// **The tenant reads empty tables until the worker catches up** — seconds
+    /// on a small tenant, minutes on a large one, and every screen in the
+    /// product wrong for the whole of it. `just migrate-fleet refresh <module>`
+    /// uses `spa_projection::rebuild_swap` instead, which builds the new tables
+    /// beside the live ones and exchanges them at the end.
+    ///
+    /// This stays as the fallback for a caller that has no projections to
+    /// replay with — the swap needs them, and only a composition root has both
+    /// them and the fleet.
     pub async fn refresh_module(
         &self,
         tenant_id: TenantId,
@@ -397,50 +442,44 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// The same, for every tenant that has the module enabled.
+    /// A pool straight at one tenant's database, for a deploy step.
     ///
-    /// Does not stop on a failure, for the same reason the fleet migrator does
-    /// not: one unreachable cluster must not leave the rest of the fleet on a
-    /// schema this build cannot read.
-    pub async fn refresh_module_fleet(
-        &self,
-        setup: ModuleSetup,
-    ) -> Result<crate::FleetPlan, AccessError> {
-        let module = setup.module.clone();
-        let tenants = self.tenants_with_module(&module).await?;
-        let mut plan = crate::FleetPlan::default();
+    /// # Why this exists when `TenantDb` deliberately does not expose one
+    ///
+    /// `TenantDb` is the request path: it carries lanes, per-operation permits,
+    /// and proof that somebody was allowed in. None of that applies here, and
+    /// pretending it does would be worse — a rebuild is not a request, it has no
+    /// member behind it, and it wants a pool rather than one connection because
+    /// it runs several transactions.
+    ///
+    /// The trust level is exactly
+    /// [`enter_for_maintenance`](crate::ControlPlane::enter_for_maintenance)'s:
+    /// a caller that already has a tenant id from a fleet walk, running as the
+    /// deploy rather than as a person. It is **not** reachable from a handler,
+    /// because a handler has no way to get here without one.
+    pub async fn maintenance_pool(&self, tenant_id: TenantId) -> Result<PgPool, AccessError> {
+        let tenant = self
+            .tenant(tenant_id)
+            .await?
+            .ok_or(AccessError::NoSuchTenant)?;
 
-        for tenant in tenants {
-            let schema = crate::TenantSchema {
-                tenant: tenant.id,
-                slug: tenant.slug.clone(),
-                version: None,
-            };
-            match self.refresh_module(tenant.id, setup.clone()).await {
-                Ok(()) => plan.behind.push(schema),
-                Err(e) => {
-                    tracing::error!(
-                        tenant = %tenant.id,
-                        slug = %tenant.slug,
-                        error = %e,
-                        "could not rebuild a module; the next run will retry it"
-                    );
-                    plan.failed.push((tenant.id, e.to_string()));
-                }
-            }
-        }
+        let options = self
+            .tenants
+            .cluster_options(&tenant.cluster)?
+            .database(&tenant.database_name);
 
-        tracing::info!(
-            module = %module,
-            rebuilt = plan.behind.len(),
-            failed = plan.failed.len(),
-            "module refresh finished"
-        );
-        Ok(plan)
+        Ok(sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await?)
     }
 
     /// Every live tenant with a module enabled.
-    async fn tenants_with_module(
+    ///
+    /// Public for operator tools that have to walk the fleet themselves — the
+    /// swap rebuild in `bin/migrator` needs the tenant *and* this crate's
+    /// projections, and only a composition root has both.
+    pub async fn tenants_with_module(
         &self,
         module: &ModuleId,
     ) -> Result<Vec<crate::model::Tenant>, AccessError> {
@@ -757,11 +796,10 @@ fn install_schema(
     setup: ModuleSetup,
 ) -> BoxFuture<Result<PgConnection, AccessError>> {
     Box::pin(async move {
-        let mut conn = run_ddl(conn, setup.install_sql.to_owned())
-            .await
-            .map_err(AccessError::Database)?;
+        let mut conn = conn;
 
-        // The projection group's schema and its checkpoint row.
+        // The projection group's schema and its checkpoint row, **before** the
+        // install SQL, because the schema is what the SQL lands in.
         //
         // Inlined rather than calling `spa_projection::ensure_group`: the
         // control plane has no business knowing what a projection is, and a
@@ -784,6 +822,38 @@ fn install_schema(
             .await
             .map_err(AccessError::Database)?;
         }
+
+        // **The install SQL is schema-relative, and this is what aims it.**
+        //
+        // It used to name `proj_sales.invoice` outright, which meant the only
+        // schema it could ever build was the live one — and a rebuild that
+        // cannot build somewhere else has to drop the live tables first, which
+        // is the outage `spa_projection::rebuild_swap` exists to avoid. The
+        // projections already wrote unqualified through `search_path`; the DDL
+        // does now too, and the two agree.
+        //
+        // ponytail: aimed at the *first* group, so a module with two would put
+        // both groups' tables in one schema. Every module has exactly one and
+        // `a_module_has_exactly_one_projection_group` keeps it that way; a
+        // second one needs the SQL to move onto the group.
+        let aimed = match setup.groups.first() {
+            Some((_, schema)) => Some(quote_ident(schema)?),
+            None => None,
+        };
+        if let Some(schema) = aimed {
+            conn = run_ddl(conn, format!("SET search_path TO {schema}, public"))
+                .await
+                .map_err(AccessError::Database)?;
+        }
+
+        conn = run_ddl(conn, setup.install_sql.to_owned())
+            .await
+            .map_err(AccessError::Database)?;
+
+        // Back, so the connection is handed on the way it was found.
+        conn = run_ddl(conn, "SET search_path TO public".to_owned())
+            .await
+            .map_err(AccessError::Database)?;
 
         Ok(conn)
     })

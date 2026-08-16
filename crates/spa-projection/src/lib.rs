@@ -24,4 +24,4 @@ pub use runner::{
     Progress, RunError, checkpoint, checkpoint_of, ensure_group, ensure_group_schema, run_once,
     run_once_in, run_to_head,
 };
-pub use shadow::{ShadowReport, TableDiff, replay_shadow};
+pub use shadow::{ShadowReport, TableDiff, rebuild_swap, replay_shadow};

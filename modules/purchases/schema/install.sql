@@ -3,9 +3,7 @@
 -- Derived from the event log and dropped-and-rebuilt rather than migrated, for
 -- the reasons in `modules/ledger/schema/install.sql`.
 
-CREATE SCHEMA IF NOT EXISTS proj_purchases;
-
-CREATE TABLE IF NOT EXISTS proj_purchases.bill (
+CREATE TABLE IF NOT EXISTS bill (
     -- Our own key for the bill, and the aggregate id. Not the supplier's number:
     -- two suppliers can both call something `INV-001`, and there is no gapless
     -- series here because **we did not issue this document**.
@@ -36,8 +34,8 @@ CREATE TABLE IF NOT EXISTS proj_purchases.bill (
     recorded_at   TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS bill_by_date_idx ON proj_purchases.bill (billed_on DESC);
-CREATE INDEX IF NOT EXISTS bill_by_supplier_idx ON proj_purchases.bill (supplier);
+CREATE INDEX IF NOT EXISTS bill_by_date_idx ON bill (billed_on DESC);
+CREATE INDEX IF NOT EXISTS bill_by_supplier_idx ON bill (supplier);
 
 -- The same supplier invoice recorded twice is a duplicate reclaim, which is the
 -- kind of mistake an inspection finds. A constraint rather than a check in code:
@@ -45,12 +43,12 @@ CREATE INDEX IF NOT EXISTS bill_by_supplier_idx ON proj_purchases.bill (supplier
 --
 -- Scoped to the supplier, because two of them numbering from 1 is normal.
 CREATE UNIQUE INDEX IF NOT EXISTS bill_reference_is_unique_per_supplier
-    ON proj_purchases.bill (supplier, reference);
+    ON bill (supplier, reference);
 
-CREATE TABLE IF NOT EXISTS proj_purchases.bill_line (
+CREATE TABLE IF NOT EXISTS bill_line (
     -- Derived from the event's log position, so a rebuild reproduces it.
     id            UUID PRIMARY KEY,
-    bill_id       TEXT NOT NULL REFERENCES proj_purchases.bill (id) ON DELETE CASCADE,
+    bill_id       TEXT NOT NULL REFERENCES bill (id) ON DELETE CASCADE,
     line_index    INT  NOT NULL CHECK (line_index >= 0),
 
     description   TEXT NOT NULL,
@@ -69,11 +67,11 @@ CREATE TABLE IF NOT EXISTS proj_purchases.bill_line (
 );
 
 CREATE INDEX IF NOT EXISTS bill_line_by_bill_idx
-    ON proj_purchases.bill_line (bill_id, line_index);
+    ON bill_line (bill_id, line_index);
 
-CREATE TABLE IF NOT EXISTS proj_purchases.bill_payment (
+CREATE TABLE IF NOT EXISTS bill_payment (
     id            UUID PRIMARY KEY,
-    bill_id       TEXT NOT NULL REFERENCES proj_purchases.bill (id) ON DELETE CASCADE,
+    bill_id       TEXT NOT NULL REFERENCES bill (id) ON DELETE CASCADE,
     -- Our own reference. Unique per bill, which is what makes recording one
     -- twice a no-op.
     reference     TEXT NOT NULL,
@@ -87,7 +85,7 @@ CREATE TABLE IF NOT EXISTS proj_purchases.bill_payment (
 );
 
 CREATE INDEX IF NOT EXISTS bill_payment_by_bill_idx
-    ON proj_purchases.bill_payment (bill_id);
+    ON bill_payment (bill_id);
 
 -- The input-tax side of a VAT return, as entries on a tax point.
 --
@@ -103,7 +101,7 @@ CREATE INDEX IF NOT EXISTS bill_payment_by_bill_idx
 -- of the purchase, not a debt ZATCA owes back; claiming it is a reclaim that
 -- gets disallowed. The `net` still appears, because exempt purchases are
 -- reported even though their tax is not recovered.
-CREATE OR REPLACE VIEW proj_purchases.vat_entry AS
+CREATE OR REPLACE VIEW vat_entry AS
 SELECT b.id                                                 AS document_id,
        b.reference                                          AS document_number,
        'bill'                                               AS kind,
@@ -113,15 +111,15 @@ SELECT b.id                                                 AS document_id,
        l.vat_rate_bp,
        l.net,
        CASE WHEN l.vat_category = 'exempt' THEN 0 ELSE l.tax END AS tax
-  FROM proj_purchases.bill b
-  JOIN proj_purchases.bill_line l ON l.bill_id = b.id;
+  FROM bill b
+  JOIN bill_line l ON l.bill_id = b.id;
 
 -- What is still owed to suppliers, summed rather than maintained.
 --
 -- Same reasoning as `proj_sales.invoice_status`: a `paid` column is a second
 -- number that can be wrong, and keeping it in step is the projection code most
 -- likely to double-count.
-CREATE OR REPLACE VIEW proj_purchases.bill_status AS
+CREATE OR REPLACE VIEW bill_status AS
 SELECT b.id,
        b.supplier,
        b.supplier_vat,
@@ -137,6 +135,6 @@ SELECT b.id,
        COALESCE(sum(p.amount), 0)::BIGINT      AS paid,
        (b.gross - COALESCE(sum(p.amount), 0))::BIGINT AS outstanding,
        count(p.id)                             AS payments
-  FROM proj_purchases.bill b
-  LEFT JOIN proj_purchases.bill_payment p ON p.bill_id = b.id
+  FROM bill b
+  LEFT JOIN bill_payment p ON p.bill_id = b.id
  GROUP BY b.id;
