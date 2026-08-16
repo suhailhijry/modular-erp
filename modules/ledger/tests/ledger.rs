@@ -1033,3 +1033,191 @@ async fn reverse(
     )
     .await
 }
+
+/// A date the business chose, as these tests write them.
+fn on(day: &str) -> Timestamp {
+    format!("{day}T00:00:00Z").parse().expect("a valid instant")
+}
+
+/// Two accounts, so there is something balanced to post between.
+async fn open_cash_and_capital(fixture: &Fixture) {
+    fixture.account("1000", AccountKind::Asset, sar()).await;
+    fixture.account("3000", AccountKind::Equity, sar()).await;
+}
+
+/// One balanced entry on a given date.
+async fn post_on(
+    fixture: &Fixture,
+    id: &str,
+    day: &str,
+) -> Result<spa_eventlog::Committed<ledger::JournalEntryEvent>, CommandError<LedgerError>> {
+    let lines = BalancedLines::new(vec![
+        Line::new(code("1000"), riyals(100)),
+        Line::new(code("3000"), riyals(-100)),
+    ])
+    .expect("balances");
+
+    post_entry(
+        &fixture.db,
+        &code(id),
+        on(day),
+        "capital introduced",
+        lines,
+        &Metadata::default(),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Closing the books
+//
+// A VAT return is filed for a period and the tax on it is paid. An entry
+// back-dated into that period afterwards changes the numbers behind a
+// declaration that has already been made — and nothing records that it happened.
+// ---------------------------------------------------------------------------
+
+/// The date on the entry decides, not the date it was written.
+#[tokio::test]
+async fn an_entry_dated_into_a_closed_period_is_refused() {
+    let fixture = Fixture::new().await;
+    open_cash_and_capital(&fixture).await;
+
+    // January's books are final.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    ledger::period::close(&mut conn, Some(on("2026-02-01")), Some("the-accountant"))
+        .await
+        .expect("closes");
+    drop(conn);
+
+    let refused = post_on(&fixture, "JE-JAN", "2026-01-15").await;
+    assert!(
+        matches!(
+            rejection(&refused.expect_err("is refused")),
+            Some(ledger::LedgerError::PeriodClosed { .. })
+        ),
+        "a January entry went in after January was closed"
+    );
+
+    // The boundary itself is open: `closed_before` is the first instant that is
+    // still open, so an entry stamped exactly on it goes through.
+    post_on(&fixture, "JE-FEB-0", "2026-02-01")
+        .await
+        .expect("the first instant of February is open");
+    post_on(&fixture, "JE-FEB", "2026-02-15")
+        .await
+        .expect("February is open");
+
+    // And the last moment of January is not.
+    let refused = post_on(&fixture, "JE-JAN-LAST", "2026-01-31").await;
+    assert!(refused.is_err(), "the last day of January is still January");
+
+    fixture.cleanup().await;
+}
+
+/// Reopening puts it back, because an accountant who closes the wrong month has
+/// to be able to put it right.
+#[tokio::test]
+async fn reopening_lets_the_period_take_entries_again() {
+    let fixture = Fixture::new().await;
+    open_cash_and_capital(&fixture).await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    ledger::period::close(&mut conn, Some(on("2026-02-01")), Some("the-accountant"))
+        .await
+        .expect("closes");
+    drop(conn);
+    assert!(post_on(&fixture, "JE-1", "2026-01-15").await.is_err());
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    ledger::period::close(&mut conn, None, Some("the-accountant"))
+        .await
+        .expect("reopens");
+    let books = ledger::period::books(&mut conn).await.expect("reads");
+    drop(conn);
+    assert_eq!(books.closed_before, None);
+
+    post_on(&fixture, "JE-1", "2026-01-15")
+        .await
+        .expect("January is open again");
+
+    fixture.cleanup().await;
+}
+
+/// **A reversal cannot be dated into a closed period either.**
+///
+/// This is the one that would have been forgotten with a per-caller check.
+/// `reverse_entry` takes its own `occurred_on` — usually today, sometimes not —
+/// and it routes through `post_entry_in`, so it inherits the refusal rather than
+/// needing to remember it.
+#[tokio::test]
+async fn a_reversal_cannot_be_back_dated_into_a_closed_period() {
+    let fixture = Fixture::new().await;
+    open_cash_and_capital(&fixture).await;
+
+    post_on(&fixture, "JE-1", "2026-01-15")
+        .await
+        .expect("posts while January is open");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    ledger::period::close(&mut conn, Some(on("2026-02-01")), Some("the-accountant"))
+        .await
+        .expect("closes");
+    drop(conn);
+
+    let refused = ledger::reverse_entry(
+        &fixture.db,
+        &code("JE-1"),
+        &code("JE-1-R"),
+        on("2026-01-20"),
+        "put right",
+        &Metadata::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            rejection(&refused.expect_err("is refused")),
+            Some(ledger::LedgerError::PeriodClosed { .. })
+        ),
+        "a correction went into a period that had already been declared"
+    );
+
+    // Dated into the open period, it goes through — which is where a correction
+    // belongs, and what an auditor expects to find.
+    ledger::reverse_entry(
+        &fixture.db,
+        &code("JE-1"),
+        &code("JE-1-R"),
+        on("2026-02-20"),
+        "put right",
+        &Metadata::default(),
+    )
+    .await
+    .expect("reverses into the open period");
+
+    fixture.cleanup().await;
+}
+
+/// Posting an entry does not need the books to be reread from scratch: a period
+/// closed a moment ago refuses the very next entry.
+#[tokio::test]
+async fn a_close_takes_effect_on_the_next_entry() {
+    let fixture = Fixture::new().await;
+    open_cash_and_capital(&fixture).await;
+
+    post_on(&fixture, "JE-1", "2026-01-15")
+        .await
+        .expect("posts");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    ledger::period::close(&mut conn, Some(on("2026-02-01")), Some("the-accountant"))
+        .await
+        .expect("closes");
+    drop(conn);
+
+    assert!(
+        post_on(&fixture, "JE-2", "2026-01-16").await.is_err(),
+        "the entry immediately after the close still got in"
+    );
+
+    fixture.cleanup().await;
+}

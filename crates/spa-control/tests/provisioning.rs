@@ -548,6 +548,13 @@ async fn refreshing_a_module_rebuilds_its_schema_and_rewinds_its_checkpoint() {
         .execute(&mut conn)
         .await
         .expect("advances");
+    // A document counter, which is **not** derived from anything and must not go
+    // with the schema. A tenant whose invoice series restarted at one after a
+    // module refresh would reissue numbers that are already on documents their
+    // customers hold, which is a legal problem rather than a bug.
+    spa_eventlog::numbering::start_at(&mut conn, "toy.document", 4108)
+        .await
+        .expect("sets a series");
     drop(conn);
 
     // Not vacuous: the new column is genuinely absent beforehand, so installing
@@ -588,6 +595,17 @@ async fn refreshing_a_module_rebuilds_its_schema_and_rewinds_its_checkpoint() {
     assert_eq!(
         checkpoint, 0,
         "and the checkpoint rewound, or the worker would think it had nothing to do"
+    );
+
+    let mut conn = fixture.tenant_connection(&tenant).await;
+    let series = spa_eventlog::numbering::peek(&mut conn, "toy.document")
+        .await
+        .expect("reads");
+    drop(conn);
+    assert_eq!(
+        series, 4108,
+        "a module refresh reset a document series — every number after this \
+         would be one somebody already holds"
     );
 
     fixture.cleanup_tenant(&tenant).await;

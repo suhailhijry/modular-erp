@@ -51,6 +51,8 @@ pub enum SalesError {
     #[error(transparent)]
     Config(#[from] spa_eventlog::ConfigError),
     #[error(transparent)]
+    Numbering(#[from] spa_eventlog::NumberingError),
+    #[error(transparent)]
     Unbalanced(#[from] ledger::Unbalanced),
     /// The ledger refused the posting — a missing or closed account, almost
     /// always. Passed through rather than reworded: the ledger's message names
@@ -87,8 +89,9 @@ impl spa_i18n::Localize for SalesError {
                 .with("reference", MessageArg::text(reference.clone())),
             Self::Tax(TaxError::MixedCurrencies) => Message::new(messages::MIXED_CURRENCIES),
             Self::Tax(TaxError::OutOfRange) => Message::new(messages::AMOUNT_OUT_OF_RANGE),
-            // All three already say the right thing in both languages.
+            // All four already say the right thing in both languages.
             Self::Config(e) => e.message(),
+            Self::Numbering(e) => e.message(),
             Self::Unbalanced(e) => e.message(),
             Self::Ledger(e) => e.message(),
         }
@@ -96,6 +99,20 @@ impl spa_i18n::Localize for SalesError {
 }
 
 type Outcome = Result<Committed<InvoiceEvent>, CommandError<SalesError>>;
+
+/// A document that now exists, and the number on it.
+///
+/// The number comes back even when the command did nothing. A client whose
+/// request timed out and retried has to be told the number the invoice already
+/// carries — telling it "done" and nothing else would leave it to guess, and the
+/// guess would be a number that does not exist.
+#[derive(Debug)]
+pub struct Numbered {
+    pub committed: Committed<InvoiceEvent>,
+    pub number: String,
+}
+
+type NumberedOutcome = Result<Numbered, CommandError<SalesError>>;
 
 /// Everything an invoice needs to be issued.
 ///
@@ -136,7 +153,7 @@ pub async fn issue_invoice(
     id: &AggregateId,
     draft: &Draft,
     metadata: &Metadata,
-) -> Outcome {
+) -> NumberedOutcome {
     if draft.lines.is_empty() {
         return Err(rejected(SalesError::NothingToInvoice));
     }
@@ -152,9 +169,9 @@ pub async fn issue_invoice(
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
         match issue_in(&mut tx, id, &entry_id, draft, &totals, &memo, metadata).await {
-            Ok(committed) => {
+            Ok(numbered) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
-                return Ok(committed);
+                return Ok(numbered);
             }
             Err(e) if e.is_conflict() => {
                 tx.rollback().await.map_err(ExecuteError::from)?;
@@ -179,12 +196,24 @@ async fn issue_in(
     totals: &Totals,
     memo: &str,
     metadata: &Metadata,
-) -> Result<Committed<InvoiceEvent>, ExecuteError<SalesError>> {
+) -> Result<Numbered, ExecuteError<SalesError>> {
     // Resolved **in this transaction**, so what the invoice was posted to and
     // what the tenant had configured cannot disagree — and the generation goes
     // into the metadata, which is how "what was configured when this was
     // decided?" stays answerable without ever being read back (L5).
     let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
+
+    // **Before the aggregate is loaded, and before anything else takes a lock.**
+    //
+    // Reserving first serializes every issue in this series from here to the end
+    // of the transaction, which is what makes the `consume` below correct:
+    // nobody else can take this number between the decision and it. It also
+    // fixes the lock order — counter, then stream — so two concurrent issues
+    // cannot deadlock by taking them the other way round.
+    let reserved = spa_eventlog::numbering::reserve(&mut *conn, crate::INVOICE_SERIES)
+        .await
+        .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
+    let number = crate::format_number(crate::INVOICE_PREFIX, reserved);
 
     let entry_lines = entry_for_issue(totals, &accounts).map_err(|e| {
         ExecuteError::Rejected(match e {
@@ -205,6 +234,7 @@ async fn issue_in(
                 return Ok(Decision::nothing());
             }
             Ok(Decision::one(InvoiceEvent::Issued {
+                number: Some(number.clone()),
                 customer: draft.customer.clone(),
                 issued_on: draft.issued_on,
                 due_on: draft.due_on,
@@ -216,6 +246,28 @@ async fn issue_in(
         },
     )
     .await?;
+
+    // Only when something was written. Re-issuing the same invoice appends
+    // nothing, and burning a number there would put a gap in the sequence of a
+    // business whose client merely retried a timed-out request.
+    let number = if committed.at.is_some() {
+        spa_eventlog::numbering::consume(&mut *conn, crate::INVOICE_SERIES)
+            .await
+            .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
+        number
+    } else {
+        // A retry. One extra load to tell the caller the number the invoice
+        // already carries — on the one path where the client is repeating
+        // itself anyway, and the alternative is a client left to guess.
+        //
+        // An invoice from before this system numbered anything has none stored:
+        // its id *was* its number.
+        spa_eventlog::load::<Invoice>(&mut *conn, id, crate::upcasters())
+            .await?
+            .aggregate
+            .number
+            .unwrap_or_else(|| id.as_str().to_owned())
+    };
 
     // Runs even when the invoice was already issued, and is a no-op then too.
     // That is what heals a half-finished write from an older, less careful
@@ -231,7 +283,7 @@ async fn issue_in(
     .await
     .map_err(lift)?;
 
-    Ok(committed)
+    Ok(Numbered { committed, number })
 }
 
 /// Records money received against an invoice, and moves it in the ledger.
@@ -386,7 +438,7 @@ pub async fn cancel_invoice(
     reason: &str,
     on: Timestamp,
     metadata: &Metadata,
-) -> Outcome {
+) -> NumberedOutcome {
     let entry_id = derived_id("si", &[invoice.as_str()])?;
     let credit_id = derived_id("cn", &[invoice.as_str(), credit_note])?;
     let memo = format!("Credit note {credit_note} · invoice {invoice}");
@@ -406,9 +458,9 @@ pub async fn cancel_invoice(
         )
         .await
         {
-            Ok(committed) => {
+            Ok(numbered) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
-                return Ok(committed);
+                return Ok(numbered);
             }
             Err(e) if e.is_conflict() => {
                 tx.rollback().await.map_err(ExecuteError::from)?;
@@ -439,10 +491,17 @@ async fn cancel_in(
     on: Timestamp,
     memo: &str,
     metadata: &Metadata,
-) -> Result<Committed<InvoiceEvent>, ExecuteError<SalesError>> {
-    let credit_note = credit_note.to_owned();
+) -> Result<Numbered, ExecuteError<SalesError>> {
+    let reference = credit_note.to_owned();
     let reason = reason.trim().to_owned();
     let mut already = false;
+
+    // Same order as issuing: the counter first. A credit note is a statutory
+    // document in its own right and gets its own gapless series.
+    let reserved = spa_eventlog::numbering::reserve(&mut *conn, crate::CREDIT_NOTE_SERIES)
+        .await
+        .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
+    let credit_note = crate::format_number(crate::CREDIT_NOTE_PREFIX, reserved);
 
     let committed = try_execute::<Invoice, _, SalesError>(
         &mut *conn,
@@ -454,8 +513,10 @@ async fn cancel_in(
             if !state.issued {
                 return Err(SalesError::NotIssued(invoice.as_str().to_owned()));
             }
-            // A retry, not a second credit.
-            if state.cancelled_by.as_deref() == Some(credit_note.as_str()) {
+            // A retry, not a second credit. Compared on the client's key, not
+            // on the number — the number is ours, and a retry is handed a
+            // different one.
+            if state.cancelled_by.as_deref() == Some(reference.as_str()) {
                 return Ok(Decision::nothing());
             }
             if let Some(by) = &state.cancelled_by {
@@ -467,6 +528,7 @@ async fn cancel_in(
             if state.payments.is_empty() {
                 Ok(Decision::one(InvoiceEvent::Cancelled {
                     credit_note: credit_note.clone(),
+                    reference: Some(reference.clone()),
                     reason: reason.clone(),
                     on,
                 }))
@@ -479,13 +541,25 @@ async fn cancel_in(
 
     already |= committed.events.is_empty();
 
-    if !already {
+    let number = if already {
+        // A repeat of a cancellation that already happened. Tell the caller the
+        // credit note that exists, not the one they would have got.
+        spa_eventlog::load::<Invoice>(&mut *conn, invoice, crate::upcasters())
+            .await?
+            .aggregate
+            .credit_note
+            .unwrap_or(credit_note)
+    } else {
+        spa_eventlog::numbering::consume(&mut *conn, crate::CREDIT_NOTE_SERIES)
+            .await
+            .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
         ledger::reverse_in(conn, entry_id, credit_id, on, memo, metadata)
             .await
             .map_err(lift)?;
-    }
+        credit_note
+    };
 
-    Ok(committed)
+    Ok(Numbered { committed, number })
 }
 
 /// The accounts a sale moves, plus metadata stamped with the generation they

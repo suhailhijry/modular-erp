@@ -125,6 +125,217 @@
         ],
         "type": "object"
       },
+      "BandView": {
+        "properties": {
+          "documents": {
+            "description": "Documents with a tax point in this period. Invoices and credit notes on\nthe output side; bills on the input side.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "vat": {
+            "type": "string"
+          },
+          "vat_rate": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "vat",
+          "vat_rate",
+          "net",
+          "tax",
+          "documents"
+        ],
+        "type": "object"
+      },
+      "BillDetailView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/BillView"
+          },
+          {
+            "properties": {
+              "lines": {
+                "items": {
+                  "$ref": "#/components/schemas/BillLineView"
+                },
+                "type": "array"
+              },
+              "payments": {
+                "items": {
+                  "$ref": "#/components/schemas/BillPaymentView"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "lines",
+              "payments"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BillLineView": {
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "vat": {
+            "type": "string"
+          },
+          "vat_rate": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "description",
+          "account",
+          "net",
+          "vat",
+          "vat_rate",
+          "tax"
+        ],
+        "type": "object"
+      },
+      "BillPaymentView": {
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "amount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "paid_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "amount",
+          "paid_on",
+          "account"
+        ],
+        "type": "object"
+      },
+      "BillView": {
+        "properties": {
+          "billed_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "due_on": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gross": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "note": {
+            "type": "string"
+          },
+          "outstanding": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "paid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "payments": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "reference": {
+            "description": "The supplier's own invoice number.",
+            "type": "string"
+          },
+          "supplier": {
+            "type": "string"
+          },
+          "supplier_vat": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "supplier",
+          "reference",
+          "billed_on",
+          "currency",
+          "net",
+          "tax",
+          "gross",
+          "paid",
+          "outstanding",
+          "payments",
+          "note"
+        ],
+        "type": "object"
+      },
+      "BooksView": {
+        "example": {
+          "closed_before": "2026-02-01T00:00:00Z"
+        },
+        "properties": {
+          "closed_before": {
+            "description": "**The first instant still open.** Everything strictly before it is final\nand no entry may be dated into it — not a journal entry, not an invoice's\ntax point, not a credit note's.\n\nClosing January is `2026-02-01T00:00:00Z`. Exclusive, like the VAT\nreturn's `until`, because \"closed through 31 January\" is a comparison\nsomebody gets wrong by exactly one day.\n\n`null` on a tenant that has never closed a period, and the way to reopen\neverything.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "CatalogueView": {
         "properties": {
           "name": {
@@ -463,6 +674,7 @@
             "type": "integer"
           },
           "id": {
+            "description": "The key the client sent when issuing, and what addresses this invoice.",
             "type": "string"
           },
           "issued_on": {
@@ -474,6 +686,10 @@
             "type": "integer"
           },
           "note": {
+            "type": "string"
+          },
+          "number": {
+            "description": "The statutory number. Sequential, gapless, and what the document prints.",
             "type": "string"
           },
           "outstanding": {
@@ -496,6 +712,7 @@
         },
         "required": [
           "id",
+          "number",
           "customer",
           "issued_on",
           "currency",
@@ -506,6 +723,32 @@
           "outstanding",
           "payment_count",
           "note"
+        ],
+        "type": "object"
+      },
+      "Issued": {
+        "description": "A statutory document that now exists.",
+        "properties": {
+          "id": {
+            "description": "The key you sent, which is what addresses this document from here on.",
+            "type": "string"
+          },
+          "number": {
+            "description": "The statutory number, allocated here from the tenant's gapless series.\nWhat goes on the printed document.\n\nOn a repeated request this is the number the document already has, not a\nnew one — the series does not move for a retry.",
+            "type": "string"
+          },
+          "position": {
+            "description": "Where it landed in the log. A client that wants to read its own write\nback passes this as `?consistent_after=`.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "number"
         ],
         "type": "object"
       },
@@ -725,6 +968,149 @@
         ],
         "type": "object"
       },
+      "NewBill": {
+        "example": {
+          "billed_on": "2026-02-03T00:00:00Z",
+          "currency": "SAR",
+          "due_on": "2026-03-05T00:00:00Z",
+          "id": "ap-2026-0042",
+          "lines": [
+            {
+              "account": "5100",
+              "description": "Office rent, February",
+              "net": 1200000,
+              "tax": 180000,
+              "vat": "standard",
+              "vat_rate": 1500
+            }
+          ],
+          "reference": "NS-8891",
+          "supplier": {
+            "name": "Najd Supplies",
+            "vat_number": "311234567800003"
+          }
+        },
+        "properties": {
+          "billed_on": {
+            "description": "The tax point, from their document. Not when you typed it in.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "due_on": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "**Your own key for this bill.** Recording the same one twice is a no-op,\nwhich is what makes a retried request safe.\n\nNot the supplier's number — that is `reference`, and two suppliers can\nboth call something `INV-001`.",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/NewBillLine"
+            },
+            "type": "array"
+          },
+          "note": {
+            "type": "string"
+          },
+          "reference": {
+            "description": "**The supplier's own invoice number.** What a reclaim is evidenced by.\nRecording the same one twice for the same supplier is refused: it would\nbe a duplicate claim.",
+            "type": "string"
+          },
+          "supplier": {
+            "$ref": "#/components/schemas/NewSupplier"
+          }
+        },
+        "required": [
+          "id",
+          "supplier",
+          "reference",
+          "billed_on",
+          "currency",
+          "lines"
+        ],
+        "type": "object"
+      },
+      "NewBillLine": {
+        "properties": {
+          "account": {
+            "description": "The expense or asset account this lands in. One bill routinely covers\nseveral.",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "net": {
+            "description": "Minor units, excluding tax.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "tax": {
+            "description": "**The tax the supplier charged, in minor units.** Not computed here: a\nreclaim is evidenced by their document, so the figure in the books has to\nbe the figure on it. Must be zero on anything not standard-rated.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "vat": {
+            "description": "`standard`, `zero` or `exempt`, as the supplier treated it.",
+            "type": "string"
+          },
+          "vat_rate": {
+            "description": "The rate they charged, in basis points. 1500 is 15%.\n\nRecorded rather than resolved. If it disagrees with today's statutory\nrate that is a thing worth being able to see, not a thing to correct\nsilently.",
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "description",
+          "account",
+          "net",
+          "vat",
+          "vat_rate",
+          "tax"
+        ],
+        "type": "object"
+      },
+      "NewBillPayment": {
+        "example": {
+          "account": "1010",
+          "amount": {
+            "currency": "SAR",
+            "minor": 1380000
+          },
+          "paid_on": "2026-03-04T00:00:00Z",
+          "reference": "TRF-2210"
+        },
+        "properties": {
+          "account": {
+            "description": "The cash or bank account it left.",
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "paid_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "reference": {
+            "description": "Your own reference — a transfer number, a cheque. Recording the same one\ntwice against the same bill is a no-op.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "amount",
+          "paid_on",
+          "account"
+        ],
+        "type": "object"
+      },
       "NewCreditNote": {
         "example": {
           "id": "CN-2026-0001",
@@ -733,7 +1119,7 @@
         },
         "properties": {
           "id": {
-            "description": "The credit note's own number. Crediting the same invoice twice with the\nsame one is a no-op; a different one is refused.",
+            "description": "**Your own key for this cancellation, not the credit note's number.**\nSending the same one twice is a no-op; a different one against an invoice\nthat is already credited is refused.\n\nThe credit note's number is allocated here, from its own gapless series —\nZATCA numbers credit notes separately from the invoices they credit.",
             "type": "string"
           },
           "on": {
@@ -876,7 +1262,7 @@
             ]
           },
           "id": {
-            "description": "The invoice number, chosen by the client. Issuing the same one twice is a\nno-op, which is what makes a retried request safe.",
+            "description": "**Your own key for this invoice, not its number.** Issuing the same one\ntwice is a no-op, which is what makes a retried request safe.\n\nThe invoice *number* is allocated here, from a gapless statutory series,\nand comes back as `number`. Saudi law requires that sequence to have no\nholes in it, which is not something a client can guarantee.",
             "type": "string"
           },
           "issued_on": {
@@ -1015,6 +1401,24 @@
         ],
         "type": "object"
       },
+      "NewSupplier": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "vat_number": {
+            "description": "Their VAT registration number. **Required if any line carries tax** —\ninput VAT is reclaimed against a registered supplier's tax invoice, and a\nbill without one is not evidence of a reclaim.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
       "PaymentView": {
         "properties": {
           "account": {
@@ -1124,6 +1528,26 @@
         ],
         "type": "object"
       },
+      "Recorded": {
+        "description": "Something recorded against a document, which is not a document itself.\n\nA payment carries no statutory number: the invoice it settles is the numbered\nthing, and a receipt references that.",
+        "properties": {
+          "id": {
+            "description": "The invoice it was recorded against.",
+            "type": "string"
+          },
+          "position": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "RoleChange": {
         "example": {
           "role": "accountant"
@@ -1153,6 +1577,30 @@
         "required": [
           "token",
           "expires_at"
+        ],
+        "type": "object"
+      },
+      "SideView": {
+        "properties": {
+          "bands": {
+            "items": {
+              "$ref": "#/components/schemas/BandView"
+            },
+            "type": "array"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bands",
+          "net",
+          "tax"
         ],
         "type": "object"
       },
@@ -1320,45 +1768,8 @@
         ],
         "type": "object"
       },
-      "VatBandView": {
-        "properties": {
-          "invoices": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "net": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "tax": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "vat": {
-            "type": "string"
-          },
-          "vat_rate": {
-            "format": "int32",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "vat",
-          "vat_rate",
-          "net",
-          "tax",
-          "invoices"
-        ],
-        "type": "object"
-      },
       "VatReturnView": {
         "properties": {
-          "bands": {
-            "items": {
-              "$ref": "#/components/schemas/VatBandView"
-            },
-            "type": "array"
-          },
           "currency": {
             "type": "string"
           },
@@ -1366,12 +1777,16 @@
             "format": "date-time",
             "type": "string"
           },
-          "net": {
-            "format": "int64",
-            "type": "integer"
+          "input": {
+            "$ref": "#/components/schemas/SideView",
+            "description": "What was paid on purchases, and the reclaimable part of it. Empty when\nthe tenant has no purchases module."
           },
-          "tax": {
-            "description": "What goes on the return.",
+          "output": {
+            "$ref": "#/components/schemas/SideView",
+            "description": "What was charged on sales, net of credit notes with a tax point in this\nperiod. Empty when the tenant has no sales module."
+          },
+          "payable": {
+            "description": "**The number that gets paid, or reclaimed.** Output tax minus input tax.\nNegative means ZATCA owes the business.",
             "format": "int64",
             "type": "integer"
           },
@@ -1384,28 +1799,9 @@
           "from",
           "until",
           "currency",
-          "bands",
-          "net",
-          "tax"
-        ],
-        "type": "object"
-      },
-      "Written": {
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "position": {
-            "description": "Where it landed in the log. A client that wants to read its own write\nback passes this as `?consistent_after=`.",
-            "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id"
+          "output",
+          "input",
+          "payable"
         ],
         "type": "object"
       }
@@ -2699,6 +3095,196 @@
           }
         },
         "summary": "Open an account.",
+        "tags": [
+          "ledger"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/ledger/books": {
+      "get": {
+        "operationId": "books",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BooksView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "How far the books are closed.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "After this, an entry dated before `closed_before` is refused — including an\ninvoice with a back-dated tax point and a credit note dated into a quarter\nthat has already been declared. Corrections go into the period that is open,\nwhich is where an auditor expects to find them.\n\n**Moving it backwards reopens.** An accountant who closes the wrong month has\nto be able to put it right, and a system that refuses is one they route\naround by editing the database. Sending `null` reopens everything.\n\n`ManageAccounts`, not `ManageTenant`: declaring the numbers final is the\naccountant's call, and it is not something a clerk posting entries should be\nable to do to them.",
+        "operationId": "close_books",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BooksView"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Closed. Entries dated before it are refused from now on."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Close the books, or reopen them.",
         "tags": [
           "ledger"
         ]
@@ -4212,6 +4798,536 @@
         }
       ]
     },
+    "/v1/tenants/{slug}/purchases/bills": {
+      "get": {
+        "operationId": "list_bills",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BillView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The projection did not reach `consistent_after` in time. Retryable."
+          }
+        },
+        "summary": "Bills, most recently billed first.",
+        "tags": [
+          "purchases"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "One transaction: the bill and its journal entry either both happen or neither\ndoes. The tax is taken **as the supplier stated it** — see `tax` on a line.",
+        "operationId": "record_bill",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewBill"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Recorded"
+                }
+              }
+            },
+            "description": "Recorded, or already recorded under this key."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No lines, mixed currencies, negative tax, tax on an untaxed line, or tax without the supplier's VAT number"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, not yours, or the purchases module is not enabled here"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Sustained contention on this bill. Retryable."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An account that does not exist or is closed, or a tax point in a closed period"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Record a supplier's bill, and post it to the ledger.",
+        "tags": [
+          "purchases"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/purchases/bills/{bill}": {
+      "get": {
+        "operationId": "get_bill",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Your key for the bill.",
+            "in": "path",
+            "name": "bill",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillDetailView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such bill, no such tenant, or the purchases module is not enabled here"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "One bill, with its lines and its payments.",
+        "tags": [
+          "purchases"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/tenants/{slug}/purchases/bills/{bill}/payments": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "pay_bill",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Your key for the bill.",
+            "in": "path",
+            "name": "bill",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewBillPayment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Recorded"
+                }
+              }
+            },
+            "description": "Recorded, or already recorded under this reference."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A non-positive amount, or an unusable id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "More than is outstanding — read the bill again and decide"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such bill, or a payment date in a closed period"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Pay a supplier against a bill.",
+        "tags": [
+          "purchases"
+        ]
+      }
+    },
     "/v1/tenants/{slug}/sales/invoices": {
       "get": {
         "description": "ponytail: the most recent 200, with no cursor. See `sales::invoices`.",
@@ -4360,11 +5476,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Written"
+                  "$ref": "#/components/schemas/Issued"
                 }
               }
             },
-            "description": "Issued, or already issued under this number."
+            "description": "Issued, or already issued under this key."
           },
           "400": {
             "content": {
@@ -4641,11 +5757,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Written"
+                  "$ref": "#/components/schemas/Issued"
                 }
               }
             },
-            "description": "Credited, or already credited by this note."
+            "description": "Credited, or already credited under this key."
           },
           "400": {
             "content": {
@@ -4797,7 +5913,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Written"
+                  "$ref": "#/components/schemas/Recorded"
                 }
               }
             },
@@ -5091,9 +6207,9 @@
         ]
       }
     },
-    "/v1/tenants/{slug}/sales/vat-return": {
+    "/v1/tenants/{slug}/vat-return": {
       "get": {
-        "description": "What the business *charged*. A full return also nets off input tax on\npurchases, which needs a purchases module — this is the side that exists.\n\nCancelled invoices are excluded rather than netted to zero, which is right\nwhen the credit note lands in the same period and wrong across a boundary.",
+        "description": "Each document is reported in the period of **its own tax point** — an invoice\non its issue date, a credit note on its credit date, a bill on the date the\nsupplier stated. Re-running a filed period gives the number that was filed.\n\nponytail: this is the arithmetic, not the submission. ZATCA clearance needs a\ncertificate and an outbox handler, and it will send what this computes.",
         "operationId": "vat_return",
         "parameters": [
           {
@@ -5133,7 +6249,7 @@
             }
           },
           {
-            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "description": "Wait for the read models to reach this log position.",
             "in": "query",
             "name": "consistent_after",
             "required": false,
@@ -5152,7 +6268,7 @@
                 }
               }
             },
-            "description": "One band per rate, and the totals that go on the return."
+            "description": "Done."
           },
           "400": {
             "content": {
@@ -5215,9 +6331,9 @@
             "description": "Not serving right now rather than broken. Retryable."
           }
         },
-        "summary": "The output-tax side of a VAT return, for a period.",
+        "summary": "The VAT return for a period: what was charged, what was paid, and the\ndifference.",
         "tags": [
-          "sales"
+          "tax"
         ]
       },
       "parameters": [
@@ -5273,6 +6389,14 @@
     {
       "description": "Invoices, payments, credit notes, and the VAT return.",
       "name": "sales"
+    },
+    {
+      "description": "Supplier bills, what is owed, and the tax paid on them.",
+      "name": "purchases"
+    },
+    {
+      "description": "What a business declares, composed from every module that contributes.",
+      "name": "tax"
     },
     {
       "description": "Liveness and this document.",

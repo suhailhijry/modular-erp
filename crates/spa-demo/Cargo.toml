@@ -15,6 +15,7 @@ workspace = true
 # is for.
 ledger = { workspace = true }
 sales = { workspace = true }
+purchases = { workspace = true }
 spa-api = { workspace = true }
 spa-control = { workspace = true }
 spa-eventlog = { workspace = true }

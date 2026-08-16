@@ -76,6 +76,12 @@ openapi:
 #
 # Includes `spa_tenant_%`: a soak test that fails an assertion panics before its
 # own cleanup runs, so those leak. Harmless, but they accumulate.
+#
+# The control plane is cleared of the tenants that went with them. Without that
+# the rows outlive their databases, and the next `just demo` fails with
+# `slug_taken` against a tenant whose database is gone — which is a confusing
+# way to find out this recipe left the two halves disagreeing.
 clean-databases:
     psql "{{admin_url}}" -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'spa_test_%' OR datname LIKE 'spa_tmpl_%' OR datname LIKE 'spa_tenant_%'" \
       | xargs -r -I{} psql "{{admin_url}}" -q -c 'DROP DATABASE IF EXISTS "{}" WITH (FORCE)'
+    psql "{{base_url}}" -q -c "DELETE FROM tenant WHERE database_name NOT IN (SELECT datname FROM pg_database)" 2>/dev/null || true

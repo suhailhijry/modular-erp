@@ -132,6 +132,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — There is no entry {entry}.
 - **ar** — لا يوجد قيد {entry}.
 
+### `ledger.period_closed`
+
+- **en** — The books are closed before {closed_before}, and this is dated {on}.              Post the correction in the period that is open.
+- **ar** — أُقفلت الدفاتر قبل {closed_before}، وتاريخ هذا القيد {on}.              سجّل التصحيح في الفترة المفتوحة.
+
 ### `ledger.too_few_lines`
 
 - **en** — An entry needs at least two lines; this has {n}.
@@ -182,6 +187,59 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **ar** — الاسم {slug} مستخدم بالفعل. يُرجى اختيار اسم آخر.
 
 
+## `purchases`
+
+### `purchases.invalid_reference`
+
+- **en** — {reference} cannot be used as a reference. Use letters, digits, and . - _ only.
+- **ar** — لا يمكن استخدام {reference} كمرجع. استخدم الحروف والأرقام و. - _ فقط.
+
+### `purchases.mixed_currencies`
+
+- **en** — Every line of a bill must be in the same currency.
+- **ar** — يجب أن تكون جميع سطور الفاتورة بالعملة نفسها.
+
+### `purchases.negative_tax`
+
+- **en** — VAT on a bill cannot be negative.
+- **ar** — لا يمكن أن تكون ضريبة القيمة المضافة على الفاتورة سالبة.
+
+### `purchases.no_supplier_vat_number`
+
+- **en** — Input VAT can only be reclaimed against a registered supplier. Add their VAT number, or record the bill without tax.
+- **ar** — لا يمكن استرداد ضريبة المدخلات إلا من مورّد مسجَّل. أضف رقمه الضريبي، أو سجّل الفاتورة دون ضريبة.
+
+### `purchases.not_a_payment`
+
+- **en** — A payment must be a positive amount.
+- **ar** — يجب أن تكون قيمة الدفعة موجبة.
+
+### `purchases.not_recorded`
+
+- **en** — Bill {bill} has not been recorded.
+- **ar** — لم تُسجَّل فاتورة المورّد {bill}.
+
+### `purchases.nothing_on_it`
+
+- **en** — A bill needs at least one line that comes to something.
+- **ar** — تحتاج الفاتورة إلى سطر واحد على الأقل بقيمة غير صفرية.
+
+### `purchases.overpayment`
+
+- **en** — Only {outstanding} is outstanding, and the payment is {offered}.
+- **ar** — المتبقي هو {outstanding} فقط، ومبلغ الدفعة {offered}.
+
+### `purchases.payment_currency`
+
+- **en** — This bill is in {expected}, but the payment is in {found}.
+- **ar** — هذه الفاتورة بعملة {expected}، لكن الدفعة بعملة {found}.
+
+### `purchases.tax_on_an_untaxed_line`
+
+- **en** — A {category} line carries no VAT, and this one is charged {tax}. Check the supplier's invoice.
+- **ar** — لا تحمل السطور من نوع {category} ضريبة، وهذا السطر عليه {tax}. راجع فاتورة المورّد.
+
+
 ## `request`
 
 ### `request.empty_period`
@@ -218,6 +276,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — The {module} module needs {required}. Add it to the list.
 - **ar** — تحتاج وحدة {module} إلى {required}. أضفها إلى القائمة.
+
+### `request.no_such_bill`
+
+- **en** — There is no bill {bill}.
+- **ar** — لا توجد فاتورة مورّد {bill}.
 
 ### `request.no_such_invoice`
 

@@ -235,6 +235,17 @@ impl Fixture {
 }
 
 async fn issue(fixture: &Fixture, id: &str, lines: Vec<InvoiceLine>) -> Outcome {
+    issue_numbered(fixture, id, lines)
+        .await
+        .map(|numbered| numbered.committed)
+}
+
+/// The same, keeping the allocated number. See `numbering.rs`.
+async fn issue_numbered(
+    fixture: &Fixture,
+    id: &str,
+    lines: Vec<InvoiceLine>,
+) -> Result<sales::Numbered, CommandError<SalesError>> {
     issue_invoice(&fixture.db, &code(id), &draft(lines), &Metadata::default()).await
 }
 
@@ -254,6 +265,16 @@ async fn pay(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> Out
 }
 
 async fn credit(fixture: &Fixture, invoice: &str, note: &str) -> Outcome {
+    credit_numbered(fixture, invoice, note)
+        .await
+        .map(|numbered| numbered.committed)
+}
+
+async fn credit_numbered(
+    fixture: &Fixture,
+    invoice: &str,
+    note: &str,
+) -> Result<sales::Numbered, CommandError<SalesError>> {
     sales::cancel_invoice(
         &fixture.db,
         &code(invoice),
@@ -1132,7 +1153,9 @@ async fn a_credit_note_cancels_an_invoice_and_reverses_its_posting() {
         money(0),
         "but nobody owes it, or a receivables list would keep chasing it"
     );
-    assert_eq!(invoice.summary.credit_note.as_deref(), Some("CN-1"));
+    // `CN-1` was the client's key for the cancellation; the credit note's own
+    // number comes from the tenant's gapless series.
+    assert_eq!(invoice.summary.credit_note.as_deref(), Some("CN-00001"));
     assert!(invoice.summary.cancelled_on.is_some());
 
     assert!(fixture.imbalances().await.is_empty());
@@ -1294,7 +1317,7 @@ fn on(day: &str) -> Timestamp {
 
 /// Issues an invoice on a given date, so a return has periods to separate.
 async fn issue_on(fixture: &Fixture, id: &str, day: &str, lines: Vec<InvoiceLine>) -> Outcome {
-    issue_invoice(
+    let issued = issue_invoice(
         &fixture.db,
         &code(id),
         &Draft {
@@ -1307,7 +1330,8 @@ async fn issue_on(fixture: &Fixture, id: &str, day: &str, lines: Vec<InvoiceLine
         },
         &Metadata::default(),
     )
-    .await
+    .await;
+    issued.map(|numbered| numbered.committed)
 }
 
 /// **What a Saudi business files.** Output tax by rate, for a period.
@@ -1394,7 +1418,7 @@ async fn a_vat_return_reports_what_was_charged_by_rate() {
 
 /// A credited invoice is not a supply, so it leaves the return.
 #[tokio::test]
-async fn a_credited_invoice_drops_out_of_the_return() {
+async fn a_credit_note_in_the_same_period_nets_the_supply_out() {
     let fixture = Fixture::new().await;
 
     issue_on(
@@ -1427,16 +1451,32 @@ async fn a_credited_invoice_drops_out_of_the_return() {
     let before = read(&fixture).await;
     assert_eq!(before.tax, riyals(600), "15% of 4,000");
 
-    credit(&fixture, "VR-DROP", "CN-VR").await.expect("credits");
+    // Dated inside the same quarter. The old view ignored a credit note's date
+    // entirely, so this line did not used to matter; it is the whole question
+    // now.
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("VR-DROP"),
+        "CN-VR",
+        "issued in error",
+        on("2026-02-20"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("credits");
     fixture.project().await;
 
     let after = read(&fixture).await;
     assert_eq!(
         after.tax,
         riyals(150),
-        "only the invoice that still stands is declared"
+        "the credit lands in the same period, so it nets the supply out"
     );
-    assert_eq!(after.bands[0].invoices, 1);
+    // Both documents are still counted. A return that showed one invoice would
+    // be hiding that a supply happened and was credited, which is exactly what
+    // an auditor is looking for.
+    assert_eq!(after.bands[0].invoices, 2);
+    assert_eq!(after.bands[0].credit_notes, 1);
 
     // And the ledger agrees: the VAT account holds exactly what the return says.
     assert_eq!(fixture.balance("2100").await, riyals(-150));
@@ -1503,6 +1543,688 @@ async fn a_return_covers_one_currency() {
         usd_return.bands.is_empty(),
         "SAR supplies are not USD supplies"
     );
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Gapless statutory numbering
+//
+// Saudi law requires a tax invoice to carry "a sequential number which uniquely
+// identifies the invoice" (VAT Implementing Regulations, Article 53). Not
+// unique. Not mostly ordered. **Gapless** — an auditor counts them, and a
+// missing 4,108 is a question the business has to answer.
+//
+// Every test below is about a way a number could go missing or repeat.
+// ---------------------------------------------------------------------------
+
+/// Numbers come out one after another, from one.
+#[tokio::test]
+async fn invoices_are_numbered_in_an_unbroken_sequence() {
+    let fixture = Fixture::new().await;
+
+    let mut numbers = Vec::new();
+    for i in 1..=5 {
+        let issued = issue_numbered(
+            &fixture,
+            &format!("KEY-{i}"),
+            vec![line("Consulting", riyals(100), VatCategory::Standard)],
+        )
+        .await
+        .expect("issues");
+        numbers.push(issued.number);
+    }
+
+    assert_eq!(
+        numbers,
+        [
+            "INV-00001",
+            "INV-00002",
+            "INV-00003",
+            "INV-00004",
+            "INV-00005"
+        ],
+        "the series has a hole or a repeat in it"
+    );
+
+    // And the read model agrees, which is the copy anybody actually looks at.
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let mut projected: Vec<String> = sales::invoices(&mut conn, 100)
+        .await
+        .expect("reads")
+        .into_iter()
+        .map(|i| i.number)
+        .collect();
+    drop(conn);
+    projected.sort();
+    assert_eq!(projected, numbers);
+
+    fixture.cleanup().await;
+}
+
+/// **A retried request does not burn a number.**
+///
+/// This is the pairing `spa_eventlog::numbering` cannot enforce from inside
+/// itself: reserve, decide nothing, and do *not* consume. A client whose request
+/// timed out and repeated it is the normal case, not an edge one, and putting a
+/// gap in a business's invoice sequence because their network blinked would be
+/// this feature failing at the one thing it exists to do.
+#[tokio::test]
+async fn re_issuing_does_not_move_the_series() {
+    let fixture = Fixture::new().await;
+    let lines = vec![line("Consulting", riyals(100), VatCategory::Standard)];
+
+    let first = issue_numbered(&fixture, "KEY-1", lines.clone())
+        .await
+        .expect("issues");
+    assert_eq!(first.number, "INV-00001");
+
+    // The same key, three more times.
+    for _ in 0..3 {
+        let again = issue_numbered(&fixture, "KEY-1", lines.clone())
+            .await
+            .expect("is a no-op");
+        assert!(again.committed.did_nothing(), "a retry wrote something");
+        assert_eq!(
+            again.number, "INV-00001",
+            "a retry must be told the number the invoice already has"
+        );
+    }
+
+    // So the next real invoice is 2, not 5.
+    let second = issue_numbered(&fixture, "KEY-2", lines)
+        .await
+        .expect("issues");
+    assert_eq!(second.number, "INV-00002");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    assert_eq!(
+        spa_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
+            .await
+            .expect("reads"),
+        3,
+        "the counter moved for something that was not issued"
+    );
+    drop(conn);
+
+    fixture.cleanup().await;
+}
+
+/// **A refused invoice does not burn a number either.**
+///
+/// The reason a Postgres sequence cannot do this job: `nextval` survives a
+/// rollback by design. Here the reservation is an ordinary row read `FOR
+/// UPDATE`, so a transaction that fails takes the number down with it.
+#[tokio::test]
+async fn a_refused_invoice_leaves_the_series_where_it_was() {
+    let fixture = Fixture::new().await;
+    let good = vec![line("Consulting", riyals(100), VatCategory::Standard)];
+
+    issue(&fixture, "KEY-1", good.clone())
+        .await
+        .expect("issues");
+
+    // Refused for three different reasons, at three different depths: before
+    // the transaction opens, inside the tax calculation, and inside the ledger.
+    assert!(issue(&fixture, "KEY-EMPTY", vec![]).await.is_err());
+    assert!(
+        issue(
+            &fixture,
+            "KEY-MIXED",
+            vec![
+                line("SAR", riyals(100), VatCategory::Standard),
+                line("USD", Money::from_minor(100, usd()), VatCategory::Standard),
+            ],
+        )
+        .await
+        .is_err()
+    );
+
+    let closed = Fixture::bare().await;
+    assert!(
+        issue(&closed, "KEY-NO-ACCOUNTS", good.clone())
+            .await
+            .is_err(),
+        "a tenant with no chart cannot post"
+    );
+    let mut conn = closed.db.acquire().await.expect("connection");
+    assert_eq!(
+        spa_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
+            .await
+            .expect("reads"),
+        1,
+        "a refusal at the ledger burned a number"
+    );
+    drop(conn);
+    closed.cleanup().await;
+
+    let next = issue_numbered(&fixture, "KEY-2", good)
+        .await
+        .expect("issues");
+    assert_eq!(next.number, "INV-00002", "a refusal burned a number");
+
+    fixture.cleanup().await;
+}
+
+/// Concurrent issues get consecutive numbers, and never the same one twice.
+///
+/// Gaplessness and concurrency are the same contradiction whatever holds the
+/// counter, so the reservation serializes. This is the test that the
+/// serialization is real rather than assumed — without the row lock, two
+/// transactions read the same `next` and both write it.
+#[tokio::test]
+async fn concurrent_issues_never_share_a_number() {
+    let fixture = Arc::new(Fixture::new().await);
+
+    let issues = (1..=8).map(|i| {
+        let fixture = Arc::clone(&fixture);
+        tokio::spawn(async move {
+            issue_numbered(
+                &fixture,
+                &format!("KEY-{i}"),
+                vec![line("Consulting", riyals(100), VatCategory::Standard)],
+            )
+            .await
+            .map(|numbered| numbered.number)
+        })
+    });
+
+    let mut numbers: Vec<String> = Vec::new();
+    for issue in issues {
+        numbers.push(issue.await.expect("the task finishes").expect("issues"));
+    }
+    numbers.sort();
+
+    assert_eq!(
+        numbers,
+        (1..=8).map(|i| format!("INV-{i:05}")).collect::<Vec<_>>(),
+        "eight concurrent issues did not produce one to eight exactly once"
+    );
+
+    Arc::try_unwrap(fixture)
+        .unwrap_or_else(|_| unreachable!("every task has finished"))
+        .cleanup()
+        .await;
+}
+
+/// Credit notes have their own series, and ZATCA wants it that way.
+#[tokio::test]
+async fn credit_notes_are_numbered_apart_from_invoices() {
+    let fixture = Fixture::new().await;
+    let lines = vec![line("Consulting", riyals(100), VatCategory::Standard)];
+
+    let first = issue_numbered(&fixture, "KEY-1", lines.clone())
+        .await
+        .expect("issues");
+    let second = issue_numbered(&fixture, "KEY-2", lines)
+        .await
+        .expect("issues");
+    assert_eq!(
+        (first.number.as_str(), second.number.as_str()),
+        ("INV-00001", "INV-00002")
+    );
+
+    let credited = credit_numbered(&fixture, "KEY-1", "CANCEL-1")
+        .await
+        .expect("credits");
+    assert_eq!(
+        credited.number, "CN-00001",
+        "a credit note takes the next credit-note number, not the next invoice number"
+    );
+
+    // Repeating the cancellation is a no-op and reports the same credit note.
+    let again = credit_numbered(&fixture, "KEY-1", "CANCEL-1")
+        .await
+        .expect("is a no-op");
+    assert!(again.committed.did_nothing());
+    assert_eq!(again.number, "CN-00001");
+
+    let next = credit_numbered(&fixture, "KEY-2", "CANCEL-2")
+        .await
+        .expect("credits");
+    assert_eq!(
+        next.number, "CN-00002",
+        "the credit note series has a hole in it"
+    );
+
+    // And issuing carries on from where it was: the two series are independent.
+    let third = issue_numbered(
+        &fixture,
+        "KEY-3",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    assert_eq!(third.number, "INV-00003");
+
+    fixture.cleanup().await;
+}
+
+/// **A rebuild reproduces the numbers rather than re-allocating them.**
+///
+/// The number is in the event, not derived on read (architecture L5). If it were
+/// derived, replaying a tenant's log would renumber every document they have
+/// ever issued — including the ones customers hold copies of.
+#[tokio::test]
+async fn a_replay_reproduces_the_numbers_it_issued_under() {
+    let fixture = Fixture::new().await;
+    let lines = vec![line("Consulting", riyals(100), VatCategory::Standard)];
+
+    for i in 1..=3 {
+        issue(&fixture, &format!("KEY-{i}"), lines.clone())
+            .await
+            .expect("issues");
+    }
+    credit(&fixture, "KEY-2", "CANCEL-2")
+        .await
+        .expect("credits");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let before: Vec<(String, String)> = sales::invoices(&mut conn, 100)
+        .await
+        .expect("reads")
+        .into_iter()
+        .map(|i| (i.id, i.number))
+        .collect();
+    drop(conn);
+    assert_eq!(before.len(), 3);
+
+    let pool = fixture.tenant_pool().await;
+    let owned = sales::projections();
+    let refs: Vec<&dyn Projection<Group = Sales>> = owned.iter().map(AsRef::as_ref).collect();
+    let report = replay_shadow::<Sales>(&pool, &refs, sales::upcasters(), 100)
+        .await
+        .expect("replays");
+
+    assert!(
+        report.is_reproducible(),
+        "a rebuild does not reproduce the live tables: {:?}",
+        report.differences()
+    );
+
+    // The counter is *not* consulted by a replay, so it has not moved either.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    assert_eq!(
+        spa_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
+            .await
+            .expect("reads"),
+        4,
+        "a replay moved the counter"
+    );
+    drop(conn);
+
+    fixture.cleanup().await;
+}
+
+/// A business arriving from another system starts where they left off.
+#[tokio::test]
+async fn a_series_can_start_somewhere_other_than_one() {
+    let fixture = Fixture::new().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    spa_eventlog::numbering::start_at(&mut conn, sales::INVOICE_SERIES, 4108)
+        .await
+        .expect("sets");
+    drop(conn);
+
+    let issued = issue_numbered(
+        &fixture,
+        "KEY-1",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    assert_eq!(issued.number, "INV-04108");
+
+    // And it refuses to go backwards, which would reissue numbers that are
+    // already printed on documents somebody holds.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let settled = spa_eventlog::numbering::start_at(&mut conn, sales::INVOICE_SERIES, 7)
+        .await
+        .expect("sets");
+    drop(conn);
+    assert_eq!(settled, 4109, "a series was allowed to move backwards");
+
+    fixture.cleanup().await;
+}
+
+/// **A credit note in a later period does not reach back into a filed return.**
+///
+/// The bug this replaces: `taxable_supply` excluded cancelled invoices outright,
+/// so crediting in April changed what a re-run of the January–March return said.
+/// The Q1 return had already been filed and the tax already paid — and nothing
+/// anywhere recorded why the number moved.
+///
+/// Each document is now reported on its own tax point. Q1 keeps the supply; the
+/// credit is an adjustment in Q2, which is where ZATCA wants it and where
+/// anybody reconciling the books to a filed return will look for it.
+#[tokio::test]
+async fn a_credit_note_is_declared_in_its_own_period_not_the_invoices() {
+    let fixture = Fixture::new().await;
+
+    issue_on(
+        &fixture,
+        "VR-Q1",
+        "2026-02-10",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let quarter = async |fixture: &Fixture, from: &str, until: &str| {
+        let mut conn = fixture.db.acquire().await.expect("connection");
+        let filed = sales::vat_return(&mut conn, sar(), on(from), on(until))
+            .await
+            .expect("reads");
+        drop(conn);
+        filed
+    };
+
+    // Q1 is filed: 150 riyals of output tax, and the money has gone to ZATCA.
+    let q1_as_filed = quarter(&fixture, "2026-01-01", "2026-04-01").await;
+    assert_eq!(q1_as_filed.tax, riyals(150));
+
+    // In April the invoice is credited.
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("VR-Q1"),
+        "CANCEL-Q1",
+        "supply never happened",
+        on("2026-04-20"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("credits");
+    fixture.project().await;
+
+    let q1_again = quarter(&fixture, "2026-01-01", "2026-04-01").await;
+    assert_eq!(
+        q1_again.tax, q1_as_filed.tax,
+        "re-running a filed return gave a different answer — the credit note \
+         reached back into a period that was already declared and paid"
+    );
+    assert_eq!(q1_again.bands[0].invoices, 1);
+    assert_eq!(
+        q1_again.bands[0].credit_notes, 0,
+        "the credit note has an April tax point and does not belong to Q1"
+    );
+
+    // And Q2 carries the adjustment, which is the whole point of not deleting it.
+    let q2 = quarter(&fixture, "2026-04-01", "2026-07-01").await;
+    assert_eq!(
+        q2.tax,
+        riyals(-150),
+        "the credit is declared in the period it happened"
+    );
+    assert_eq!(q2.net, riyals(-1_000));
+    assert_eq!(q2.bands[0].invoices, 0);
+    assert_eq!(q2.bands[0].credit_notes, 1);
+
+    // Over both quarters together the two cancel, which is the arithmetic that
+    // makes this a restatement rather than a loss.
+    let half = quarter(&fixture, "2026-01-01", "2026-07-01").await;
+    assert_eq!(half.tax, money(0));
+    assert_eq!(half.net, money(0));
+
+    // The ledger agrees: the VAT account is back to nothing.
+    assert_eq!(fixture.balance("2100").await, money(0));
+
+    fixture.cleanup().await;
+}
+
+/// A credit note reverses every band the invoice declared, not just one.
+#[tokio::test]
+async fn a_credit_note_adjusts_each_rate_the_invoice_carried() {
+    let fixture = Fixture::new().await;
+
+    issue_on(
+        &fixture,
+        "VR-MIXED",
+        "2026-02-10",
+        vec![
+            line("Consulting", riyals(1_000), VatCategory::Standard),
+            line("Export", riyals(400), VatCategory::Zero),
+            line("Rent", riyals(200), VatCategory::Exempt),
+        ],
+    )
+    .await
+    .expect("issues");
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("VR-MIXED"),
+        "CANCEL-MIXED",
+        "cancelled",
+        on("2026-05-02"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("credits");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let q2 = sales::vat_return(&mut conn, sar(), on("2026-04-01"), on("2026-07-01"))
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(
+        q2.bands.len(),
+        3,
+        "one adjustment per band, not one per invoice"
+    );
+    assert_eq!(q2.net, riyals(-1_600), "every band's net is reversed");
+    assert_eq!(
+        q2.tax,
+        riyals(-150),
+        "and only the standard-rated one carried tax"
+    );
+    for band in &q2.bands {
+        assert_eq!(band.invoices, 0);
+        assert_eq!(band.credit_notes, 1);
+    }
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Closed periods, from the other side of the seam
+//
+// Sales never mentions a fiscal period. It inherits the refusal because an
+// invoice and its journal entry commit together, so every sales write arrives at
+// `ledger::post_entry_in` — which is where the one check lives. These are the
+// tests that the seam actually carries it, rather than that it was supposed to.
+// ---------------------------------------------------------------------------
+
+/// **An invoice with a back-dated tax point cannot reopen a filed quarter.**
+#[tokio::test]
+async fn an_invoice_cannot_be_dated_into_a_closed_period() {
+    let fixture = Fixture::new().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    ledger::period::close(&mut conn, Some(on("2026-04-01")), Some("the-accountant"))
+        .await
+        .expect("closes the first quarter");
+    drop(conn);
+
+    let refused = issue_on(
+        &fixture,
+        "KEY-BACKDATED",
+        "2026-02-14",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await;
+    assert!(
+        matches!(
+            rejection(&refused.expect_err("is refused")),
+            Some(SalesError::Ledger(ledger::LedgerError::PeriodClosed { .. }))
+        ),
+        "an invoice was dated into a quarter whose return has been filed"
+    );
+
+    // And nothing was left behind: not the invoice, and not a number out of the
+    // series. The whole transaction went, which is the same guarantee
+    // `a_failed_posting_leaves_no_invoice_behind` makes about the ledger.
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    assert!(
+        sales::invoices(&mut conn, 100)
+            .await
+            .expect("reads")
+            .is_empty(),
+        "a refused invoice left a row behind"
+    );
+    assert_eq!(
+        spa_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
+            .await
+            .expect("reads"),
+        1,
+        "a refused invoice burned a number"
+    );
+    drop(conn);
+
+    // The open quarter still works, and takes the first number.
+    let issued = issue_on(
+        &fixture,
+        "KEY-OK",
+        "2026-04-14",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues into the open period");
+    assert!(issued.at.is_some());
+
+    fixture.cleanup().await;
+}
+
+/// **A credit note cannot be dated back into a filed quarter either.**
+///
+/// This is the case the VAT return's period rule depends on. An adjustment
+/// belongs in the period it happened; letting somebody date one into a quarter
+/// that has been declared would put the return back exactly where it was before
+/// `vat_entry` — able to restate itself after filing.
+#[tokio::test]
+async fn a_credit_note_cannot_be_dated_into_a_closed_period() {
+    let fixture = Fixture::new().await;
+
+    issue_on(
+        &fixture,
+        "KEY-Q1",
+        "2026-02-10",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    ledger::period::close(&mut conn, Some(on("2026-04-01")), Some("the-accountant"))
+        .await
+        .expect("closes the first quarter");
+    drop(conn);
+
+    let refused = sales::cancel_invoice(
+        &fixture.db,
+        &code("KEY-Q1"),
+        "CANCEL-BACKDATED",
+        "cancelled",
+        on("2026-03-01"),
+        &Metadata::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            rejection(&refused.expect_err("is refused")),
+            Some(SalesError::Ledger(ledger::LedgerError::PeriodClosed { .. }))
+        ),
+        "a credit note was dated into a quarter that had already been declared"
+    );
+
+    // The filed quarter still says what it said.
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let q1 = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-04-01"))
+        .await
+        .expect("reads");
+    drop(conn);
+    assert_eq!(q1.tax, riyals(150), "the filed return moved");
+
+    // Dated into the open quarter, the credit goes through — and lands there.
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("KEY-Q1"),
+        "CANCEL-Q2",
+        "cancelled",
+        on("2026-04-20"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("credits into the open period");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let q1_again = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-04-01"))
+        .await
+        .expect("reads");
+    let q2 = sales::vat_return(&mut conn, sar(), on("2026-04-01"), on("2026-07-01"))
+        .await
+        .expect("reads");
+    drop(conn);
+    assert_eq!(q1_again.tax, riyals(150), "and it still says it");
+    assert_eq!(
+        q2.tax,
+        riyals(-150),
+        "the adjustment is in the open quarter"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A payment is dated too, and a receipt back-dated into a closed period moves
+/// cash that has already been reconciled.
+#[tokio::test]
+async fn a_payment_cannot_be_dated_into_a_closed_period() {
+    let fixture = Fixture::new().await;
+
+    issue_on(
+        &fixture,
+        "KEY-1",
+        "2026-02-10",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    ledger::period::close(&mut conn, Some(on("2026-04-01")), Some("the-accountant"))
+        .await
+        .expect("closes");
+    drop(conn);
+
+    let refused = record_payment(
+        &fixture.db,
+        &code("KEY-1"),
+        &Receipt {
+            reference: "wire-1".to_owned(),
+            amount: riyals(100),
+            received_on: on("2026-03-05"),
+            into: code("1010"),
+        },
+        &Metadata::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            rejection(&refused.expect_err("is refused")),
+            Some(SalesError::Ledger(ledger::LedgerError::PeriodClosed { .. }))
+        ),
+        "cash moved in a period that had already been reconciled"
+    );
+
+    pay(&fixture, "KEY-1", "wire-2", riyals(100))
+        .await
+        .expect_err("`when()` is 2023, which is also closed");
 
     fixture.cleanup().await;
 }

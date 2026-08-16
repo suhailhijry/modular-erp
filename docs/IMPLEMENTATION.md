@@ -227,7 +227,13 @@ Built only where the ledger produced a second consumer.
       its first and only consumer. Declarations, layers and resolution rules are
       Phase 6's, and they are what §6 describes; this is what sits underneath
       them
-- [ ] Numbering (gapless per-tenant document sequences)
+- [x] Numbering (gapless per-tenant document sequences) — `spa_eventlog::numbering`
+      and `migrations/tenant/0005_numbering.sql`. A counter row read `FOR UPDATE`
+      and advanced in the same transaction as the document, so a refusal, a
+      retry, or a crash releases the number rather than burning it. Saudi VAT
+      Implementing Regulations Article 53 requires the sequence to have no holes
+      in it, which a Postgres `SEQUENCE` cannot give: `nextval` survives a
+      rollback by design
 - [x] `docs/ERRORS.md` — every error code in both languages, generated from the
       catalog the API renders from, with a CI drift check (`just errors`)
 - [x] `docs/openapi.json` — every route, generated from the router that serves
@@ -269,7 +275,11 @@ first `Idempotency-Key` and `ETag` have a real mutation to attach to.
 - [x] Credit notes — an invoice issued in error is cancelled by crediting it,
       which reverses its journal entry. Whole-invoice only, and refused while
       payments stand against it
-- [ ] Partial credit notes, fiscal periods, drafts, multi-currency entries with FX
+- [x] Fiscal periods — `ledger::period`, one watermark, checked in
+      `post_entry_in` where every posting in the system arrives. An entry dated
+      into a closed period is refused whether it is a hand-written journal entry,
+      a reversal, an invoice's tax point, a payment, or a credit note
+- [ ] Partial credit notes, drafts, multi-currency entries with FX
 - [ ] An entry-level read model *(a `proj_ledger.entry` table would show which
       entry reversed which, and let entries be listed at all — but adding a
       table to a module's install script needs the fleet-wide module refresh
@@ -312,9 +322,14 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [x] A VAT return — output tax by rate for a half-open period, per currency,
       with credited invoices excluded
 - [ ] ZATCA clearance *(needs a certificate and the first real outbox handler)*
-- [ ] The input-tax side *(needs a purchases module; a full return nets the two)*
-- [ ] Credit notes, cancellation, customers as records, quantities and unit
-      prices, statutory gapless numbering
+- [x] The input-tax side — `modules/purchases`, and the whole return composed in
+      the API from both modules' own reads, because their projection groups never
+      see each other (L3) and nothing below the composition root could produce
+      the figure
+- [x] Credit notes and cancellation — a `POST`, not a `DELETE`: the invoice
+      stays, its journal entry is reversed, and the books show both
+- [x] Statutory gapless numbering, on its own series per document type
+- [ ] Customers as records, quantities and unit prices, partial credit notes
 
 ### 4b · The demo tenant
 
@@ -1419,3 +1434,234 @@ here and folded back into ARCHITECTURE.md.
   a client reads as prose, in eight places. So `Conventions` now generates it from
   `Role::ALL` onto every `role` field, and the doc comments that listed it are
   gone. One list, and it is the enum's.
+
+- **Gapless numbering: what a sequence cannot do, and why the client had to give
+  something up.** Saudi law requires a tax invoice to carry "a sequential number
+  which uniquely identifies the invoice" (VAT Implementing Regulations, Article
+  53), and ZATCA's e-invoicing rules require the counter to advance by exactly
+  one so the cryptographic chain has no holes. Not *unique*. Not *mostly
+  ordered*. **Gapless** — an auditor counts them, and a missing 4,108 is a
+  question the business has to answer.
+
+  A Postgres `SEQUENCE` cannot do it, and not by accident: `nextval` is
+  deliberately transaction-independent, because that is what lets concurrent
+  writers take numbers without blocking. Every rolled-back issue would burn one.
+  So the counter is an ordinary row read `FOR UPDATE` and advanced in the
+  transaction that writes the document, and a rollback releases the number
+  because it was never really taken.
+
+  **The cost is real and cannot be engineered away.** Issuing serializes per
+  (tenant, series). "Gapless" and "concurrent" are the same contradiction
+  whatever holds the counter; the honest answer when a tenant outgrows it is more
+  series — per branch, per point of sale — which is how the paper world solved it
+  too.
+
+- **Two calls, because the document might not be written.** `reserve` takes the
+  row lock without moving the counter; `consume` moves it. A single
+  `nextval`-shaped call would burn a number on every idempotent retry — and a
+  client whose request timed out and repeated it is the *normal* case, not an
+  edge one. Putting a gap in a business's invoice sequence because their network
+  blinked would be this feature failing at the one thing it exists to do.
+
+  `re_issuing_does_not_move_the_series` is the test for exactly that pairing,
+  which the module cannot enforce from inside itself.
+
+- **The client gave up choosing the number, and got a key instead.** `id` on a
+  new invoice used to be the invoice number. It is now the client's own
+  reference: what makes a retry a no-op, and what addresses the document
+  afterwards. The number is allocated here and comes back as `number`.
+
+  That is not a preference. A number a client picks cannot be gapless — two
+  clients cannot coordinate, and a client that skips one has no way to know. The
+  same split applies to credit notes, which ZATCA numbers separately from the
+  invoices they credit, and which now have their own series.
+
+  A retried request is told the number the document **already has**, which costs
+  one extra aggregate load on that path only. Telling a client "done" and nothing
+  else would leave it to guess, and the guess would be a number that does not
+  exist.
+
+- **The number is in the event, not derived on read.** Architecture L5, and here
+  it is load-bearing: a number derived at projection time would mean replaying a
+  tenant's log renumbers every document they have ever issued — including the
+  ones customers hold copies of. `a_replay_reproduces_the_numbers_it_issued_under`
+  checks the rebuild is identical *and* that the counter did not move.
+
+  For the same reason `document_number` is not in a `proj_*` schema. It is not
+  derived from the log; the log depends on it. A module refresh drops and rebuilds
+  projection schemas, and a tenant whose series restarted at one afterwards would
+  reissue numbers that are already printed. That is now asserted in
+  `refreshing_a_module_rebuilds_its_schema_and_rewinds_its_checkpoint`, and
+  confirmed by making a refresh delete the counters and watching it fail.
+
+- **Old invoices keep the numbers they were issued under.** `Issued.number` is an
+  `Option`, not a version bump with an upcaster — and that is the honest shape
+  rather than a shortcut. An upcaster sees the payload and not the stream it came
+  from, so there is nowhere for an old number to come from; and an invoice issued
+  before this existed genuinely had none allocated. Its number *was* its
+  client-chosen id, and the projection resolves `number.unwrap_or(id)`, so every
+  such invoice keeps exactly the number on the copy somebody holds.
+
+- **The demo taught the wrong thing for about ten minutes.** Its invoices were
+  seeded with ids like `INV-2026-001`, which now sit beside numbers like
+  `INV-00001` — two strings that look like invoice numbers, side by side, in the
+  one artifact that exists to explain the system. The seeded ids read like a
+  CRM's references now (`crm-4471`), which is what `id` actually is.
+
+- **A comment that promised a guard nobody had written.** `taxable_supply`
+  carried this, in the schema, next to the view it describes:
+
+  > *"…so this view is honest about being the simple case and `vat_return`
+  > refuses to span one silently."*
+
+  `vat_return` did no such thing. There was no check anywhere — the sentence
+  described an intention that never became code, and it read as reassurance for
+  months. The `ponytail:` note above it was accurate about the *problem* and
+  wrong about the mitigation, which is the worse of the two ways to be wrong.
+
+- **What it was hiding: a filed VAT return could quietly restate itself.**
+  `taxable_supply` excluded cancelled invoices outright. That is right in exactly
+  one case — a credit note raised in the same period as the invoice, netting out
+  before anything is filed.
+
+  Across a boundary it is wrong. An invoice issued in February and credited in
+  April *was* a supply in Q1: the return was filed and the tax paid. Dropping the
+  invoice retrospectively meant re-running the Q1 return produced a smaller
+  number than the one filed, with nothing anywhere recording why — and the credit
+  appeared in no period at all.
+
+  Both documents are now entries on their own tax point (`proj_sales.vat_entry`),
+  so Q1 keeps the supply and Q2 carries the adjustment. Same-period credits still
+  net to zero; cross-period ones no longer reach back.
+
+- **The numbering work is what unblocked it.** The `ponytail:` note said the fix
+  needed "the credit note to be a document with its own tax point", and it was
+  right. A credit note now has its own number, from its own statutory series, and
+  `on` is its tax point — so there *is* a document to date the adjustment by. The
+  feature that made it possible was built for a different reason entirely.
+
+- **The old test could not have caught it.** `a_credited_invoice_drops_out_of_the_return`
+  credited within a single period, so it passed under both the wrong rule and the
+  right one — it never touched the boundary, which is the only place they differ.
+  Worse, its `credit()` helper dated the credit note in **2023** against invoices
+  from 2026, and that had no effect at all, because the old view ignored a credit
+  note's date entirely. A field the code never read cannot be wrong in a test.
+
+  The replacement is named for what it checks, and
+  `a_credit_note_is_declared_in_its_own_period_not_the_invoices` fails against the
+  old rule — confirmed by putting the old rule back and watching a filed 150
+  become 0.
+
+- **Bands count both kinds of document.** A period where a supply was invoiced
+  and credited shows `invoices: 2, credit_notes: 1, tax: 0` rather than vanishing.
+  A return that showed nothing would be hiding that a supply happened and was
+  reversed, which is precisely what an auditor is looking for.
+
+- **One check, at the seam everything already routes through.** Closing the books
+  has to refuse a back-dated journal entry, a back-dated reversal, an invoice
+  with a back-dated tax point, a payment, and a credit note. That is five call
+  sites, in two modules, and a check per call site is a check somebody forgets —
+  where the one forgotten is the one that mattered.
+
+  There is exactly one: `ledger::post_entry_in`. Sales writes an invoice and its
+  journal entry in the same transaction, so every sales command arrives there;
+  `reverse_in` calls it too. **Sales never mentions a fiscal period and inherits
+  the refusal anyway**, which is the seam earning its keep rather than being
+  asserted about. `modules/sales/tests/sales.rs` tests it from that side, because
+  a guarantee only one module knows about is a guarantee that decays.
+
+- **`closed_before`, not "closed through".** The watermark is the first instant
+  still *open*, so closing January is `2026-02-01T00:00:00Z`. The same convention
+  as the VAT return's `until`, for the same reason: "closed through 31 January"
+  is a comparison somebody gets wrong once a month, and gets wrong by exactly one
+  day. `the_instant_named_is_the_first_one_still_open` pins both sides of the
+  boundary.
+
+- **One instant rather than a table of periods.** Books close in order — nobody
+  closes March while February is open, because the March numbers are built on the
+  February ones. So the whole state is a scalar, stored in the configuration the
+  command already reads inside its own transaction. A `ponytail:` note names the
+  upgrade: a locked prior year with one adjustment period open inside it is a
+  table of ranges, and this becomes its newest row.
+
+- **Reopening is allowed, on purpose.** An accountant who closes the wrong month
+  has to be able to put it right, and a system that refuses is one they route
+  around by editing the database — which is strictly worse, because then nothing
+  records it at all. What it must not be is quiet, which is what `set_by` and
+  `set_at` are for.
+
+- **What this makes safe.** The VAT return's period rule says an adjustment
+  belongs to the period of its own tax point. Without a close, somebody could
+  still date a credit note into a quarter that has been declared and paid — which
+  would put the return back exactly where it was before `vat_entry`, able to
+  restate itself after filing. `a_credit_note_cannot_be_dated_into_a_closed_period`
+  is the test that the two features hold the line together.
+
+- **The third module is a different job from the second.** `sales` answered "how
+  do two modules meet". `purchases` answered the question that could not be asked
+  until there was a third: *was that a general answer, or did it just happen to
+  fit sales?*
+
+  All of the mechanism generalised, unchanged. An aggregate, events at version 1,
+  a projection group nobody else reads, `ModuleSetup`, `requires`, a
+  rejection-to-status mapping, and a command writing its document and its journal
+  entry in one transaction through `ledger::post_entry_in`. The closed-period
+  check arrived **for free**: `purchases` never mentions a fiscal period and
+  cannot post into one, because every posting goes through the same seam.
+  `a_bill_cannot_be_dated_into_a_closed_period` is a rule written in another
+  module before this one existed.
+
+  Exactly one thing had to move: `VatCategory`, from `sales` to `ledger`. Two
+  sibling modules must not depend on each other, so what they share has to live
+  in the one they both stand on. That is a rule only a third module could test.
+
+- **What is genuinely different is the domain, not the plumbing.** Sales
+  *computes* tax; purchases *records* it. Input VAT is reclaimed against the
+  supplier's tax invoice, so the figure in the books has to be the figure on the
+  document you hold — a recomputation landing a halala away produces a reclaim
+  that does not match its own evidence, and the evidence is what an inspector
+  asks to see. So there is no `vat::total` here and no rounding: the module
+  checks the stated tax is *possible* and stores what it was told.
+
+  Three consequences fall out of that one fact, and each is a rule rather than a
+  simplification:
+
+  1. **No gapless numbering.** We did not issue the document. The supplier's own
+     number is recorded, and a duplicate of it against the same supplier is
+     refused — recording one bill twice is a duplicate reclaim.
+  2. **Tax without the supplier's VAT number is refused.** A bill from an
+     unregistered supplier is not evidence of a reclaim.
+  3. **Exempt input tax never reaches `1200 Input VAT`.** It is irrecoverable, so
+     it is a cost of the purchase and rides on the line's own account. In
+     practice suppliers charge no tax on an exempt supply — but "rarely" is not
+     "never", and a rule that only holds for the common case is the one that
+     produces an unexplainable balance.
+
+- **A VAT return spans two modules, and neither can compute it.** `proj_sales`
+  and `proj_purchases` are separate groups and neither may read the other (L3). A
+  third module reading both would be exactly the cross-group read the law exists
+  to prevent.
+
+  So it is composed in the API, from each module's own answer — which is not a
+  workaround but where cross-module composition is supposed to happen, the same
+  place `spa-worker` composes jobs and `modules.rs` composes the catalogue. A
+  tenant with only one module gets zeroes for the other side rather than a 404: a
+  business that has not enabled purchases genuinely reclaimed nothing, and that is
+  a return they can file.
+
+  `GET /v1/tenants/{slug}/sales/vat-return` is **gone**. It answered half the
+  question, and half a VAT return is a number nobody files.
+
+- **Two guards earned their keep during this.** `no_two_operations_share_an_id`
+  caught the new `/vat-return` colliding with the sales one the moment it was
+  registered — which is what forced the decision to delete rather than rename.
+  And the authorization matrix refused to pass until all five new operations were
+  in its table, so "who may record a bill" was a decision typed into a diff rather
+  than one that defaulted.
+
+- **`just clean-databases` left the two halves disagreeing.** It drops
+  `spa_tenant_%` and never touched the control plane, so the `tenant` rows
+  outlived their databases — and the next `just demo` failed with `slug_taken`
+  against a tenant whose database was gone. Found by running it, which is the
+  only way a developer-tool bug gets found. The recipe now clears rows whose
+  database no longer exists.

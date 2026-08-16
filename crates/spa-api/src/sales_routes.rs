@@ -23,7 +23,7 @@ use crate::error::ApiError;
 use crate::extract::{Allowed, Language, ManageAccounts, PostEntries, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
-use crate::wire::{Amount, Json, Query, bad_request, metadata, parse_id, require_module};
+use crate::wire::{Amount, Json, bad_request, metadata, parse_id, require_module};
 
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -31,7 +31,6 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get_invoice))
         .routes(routes!(record_payment))
         .routes(routes!(credit_note))
-        .routes(routes!(vat_return))
         // Typed on purpose. The store underneath is key-value; this is not, so
         // a value that reaches it has already been through the type that gives
         // it meaning. See `spa_eventlog::config`.
@@ -59,8 +58,12 @@ const PAGE: i64 = 200;
     "note": ""
 }))]
 struct NewInvoice {
-    /// The invoice number, chosen by the client. Issuing the same one twice is a
-    /// no-op, which is what makes a retried request safe.
+    /// **Your own key for this invoice, not its number.** Issuing the same one
+    /// twice is a no-op, which is what makes a retried request safe.
+    ///
+    /// The invoice *number* is allocated here, from a gapless statutory series,
+    /// and comes back as `number`. Saudi law requires that sequence to have no
+    /// holes in it, which is not something a client can guarantee.
     id: String,
     /// Copied onto the invoice as values, never as a reference. A tax invoice
     /// is a legal document; last year's copy must not change when a customer
@@ -117,11 +120,30 @@ struct NewPayment {
     account: String,
 }
 
+/// A statutory document that now exists.
 #[derive(Debug, Serialize, ToSchema)]
-struct Written {
+struct Issued {
+    /// The key you sent, which is what addresses this document from here on.
     id: String,
+    /// The statutory number, allocated here from the tenant's gapless series.
+    /// What goes on the printed document.
+    ///
+    /// On a repeated request this is the number the document already has, not a
+    /// new one — the series does not move for a retry.
+    number: String,
     /// Where it landed in the log. A client that wants to read its own write
     /// back passes this as `?consistent_after=`.
+    position: Option<i64>,
+}
+
+/// Something recorded against a document, which is not a document itself.
+///
+/// A payment carries no statutory number: the invoice it settles is the numbered
+/// thing, and a receipt references that.
+#[derive(Debug, Serialize, ToSchema)]
+struct Recorded {
+    /// The invoice it was recorded against.
+    id: String,
     position: Option<i64>,
 }
 
@@ -130,8 +152,12 @@ struct Written {
     "id": "CN-2026-0001", "reason": "Returned in full", "on": "2026-08-25T00:00:00Z"
 }))]
 struct NewCreditNote {
-    /// The credit note's own number. Crediting the same invoice twice with the
-    /// same one is a no-op; a different one is refused.
+    /// **Your own key for this cancellation, not the credit note's number.**
+    /// Sending the same one twice is a no-op; a different one against an invoice
+    /// that is already credited is refused.
+    ///
+    /// The credit note's number is allocated here, from its own gapless series —
+    /// ZATCA numbers credit notes separately from the invoices they credit.
     id: String,
     #[serde(default)]
     reason: String,
@@ -143,7 +169,10 @@ struct NewCreditNote {
 
 #[derive(Debug, Serialize, ToSchema)]
 struct InvoiceView {
+    /// The key the client sent when issuing, and what addresses this invoice.
     id: String,
+    /// The statutory number. Sequential, gapless, and what the document prints.
+    number: String,
     /// Set once a credit note has cancelled it. A cancelled invoice owes
     /// nothing, and `outstanding` says so too.
     #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
@@ -211,6 +240,7 @@ struct PaymentView {
 fn view(summary: sales::InvoiceSummary) -> InvoiceView {
     InvoiceView {
         id: summary.id,
+        number: summary.number,
         cancelled_on: summary.cancelled_on,
         credit_note: summary.credit_note,
         customer: summary.customer,
@@ -247,7 +277,7 @@ fn view(summary: sales::InvoiceSummary) -> InvoiceView {
     params(("slug" = String, Path, description = "The tenant's name in URLs.")),
     request_body = NewInvoice,
     responses(
-        (status = CREATED, description = "Issued, or already issued under this number.", body = Written),
+        (status = CREATED, description = "Issued, or already issued under this key.", body = Issued),
         (status = BAD_REQUEST, description = "No lines that come to anything, mixed currencies, an unknown VAT category, or an unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -262,7 +292,7 @@ async fn issue_invoice(
     State(state): State<AppState>,
     Language(locale): Language,
     Json(body): Json<NewInvoice>,
-) -> Result<(StatusCode, Json<Written>), Problem> {
+) -> Result<(StatusCode, Json<Issued>), Problem> {
     require_module(&tenant, &sales::module_id(), locale)?;
 
     let id = parse_id(&body.id, locale)?;
@@ -314,9 +344,10 @@ async fn issue_invoice(
 
     Ok((
         StatusCode::CREATED,
-        Json(Written {
+        Json(Issued {
             id: body.id,
-            position: committed.at.map(spa_types::LogPosition::get),
+            number: committed.number,
+            position: committed.committed.at.map(spa_types::LogPosition::get),
         }),
     ))
 }
@@ -336,7 +367,7 @@ async fn issue_invoice(
     ),
     request_body = NewPayment,
     responses(
-        (status = OK, description = "Recorded, or already recorded under this reference.", body = Written),
+        (status = OK, description = "Recorded, or already recorded under this reference.", body = Recorded),
         (status = BAD_REQUEST, description = "A non-positive amount, or an unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -352,7 +383,7 @@ async fn record_payment(
     Language(locale): Language,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewPayment>,
-) -> Result<Json<Written>, Problem> {
+) -> Result<Json<Recorded>, Problem> {
     require_module(&tenant, &sales::module_id(), locale)?;
 
     let raw = params.get("invoice").map_or("", String::as_str);
@@ -375,7 +406,7 @@ async fn record_payment(
 
     nudge(&state, tenant.db.tenant()).await;
 
-    Ok(Json(Written {
+    Ok(Json(Recorded {
         id: raw.to_owned(),
         position: committed.at.map(spa_types::LogPosition::get),
     }))
@@ -398,7 +429,7 @@ async fn record_payment(
     ),
     request_body = NewCreditNote,
     responses(
-        (status = OK, description = "Credited, or already credited by this note.", body = Written),
+        (status = OK, description = "Credited, or already credited under this key.", body = Issued),
         (status = BAD_REQUEST, description = "An unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -414,7 +445,7 @@ async fn credit_note(
     Language(locale): Language,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewCreditNote>,
-) -> Result<Json<Written>, Problem> {
+) -> Result<Json<Issued>, Problem> {
     require_module(&tenant, &sales::module_id(), locale)?;
 
     let raw = params.get("invoice").map_or("", String::as_str);
@@ -433,9 +464,10 @@ async fn credit_note(
 
     nudge(&state, tenant.db.tenant()).await;
 
-    Ok(Json(Written {
+    Ok(Json(Issued {
         id: body.id,
-        position: committed.at.map(spa_types::LogPosition::get),
+        number: committed.number,
+        position: committed.committed.at.map(spa_types::LogPosition::get),
     }))
 }
 
@@ -563,128 +595,6 @@ async fn get_invoice(
             })
             .collect(),
         invoice: view(detail.summary),
-    }))
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-struct Period {
-    /// Inclusive.
-    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
-    from: Timestamp,
-    /// **Exclusive.** A period ending "31 March inclusive" is a comparison
-    /// somebody gets wrong once a quarter, and two consecutive returns built
-    /// that way either double-count the boundary or drop it.
-    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
-    until: Timestamp,
-    currency: String,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-struct VatBandView {
-    vat: &'static str,
-    vat_rate: i32,
-    net: i64,
-    tax: i64,
-    invoices: i64,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-struct VatReturnView {
-    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
-    from: Timestamp,
-    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
-    until: Timestamp,
-    currency: String,
-    bands: Vec<VatBandView>,
-    net: i64,
-    /// What goes on the return.
-    tax: i64,
-}
-
-/// The output-tax side of a VAT return, for a period.
-///
-/// What the business *charged*. A full return also nets off input tax on
-/// purchases, which needs a purchases module — this is the side that exists.
-///
-/// Cancelled invoices are excluded rather than netted to zero, which is right
-/// when the credit note lands in the same period and wrong across a boundary.
-#[utoipa::path(
-    get,
-    path = "/v1/tenants/{slug}/sales/vat-return",
-    tag = "sales",
-    params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
-        ("from" = String, Query, description = "Start of the period, inclusive. RFC 3339."),
-        ("until" = String, Query, description = "End of the period, **exclusive**. RFC 3339."),
-        ("currency" = String, Query, description = "ISO 4217."),
-        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
-    ),
-    responses(
-        (status = OK, description = "One band per rate, and the totals that go on the return.", body = VatReturnView),
-        (status = BAD_REQUEST, description = "An unknown currency, or a period that ends before it starts", body = Problem),
-        (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
-        (status = NOT_FOUND, body = Problem),
-        (status = SERVICE_UNAVAILABLE, body = Problem),
-    ),
-)]
-async fn vat_return(
-    tenant: Allowed<Read>,
-    Language(locale): Language,
-    consistency: Consistency,
-    Query(period): Query<Period>,
-) -> Result<Json<VatReturnView>, Problem> {
-    require_module(&tenant, &sales::module_id(), locale)?;
-    consistency
-        .wait_for(&tenant.db, sales::GROUP_NAME, locale)
-        .await?;
-
-    let currency = CurrencyCode::new(&period.currency).map_err(|_| {
-        bad_request(
-            crate::messages::UNKNOWN_CURRENCY,
-            "currency",
-            &period.currency,
-            locale,
-        )
-    })?;
-
-    if period.until <= period.from {
-        return Err(bad_request(
-            crate::messages::EMPTY_PERIOD,
-            "period",
-            &period.from.to_rfc3339(),
-            locale,
-        ));
-    }
-
-    let mut conn = tenant
-        .db
-        .read()
-        .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-
-    let filed = sales::vat_return(&mut conn, currency, period.from, period.until)
-        .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    drop(conn);
-
-    Ok(Json(VatReturnView {
-        from: filed.from,
-        until: filed.until,
-        currency: filed.currency.to_string(),
-        bands: filed
-            .bands
-            .iter()
-            .map(|b| VatBandView {
-                vat: b.category.as_str(),
-                vat_rate: b.basis_points,
-                net: b.net.minor(),
-                tax: b.tax.minor(),
-                invoices: b.invoices,
-            })
-            .collect(),
-        net: filed.net.minor(),
-        tax: filed.tax.minor(),
     }))
 }
 

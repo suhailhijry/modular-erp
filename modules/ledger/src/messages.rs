@@ -13,6 +13,8 @@ pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("ledger.mixed_currenc
 pub const DOES_NOT_BALANCE: MessageCode = MessageCode::new("ledger.does_not_balance");
 pub const ZERO_LINE: MessageCode = MessageCode::new("ledger.zero_line");
 pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("ledger.amount_out_of_range");
+/// An entry dated into a period the books were closed for.
+pub const PERIOD_CLOSED: MessageCode = MessageCode::new("ledger.period_closed");
 
 pub static CODES: &[MessageCode] = &[
     ACCOUNT_EXISTS,
@@ -26,9 +28,24 @@ pub static CODES: &[MessageCode] = &[
     DOES_NOT_BALANCE,
     ZERO_LINE,
     AMOUNT_OUT_OF_RANGE,
+    PERIOD_CLOSED,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        PERIOD_CLOSED,
+        Locale::English,
+        Template::Simple(
+            "The books are closed before {closed_before}, and this is dated {on}.              Post the correction in the period that is open.",
+        ),
+    ),
+    (
+        PERIOD_CLOSED,
+        Locale::Arabic,
+        Template::Simple(
+            "أُقفلت الدفاتر قبل {closed_before}، وتاريخ هذا القيد {on}.              سجّل التصحيح في الفترة المفتوحة.",
+        ),
+    ),
     (
         ACCOUNT_EXISTS,
         Locale::English,

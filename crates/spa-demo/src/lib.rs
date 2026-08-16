@@ -67,6 +67,8 @@ pub struct Seeded {
     /// Invoices cancelled by a credit note. Part of `invoices`, not extra.
     pub credited: usize,
     pub payments: usize,
+    /// Supplier bills — the input-tax side of the return.
+    pub bills: usize,
     pub journal_entries: usize,
 }
 
@@ -158,6 +160,11 @@ pub async fn seed(
     let credited = seed_corrections(&app, slug, &token).await?;
     let invoices = invoices + credited;
 
+    // The other side of a VAT return. Without bills a demo shows output tax and
+    // calls it a return, which is half a number and the wrong half to show
+    // somebody deciding whether this can file for them.
+    let bills = seed_bills(&app, slug, &token).await?;
+
     let colleague = seed_colleague(&app, slug, &token, password).await?;
 
     // Drive the projections, so the demo has something to show the moment it
@@ -196,6 +203,7 @@ pub async fn seed(
         invoices,
         credited,
         payments,
+        bills,
         journal_entries,
     })
 }
@@ -205,6 +213,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     let db = control.enter_for_maintenance(tenant).await?;
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
     advance::<sales::Sales>(&db, &sales::projections(), sales::upcasters()).await?;
+    advance::<purchases::Purchases>(&db, &purchases::projections(), purchases::upcasters()).await?;
     Ok(())
 }
 
@@ -360,14 +369,112 @@ async fn seed_opening_balances(
     Ok(entries.len())
 }
 
+/// Four supplier bills across two suppliers, so the return has an input side.
+///
+/// One of them is exempt — residential rent — because the difference between
+/// zero-rated and exempt is invisible until a return has both, and it is the
+/// distinction that costs money to get wrong.
+async fn seed_bills(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    let bills = [
+        (
+            "ap-2201",
+            "Najd Logistics Services",
+            "311234567800003",
+            "NL-77120",
+            "2026-01-12T00:00:00Z",
+            serde_json::json!([
+                { "description": "Freight, January", "account": "5000",
+                  "net": 820_000, "vat": "standard", "vat_rate": 1500, "tax": 123_000 },
+            ]),
+        ),
+        (
+            "ap-2214",
+            "Al Khobar Properties",
+            "310999888700003",
+            "AKP-2026-02",
+            "2026-02-01T00:00:00Z",
+            // Residential rent is exempt. No tax, and none to reclaim.
+            serde_json::json!([
+                { "description": "Office rent, February", "account": "5100",
+                  "net": 1_500_000, "vat": "exempt", "vat_rate": 0, "tax": 0 },
+            ]),
+        ),
+        (
+            "ap-2230",
+            "Najd Logistics Services",
+            "311234567800003",
+            "NL-77455",
+            "2026-02-19T00:00:00Z",
+            serde_json::json!([
+                { "description": "Freight, February", "account": "5000",
+                  "net": 640_000, "vat": "standard", "vat_rate": 1500, "tax": 96_000 },
+                { "description": "Customs handling", "account": "5200",
+                  "net": 180_000, "vat": "standard", "vat_rate": 1500, "tax": 27_000 },
+            ]),
+        ),
+        (
+            "ap-2248",
+            "Al Khobar Properties",
+            "310999888700003",
+            "AKP-2026-03",
+            "2026-03-01T00:00:00Z",
+            serde_json::json!([
+                { "description": "Office rent, March", "account": "5100",
+                  "net": 1_500_000, "vat": "exempt", "vat_rate": 0, "tax": 0 },
+            ]),
+        ),
+    ];
+
+    for (id, supplier, vat_number, reference, billed_on, lines) in &bills {
+        post(
+            app,
+            &format!("/v1/tenants/{slug}/purchases/bills"),
+            Some(token),
+            &serde_json::json!({
+                "id": id,
+                "supplier": { "name": supplier, "vat_number": vat_number },
+                "reference": reference,
+                "billed_on": billed_on,
+                "currency": "SAR",
+                "lines": lines,
+            }),
+            StatusCode::CREATED,
+        )
+        .await?;
+    }
+
+    // One of them settled, so a payables list has something in every state.
+    post(
+        app,
+        &format!("/v1/tenants/{slug}/purchases/bills/ap-2201/payments"),
+        Some(token),
+        &serde_json::json!({
+            "reference": "TRF-90218",
+            "amount": { "minor": 943_000, "currency": "SAR" },
+            "paid_on": "2026-02-11T00:00:00Z",
+            "account": "1010"
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    Ok(bills.len())
+}
+
 /// Five invoices across three customers, spanning every VAT treatment.
 ///
 /// The mix is the point: a demo with one 15% invoice shows nothing about the
 /// tax breakdown a Saudi invoice has to print.
+///
+/// The ids read like a CRM's references on purpose. `id` is the *client's* key
+/// — what makes a retry safe — and the invoice number is allocated here from a
+/// gapless statutory series. Seeding them as `INV-2026-001` would put two things
+/// that look like invoice numbers side by side and teach that they are the same
+/// kind of thing.
 async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
     let invoices = [
         (
-            "INV-2026-001",
+            "crm-4471",
             "2026-01-08T00:00:00Z",
             "Al Faisaliah Group",
             Some("310122393500003"),
@@ -376,7 +483,7 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
             ]),
         ),
         (
-            "INV-2026-002",
+            "crm-4489",
             "2026-01-22T00:00:00Z",
             "Najd Logistics",
             Some("311234567800003"),
@@ -386,7 +493,7 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
             ]),
         ),
         (
-            "INV-2026-003",
+            "crm-4502",
             "2026-02-05T00:00:00Z",
             "Gulf Freight DMCC",
             None,
@@ -395,7 +502,7 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
             ]),
         ),
         (
-            "INV-2026-004",
+            "crm-4517",
             "2026-02-19T00:00:00Z",
             "Al Faisaliah Group",
             Some("310122393500003"),
@@ -406,7 +513,7 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
             ]),
         ),
         (
-            "INV-2026-005",
+            "crm-4530",
             "2026-03-04T00:00:00Z",
             "Najd Logistics",
             Some("311234567800003"),
@@ -442,26 +549,11 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
 async fn seed_payments(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
     let payments = [
         // 45,000.00 + 15% = 51,750.00
-        (
-            "INV-2026-001",
-            "SNB-88401",
-            5_175_000,
-            "2026-02-01T00:00:00Z",
-        ),
+        ("crm-4471", "SNB-88401", 5_175_000, "2026-02-01T00:00:00Z"),
         // (28,000.00 + 6,000.00) + 15% = 39,100.00
-        (
-            "INV-2026-002",
-            "SNB-88907",
-            3_910_000,
-            "2026-02-15T00:00:00Z",
-        ),
+        ("crm-4489", "SNB-88907", 3_910_000, "2026-02-15T00:00:00Z"),
         // Zero-rated: 33,000.00, and only half of it has arrived.
-        (
-            "INV-2026-003",
-            "RJHI-1204",
-            1_650_000,
-            "2026-03-01T00:00:00Z",
-        ),
+        ("crm-4502", "RJHI-1204", 1_650_000, "2026-03-01T00:00:00Z"),
     ];
 
     for (invoice, reference, minor, received_on) in &payments {
@@ -495,7 +587,7 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
         &format!("/v1/tenants/{slug}/sales/invoices"),
         Some(token),
         &serde_json::json!({
-            "id": "INV-2026-006",
+            "id": "crm-4544",
             "customer": { "name": "Najd Logistics", "vat_number": "311234567800003" },
             "issued_on": "2026-03-11T00:00:00Z",
             "due_on": "2026-04-10T00:00:00Z",
@@ -511,10 +603,10 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
 
     post(
         app,
-        &format!("/v1/tenants/{slug}/sales/invoices/INV-2026-006/credit-note"),
+        &format!("/v1/tenants/{slug}/sales/invoices/crm-4544/credit-note"),
         Some(token),
         &serde_json::json!({
-            "id": "CN-2026-001",
+            "id": "crm-4544-void",
             "reason": "Raised against the wrong customer",
             "on": "2026-03-12T00:00:00Z",
         }),

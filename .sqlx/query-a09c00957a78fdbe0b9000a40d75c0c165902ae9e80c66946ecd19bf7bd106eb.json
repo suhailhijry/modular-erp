@@ -1,0 +1,208 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", number as \"number!\", customer as \"customer!\", customer_vat,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\",\n                  cancelled_on, credit_note\n             FROM proj_sales.invoice_status\n            WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "number!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "customer!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "customer"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "customer_vat",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "customer_vat"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "issued_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "issued_on"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "due_on",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "due_on"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "tax!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "tax"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "gross"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "paid!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "paid"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "outstanding!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "outstanding"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "payments!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "payments"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "note!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "note"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "cancelled_on",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "cancelled_on"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "credit_note",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "credit_note"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "a09c00957a78fdbe0b9000a40d75c0c165902ae9e80c66946ecd19bf7bd106eb"
+}

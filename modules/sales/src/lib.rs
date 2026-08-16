@@ -25,11 +25,10 @@
 //!
 //! # What is deliberately absent
 //!
-//! Credit notes, cancellation, customers as records, quantities and unit prices,
-//! statutory gapless numbering, a VAT return, and ZATCA clearance. The last two
-//! are the module's commercial reason to exist and both need a shape nobody has
-//! specified yet — a return needs periods, clearance needs a certificate and an
-//! outbox handler. Every one of them is additive.
+//! Customers as records, quantities and unit prices, partial credit notes, and
+//! ZATCA clearance. The last is the module's commercial reason to exist and
+//! needs a shape nobody has specified yet — a certificate and an outbox handler.
+//! Every one of them is additive.
 
 mod commands;
 mod invoice;
@@ -38,7 +37,9 @@ mod posting;
 mod projections;
 mod vat;
 
-pub use commands::{Draft, Receipt, SalesError, cancel_invoice, issue_invoice, record_payment};
+pub use commands::{
+    Draft, Numbered, Receipt, SalesError, cancel_invoice, issue_invoice, record_payment,
+};
 pub use invoice::{Customer, Invoice, InvoiceEvent, InvoiceLine};
 pub use posting::{PostingAccounts, entry_for_issue, entry_for_payment};
 pub use projections::{
@@ -52,6 +53,36 @@ use spa_types::{DomainName, EventName, SchemaVersion};
 
 /// This module's messages, in every supported language.
 pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
+
+/// The gapless series an invoice number comes from.
+///
+/// Namespaced like a configuration key, because it is the same kind of thing:
+/// tenant state owned by the module that gives it meaning.
+pub const INVOICE_SERIES: &str = "sales.invoice";
+
+/// A credit note is a statutory document too, and ZATCA numbers it separately
+/// from the invoices it credits.
+pub const CREDIT_NOTE_SERIES: &str = "sales.credit_note";
+
+const INVOICE_PREFIX: &str = "INV-";
+const CREDIT_NOTE_PREFIX: &str = "CN-";
+
+/// How a document number reads.
+///
+/// ponytail: the prefix and the five-digit width are fixed. They become a
+/// `sales.numbering` configuration the first time a tenant asks — the store and
+/// the typed surface both already exist (`spa_eventlog::configuration`), and the
+/// only new thing would be the route. Deliberately not built on speculation,
+/// but worth knowing the shape: a tenant must choose **before** their first
+/// invoice, because a number that has been on a document cannot be restated.
+///
+/// A year-reset series (`INV-2026-00001`) is the other common shape and is a
+/// bigger change than a format string: the reset has to be atomic, and "which
+/// year" has to come from the tax point rather than the clock.
+#[must_use]
+pub fn format_number(prefix: &str, value: i64) -> String {
+    format!("{prefix}{value:05}")
+}
 
 /// Creates this module's read models in a tenant database.
 ///

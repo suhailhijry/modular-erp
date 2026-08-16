@@ -36,6 +36,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(post_entry))
         .routes(routes!(reverse_entry))
         .routes(routes!(trial_balance))
+        .routes(routes!(books, close_books))
         // Unauthenticated on purpose: a signup form needs to show the choices
         // before anyone has an account. It is product information, not data.
         .routes(routes!(list_charts))
@@ -458,10 +459,12 @@ fn ledger_problem(error: &CommandError<ledger::LedgerError>, locale: Locale) -> 
                 // code somebody else took, and an entry somebody else undid.
                 ledger::LedgerError::AccountExists(_)
                 | ledger::LedgerError::AlreadyReversed { .. } => StatusCode::CONFLICT,
-                // Well-formed, but refers to something that is not there.
+                // Well-formed, but refers to something that is not there — or
+                // to a period nobody may write into any more.
                 ledger::LedgerError::NoSuchAccount(_)
                 | ledger::LedgerError::AccountClosed(_)
-                | ledger::LedgerError::NoSuchEntry(_) => StatusCode::UNPROCESSABLE_ENTITY,
+                | ledger::LedgerError::NoSuchEntry(_)
+                | ledger::LedgerError::PeriodClosed { .. } => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::BAD_REQUEST,
             },
             rejection.message(),
@@ -490,6 +493,122 @@ fn ledger_problem(error: &CommandError<ledger::LedgerError>, locale: Locale) -> 
     };
 
     Problem::new(status, &message, locale, &crate::catalog::CATALOG)
+}
+
+// ---------------------------------------------------------------------------
+// Closing the books
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({ "closed_before": "2026-02-01T00:00:00Z" }))]
+struct BooksView {
+    /// **The first instant still open.** Everything strictly before it is final
+    /// and no entry may be dated into it — not a journal entry, not an invoice's
+    /// tax point, not a credit note's.
+    ///
+    /// Closing January is `2026-02-01T00:00:00Z`. Exclusive, like the VAT
+    /// return's `until`, because "closed through 31 January" is a comparison
+    /// somebody gets wrong by exactly one day.
+    ///
+    /// `null` on a tenant that has never closed a period, and the way to reopen
+    /// everything.
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    closed_before: Option<Timestamp>,
+}
+
+/// How far the books are closed.
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/ledger/books",
+    tag = "ledger",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    responses(
+        (status = OK, body = BooksView),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn books(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<BooksView>, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
+
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    let books = ledger::period::books(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    drop(conn);
+
+    Ok(Json(BooksView {
+        closed_before: books.closed_before,
+    }))
+}
+
+/// Close the books, or reopen them.
+///
+/// After this, an entry dated before `closed_before` is refused — including an
+/// invoice with a back-dated tax point and a credit note dated into a quarter
+/// that has already been declared. Corrections go into the period that is open,
+/// which is where an auditor expects to find them.
+///
+/// **Moving it backwards reopens.** An accountant who closes the wrong month has
+/// to be able to put it right, and a system that refuses is one they route
+/// around by editing the database. Sending `null` reopens everything.
+///
+/// `ManageAccounts`, not `ManageTenant`: declaring the numbers final is the
+/// accountant's call, and it is not something a clerk posting entries should be
+/// able to do to them.
+#[utoipa::path(
+    put,
+    path = "/v1/tenants/{slug}/ledger/books",
+    tag = "ledger",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = BooksView,
+    responses(
+        (status = NO_CONTENT, description = "Closed. Entries dated before it are refused from now on."),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn close_books(
+    tenant: Allowed<ManageAccounts>,
+    Language(locale): Language,
+    Json(body): Json<BooksView>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
+
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    ledger::period::close(
+        &mut conn,
+        body.closed_before,
+        Some(&tenant.session.identity.to_string()),
+    )
+    .await
+    .map_err(|e| config_problem(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn config_problem(error: &spa_eventlog::ConfigError, locale: Locale) -> Problem {
+    tracing::error!(error = %error, "configuration failed");
+    Problem::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &error.message(),
+        locale,
+        &crate::catalog::CATALOG,
+    )
 }
 
 // ---------------------------------------------------------------------------

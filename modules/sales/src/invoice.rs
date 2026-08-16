@@ -62,6 +62,19 @@ pub struct InvoiceLine {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InvoiceEvent {
     Issued {
+        /// The invoice number, from the tenant's gapless series.
+        ///
+        /// In the event rather than derived on read, because that is the whole
+        /// point: a replay must reproduce the number the document was issued
+        /// under, not the one today's counter would give (architecture L5).
+        ///
+        /// `None` on invoices issued before this system numbered them, whose
+        /// number *was* their client-chosen id. Not an upcaster: an upcaster
+        /// sees the payload and not the stream it came from, so there is
+        /// nowhere for the old number to come from — and `None` is the honest
+        /// statement that nothing allocated one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<String>,
         customer: Customer,
         /// The tax point — the date the supply is treated as made. Not when the
         /// row was written.
@@ -83,9 +96,18 @@ pub enum InvoiceEvent {
     /// the books show both it and the credit. What changes is that nothing is
     /// owed on it.
     Cancelled {
-        /// The credit note's own identifier, and the id of the reversing
-        /// journal entry.
+        /// The credit note's number, from the tenant's gapless series — and on
+        /// events written before that existed, the client's own identifier,
+        /// which is what it meant then.
         credit_note: String,
+        /// The client's key for this cancellation, which is what makes a
+        /// retried request a no-op and a second, different one a conflict.
+        ///
+        /// Separate from `credit_note` since the number stopped being the
+        /// client's to choose. `None` on older events, where they were the same
+        /// thing — see [`Invoice::cancelled_by`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
         reason: String,
         on: Timestamp,
     },
@@ -127,12 +149,21 @@ impl DomainEvent for InvoiceEvent {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Invoice {
     pub issued: bool,
+    /// The statutory number this invoice was issued under. `None` before it is
+    /// issued, and on invoices from before the system numbered them — where the
+    /// aggregate id was the number.
+    pub number: Option<String>,
     pub currency: Option<CurrencyCode>,
     pub gross: Option<Money>,
     /// Total received so far. `None` until the invoice is issued.
     pub paid: Option<Money>,
-    /// Cancelled, and by which credit note.
+    /// Cancelled, and under which client key — the client's `reference`, or on
+    /// an older event the credit note's identifier, which was the same thing.
+    /// Compared against on a retry.
     pub cancelled_by: Option<String>,
+    /// The credit note's number, for reporting it back to a caller who asked to
+    /// cancel an invoice that was already cancelled.
+    pub credit_note: Option<String>,
     /// Payment references already recorded. Small — an invoice is settled in a
     /// handful of instalments at most — and the only way to make recording a
     /// payment idempotent without a separate table.
@@ -149,15 +180,24 @@ impl Aggregate for Invoice {
     fn apply(&mut self, event: &Self::Event) {
         match event {
             InvoiceEvent::Issued {
-                currency, totals, ..
+                number,
+                currency,
+                totals,
+                ..
             } => {
                 self.issued = true;
+                self.number.clone_from(number);
                 self.currency = Some(*currency);
                 self.gross = Some(totals.gross);
                 self.paid = Some(Money::zero(*currency));
             }
-            InvoiceEvent::Cancelled { credit_note, .. } => {
-                self.cancelled_by = Some(credit_note.clone());
+            InvoiceEvent::Cancelled {
+                credit_note,
+                reference,
+                ..
+            } => {
+                self.cancelled_by = Some(reference.clone().unwrap_or_else(|| credit_note.clone()));
+                self.credit_note = Some(credit_note.clone());
             }
             InvoiceEvent::PaymentRecorded {
                 payment, amount, ..
@@ -210,6 +250,7 @@ mod tests {
         let vat = Vat::current(VatCategory::Standard);
         let net = Money::from_minor(gross_net, currency);
         InvoiceEvent::Issued {
+            number: Some("INV-00001".to_owned()),
             customer: Customer::new("Acme"),
             issued_on: Timestamp::UNIX_EPOCH,
             due_on: None,

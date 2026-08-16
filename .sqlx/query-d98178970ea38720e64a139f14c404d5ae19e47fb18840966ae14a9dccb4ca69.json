@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", customer as \"customer!\", customer_vat,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\",\n                  cancelled_on, credit_note\n             FROM proj_sales.invoice_status\n            ORDER BY issued_on DESC, id\n            LIMIT $1",
+  "query": "SELECT id as \"id!\", supplier as \"supplier!\", supplier_vat,\n                  reference as \"reference!\",\n                  billed_on as \"billed_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\"\n             FROM proj_purchases.bill_status\n            ORDER BY billed_on DESC, id\n            LIMIT $1",
   "describe": {
     "columns": [
       {
@@ -9,162 +9,151 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_purchases.bill_status",
             "name": "id"
           }
         }
       },
       {
         "ordinal": 1,
-        "name": "customer!",
+        "name": "supplier!",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "customer"
+            "table": "proj_purchases.bill_status",
+            "name": "supplier"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "customer_vat",
+        "name": "supplier_vat",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "customer_vat"
+            "table": "proj_purchases.bill_status",
+            "name": "supplier_vat"
           }
         }
       },
       {
         "ordinal": 3,
-        "name": "issued_on!",
-        "type_info": "Timestamptz",
+        "name": "reference!",
+        "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "issued_on"
+            "table": "proj_purchases.bill_status",
+            "name": "reference"
           }
         }
       },
       {
         "ordinal": 4,
-        "name": "due_on",
+        "name": "billed_on!",
         "type_info": "Timestamptz",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "due_on"
+            "table": "proj_purchases.bill_status",
+            "name": "billed_on"
           }
         }
       },
       {
         "ordinal": 5,
-        "name": "currency!",
-        "type_info": "Bpchar",
+        "name": "due_on",
+        "type_info": "Timestamptz",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "currency"
+            "table": "proj_purchases.bill_status",
+            "name": "due_on"
           }
         }
       },
       {
         "ordinal": 6,
-        "name": "net!",
-        "type_info": "Int8",
+        "name": "currency!",
+        "type_info": "Bpchar",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "net"
+            "table": "proj_purchases.bill_status",
+            "name": "currency"
           }
         }
       },
       {
         "ordinal": 7,
-        "name": "tax!",
+        "name": "net!",
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "tax"
+            "table": "proj_purchases.bill_status",
+            "name": "net"
           }
         }
       },
       {
         "ordinal": 8,
-        "name": "gross!",
+        "name": "tax!",
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "gross"
+            "table": "proj_purchases.bill_status",
+            "name": "tax"
           }
         }
       },
       {
         "ordinal": 9,
-        "name": "paid!",
+        "name": "gross!",
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "paid"
+            "table": "proj_purchases.bill_status",
+            "name": "gross"
           }
         }
       },
       {
         "ordinal": 10,
-        "name": "outstanding!",
+        "name": "paid!",
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "outstanding"
+            "table": "proj_purchases.bill_status",
+            "name": "paid"
           }
         }
       },
       {
         "ordinal": 11,
-        "name": "payments!",
+        "name": "outstanding!",
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "payments"
+            "table": "proj_purchases.bill_status",
+            "name": "outstanding"
           }
         }
       },
       {
         "ordinal": 12,
-        "name": "note!",
-        "type_info": "Text",
+        "name": "payments!",
+        "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "note"
+            "table": "proj_purchases.bill_status",
+            "name": "payments"
           }
         }
       },
       {
         "ordinal": 13,
-        "name": "cancelled_on",
-        "type_info": "Timestamptz",
-        "origin": {
-          "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "cancelled_on"
-          }
-        }
-      },
-      {
-        "ordinal": 14,
-        "name": "credit_note",
+        "name": "note!",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
-            "name": "credit_note"
+            "table": "proj_purchases.bill_status",
+            "name": "note"
           }
         }
       }
@@ -188,9 +177,8 @@
       true,
       true,
       true,
-      true,
       true
     ]
   },
-  "hash": "89876d8d1931e6c74e8658d93ffb7e496339ccf5fa377715c8dd8f9e184b6de3"
+  "hash": "d98178970ea38720e64a139f14c404d5ae19e47fb18840966ae14a9dccb4ca69"
 }

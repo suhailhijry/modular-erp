@@ -59,11 +59,11 @@ impl Projection for Invoices {
         if !InvoiceEvent::NAMES.contains(&envelope.event_name.as_str()) {
             return Ok(());
         }
-        // The invoice number is the aggregate id.
         let id = envelope.stream.id.as_str();
 
         match decode::<InvoiceEvent>(ctx, envelope)? {
             InvoiceEvent::Issued {
+                number,
                 customer,
                 issued_on,
                 due_on,
@@ -73,6 +73,10 @@ impl Projection for Invoices {
                 note,
             } => {
                 let invoice = NewInvoice {
+                    // Issued before this system numbered anything: the number
+                    // *was* the client-chosen id, and that is the number on the
+                    // copy the customer holds.
+                    number: number.unwrap_or_else(|| id.to_owned()),
                     customer,
                     issued_on,
                     due_on,
@@ -124,6 +128,7 @@ impl Projection for Invoices {
 /// Everything an `Issued` event carries, so writing it is one call rather than
 /// nine arguments.
 struct NewInvoice {
+    number: String,
     customer: crate::invoice::Customer,
     issued_on: Timestamp,
     due_on: Option<Timestamp>,
@@ -143,11 +148,12 @@ async fn write_issued(
 ) -> Result<(), ProjectionError> {
     sqlx::query(
         "INSERT INTO invoice
-             (id, customer, customer_vat, issued_on, due_on, currency,
+             (id, number, customer, customer_vat, issued_on, due_on, currency,
               net, tax, gross, note, recorded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(id)
+    .bind(&invoice.number)
     .bind(&invoice.customer.name)
     .bind(invoice.customer.vat_number.as_deref())
     .bind(invoice.issued_on)
@@ -219,7 +225,11 @@ pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = Sales>>> {
 /// An invoice and where it stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvoiceSummary {
+    /// The client's own key, and what a route addresses.
     pub id: String,
+    /// The statutory number, from the tenant's gapless series. What the document
+    /// prints and what an auditor counts.
+    pub number: String,
     /// When a credit note cancelled it, and which one.
     pub cancelled_on: Option<Timestamp>,
     pub credit_note: Option<String>,
@@ -283,7 +293,7 @@ pub async fn invoices(
     limit: i64,
 ) -> Result<Vec<InvoiceSummary>, sqlx::Error> {
     let rows = sqlx::query!(
-        r#"SELECT id as "id!", customer as "customer!", customer_vat,
+        r#"SELECT id as "id!", number as "number!", customer as "customer!", customer_vat,
                   issued_on as "issued_on!", due_on,
                   currency as "currency!",
                   net as "net!", tax as "tax!", gross as "gross!",
@@ -303,6 +313,7 @@ pub async fn invoices(
             let currency = parse_currency(&row.currency)?;
             Ok(InvoiceSummary {
                 id: row.id,
+                number: row.number,
                 customer: row.customer,
                 customer_vat: row.customer_vat,
                 issued_on: row.issued_on,
@@ -329,7 +340,7 @@ pub async fn invoice(
     id: &str,
 ) -> Result<Option<InvoiceDetail>, sqlx::Error> {
     let Some(header) = sqlx::query!(
-        r#"SELECT id as "id!", customer as "customer!", customer_vat,
+        r#"SELECT id as "id!", number as "number!", customer as "customer!", customer_vat,
                   issued_on as "issued_on!", due_on,
                   currency as "currency!",
                   net as "net!", tax as "tax!", gross as "gross!",
@@ -384,6 +395,7 @@ pub async fn invoice(
     Ok(Some(InvoiceDetail {
         summary: InvoiceSummary {
             id: header.id,
+            number: header.number,
             customer: header.customer,
             customer_vat: header.customer_vat,
             issued_on: header.issued_on,
@@ -450,11 +462,18 @@ fn parse_category(raw: &str) -> Result<VatCategory, sqlx::Error> {
 pub struct VatBand {
     pub category: VatCategory,
     pub basis_points: i32,
-    /// Taxable supplies at this rate, excluding tax.
+    /// Supplies at this rate **net of credit notes falling in this period**,
+    /// excluding tax. Negative when a period credits more than it invoices,
+    /// which is what a quiet quarter after a big cancellation looks like.
     pub net: Money,
-    /// Tax charged on them, and owed to ZATCA.
+    /// Tax on them, and owed to ZATCA.
     pub tax: Money,
+    /// Invoices whose tax point falls in this period.
     pub invoices: i64,
+    /// Credit notes whose tax point falls in this period — which is not the
+    /// same set of periods as the invoices they credit, and the reason the two
+    /// are counted apart.
+    pub credit_notes: i64,
 }
 
 /// What a business declares for a period.
@@ -495,9 +514,10 @@ pub async fn vat_return(
     let rows = sqlx::query!(
         r#"SELECT vat_category as "vat_category!", vat_rate_bp as "vat_rate_bp!",
                   sum(net)::BIGINT as "net!", sum(tax)::BIGINT as "tax!",
-                  count(DISTINCT invoice_id) as "invoices!"
-             FROM proj_sales.taxable_supply
-            WHERE currency = $1 AND issued_on >= $2 AND issued_on < $3
+                  count(*) FILTER (WHERE kind = 'invoice') as "invoices!",
+                  count(*) FILTER (WHERE kind = 'credit_note') as "credit_notes!"
+             FROM proj_sales.vat_entry
+            WHERE currency = $1 AND tax_point >= $2 AND tax_point < $3
             GROUP BY vat_category, vat_rate_bp
             ORDER BY vat_category, vat_rate_bp"#,
         currency.as_str(),
@@ -516,6 +536,7 @@ pub async fn vat_return(
                 net: Money::from_minor(row.net, currency),
                 tax: Money::from_minor(row.tax, currency),
                 invoices: row.invoices,
+                credit_notes: row.credit_notes,
             })
         })
         .collect::<Result<Vec<VatBand>, sqlx::Error>>()?;

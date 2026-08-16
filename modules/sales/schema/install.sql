@@ -6,8 +6,19 @@
 CREATE SCHEMA IF NOT EXISTS proj_sales;
 
 CREATE TABLE IF NOT EXISTS proj_sales.invoice (
-    -- The invoice number, as the tenant chose it. Also the aggregate id.
+    -- The client's own key for this invoice, and the aggregate id. Sending the
+    -- same one twice is a no-op, which is what makes a retry safe.
     id           TEXT PRIMARY KEY,
+
+    -- **The statutory number.** Allocated from a gapless per-tenant series at
+    -- issue and carried in the event, so a rebuild reproduces it rather than
+    -- re-allocating (architecture L5). See `migrations/tenant/0005_numbering.sql`.
+    --
+    -- Unique, and not the primary key: `id` is what a client addresses and this
+    -- is what the document prints. On invoices issued before this system
+    -- numbered them the two are the same string, which is exactly what they
+    -- were.
+    number       TEXT NOT NULL,
 
     -- The buyer as they were when it was issued, never a foreign key. A tax
     -- invoice is a legal document; last year's copy must not change when a
@@ -37,6 +48,11 @@ CREATE TABLE IF NOT EXISTS proj_sales.invoice (
     -- The event's own timestamp, never `now()` (architecture L2).
     recorded_at  TIMESTAMPTZ NOT NULL
 );
+
+-- A repeated number would mean the series went backwards, which is the one
+-- failure mode gaplessness exists to prevent. A constraint rather than a test,
+-- because a projection that could write it twice must fail loudly (L6).
+CREATE UNIQUE INDEX IF NOT EXISTS invoice_number_is_unique ON proj_sales.invoice (number);
 
 CREATE INDEX IF NOT EXISTS invoice_by_date_idx ON proj_sales.invoice (issued_on DESC);
 CREATE INDEX IF NOT EXISTS invoice_by_customer_idx ON proj_sales.invoice (customer);
@@ -92,24 +108,34 @@ CREATE TABLE IF NOT EXISTS proj_sales.invoice_payment (
 CREATE INDEX IF NOT EXISTS invoice_payment_by_invoice_idx
     ON proj_sales.invoice_payment (invoice_id);
 
--- The output-tax side of a VAT return.
+-- The output-tax side of a VAT return, as entries on a tax point.
 --
--- One row per invoice per rate, carrying the tax point so a return can be run
--- for a period. A view rather than a table for the same reason balances are:
--- summing is exact and needs no code, and a maintained total is a second thing
--- that can be wrong.
+-- One row per document per rate band: an invoice on the day it was issued, and
+-- a credit note **on its own tax point**, negating what the invoice declared.
 --
--- **Cancelled invoices are excluded**, not netted to zero. A credit note in the
--- same period removes the supply; one in a *later* period is a supply and then
--- an adjustment, and ZATCA wants those reported in the periods they happened.
--- ponytail: that distinction needs the credit note to be a document with its own
--- tax point, which is the partial-credit-note work. Until then a credited
--- invoice leaves the return entirely, which is right when the credit lands in
--- the same period and wrong across a boundary — so this view is honest about
--- being the simple case and `vat_return` refuses to span one silently.
-CREATE OR REPLACE VIEW proj_sales.taxable_supply AS
-SELECT i.id           AS invoice_id,
-       i.issued_on,
+-- # Why a credit note is an entry and not a deletion
+--
+-- The first version of this view simply excluded cancelled invoices, and that is
+-- right in exactly one case: a credit note raised in the same period as the
+-- invoice, where the supply and its reversal cancel out before anything is
+-- filed.
+--
+-- Across a period boundary it is wrong, and wrong in the direction that matters.
+-- An invoice issued in Q1 and credited in Q2 was a supply in Q1 — the return was
+-- filed, the tax was paid — and the credit is an *adjustment in Q2*. Dropping the
+-- invoice retrospectively means re-running the Q1 return produces a different
+-- number from the one filed, and nothing anywhere says why. ZATCA wants each
+-- reported in the period it happened, and so does anybody reconciling the books
+-- to a filed return.
+--
+-- So both are entries, each on its own tax point, and the period does the rest.
+-- Same-period credits still net to zero; cross-period ones no longer reach back.
+CREATE OR REPLACE VIEW proj_sales.vat_entry AS
+-- The supply.
+SELECT i.id            AS document_id,
+       i.number        AS document_number,
+       'invoice'       AS kind,
+       i.issued_on     AS tax_point,
        i.currency,
        t.vat_category,
        t.vat_rate_bp,
@@ -117,7 +143,26 @@ SELECT i.id           AS invoice_id,
        t.tax
   FROM proj_sales.invoice i
   JOIN proj_sales.invoice_tax t ON t.invoice_id = i.id
- WHERE i.cancelled_on IS NULL;
+
+UNION ALL
+
+-- The adjustment, negating the same bands the invoice declared. A credit note
+-- cancels the whole invoice, so it reverses every band of it.
+-- ponytail: partial credit notes would carry their own bands rather than
+-- borrowing the invoice's, which is a table of their own and the reason they
+-- are not built yet.
+SELECT i.credit_note   AS document_id,
+       i.credit_note   AS document_number,
+       'credit_note'   AS kind,
+       i.cancelled_on  AS tax_point,
+       i.currency,
+       t.vat_category,
+       t.vat_rate_bp,
+       -t.net,
+       -t.tax
+  FROM proj_sales.invoice i
+  JOIN proj_sales.invoice_tax t ON t.invoice_id = i.id
+ WHERE i.cancelled_on IS NOT NULL;
 
 -- What is still owed, summed rather than maintained.
 --
@@ -127,6 +172,7 @@ SELECT i.id           AS invoice_id,
 -- tenant ever has enough invoices for the scan to matter.
 CREATE OR REPLACE VIEW proj_sales.invoice_status AS
 SELECT i.id,
+       i.number,
        i.customer,
        i.customer_vat,
        i.issued_on,

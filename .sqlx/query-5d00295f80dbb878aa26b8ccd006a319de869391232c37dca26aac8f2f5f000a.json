@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT reference as \"reference!\", amount as \"amount!\",\n                  paid_on as \"paid_on!\", account as \"account!\"\n             FROM proj_purchases.bill_payment\n            WHERE bill_id = $1\n            ORDER BY paid_on, reference",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reference!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_payment",
+            "name": "reference"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "amount!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_payment",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "paid_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_payment",
+            "name": "paid_on"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "account!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_payment",
+            "name": "account"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5d00295f80dbb878aa26b8ccd006a319de869391232c37dca26aac8f2f5f000a"
+}

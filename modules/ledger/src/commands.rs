@@ -24,8 +24,17 @@ pub enum LedgerError {
     NoSuchEntry(String),
     #[error("entry {entry} was already reversed by {by}")]
     AlreadyReversed { entry: String, by: String },
+    /// The books were closed before this date. A correction goes into the
+    /// period that is open, not into one somebody has already declared.
+    #[error("the books are closed before {closed_before}; this entry is dated {occurred_on}")]
+    PeriodClosed {
+        occurred_on: Timestamp,
+        closed_before: Timestamp,
+    },
     #[error(transparent)]
     Unbalanced(#[from] Unbalanced),
+    #[error(transparent)]
+    Config(#[from] spa_eventlog::ConfigError),
     /// A chart shipped a code that is not a usable identifier. A build bug, not
     /// something a user can cause — `charts::tests` catches it first.
     #[error("{0}")]
@@ -40,6 +49,18 @@ impl spa_i18n::Localize for LedgerError {
             Self::AccountExists(code) => {
                 Message::new(messages::ACCOUNT_EXISTS).with("code", MessageArg::text(code.clone()))
             }
+            Self::PeriodClosed {
+                occurred_on,
+                closed_before,
+            } => Message::new(messages::PERIOD_CLOSED)
+                .with("on", MessageArg::text(occurred_on.to_rfc3339()))
+                .with(
+                    "closed_before",
+                    MessageArg::text(closed_before.to_rfc3339()),
+                ),
+            // Ours: a stored value that no longer fits the type that gives it
+            // meaning. Says so in both languages already.
+            Self::Config(e) => e.message(),
             Self::NoSuchAccount(code) => {
                 Message::new(messages::NO_SUCH_ACCOUNT).with("code", MessageArg::text(code.clone()))
             }
@@ -196,6 +217,21 @@ pub async fn post_entry_in(
     lines: &BalancedLines,
     metadata: &Metadata,
 ) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
+    // **The one place a closed period is enforced.** Every posting in the system
+    // arrives here — hand-written entries, reversals, and everything sales does,
+    // because an invoice and its journal entry commit together. Read inside this
+    // transaction, so a period closed a moment ago refuses the next entry rather
+    // than the one after that.
+    let books = crate::period::books(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(LedgerError::Config(e)))?;
+    if !books.accepts(occurred_on) {
+        return Err(ExecuteError::Rejected(LedgerError::PeriodClosed {
+            occurred_on,
+            closed_before: books.closed_before.unwrap_or(occurred_on),
+        }));
+    }
+
     for line in lines.as_slice() {
         let account =
             spa_eventlog::load::<Account>(&mut *conn, &line.account, crate::upcasters()).await?;

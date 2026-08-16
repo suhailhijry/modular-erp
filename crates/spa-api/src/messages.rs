@@ -20,6 +20,7 @@ pub const MODULE_REQUIRES: MessageCode = MessageCode::new("request.module_requir
 pub const MODULE_NOT_ENABLED: MessageCode = MessageCode::new("request.module_not_enabled");
 pub const UNKNOWN_VAT_CATEGORY: MessageCode = MessageCode::new("request.unknown_vat_category");
 pub const NO_SUCH_INVOICE: MessageCode = MessageCode::new("request.no_such_invoice");
+pub const NO_SUCH_BILL: MessageCode = MessageCode::new("request.no_such_bill");
 /// A module cannot be turned off while another is standing on it.
 pub const MODULE_IN_USE: MessageCode = MessageCode::new("request.module_in_use");
 /// A reporting period that ends before it begins, or on the day it begins.
@@ -44,6 +45,7 @@ pub static CODES: &[MessageCode] = &[
     MODULE_NOT_ENABLED,
     UNKNOWN_VAT_CATEGORY,
     NO_SUCH_INVOICE,
+    NO_SUCH_BILL,
     MODULE_IN_USE,
     EMPTY_PERIOD,
     MALFORMED_BODY,
@@ -84,6 +86,16 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         INVALID_QUERY,
         Locale::Arabic,
         Template::Simple("تعذّرت قراءة معطيات الاستعلام: {reason}"),
+    ),
+    (
+        NO_SUCH_BILL,
+        Locale::English,
+        Template::Simple("There is no bill {bill}."),
+    ),
+    (
+        NO_SUCH_BILL,
+        Locale::Arabic,
+        Template::Simple("لا توجد فاتورة مورّد {bill}."),
     ),
     (
         UNKNOWN_CURRENCY,

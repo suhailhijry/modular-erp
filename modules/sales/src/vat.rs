@@ -18,61 +18,13 @@
 use serde::{Deserialize, Serialize};
 use spa_types::{CurrencyCode, Money};
 
+// Defined in `ledger` because `purchases` classifies by the same three
+// categories, and two sibling modules must not depend on each other.
+pub use ledger::VatCategory;
+
 /// One ten-thousandth. Rates are basis points because 15% is exact there and
 /// `0.15` is not — and `float_arithmetic` is denied workspace-wide anyway.
 const BASIS: i128 = 10_000;
-
-/// How a line is treated for tax.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VatCategory {
-    /// The ordinary rate. 15% since July 2020.
-    Standard,
-    /// Taxable at 0% — exports, qualifying medicines. Input tax is reclaimable.
-    Zero,
-    /// Outside the tax — residential rent, some financial services. Input tax
-    /// attached to it is **not** reclaimable, which is why this is not `Zero`.
-    Exempt,
-}
-
-impl VatCategory {
-    /// The rate this category carries **today**, in basis points.
-    ///
-    /// Called once, when an invoice is issued. Everything afterwards reads the
-    /// rate stored on the line.
-    #[must_use]
-    pub const fn rate_now(self) -> i32 {
-        match self {
-            // ponytail: a constant, not configuration. The rate is national and
-            // changes by royal decree roughly once a decade; when it next moves,
-            // this becomes a date-keyed table and old invoices are unaffected
-            // because they carry their own rate.
-            Self::Standard => 1_500,
-            Self::Zero | Self::Exempt => 0,
-        }
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::Zero => "zero",
-            Self::Exempt => "exempt",
-        }
-    }
-}
-
-impl std::str::FromStr for VatCategory {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "standard" => Ok(Self::Standard),
-            "zero" => Ok(Self::Zero),
-            "exempt" => Ok(Self::Exempt),
-            other => Err(format!("unknown VAT category {other:?}")),
-        }
-    }
-}
 
 /// A tax treatment together with the rate that applied when it was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

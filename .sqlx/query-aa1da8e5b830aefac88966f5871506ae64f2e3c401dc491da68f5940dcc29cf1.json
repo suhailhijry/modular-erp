@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT description as \"description!\", account as \"account!\",\n                  net as \"net!\", vat_category as \"vat_category!\",\n                  vat_rate_bp as \"vat_rate_bp!\", tax as \"tax!\"\n             FROM proj_purchases.bill_line\n            WHERE bill_id = $1\n            ORDER BY line_index",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "description!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_line",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "account!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_line",
+            "name": "account"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_line",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "vat_category!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_line",
+            "name": "vat_category"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "vat_rate_bp!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_line",
+            "name": "vat_rate_bp"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "tax!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_purchases.bill_line",
+            "name": "tax"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "aa1da8e5b830aefac88966f5871506ae64f2e3c401dc491da68f5940dcc29cf1"
+}

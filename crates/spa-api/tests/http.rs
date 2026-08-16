@@ -170,6 +170,12 @@ impl Fixture {
         self.enable_module(tenant, sales::setup()).await;
     }
 
+    /// Sales and purchases together, which is what a whole VAT return needs.
+    async fn enable_both_sides(&self, tenant: TenantId) {
+        self.enable_sales(tenant).await;
+        self.enable_module(tenant, purchases::setup()).await;
+    }
+
     /// Drives one group's projections, standing in for the worker.
     async fn project<G: spa_projection::ProjectionGroup>(
         &self,
@@ -207,6 +213,12 @@ impl Fixture {
     async fn project_sales(&self, tenant: TenantId) {
         self.project_ledger(tenant).await;
         self.project(tenant, &sales::projections(), sales::upcasters())
+            .await;
+    }
+
+    async fn project_both_sides(&self, tenant: TenantId) {
+        self.project_sales(tenant).await;
+        self.project(tenant, &purchases::projections(), purchases::upcasters())
             .await;
     }
 
@@ -1215,6 +1227,56 @@ fn role_scoped_operations() -> Vec<(String, String, bool)> {
     found
 }
 
+/// `(operationId, the roles that may)`. Everything else is refused.
+const PERMISSIONS: &[(&str, &[&str])] = &[
+    // Reading is what a viewer is for.
+    ("tenant", ALL_ROLES),
+    ("list_members", ALL_ROLES),
+    ("list_modules", ALL_ROLES),
+    ("list_accounts", ALL_ROLES),
+    ("trial_balance", ALL_ROLES),
+    ("list_invoices", ALL_ROLES),
+    ("get_invoice", ALL_ROLES),
+    ("vat_return", ALL_ROLES),
+    ("posting_accounts", ALL_ROLES),
+    ("books", ALL_ROLES),
+    ("list_bills", ALL_ROLES),
+    ("get_bill", ALL_ROLES),
+    // The whole return: what was charged, what was paid, and the difference.
+    ("vat_return", ALL_ROLES),
+    // Recording what happened. A clerk does this and nothing structural.
+    ("post_entry", &["owner", "accountant", "clerk"]),
+    ("reverse_entry", &["owner", "accountant", "clerk"]),
+    ("issue_invoice", &["owner", "accountant", "clerk"]),
+    ("record_payment", &["owner", "accountant", "clerk"]),
+    ("credit_note", &["owner", "accountant", "clerk"]),
+    ("record_bill", &["owner", "accountant", "clerk"]),
+    ("pay_bill", &["owner", "accountant", "clerk"]),
+    // Changing the shape of the books. Not a clerk's job — they post into
+    // the chart, they do not restructure it.
+    ("open_account", &["owner", "accountant"]),
+    ("install_chart", &["owner", "accountant"]),
+    ("set_posting_accounts", &["owner", "accountant"]),
+    // Declaring the numbers final is the accountant's call, and not
+    // something a clerk posting entries should be able to do to them.
+    ("close_books", &["owner", "accountant"]),
+    // Changing the tenant: who has access, and what it pays for. The owner
+    // alone, including against an accountant — somebody who keeps the books
+    // should not be able to decide who else can see them.
+    ("add_member", OWNER),
+    ("change_role", OWNER),
+    ("remove_member", OWNER),
+    ("set_module_role", OWNER),
+    ("clear_module_role", OWNER),
+    ("enable_module", OWNER),
+    ("disable_module", OWNER),
+    ("list_invitations", OWNER),
+    ("invite", OWNER),
+    ("revoke_invitation", OWNER),
+];
+const ALL_ROLES: &[&str] = &["owner", "accountant", "clerk", "viewer"];
+const OWNER: &[&str] = &["owner"];
+
 /// **The authorization matrix, over HTTP: every role against every endpoint.**
 ///
 /// # Why the list comes from the document
@@ -1245,46 +1307,6 @@ fn role_scoped_operations() -> Vec<(String, String, bool)> {
 /// mutating the tenant out from under itself.
 #[tokio::test]
 async fn every_role_against_every_endpoint() {
-    /// `(operationId, the roles that may)`. Everything else is refused.
-    const PERMISSIONS: &[(&str, &[&str])] = &[
-        // Reading is what a viewer is for.
-        ("tenant", ALL_ROLES),
-        ("list_members", ALL_ROLES),
-        ("list_modules", ALL_ROLES),
-        ("list_accounts", ALL_ROLES),
-        ("trial_balance", ALL_ROLES),
-        ("list_invoices", ALL_ROLES),
-        ("get_invoice", ALL_ROLES),
-        ("vat_return", ALL_ROLES),
-        ("posting_accounts", ALL_ROLES),
-        // Recording what happened. A clerk does this and nothing structural.
-        ("post_entry", &["owner", "accountant", "clerk"]),
-        ("reverse_entry", &["owner", "accountant", "clerk"]),
-        ("issue_invoice", &["owner", "accountant", "clerk"]),
-        ("record_payment", &["owner", "accountant", "clerk"]),
-        ("credit_note", &["owner", "accountant", "clerk"]),
-        // Changing the shape of the books. Not a clerk's job — they post into
-        // the chart, they do not restructure it.
-        ("open_account", &["owner", "accountant"]),
-        ("install_chart", &["owner", "accountant"]),
-        ("set_posting_accounts", &["owner", "accountant"]),
-        // Changing the tenant: who has access, and what it pays for. The owner
-        // alone, including against an accountant — somebody who keeps the books
-        // should not be able to decide who else can see them.
-        ("add_member", OWNER),
-        ("change_role", OWNER),
-        ("remove_member", OWNER),
-        ("set_module_role", OWNER),
-        ("clear_module_role", OWNER),
-        ("enable_module", OWNER),
-        ("disable_module", OWNER),
-        ("list_invitations", OWNER),
-        ("invite", OWNER),
-        ("revoke_invitation", OWNER),
-    ];
-    const ALL_ROLES: &[&str] = &["owner", "accountant", "clerk", "viewer"];
-    const OWNER: &[&str] = &["owner"];
-
     let mut fixture = Fixture::new().await;
     let tenant = fixture.provision("acme").await;
     fixture.enable_sales(tenant).await;
@@ -1304,8 +1326,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        27,
-        "expected twenty-seven role-scoped operations"
+        33,
+        "expected thirty-three role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -2061,6 +2083,10 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{issued}");
+    // The client chose the *key*; the statutory number is ours, and Saudi law
+    // requires the series it comes from to have no holes in it.
+    assert_eq!(issued["id"], "INV-1", "the key comes back as sent");
+    assert_eq!(issued["number"], "INV-00001", "{issued}");
     let position = issued["position"].as_i64().expect("a log position");
 
     // Read your own write. Without the worker running, this is what the hint is
@@ -3738,6 +3764,9 @@ async fn an_invoice_can_be_credited_and_stops_being_owed() {
 
     let (status, body, _) = fixture.send(credit("CN-1")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    // `CN-1` was the client's key; the credit note's statutory number is ours,
+    // and it comes from a series of its own.
+    assert_eq!(body["number"], "CN-00001", "{body}");
 
     fixture.project_sales(tenant).await;
     assert_eq!(
@@ -3760,7 +3789,7 @@ async fn an_invoice_can_be_credited_and_stops_being_owed() {
         invoice["outstanding"], 0,
         "but nobody owes it, so nobody chases it"
     );
-    assert_eq!(invoice["credit_note"], "CN-1");
+    assert_eq!(invoice["credit_note"], "CN-00001");
 
     // A second, different credit note is refused.
     let (status, body, _) = fixture.send(credit("CN-2")).await;
@@ -3813,19 +3842,26 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     let (status, filed, _) = fixture
         .send(
             bearer(Request::get(format!(
-                "/v1/tenants/acme/sales/vat-return?{period}"
+                "/v1/tenants/acme/vat-return?{period}"
             )))
             .body(Body::empty())
             .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{filed}");
-    assert_eq!(filed["tax"], 15_000, "15% of the standard-rated 1,000 only");
-    assert_eq!(filed["net"], 150_000);
     assert_eq!(
-        filed["bands"].as_array().expect("bands").len(),
+        filed["output"]["tax"], 15_000,
+        "15% of the standard-rated 1,000 only"
+    );
+    assert_eq!(filed["output"]["net"], 150_000);
+    assert_eq!(
+        filed["output"]["bands"].as_array().expect("bands").len(),
         2,
         "standard and zero-rated are reported apart"
+    );
+    assert_eq!(
+        filed["payable"], 15_000,
+        "nothing was bought, so the whole of it is payable"
     );
 
     // A period that ends before it starts is a mistake worth naming rather than
@@ -3833,7 +3869,7 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     let (status, body, _) = fixture
         .send(
             bearer(Request::get(
-                "/v1/tenants/acme/sales/vat-return\
+                "/v1/tenants/acme/vat-return\
                  ?from=2026-04-01T00:00:00Z&until=2026-01-01T00:00:00Z&currency=SAR",
             ))
             .body(Body::empty())
@@ -3848,11 +3884,9 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     // missing `from` is the same shape as every other failure.
     let (status, body, content_type) = fixture
         .send(
-            bearer(Request::get(
-                "/v1/tenants/acme/sales/vat-return?currency=SAR",
-            ))
-            .body(Body::empty())
-            .unwrap(),
+            bearer(Request::get("/v1/tenants/acme/vat-return?currency=SAR"))
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -4372,4 +4406,192 @@ mod contract {
             "a flattened shape missing `payments` and carrying `payments_` must fail"
         );
     }
+}
+
+/// **The whole VAT return: what was charged, what was paid, and the difference.**
+///
+/// The number a Saudi business actually files, and the reason the purchases
+/// module exists. It is composed in the API from two modules whose read models
+/// never see each other — `proj_sales` and `proj_purchases` are separate groups
+/// and neither may read the other (architecture L3). Nothing below the
+/// composition root could produce this figure.
+#[tokio::test]
+async fn a_tenant_files_output_tax_less_input_tax() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    fixture.enable_both_sides(tenant).await;
+
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    // Charged: 1,000.00 at 15% → 150.00 of output tax.
+    let (status, issued, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "crm-1",
+                        "customer": { "name": "Rawabi", "vat_number": "310000000000003" },
+                        "issued_on": "2026-02-10T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [
+                            { "description": "Consulting", "net": 100_000, "vat": "standard" }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+
+    // Paid: 400.00 at 15% → 60.00 of input tax, as the supplier stated it.
+    let (status, recorded, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/purchases/bills"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "ap-1",
+                        "supplier": { "name": "Najd Supplies", "vat_number": "311234567800003" },
+                        "reference": "NS-8891",
+                        "billed_on": "2026-02-14T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [
+                            { "description": "Subcontracting", "account": "5000",
+                              "net": 40_000, "vat": "standard", "vat_rate": 1500, "tax": 6_000 }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{recorded}");
+
+    fixture.project_both_sides(tenant).await;
+
+    let (status, filed, _) = fixture
+        .send(
+            bearer(Request::get(
+                "/v1/tenants/acme/vat-return\
+                 ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{filed}");
+
+    assert_eq!(filed["output"]["tax"], 15_000, "what was charged");
+    assert_eq!(
+        filed["input"]["tax"], 6_000,
+        "what was paid and can be reclaimed"
+    );
+    assert_eq!(
+        filed["payable"], 9_000,
+        "the number that gets paid: 150.00 charged less 60.00 reclaimed"
+    );
+    assert_eq!(filed["output"]["net"], 100_000);
+    assert_eq!(filed["input"]["net"], 40_000);
+
+    // A period with nothing in it is zero on both sides, not an error.
+    let (status, empty, _) = fixture
+        .send(
+            bearer(Request::get(
+                "/v1/tenants/acme/vat-return\
+                 ?from=2026-07-01T00:00:00Z&until=2026-10-01T00:00:00Z&currency=SAR",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["payable"], 0);
+
+    fixture.cleanup().await;
+}
+
+/// A tenant with only sales gets zeroes for the input side, not a 404.
+///
+/// A business that has not enabled purchases genuinely reclaimed nothing, and
+/// that is a return they can file. Refusing would make the endpoint useless to
+/// most of the tenants that need it.
+#[tokio::test]
+async fn a_return_for_a_tenant_with_one_side_reports_the_other_as_nothing() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    fixture.enable_sales(tenant).await;
+
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    let (status, issued, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "crm-1",
+                        "customer": { "name": "Rawabi" },
+                        "issued_on": "2026-02-10T00:00:00Z",
+                        "currency": "SAR",
+                        "lines": [
+                            { "description": "Consulting", "net": 100_000, "vat": "standard" }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    fixture.project_sales(tenant).await;
+
+    let (status, filed, _) = fixture
+        .send(
+            bearer(Request::get(
+                "/v1/tenants/acme/vat-return\
+                 ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{filed}");
+    assert_eq!(filed["output"]["tax"], 15_000);
+    assert_eq!(filed["input"]["tax"], 0);
+    assert_eq!(
+        filed["input"]["bands"].as_array().map(Vec::len),
+        Some(0),
+        "no purchases module, so nothing to report on that side"
+    );
+    assert_eq!(filed["payable"], 15_000);
+
+    // And the purchases routes themselves are not there for this tenant.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tenants/acme/purchases/bills"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "request.module_not_enabled");
+
+    fixture.cleanup().await;
 }

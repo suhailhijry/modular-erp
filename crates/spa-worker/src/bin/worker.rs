@@ -81,9 +81,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .for_module(sales::module_id()),
         ))
         .with_job(Arc::new(
+            ProjectionJob::<purchases::Purchases>::new(
+                purchases::projections(),
+                Arc::new(purchases::upcasters().clone()),
+                200,
+            )
+            .for_module(purchases::module_id()),
+        ))
+        .with_job(Arc::new(
             HealthJob::every(Duration::from_mins(5))
                 .with(Arc::new(TrialBalance))
-                .with(Arc::new(NoOverpaidInvoice)),
+                .with(Arc::new(NoOverpaidInvoice))
+                .with(Arc::new(NoOverpaidBill)),
         ));
 
     let shutdown = worker.run(shutdown_signal()).await;
@@ -139,6 +148,45 @@ impl Invariant for TrialBalance {
 
 fn ledger_module() -> ModuleId {
     ModuleId::new("ledger").unwrap_or_else(|_| unreachable!("a literal that satisfies ModuleId"))
+}
+
+/// No bill may have been paid more than it was for.
+///
+/// The mirror of [`NoOverpaidInvoice`], and unreachable the same way. Two
+/// invariants rather than one because a tenant may have either module without
+/// the other, and `module()` is what stops a tenant being checked for something
+/// they declined.
+struct NoOverpaidBill;
+
+#[async_trait::async_trait]
+impl Invariant for NoOverpaidBill {
+    fn name(&self) -> &'static str {
+        "no_overpaid_bill"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(purchases::module_id())
+    }
+
+    async fn check(
+        &self,
+        db: &spa_control::TenantDb,
+    ) -> Result<Vec<Finding>, spa_worker::BoxError> {
+        let mut conn = db.acquire().await?;
+        Ok(purchases::overpaid(&mut conn)
+            .await?
+            .into_iter()
+            .map(|b| {
+                Finding::new(
+                    "no_overpaid_bill",
+                    format!(
+                        "bill {} is for {} and has been paid {}",
+                        b.bill, b.gross, b.paid
+                    ),
+                )
+            })
+            .collect())
+    }
 }
 
 /// No invoice may have taken more money than it asked for.

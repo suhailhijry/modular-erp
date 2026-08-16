@@ -24,11 +24,13 @@ mod append;
 mod config;
 mod envelope;
 pub mod messages;
+pub mod numbering;
 mod outbox;
 mod read;
 mod upcast;
 
 pub use config::{ConfigError, Configured};
+pub use numbering::NumberingError;
 pub mod configuration {
     //! Tenant configuration: the store, not the meaning. See [`crate::config`].
     pub use crate::config::{get, set, version};

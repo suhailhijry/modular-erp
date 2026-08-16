@@ -33,6 +33,7 @@ mod members;
 pub mod messages;
 mod modules;
 mod problem;
+mod purchases_routes;
 mod routes;
 mod sales_routes;
 mod signup;

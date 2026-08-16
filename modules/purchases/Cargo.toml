@@ -1,0 +1,32 @@
+[package]
+name = "purchases"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Supplier bills and the input-tax side of a Saudi VAT return."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The accounting kernel. `purchases` and `sales` are siblings and never see each
+# other; what they share — `VatCategory`, posting, the closed-period check —
+# lives here, in the module they both stand on.
+ledger = { workspace = true }
+
+spa-control = { workspace = true }
+spa-eventlog = { workspace = true }
+spa-i18n = { workspace = true }
+spa-projection = { workspace = true }
+spa-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+spa-testkit = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT vat_category as \"vat_category!\", vat_rate_bp as \"vat_rate_bp!\",\n                  sum(net)::BIGINT as \"net!\", sum(tax)::BIGINT as \"tax!\",\n                  count(DISTINCT invoice_id) as \"invoices!\"\n             FROM proj_sales.taxable_supply\n            WHERE currency = $1 AND issued_on >= $2 AND issued_on < $3\n            GROUP BY vat_category, vat_rate_bp\n            ORDER BY vat_category, vat_rate_bp",
+  "query": "SELECT vat_category as \"vat_category!\", vat_rate_bp as \"vat_rate_bp!\",\n                  sum(net)::BIGINT as \"net!\", sum(tax)::BIGINT as \"tax!\",\n                  count(DISTINCT document_id) as \"bills!\"\n             FROM proj_purchases.vat_entry\n            WHERE currency = $1 AND tax_point >= $2 AND tax_point < $3\n            GROUP BY vat_category, vat_rate_bp\n            ORDER BY vat_category, vat_rate_bp",
   "describe": {
     "columns": [
       {
@@ -9,7 +9,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.taxable_supply",
+            "table": "proj_purchases.vat_entry",
             "name": "vat_category"
           }
         }
@@ -20,7 +20,7 @@
         "type_info": "Int4",
         "origin": {
           "Table": {
-            "table": "proj_sales.taxable_supply",
+            "table": "proj_purchases.vat_entry",
             "name": "vat_rate_bp"
           }
         }
@@ -39,7 +39,7 @@
       },
       {
         "ordinal": 4,
-        "name": "invoices!",
+        "name": "bills!",
         "type_info": "Int8",
         "origin": "Expression"
       }
@@ -59,5 +59,5 @@
       null
     ]
   },
-  "hash": "478d46892a861b5a8caa470b27284f3b0e8582bea8035c9c15b45a67dbaa9606"
+  "hash": "0e375e6d9b2a50c8824dc1627146ed4af8eba059bea93f3fdb839e7e44868b47"
 }

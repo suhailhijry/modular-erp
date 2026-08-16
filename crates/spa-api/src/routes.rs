@@ -97,6 +97,8 @@ Minor units and an explicit currency, never a decimal string and never a float. 
         (name = "modules", description = "Which parts of the system this tenant has turned on."),
         (name = "ledger", description = "Accounts, journal entries, and the trial balance."),
         (name = "sales", description = "Invoices, payments, credit notes, and the VAT return."),
+        (name = "purchases", description = "Supplier bills, what is owed, and the tax paid on them."),
+        (name = "tax", description = "What a business declares, composed from every module that contributes."),
         (name = "service", description = "Liveness and this document."),
     ),
 )]
@@ -314,6 +316,8 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(crate::modules::routes())
         .merge(crate::ledger_routes::routes())
         .merge(crate::sales_routes::routes())
+        .merge(crate::purchases_routes::routes())
+        .merge(crate::purchases_routes::combined_routes())
 }
 
 /// The router and the document, from the one description of both.

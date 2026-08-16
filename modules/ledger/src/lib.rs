@@ -27,7 +27,9 @@ mod commands;
 mod entry;
 mod lines;
 pub mod messages;
+pub mod period;
 mod projections;
+mod vat;
 
 pub use account::{Account, AccountEvent, AccountKind};
 pub use charts::{CHARTS, Chart, Installed, TemplateAccount, chart};
@@ -37,10 +39,12 @@ pub use commands::{
 };
 pub use entry::{JournalEntry, JournalEntryEvent};
 pub use lines::{BalancedLines, Line, Unbalanced};
+pub use period::Books;
 pub use projections::{
     AccountBalance, Accounts, Ledger, Postings, TrialBalance, account_balances, imbalances,
     projections, trial_balance,
 };
+pub use vat::VatCategory;
 
 use spa_i18n::StaticCatalog;
 use spa_types::{DomainName, EventName, SchemaVersion};

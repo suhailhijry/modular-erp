@@ -44,7 +44,11 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
 /// while the set was a `match` arm.
 #[must_use]
 pub fn available() -> Vec<(&'static str, ModuleSetup)> {
-    vec![("ledger", ledger::setup()), ("sales", sales::setup())]
+    vec![
+        ("ledger", ledger::setup()),
+        ("sales", sales::setup()),
+        ("purchases", purchases::setup()),
+    ]
 }
 
 /// Looks a module up by the name a client sent.

@@ -1240,6 +1240,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "purchases"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ledger",
+ "serde",
+ "serde_json",
+ "spa-control",
+ "spa-eventlog",
+ "spa-i18n",
+ "spa-projection",
+ "spa-testkit",
+ "spa-types",
+ "sqlx",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1610,6 +1630,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "ledger",
+ "purchases",
  "sales",
  "serde",
  "serde_json",
@@ -1659,6 +1680,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "ledger",
+ "purchases",
  "sales",
  "serde_json",
  "spa-api",
@@ -1750,6 +1772,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ledger",
+ "purchases",
  "sales",
  "serde",
  "serde_json",

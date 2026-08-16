@@ -16,6 +16,7 @@ spa-projection = { workspace = true }
 spa-types = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }
+purchases = { workspace = true }
 # For the module catalogue, so `migrator refresh <name>` and the API cannot
 # disagree about which modules exist.
 spa-api = { workspace = true }
