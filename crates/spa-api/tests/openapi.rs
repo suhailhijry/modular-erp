@@ -414,3 +414,57 @@ fn named_path_params(parameters: &Value) -> BTreeSet<String> {
         })
         .unwrap_or_default()
 }
+
+/// Every role the document names is a role that exists, and it names them all.
+///
+/// `role` is a `String` on the wire so that an unknown one gets a localized
+/// `request.unknown_role` rather than a serde rejection — which means the list a
+/// client reads is prose, and prose drifts. It did: the first version of this
+/// document offered `manager`, which has never existed, in three descriptions
+/// and an example. A client copying that gets a 400.
+#[test]
+fn every_role_the_document_names_exists() {
+    let real: BTreeSet<&str> = spa_control::Role::ALL.iter().map(|r| r.as_str()).collect();
+
+    let doc = document();
+    let mut described = 0;
+    let mut exampled = 0;
+
+    for (name, schema) in doc["components"]["schemas"]
+        .as_object()
+        .expect("there are schemas")
+    {
+        // Anything the document offers as a `role` value.
+        if let Some(example) = schema["example"]["role"].as_str() {
+            exampled += 1;
+            assert!(
+                real.contains(example),
+                "{name}'s example offers the role `{example}`, which does not exist"
+            );
+        }
+
+        let Some(description) = schema["properties"]["role"]["description"].as_str() else {
+            continue;
+        };
+        described += 1;
+
+        // Backticked tokens in a `role` field's description are the list a
+        // client reads, and `Conventions` generates it from `Role::ALL`. This is
+        // the assertion that the mechanism reached every one of them.
+        let listed: BTreeSet<&str> = description
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            listed, real,
+            "{name}.role is described as {listed:?}, and the roles are {real:?}"
+        );
+    }
+
+    assert!(
+        described >= 6 && exampled >= 2,
+        "only {described} descriptions and {exampled} examples — did they register?"
+    );
+}

@@ -45,7 +45,6 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
 struct NewInvitation {
     /// The address to invite. Also the login handle they will end up with.
     handle: String,
-    /// `owner`, `manager`, `accountant` or `viewer`.
     role: String,
 }
 

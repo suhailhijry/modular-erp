@@ -339,6 +339,7 @@
             "type": "string"
           },
           "role": {
+            "description": "One of `owner`, `accountant`, `clerk`, `viewer`.",
             "type": "string"
           },
           "token": {
@@ -373,6 +374,7 @@
             "type": "string"
           },
           "role": {
+            "description": "One of `owner`, `accountant`, `clerk`, `viewer`.",
             "type": "string"
           }
         },
@@ -565,7 +567,7 @@
             "type": "array"
           },
           "role": {
-            "description": "What they are here, and in any module not listed below.",
+            "description": "What they are here, and in any module not listed below.\n\nOne of `owner`, `accountant`, `clerk`, `viewer`.",
             "type": "string"
           },
           "since": {
@@ -658,6 +660,7 @@
             "type": "string"
           },
           "role": {
+            "description": "One of `owner`, `accountant`, `clerk`, `viewer`.",
             "type": "string"
           }
         },
@@ -827,7 +830,7 @@
             "type": "string"
           },
           "role": {
-            "description": "`owner`, `manager`, `accountant` or `viewer`.",
+            "description": "One of `owner`, `accountant`, `clerk`, `viewer`.",
             "type": "string"
           }
         },
@@ -940,7 +943,7 @@
             "type": "string"
           },
           "role": {
-            "description": "`owner`, `manager`, `accountant` or `viewer`.",
+            "description": "One of `owner`, `accountant`, `clerk`, `viewer`.",
             "type": "string"
           }
         },
@@ -1055,6 +1058,7 @@
             "type": "boolean"
           },
           "role": {
+            "description": "One of `owner`, `accountant`, `clerk`, `viewer`.",
             "type": "string"
           },
           "slug": {
@@ -1122,11 +1126,11 @@
       },
       "RoleChange": {
         "example": {
-          "role": "manager"
+          "role": "accountant"
         },
         "properties": {
           "role": {
-            "description": "`owner`, `manager`, `accountant` or `viewer`.",
+            "description": "One of `owner`, `accountant`, `clerk`, `viewer`.",
             "type": "string"
           }
         },
@@ -1268,7 +1272,7 @@
             "type": "array"
           },
           "role": {
-            "description": "What the caller may do here, so a client can hide what it must not\noffer. The server refuses regardless — this is for the buttons.",
+            "description": "What the caller may do here, so a client can hide what it must not\noffer. The server refuses regardless — this is for the buttons.\n\nOne of `owner`, `accountant`, `clerk`, `viewer`.",
             "type": [
               "string",
               "null"

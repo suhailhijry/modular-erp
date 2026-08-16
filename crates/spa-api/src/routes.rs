@@ -138,6 +138,39 @@ fn canonical_meaning(status: &str) -> &'static str {
     }
 }
 
+/// Names the roles on every `role` field, from the enum rather than from prose.
+///
+/// `role` is a `String` on the wire so an unknown one gets a localized
+/// `request.unknown_role` rather than a serde rejection — which leaves the list
+/// a client reads as a doc comment, in eight places. The first version of this
+/// document offered `manager` in three of them, which has never been a role.
+///
+/// Generated here, so there is one list and it is the enum's.
+fn name_the_roles(components: &mut utoipa::openapi::Components) {
+    let listed = spa_control::Role::ALL
+        .iter()
+        .map(|role| format!("`{}`", role.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    for schema in components.schemas.values_mut() {
+        let utoipa::openapi::RefOr::T(utoipa::openapi::Schema::Object(object)) = schema else {
+            continue;
+        };
+        let Some(utoipa::openapi::RefOr::T(utoipa::openapi::Schema::Object(property))) =
+            object.properties.get_mut("role")
+        else {
+            continue;
+        };
+
+        let one_of = format!("One of {listed}.");
+        property.description = Some(match property.description.take() {
+            Some(existing) if !existing.is_empty() => format!("{existing}\n\n{one_of}"),
+            _ => one_of,
+        });
+    }
+}
+
 /// A failure, in the one shape every failure has.
 fn problem_response(description: &str) -> utoipa::openapi::RefOr<utoipa::openapi::Response> {
     utoipa::openapi::RefOr::T(
@@ -178,6 +211,8 @@ impl Modify for Conventions {
                         .build(),
                 ),
             );
+
+        name_the_roles(openapi.components.get_or_insert_default());
 
         let language = utoipa::openapi::path::ParameterBuilder::new()
             .name("Accept-Language")

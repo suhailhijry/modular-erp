@@ -1187,90 +1187,189 @@ async fn an_unknown_chart_is_refused() {
 // Authorization
 // ---------------------------------------------------------------------------
 
-/// **The authorization matrix, over HTTP.**
+/// Every operation the router serves under a tenant, as
+/// `(operationId, "METHOD /template", takes a body)`.
 ///
-/// Every role against every endpoint. Written out rather than derived from
-/// `Role::allows`, because a test that asks the code what it does can only ever
-/// agree with it — this one asks whether that is what we *meant*.
+/// Everything below `/v1/tenants/{slug}` is role-scoped by construction — the
+/// `Allowed<C>` extractor is what gets you a `TenantDb` — so this is the set an
+/// authorization matrix has to cover.
+fn role_scoped_operations() -> Vec<(String, String, bool)> {
+    let document = serde_json::to_value(spa_api::openapi()).expect("the document serializes");
+    let mut found = Vec::new();
+
+    for (path, item) in document["paths"].as_object().expect("there are paths") {
+        if !path.starts_with("/v1/tenants/{slug}") {
+            continue;
+        }
+        for (method, operation) in item.as_object().expect("a path item") {
+            if let Some(id) = operation["operationId"].as_str() {
+                found.push((
+                    id.to_owned(),
+                    format!("{} {path}", method.to_uppercase()),
+                    operation["requestBody"].is_object(),
+                ));
+            }
+        }
+    }
+
+    found
+}
+
+/// **The authorization matrix, over HTTP: every role against every endpoint.**
+///
+/// # Why the list comes from the document
+///
+/// The previous version of this test carried exactly this heading and checked
+/// three ledger routes. It could not have done better: the endpoints were
+/// written out here, so the test only ever grew when somebody remembered to
+/// grow it, and a route added without that thought is a route nobody checked.
+///
+/// So the endpoints come from `spa_api::openapi()` — the same value the router
+/// is built from. Every operation under `/v1/tenants/{slug}` is role-scoped by
+/// construction, and `PERMISSIONS` must name all of them: an operation missing
+/// from the table **fails this test** rather than defaulting to untested.
+/// Adding a route now forces the decision instead of allowing it.
+///
+/// # Why the table is written out
+///
+/// It is not derived from `Role::allows`. A test that asks the code what it does
+/// can only ever agree with it; this one asks whether that is what we meant, and
+/// a change in permissions has to be typed here, in a diff somebody reviews.
+///
+/// # Why a garbage body still answers the question
+///
+/// `Allowed<C>` is a `FromRequestParts` extractor and the first parameter of
+/// all twenty-seven of these handlers, so authorization runs *before* the body
+/// is parsed. `{}` gets a 403 when the role is refused and a 400 when it is not,
+/// which is exactly the distinction being measured — and it keeps the test from
+/// mutating the tenant out from under itself.
 #[tokio::test]
-async fn every_role_can_do_exactly_what_it_should() {
+async fn every_role_against_every_endpoint() {
+    /// `(operationId, the roles that may)`. Everything else is refused.
+    const PERMISSIONS: &[(&str, &[&str])] = &[
+        // Reading is what a viewer is for.
+        ("tenant", ALL_ROLES),
+        ("list_members", ALL_ROLES),
+        ("list_modules", ALL_ROLES),
+        ("list_accounts", ALL_ROLES),
+        ("trial_balance", ALL_ROLES),
+        ("list_invoices", ALL_ROLES),
+        ("get_invoice", ALL_ROLES),
+        ("vat_return", ALL_ROLES),
+        ("posting_accounts", ALL_ROLES),
+        // Recording what happened. A clerk does this and nothing structural.
+        ("post_entry", &["owner", "accountant", "clerk"]),
+        ("reverse_entry", &["owner", "accountant", "clerk"]),
+        ("issue_invoice", &["owner", "accountant", "clerk"]),
+        ("record_payment", &["owner", "accountant", "clerk"]),
+        ("credit_note", &["owner", "accountant", "clerk"]),
+        // Changing the shape of the books. Not a clerk's job — they post into
+        // the chart, they do not restructure it.
+        ("open_account", &["owner", "accountant"]),
+        ("install_chart", &["owner", "accountant"]),
+        ("set_posting_accounts", &["owner", "accountant"]),
+        // Changing the tenant: who has access, and what it pays for. The owner
+        // alone, including against an accountant — somebody who keeps the books
+        // should not be able to decide who else can see them.
+        ("add_member", OWNER),
+        ("change_role", OWNER),
+        ("remove_member", OWNER),
+        ("set_module_role", OWNER),
+        ("clear_module_role", OWNER),
+        ("enable_module", OWNER),
+        ("disable_module", OWNER),
+        ("list_invitations", OWNER),
+        ("invite", OWNER),
+        ("revoke_invitation", OWNER),
+    ];
+    const ALL_ROLES: &[&str] = &["owner", "accountant", "clerk", "viewer"];
+    const OWNER: &[&str] = &["owner"];
+
     let mut fixture = Fixture::new().await;
     let tenant = fixture.provision("acme").await;
-    fixture.enable_ledger(tenant).await;
+    fixture.enable_sales(tenant).await;
 
-    // (role, read, post, manage accounts)
-    let matrix = [
-        ("owner", true, true, true),
-        ("accountant", true, true, true),
-        ("clerk", true, true, false),
-        ("viewer", true, false, false),
-    ];
+    let endpoints = role_scoped_operations();
 
-    for (role, may_read, may_post, may_manage) in matrix {
+    // The table and the router describe the same set, in both directions.
+    let served: std::collections::BTreeSet<&str> =
+        endpoints.iter().map(|(id, _, _)| id.as_str()).collect();
+    let tabled: std::collections::BTreeSet<&str> = PERMISSIONS.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        served,
+        tabled,
+        "the table and the routes disagree. Served and untabled: {:?}. Tabled and unserved: {:?}.",
+        served.difference(&tabled).collect::<Vec<_>>(),
+        tabled.difference(&served).collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        served.len(),
+        27,
+        "expected twenty-seven role-scoped operations"
+    );
+
+    // A member, so `{identity}` names somebody real rather than testing the
+    // uuid parser.
+    let subject = fixture.user("subject@acme.test", "hunter2hunter2").await;
+    fixture.join_as(subject, tenant, "viewer").await;
+
+    for role in ALL_ROLES {
         let email = format!("{role}@acme.test");
         let user = fixture.user(&email, "hunter2hunter2").await;
         fixture.join_as(user, tenant, role).await;
         let token = fixture.token(&email, "hunter2hunter2").await;
 
-        let bearer = |request: axum::http::request::Builder| {
-            request.header(header::AUTHORIZATION, format!("Bearer {token}"))
-        };
+        for (id, route, takes_a_body) in &endpoints {
+            let (method, template) = route.split_once(' ').expect("method and path");
+            // `{module}` is deliberately not a module: `disable_module` takes no
+            // body, so a real name would let the owner turn sales off half way
+            // through the matrix. An unknown one is refused *after* the
+            // capability check, which is the only part being measured.
+            let path = template
+                .replace("{slug}", "acme")
+                .replace("{identity}", &subject.to_string())
+                .replace("{module}", "none")
+                .replace("{entry}", "JE-1")
+                .replace("{invoice}", "INV-1")
+                .replace("{invitation}", "01a00000-0000-7000-8000-000000000000");
 
-        let (read, _, _) = fixture
-            .send(
-                bearer(Request::get("/v1/tenants/acme/ledger/accounts"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await;
-        assert_eq!(read == StatusCode::OK, may_read, "{role} read: {read}");
+            let request = Request::builder()
+                .method(method)
+                .uri(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json");
+            let body = if *takes_a_body {
+                Body::from("{}")
+            } else {
+                Body::empty()
+            };
 
-        let (manage, _, _) = fixture
-            .send(
-                bearer(Request::post("/v1/tenants/acme/ledger/accounts"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "code": format!("9{}", role.len()),
-                            "name": "Test", "kind": "asset", "currency": "SAR"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await;
-        assert_eq!(
-            manage == StatusCode::CREATED,
-            may_manage,
-            "{role} manage accounts: {manage}"
-        );
+            let (status, answer, _) = fixture.send(request.body(body).unwrap()).await;
 
-        // Posting needs accounts, so this asserts the *authorization* outcome:
-        // a refused role gets 403 before the ledger is consulted, an allowed
-        // one gets past it and fails on the missing accounts instead.
-        let (post, body, _) = fixture
-            .send(
-                bearer(Request::post("/v1/tenants/acme/ledger/entries"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "id": format!("e-{role}"),
-                            "occurred_on": "2026-01-15T00:00:00Z",
-                            "lines": [
-                                { "account": "1000", "amount": { "minor": 1, "currency": "SAR" } },
-                                { "account": "4000", "amount": { "minor": -1, "currency": "SAR" } }
-                            ]
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await;
-        assert_eq!(
-            post != StatusCode::FORBIDDEN,
-            may_post,
-            "{role} post entries: {post} {body}"
-        );
+            let may = PERMISSIONS
+                .iter()
+                .find(|(operation, _)| operation == id)
+                .map(|(_, roles)| roles.contains(role))
+                .expect("every operation is in the table; checked above");
+
+            assert_eq!(
+                status != StatusCode::FORBIDDEN,
+                may,
+                "{role} → {method} {path} ({id}) answered {status}, and the table says \
+                 {}. Body: {answer}",
+                if may { "allowed" } else { "refused" }
+            );
+
+            // A refusal says which capability, so the person reading it knows
+            // what to ask for rather than just that they cannot.
+            if !may {
+                assert_eq!(answer["code"], "access.not_permitted", "{role} → {id}");
+                assert!(
+                    answer["args"]["capability"]["value"].is_string(),
+                    "{role} → {id}: the 403 does not name the capability: {answer}"
+                );
+            }
+        }
     }
 
     fixture.cleanup().await;

@@ -236,7 +236,10 @@ Built only where the ledger produced a second consumer.
       `#[utoipa::path]` attribute, so a served route cannot be undocumented; the
       hand-written half (which status carries what) is checked by validating
       every response in `tests/http.rs` against the published schema
-- [ ] Authorization matrix tests
+- [x] Authorization matrix tests — every role against **every** role-scoped
+      endpoint, with the endpoint list taken from `spa_api::openapi()` so a route
+      added tomorrow appears whether or not anybody remembers, and an operation
+      the table does not name fails the test rather than defaulting to untested
 
 **Exit for 3a+3b:** a person signs in and reads their own tenant over HTTP, in
 Arabic, and cannot read anybody else's. **Met.** 230 tests.
@@ -1378,3 +1381,41 @@ here and folded back into ARCHITECTURE.md.
   operations and fails on any other that opts out. It caught `POST /v1/signups`,
   which is public and was documented as needing a session — harmless in that
   direction, and the same test is what catches the harmful one.
+
+- **A heading that had outrun its test.** `every_role_can_do_exactly_what_it_should`
+  was documented as "every role against every endpoint" and checked three ledger
+  routes. It could not have done better while the endpoint list lived in the test
+  body: it only grew when somebody remembered to grow it, and a route added
+  without that thought is a route nobody checked. Twenty-seven role-scoped
+  operations existed; four were covered.
+
+  The document fixed that as a side effect. The endpoint list now comes from
+  `spa_api::openapi()` — the same value the router is built from — and the
+  permission table has to name every operation under `/v1/tenants/{slug}` or the
+  test fails. **Adding a route now forces the decision instead of allowing it.**
+
+  The table itself is still written out rather than derived from `Role::allows`:
+  a test that asks the code what it does can only agree with it. This one asks
+  whether that is what we meant, and a change in permissions has to be typed into
+  a diff somebody reviews.
+
+  108 checks, all green — the code and the intent agree everywhere, which is the
+  outcome worth having and not the one worth assuming. Both halves were confirmed
+  by breaking them: a table entry the code does not grant, and a served route the
+  table does not name.
+
+  The mechanism that makes a garbage body safe is worth stating: `Allowed<C>` is
+  a `FromRequestParts` extractor and the first parameter of all twenty-seven
+  handlers, so authorization runs *before* the body is parsed. `{}` gets a 403
+  when the role is refused and a 400 when it is not — the exact distinction being
+  measured — and the matrix cannot mutate the tenant out from under itself.
+
+- **`manager` was never a role.** I published it in three field descriptions and
+  an example; the roles are `owner`, `accountant`, `clerk`, `viewer`. A client
+  copying that example gets a 400.
+
+  `role` is a `String` on the wire on purpose — an unknown one should get a
+  localized `request.unknown_role`, not a serde rejection — which leaves the list
+  a client reads as prose, in eight places. So `Conventions` now generates it from
+  `Role::ALL` onto every `role` field, and the doc comments that listed it are
+  gone. One list, and it is the enum's.

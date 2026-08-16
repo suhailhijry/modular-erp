@@ -62,7 +62,6 @@ struct NewMember {
     /// Chosen by the owner and handed over. An invitation flow would leave this
     /// to the recipient — see `spa-control/src/members.rs`.
     password: String,
-    /// `owner`, `manager`, `accountant` or `viewer`.
     role: String,
 }
 
@@ -73,9 +72,8 @@ struct MemberAdded {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[schema(example = json!({ "role": "manager" }))]
+#[schema(example = json!({ "role": "accountant" }))]
 struct RoleChange {
-    /// `owner`, `manager`, `accountant` or `viewer`.
     role: String,
 }
 
