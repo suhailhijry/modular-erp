@@ -1,0 +1,232 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", source_id as \"source_id!\", kind as \"kind!\",\n                  type_code as \"type_code!\", issued_at as \"issued_at!\",\n                  currency as \"currency!\", net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  icv, previous_hash, invoice_hash, xml, qr, status as \"status!\",\n                  stamped_xml, remarks, settled_at\n             FROM proj_tax_sa.zatca_document WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "source_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "type_code!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "type_code"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "issued_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "issued_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "tax!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "tax"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "gross"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "icv",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "icv"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "previous_hash",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "previous_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "invoice_hash",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "invoice_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "xml",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "xml"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "qr",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "qr"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "status!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "stamped_xml",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "stamped_xml"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "remarks",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "remarks"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "settled_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "settled_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "6c54045afb1e6ebc2530b437c62519d82d5ff19faf463d8b093a531808fe9e3d"
+}

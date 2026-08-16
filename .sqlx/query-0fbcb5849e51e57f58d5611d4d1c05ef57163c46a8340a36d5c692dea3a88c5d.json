@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT registration FROM proj_tax_sa.taxpayer WHERE id = 'self'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registration",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.taxpayer",
+            "name": "registration"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0fbcb5849e51e57f58d5611d4d1c05ef57163c46a8340a36d5c692dea3a88c5d"
+}

@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", kind as \"kind!\", issued_at as \"issued_at!\",\n                  document->>'uuid' as \"uuid!\", invoice_hash as \"invoice_hash!\",\n                  xml as \"xml!\"\n             FROM proj_tax_sa.zatca_document\n            WHERE status = 'pending'\n              AND xml IS NOT NULL AND invoice_hash IS NOT NULL\n            ORDER BY issued_at, id\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "issued_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "issued_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "uuid!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "invoice_hash!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "invoice_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "xml!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "xml"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "cec37e58ed716ef7072061de41b6d2c7f6a20b8724cc1cce23dc01c0d2ffc2e7"
+}

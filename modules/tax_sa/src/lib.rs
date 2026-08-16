@@ -14,7 +14,7 @@
 //!
 //! So `ledger` owns the *shape* — a line has a treatment and a rate — and this
 //! module owns the *values*: it seeds `ledger::Rates` when a tenant enables it,
-//! and it is where clearance will go.
+//! and it holds ZATCA.
 //!
 //! # Why the return moved here from `spa-api`
 //!
@@ -28,23 +28,46 @@
 //! dependency arrows straight: `tax_sa → {sales, purchases} → ledger`. Nothing
 //! reaches sideways, and `requires` says so where a tenant can read it.
 //!
-//! # What is deliberately absent
+//! # ZATCA, and the one thing that is absent
 //!
-//! ZATCA clearance — the certificate, the invoice hash chain, the QR code, the
-//! reporting API. It needs a certificate this project does not have and the
-//! first real outbox handler, and it is what [`FilingEvent::Filed::reference`]
-//! is waiting for.
+//! Every invoice becomes a document ZATCA has to see: [`zatca`] builds it, this
+//! module's projections derive it from `sales` events, and [`submit_pending`]
+//! sends it. A buyer with a VAT number gets a **standard** invoice, cleared
+//! before they are given it; everyone else gets a **simplified** one, reported
+//! within twenty-four hours.
+//!
+//! What is absent is the socket. Submitting needs a production CSID — a
+//! certificate ZATCA issues after onboarding one taxpayer's one solution — and
+//! an `XAdES` signature made with it. That is one implementation of
+//! [`zatca::wire::Submitter`], and everything up to it is here: the canonical
+//! UBL, the hash chain, the QR, both endpoints, and the reading of the answer.
+//!
+//! [`FilingEvent::Filed::reference`] is still waiting, and for a different
+//! thing: that is the acknowledgement for a **VAT return**, which is filed on
+//! ZATCA's portal rather than through the invoicing API.
 
+mod clearance;
 mod commands;
+mod documents;
 mod filing;
 pub mod messages;
 mod projections;
 mod report;
+mod submit;
+pub mod taxpayer;
+pub mod zatca;
 
-pub use commands::{Filed, TaxError, file_return, period_id};
+pub use clearance::{Clearance, ClearanceEvent};
+pub use commands::{Filed, TaxError, file_return, period_id, record_outcome, register_taxpayer};
+pub use documents::{
+    Pending, Standing, Status, Stored, Taxpayers, ZatcaDocuments, document, documents, pending,
+    registered, standing,
+};
 pub use filing::{Filing, FilingEvent};
-pub use projections::{FiledReturn, FiledReturns, TaxSa, filed, projections};
+pub use projections::{FiledReturn, FiledReturns, Outcomes, TaxSa, filed, projections};
 pub use report::{Band, Return, Side, Sides, vat_return};
+pub use submit::{SweepError, Swept, submit_pending};
+pub use taxpayer::{Registration, Taxpayer, TaxpayerEvent};
 
 use spa_i18n::StaticCatalog;
 use spa_types::{DomainName, EventName, SchemaVersion};
@@ -116,15 +139,24 @@ pub fn module_id() -> spa_types::ModuleId {
 }
 
 /// Every event shape this build can read.
+///
+/// Its own, **and `sales`'** — because this module builds ZATCA documents from
+/// `sales.invoice.issued`, and a projection cannot decode an event whose version
+/// it has not declared. Folded in rather than re-declared, so a version `sales`
+/// adds next year is readable here without a second copy of its history that
+/// could disagree with the first. See [`spa_eventlog::Upcasters::also`].
 #[must_use]
 pub fn upcasters() -> &'static spa_eventlog::Upcasters {
     static UPCASTERS: std::sync::OnceLock<spa_eventlog::Upcasters> = std::sync::OnceLock::new();
     UPCASTERS.get_or_init(|| {
-        FilingEvent::NAMES
+        let mine = FilingEvent::NAMES
             .iter()
+            .chain(TaxpayerEvent::NAMES.iter())
+            .chain(ClearanceEvent::NAMES.iter())
             .fold(spa_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
-            })
+            });
+        mine.also(sales::upcasters())
     })
 }
 

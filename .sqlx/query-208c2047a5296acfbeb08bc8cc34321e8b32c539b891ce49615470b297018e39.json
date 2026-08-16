@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(max(icv), 0) as \"length!\" FROM proj_tax_sa.zatca_document",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "length!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "208c2047a5296acfbeb08bc8cc34321e8b32c539b891ce49615470b297018e39"
+}

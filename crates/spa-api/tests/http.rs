@@ -104,7 +104,22 @@ impl Fixture {
             .expect("membership is granted");
     }
 
+    /// Sends a request, naming `acme` unless the test named someone else.
+    ///
+    /// The tenant is the subdomain now. Defaulting it here keeps a hundred
+    /// call sites from repeating `acme.localhost`; a test that means a
+    /// different tenant sets `Host` itself, and those are precisely the tests
+    /// about reaching a tenant you are not a member of.
     async fn send(&self, request: Request<Body>) -> (StatusCode, serde_json::Value, Vec<u8>) {
+        let mut request = request;
+        if !request.headers().contains_key(header::HOST) {
+            request.headers_mut().insert(
+                header::HOST,
+                axum::http::HeaderValue::from_static("acme.localhost"),
+            );
+        }
+        let request = request;
+
         let method = request.method().as_str().to_lowercase();
         let path = request.uri().path().to_owned();
         let response = self
@@ -229,11 +244,51 @@ impl Fixture {
             .await;
     }
 
+    /// Registers the tenant with ZATCA over HTTP, which every ZATCA test needs
+    /// before it can have a document at all.
+    async fn register_with_zatca(&self, token: &str) {
+        let (status, body, _) = self
+            .send(
+                Request::put("/v1/tax_sa/registration")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "vat_number": "310122393500003",
+                            "name": "أكمي للتجارة",
+                            "scheme": "crn",
+                            "identifier": "1010101010",
+                            "address": {
+                                "street": "طريق الملك فهد",
+                                "building": "2322",
+                                "district": "العليا",
+                                "city": "الرياض",
+                                "postal_code": "12211",
+                                "country": "SA"
+                            },
+                            "effective_from": "2026-01-01T00:00:00Z"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// The Saudi module's group, which is what builds the ZATCA documents.
+    async fn project_tax(&self, tenant: TenantId) {
+        self.project_sales(tenant).await;
+        self.project(tenant, &tax_sa::projections(), tax_sa::upcasters())
+            .await;
+    }
+
     /// Installs a chart of accounts over HTTP.
     async fn install_chart(&self, token: &str, slug: &str, template: &str) {
         let (status, body, _) = self
             .send(
-                Request::post(format!("/v1/tenants/{slug}/ledger/chart"))
+                Request::post("/v1/ledger/chart")
+                    .header(header::HOST, format!("{slug}.localhost"))
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -254,7 +309,7 @@ impl Fixture {
         module: &str,
         role: Option<&str>,
     ) -> StatusCode {
-        let uri = format!("/v1/tenants/acme/members/{identity}/modules/{module}");
+        let uri = format!("/v1/members/{identity}/modules/{module}");
         let request = Request::builder()
             .method(if role.is_some() { "PUT" } else { "DELETE" })
             .uri(uri)
@@ -277,7 +332,7 @@ impl Fixture {
     async fn try_invoice(&self, token: &str, id: &str) -> StatusCode {
         let (status, _, _) = self
             .send(
-                Request::post("/v1/tenants/acme/sales/invoices")
+                Request::post("/v1/sales/invoices")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -302,7 +357,7 @@ impl Fixture {
     async fn try_open_account(&self, token: &str, code: &str) -> StatusCode {
         let (status, _, _) = self
             .send(
-                Request::post("/v1/tenants/acme/ledger/accounts")
+                Request::post("/v1/ledger/accounts")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -322,7 +377,8 @@ impl Fixture {
     async fn ledger_balance(&self, token: &str, slug: &str, code: &str) -> i64 {
         let (status, accounts, _) = self
             .send(
-                Request::get(format!("/v1/tenants/{slug}/ledger/accounts"))
+                Request::get("/v1/ledger/accounts")
+                    .header(header::HOST, format!("{slug}.localhost"))
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -342,7 +398,8 @@ impl Fixture {
     async fn invite(&self, token: &str, slug: &str, handle: &str, role: &str) -> String {
         let (status, body, _) = self
             .send(
-                Request::post(format!("/v1/tenants/{slug}/invitations"))
+                Request::post("/v1/invitations")
+                    .header(header::HOST, format!("{slug}.localhost"))
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -429,7 +486,7 @@ async fn logging_out_ends_the_session_at_once() {
 
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
     let authorized = |t: &str| {
-        Request::get("/v1/tenants/acme")
+        Request::get("/v1/tenant")
             .header(header::AUTHORIZATION, format!("Bearer {t}"))
             .body(Body::empty())
             .unwrap()
@@ -495,8 +552,12 @@ async fn a_member_of_one_tenant_cannot_read_another() {
     fixture.join(user, acme).await;
 
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    // **The tenant is the host now**, so the same path reads a different
+    // company depending only on which subdomain it arrives at. That is the
+    // thing this test exists to try.
     let read = |slug: &str| {
-        Request::get(format!("/v1/tenants/{slug}"))
+        Request::get("/v1/tenant")
+            .header(header::HOST, format!("{slug}.localhost"))
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap()
@@ -534,7 +595,7 @@ async fn an_absent_or_malformed_credential_is_a_401_not_a_500() {
         Some("Basic abc"),
         Some("Bearer not-a-token"),
     ] {
-        let mut request = Request::get("/v1/tenants/acme");
+        let mut request = Request::get("/v1/tenant");
         if let Some(value) = header_value {
             request = request.header(header::AUTHORIZATION, value);
         }
@@ -712,7 +773,7 @@ async fn a_signed_in_user_can_keep_books() {
     for (code, kind) in [("1000", "asset"), ("4000", "revenue")] {
         let (status, body, _) = fixture
             .send(post(
-                "/v1/tenants/acme/ledger/accounts",
+                "/v1/ledger/accounts",
                 serde_json::json!({
                     "code": code, "name": code, "kind": kind, "currency": "SAR"
                 }),
@@ -723,7 +784,7 @@ async fn a_signed_in_user_can_keep_books() {
 
     let (status, body, _) = fixture
         .send(post(
-            "/v1/tenants/acme/ledger/entries",
+            "/v1/ledger/entries",
             serde_json::json!({
                 "id": "inv-1",
                 "occurred_on": "2026-01-15T00:00:00Z",
@@ -754,15 +815,13 @@ async fn a_signed_in_user_can_keep_books() {
             .unwrap()
     };
 
-    let (status, accounts, _) = fixture.send(read("/v1/tenants/acme/ledger/accounts")).await;
+    let (status, accounts, _) = fixture.send(read("/v1/ledger/accounts")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(accounts[0]["code"], "1000");
     assert_eq!(accounts[0]["balance"], 15000);
     assert_eq!(accounts[1]["balance"], -15000);
 
-    let (status, trial, _) = fixture
-        .send(read("/v1/tenants/acme/ledger/trial-balance"))
-        .await;
+    let (status, trial, _) = fixture.send(read("/v1/ledger/trial-balance")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(trial[0]["currency"], "SAR");
     assert_eq!(trial[0]["difference"], 0);
@@ -785,7 +844,7 @@ async fn an_unbalanced_entry_is_refused_with_the_difference() {
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
     let (status, body, content_type) = fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/entries")
+            Request::post("/v1/ledger/entries")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::ACCEPT_LANGUAGE, "ar")
@@ -828,7 +887,7 @@ async fn posting_to_an_unknown_account_is_unprocessable() {
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
     let (status, body, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/entries")
+            Request::post("/v1/ledger/entries")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -864,7 +923,7 @@ async fn the_ledger_is_behind_the_same_tenant_check_as_everything_else() {
     let token = fixture.token("nosy@globex.test", "hunter2hunter2").await;
     let (status, _, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/ledger/trial-balance")
+            Request::get("/v1/ledger/trial-balance")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -918,7 +977,7 @@ async fn signing_up_gives_you_a_working_system() {
     // The token works immediately — signing up logs you in.
     let (status, tenant, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme")
+            Request::get("/v1/tenant")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -930,7 +989,7 @@ async fn signing_up_gives_you_a_working_system() {
     // And the ledger is installed and usable, with no further setup.
     let (status, accounts, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/ledger/accounts")
+            Request::get("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -941,7 +1000,7 @@ async fn signing_up_gives_you_a_working_system() {
 
     let (status, _, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/accounts")
+            Request::post("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1119,7 +1178,7 @@ async fn a_new_tenant_can_start_from_a_template() {
 
     let (status, installed, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/chart")
+            Request::post("/v1/ledger/chart")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::ACCEPT_LANGUAGE, "ar")
@@ -1147,7 +1206,7 @@ async fn a_new_tenant_can_start_from_a_template() {
 
     let (status, accounts, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/ledger/accounts")
+            Request::get("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1187,7 +1246,7 @@ async fn an_unknown_chart_is_refused() {
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
     let (status, body, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/chart")
+            Request::post("/v1/ledger/chart")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1206,28 +1265,43 @@ async fn an_unknown_chart_is_refused() {
 // Authorization
 // ---------------------------------------------------------------------------
 
-/// Every operation the router serves under a tenant, as
+/// Every operation that is about a tenant, as
 /// `(operationId, "METHOD /template", takes a body)`.
 ///
-/// Everything below `/v1/tenants/{slug}` is role-scoped by construction — the
-/// `Allowed<C>` extractor is what gets you a `TenantDb` — so this is the set an
-/// authorization matrix has to cover.
+/// # Why this is not a path prefix any more
+///
+/// It used to be everything under `/v1/tenants/{slug}`, which was a prefix a
+/// route either had or did not. The tenant is the **subdomain** now, so a
+/// tenant-scoped path and an apex one look identical — `/v1/members` and
+/// `/v1/catalogue` differ in what they need, not in how they read.
+///
+/// So the property is the real one: an operation is role-scoped unless it is
+/// **public** (`security: []`) or one of the handful that need a session and no
+/// tenant. That list is written out, because a route that quietly joined it
+/// would be a route this matrix stopped checking.
 fn role_scoped_operations() -> Vec<(String, String, bool)> {
+    /// Authenticated, and about the caller rather than a company.
+    const NO_TENANT: &[&str] = &["log_out"];
+
     let document = serde_json::to_value(spa_api::openapi()).expect("the document serializes");
     let mut found = Vec::new();
 
     for (path, item) in document["paths"].as_object().expect("there are paths") {
-        if !path.starts_with("/v1/tenants/{slug}") {
-            continue;
-        }
         for (method, operation) in item.as_object().expect("a path item") {
-            if let Some(id) = operation["operationId"].as_str() {
-                found.push((
-                    id.to_owned(),
-                    format!("{} {path}", method.to_uppercase()),
-                    operation["requestBody"].is_object(),
-                ));
+            let Some(id) = operation["operationId"].as_str() else {
+                continue;
+            };
+            let public = operation["security"]
+                .as_array()
+                .is_some_and(std::vec::Vec::is_empty);
+            if public || NO_TENANT.contains(&id) {
+                continue;
             }
+            found.push((
+                id.to_owned(),
+                format!("{} {path}", method.to_uppercase()),
+                operation["requestBody"].is_object(),
+            ));
         }
     }
 
@@ -1251,6 +1325,13 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("filed_returns", ALL_ROLES),
     ("list_bills", ALL_ROLES),
     ("get_bill", ALL_ROLES),
+    // Where the business stands with ZATCA, and the documents themselves.
+    // Reading, so everyone — a clerk at a till needs to see that the receipt
+    // they just handed over has been reported.
+    ("registration", ALL_ROLES),
+    ("zatca_standing", ALL_ROLES),
+    ("zatca_documents", ALL_ROLES),
+    ("zatca_document", ALL_ROLES),
     // Recording what happened. A clerk does this and nothing structural.
     ("post_entry", &["owner", "accountant", "clerk"]),
     ("reverse_entry", &["owner", "accountant", "clerk"]),
@@ -1273,6 +1354,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Changing the tenant: who has access, and what it pays for. The owner
     // alone, including against an accountant — somebody who keeps the books
     // should not be able to decide who else can see them.
+    // The tenant's identity to a tax authority. Every invoice it ever issues
+    // is stamped with this, so it sits with the owner beside membership.
+    ("register", OWNER),
     ("add_member", OWNER),
     ("change_role", OWNER),
     ("remove_member", OWNER),
@@ -1297,7 +1381,7 @@ const OWNER: &[&str] = &["owner"];
 /// grow it, and a route added without that thought is a route nobody checked.
 ///
 /// So the endpoints come from `spa_api::openapi()` — the same value the router
-/// is built from. Every operation under `/v1/tenants/{slug}` is role-scoped by
+/// is built from. Every operation under `/v1/tenant` is role-scoped by
 /// construction, and `PERMISSIONS` must name all of them: an operation missing
 /// from the table **fails this test** rather than defaulting to untested.
 /// Adding a route now forces the decision instead of allowing it.
@@ -1348,8 +1432,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        37,
-        "expected thirty-seven role-scoped operations"
+        42,
+        "expected forty-two role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -1370,7 +1454,6 @@ async fn every_role_against_every_endpoint() {
             // through the matrix. An unknown one is refused *after* the
             // capability check, which is the only part being measured.
             let path = template
-                .replace("{slug}", "acme")
                 .replace("{identity}", &subject.to_string())
                 .replace("{module}", "none")
                 .replace("{entry}", "JE-1")
@@ -1432,7 +1515,7 @@ async fn a_refusal_names_the_capability_and_speaks_arabic() {
 
     let (status, body, content_type) = fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/accounts")
+            Request::post("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::ACCEPT_LANGUAGE, "ar")
@@ -1480,7 +1563,7 @@ async fn an_unknown_stored_role_locks_nobody_in_or_out_silently() {
 
     let (status, _, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme")
+            Request::get("/v1/tenant")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1509,7 +1592,7 @@ async fn the_tenant_view_tells_a_client_what_to_show() {
 
     let (status, body, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme")
+            Request::get("/v1/tenant")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1538,7 +1621,7 @@ async fn an_owner_can_add_a_colleague_who_can_then_sign_in() {
 
     let (status, added, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/members")
+            Request::post("/v1/members")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1560,7 +1643,7 @@ async fn an_owner_can_add_a_colleague_who_can_then_sign_in() {
         .await;
     let (status, view, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme")
+            Request::get("/v1/tenant")
                 .header(header::AUTHORIZATION, format!("Bearer {colleague}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1572,7 +1655,7 @@ async fn an_owner_can_add_a_colleague_who_can_then_sign_in() {
     // And their role is enforced: a clerk cannot restructure the chart.
     let (status, _, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/accounts")
+            Request::post("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {colleague}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1589,7 +1672,7 @@ async fn an_owner_can_add_a_colleague_who_can_then_sign_in() {
     // Both show up in the list, which a viewer could also read.
     let (status, members, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/members")
+            Request::get("/v1/members")
                 .header(header::AUTHORIZATION, format!("Bearer {colleague}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1624,7 +1707,7 @@ async fn changing_a_role_takes_effect_at_once() {
 
     let (_, added, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/members")
+            Request::post("/v1/members")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1644,7 +1727,7 @@ async fn changing_a_role_takes_effect_at_once() {
         .await;
 
     let open_account = |t: &str| {
-        Request::post("/v1/tenants/acme/ledger/accounts")
+        Request::post("/v1/ledger/accounts")
             .header(header::AUTHORIZATION, format!("Bearer {t}"))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
@@ -1661,7 +1744,7 @@ async fn changing_a_role_takes_effect_at_once() {
 
     let (status, _, _) = fixture
         .send(
-            Request::patch(format!("/v1/tenants/acme/members/{identity}"))
+            Request::patch(format!("/v1/members/{identity}"))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1694,7 +1777,7 @@ async fn the_last_owner_cannot_remove_or_demote_themselves() {
 
     let (status, body, _) = fixture
         .send(
-            Request::patch(format!("/v1/tenants/acme/members/{owner}"))
+            Request::patch(format!("/v1/members/{owner}"))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1708,7 +1791,7 @@ async fn the_last_owner_cannot_remove_or_demote_themselves() {
 
     let (status, _, _) = fixture
         .send(
-            Request::delete(format!("/v1/tenants/acme/members/{owner}"))
+            Request::delete(format!("/v1/members/{owner}"))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1720,7 +1803,7 @@ async fn the_last_owner_cannot_remove_or_demote_themselves() {
     // keeping an owner, not about anyone being undemotable.
     fixture
         .send(
-            Request::post("/v1/tenants/acme/members")
+            Request::post("/v1/members")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1737,7 +1820,7 @@ async fn the_last_owner_cannot_remove_or_demote_themselves() {
 
     let (status, _, _) = fixture
         .send(
-            Request::patch(format!("/v1/tenants/acme/members/{owner}"))
+            Request::patch(format!("/v1/members/{owner}"))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1766,7 +1849,7 @@ async fn an_accountant_cannot_add_members() {
 
     let (status, body, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/members")
+            Request::post("/v1/members")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1807,7 +1890,10 @@ async fn adding_an_existing_login_reuses_their_account() {
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
     let (status, added, _) = fixture
         .send(
-            Request::post("/v1/tenants/globex/members")
+            Request::post("/v1/members")
+                // The *other* tenant: they are already an accountant at acme,
+                // and this is the second company adding the same person.
+                .header(header::HOST, "globex.localhost")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1832,7 +1918,8 @@ async fn adding_an_existing_login_reuses_their_account() {
     // And adding them again is a conflict, not a silent second membership.
     let (status, body, _) = fixture
         .send(
-            Request::post("/v1/tenants/globex/members")
+            Request::post("/v1/members")
+                .header(header::HOST, "globex.localhost")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1873,7 +1960,7 @@ async fn a_client_can_read_the_write_it_just_made() {
     for (code, kind) in [("1000", "asset"), ("4000", "revenue")] {
         fixture
             .send(
-                Request::post("/v1/tenants/acme/ledger/accounts")
+                Request::post("/v1/ledger/accounts")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -1889,7 +1976,7 @@ async fn a_client_can_read_the_write_it_just_made() {
 
     let (status, posted, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/entries")
+            Request::post("/v1/ledger/entries")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1913,12 +2000,10 @@ async fn a_client_can_read_the_write_it_just_made() {
     // the read must time out rather than quietly serve stale data.
     let (status, body, _) = fixture
         .send(
-            Request::get(format!(
-                "/v1/tenants/acme/ledger/accounts?consistent_after={position}"
-            ))
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .body(Body::empty())
-            .unwrap(),
+            Request::get(format!("/v1/ledger/accounts?consistent_after={position}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
     assert_eq!(
@@ -1933,12 +2018,10 @@ async fn a_client_can_read_the_write_it_just_made() {
     fixture.project_ledger(tenant).await;
     let (status, accounts, _) = fixture
         .send(
-            Request::get(format!(
-                "/v1/tenants/acme/ledger/accounts?consistent_after={position}"
-            ))
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .body(Body::empty())
-            .unwrap(),
+            Request::get(format!("/v1/ledger/accounts?consistent_after={position}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
@@ -1965,7 +2048,7 @@ async fn a_read_without_the_hint_is_never_delayed() {
 
     fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/accounts")
+            Request::post("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1984,7 +2067,7 @@ async fn a_read_without_the_hint_is_never_delayed() {
     let started = std::time::Instant::now();
     let (status, accounts, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/ledger/accounts")
+            Request::get("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2030,7 +2113,7 @@ async fn a_write_marks_the_tenant_as_needing_a_visit() {
 
     fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/accounts")
+            Request::post("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2087,7 +2170,7 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
 
     let (status, issued, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::post("/v1/sales/invoices"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "INV-1",
@@ -2118,7 +2201,7 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
     let (status, invoice, _) = fixture
         .send(
             bearer(Request::get(format!(
-                "/v1/tenants/acme/sales/invoices/INV-1?consistent_after={position}"
+                "/v1/sales/invoices/INV-1?consistent_after={position}"
             )))
             .body(Body::empty())
             .unwrap(),
@@ -2148,19 +2231,17 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
     // And the money arrives.
     let (status, paid, _) = fixture
         .send(
-            bearer(Request::post(
-                "/v1/tenants/acme/sales/invoices/INV-1/payments",
-            ))
-            .body(Body::from(
-                serde_json::json!({
-                    "reference": "wire-77",
-                    "amount": { "minor": 165_000, "currency": "SAR" },
-                    "received_on": "2026-03-20T00:00:00Z",
-                    "account": "1010"
-                })
-                .to_string(),
-            ))
-            .unwrap(),
+            bearer(Request::post("/v1/sales/invoices/INV-1/payments"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "reference": "wire-77",
+                        "amount": { "minor": 165_000, "currency": "SAR" },
+                        "received_on": "2026-03-20T00:00:00Z",
+                        "account": "1010"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{paid}");
@@ -2168,7 +2249,7 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
 
     let (_, invoices, _) = fixture
         .send(
-            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::get("/v1/sales/invoices"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2201,7 +2282,7 @@ async fn a_module_a_tenant_did_not_enable_is_not_there() {
 
     let (status, body, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/sales/invoices")
+            Request::get("/v1/sales/invoices")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2213,7 +2294,7 @@ async fn a_module_a_tenant_did_not_enable_is_not_there() {
     // Not vacuous: the ledger's own routes work for this same tenant and token.
     let (status, _, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/ledger/accounts")
+            Request::get("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2275,7 +2356,7 @@ async fn an_unknown_vat_treatment_is_refused() {
 
     let (status, body, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/sales/invoices")
+            Request::post("/v1/sales/invoices")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2313,7 +2394,7 @@ async fn an_invoice_the_chart_cannot_take_is_unprocessable() {
     // No chart installed at all.
     let (status, body, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/sales/invoices")
+            Request::post("/v1/sales/invoices")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2361,7 +2442,7 @@ async fn a_tenant_can_turn_a_module_on_after_signing_up() {
     // Not there yet.
     let (status, _, _) = fixture
         .send(
-            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::get("/v1/sales/invoices"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2370,7 +2451,7 @@ async fn a_tenant_can_turn_a_module_on_after_signing_up() {
 
     let (status, body, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/modules"))
+            bearer(Request::post("/v1/modules"))
                 .body(Body::from(
                     serde_json::json!({ "module": "sales" }).to_string(),
                 ))
@@ -2385,7 +2466,7 @@ async fn a_tenant_can_turn_a_module_on_after_signing_up() {
     fixture.install_chart(&token, "acme", "services").await;
     let (status, body, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::post("/v1/sales/invoices"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "INV-LATE",
@@ -2404,7 +2485,7 @@ async fn a_tenant_can_turn_a_module_on_after_signing_up() {
     fixture.project_sales(tenant).await;
     let (_, invoices, _) = fixture
         .send(
-            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::get("/v1/sales/invoices"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2436,7 +2517,7 @@ async fn turning_a_module_off_hides_it_without_losing_anything() {
     fixture.install_chart(&token, "acme", "services").await;
     let (status, _, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::post("/v1/sales/invoices"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "INV-KEEP",
@@ -2455,7 +2536,7 @@ async fn turning_a_module_off_hides_it_without_losing_anything() {
 
     let (status, body, _) = fixture
         .send(
-            bearer(Request::delete("/v1/tenants/acme/modules/sales"))
+            bearer(Request::delete("/v1/modules/sales"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2464,7 +2545,7 @@ async fn turning_a_module_off_hides_it_without_losing_anything() {
 
     let (status, _, _) = fixture
         .send(
-            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::get("/v1/sales/invoices"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2482,7 +2563,7 @@ async fn turning_a_module_off_hides_it_without_losing_anything() {
     // Back on, and the invoice is exactly where it was left.
     let (status, _, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/modules"))
+            bearer(Request::post("/v1/modules"))
                 .body(Body::from(
                     serde_json::json!({ "module": "sales" }).to_string(),
                 ))
@@ -2493,7 +2574,7 @@ async fn turning_a_module_off_hides_it_without_losing_anything() {
 
     let (status, invoices, _) = fixture
         .send(
-            bearer(Request::get("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::get("/v1/sales/invoices"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2521,7 +2602,7 @@ async fn a_module_something_else_needs_cannot_be_turned_off() {
 
     let (status, body, _) = fixture
         .send(
-            Request::delete("/v1/tenants/acme/modules/ledger")
+            Request::delete("/v1/modules/ledger")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::ACCEPT_LANGUAGE, "ar")
                 .body(Body::empty())
@@ -2536,7 +2617,7 @@ async fn a_module_something_else_needs_cannot_be_turned_off() {
     // Not vacuous: with sales off first, the ledger goes too.
     let (status, _, _) = fixture
         .send(
-            Request::delete("/v1/tenants/acme/modules/sales")
+            Request::delete("/v1/modules/sales")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2546,7 +2627,7 @@ async fn a_module_something_else_needs_cannot_be_turned_off() {
 
     let (status, _, _) = fixture
         .send(
-            Request::delete("/v1/tenants/acme/modules/ledger")
+            Request::delete("/v1/modules/ledger")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2570,7 +2651,7 @@ async fn a_module_cannot_be_turned_on_without_what_it_needs() {
 
     let (status, body, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/modules")
+            Request::post("/v1/modules")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2601,7 +2682,7 @@ async fn changing_modules_needs_the_capability_to_manage_the_tenant() {
 
         let (status, body, _) = fixture
             .send(
-                Request::post("/v1/tenants/acme/modules")
+                Request::post("/v1/modules")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -2629,7 +2710,7 @@ async fn the_module_catalogue_is_readable_without_signing_in() {
     let fixture = Fixture::new().await;
 
     let (status, body, _) = fixture
-        .send(Request::get("/v1/modules").body(Body::empty()).unwrap())
+        .send(Request::get("/v1/catalogue").body(Body::empty()).unwrap())
         .await;
 
     assert_eq!(status, StatusCode::OK);
@@ -2662,7 +2743,7 @@ async fn an_invited_colleague_sets_their_own_password_and_gets_to_work() {
 
     let (status, invitation, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/invitations")
+            Request::post("/v1/invitations")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2682,7 +2763,7 @@ async fn an_invited_colleague_sets_their_own_password_and_gets_to_work() {
     // What Sara sees before accepting: what she is joining, and as what.
     let (status, pending, _) = fixture
         .send(
-            Request::get(format!("/v1/invitations/{link}"))
+            Request::get(format!("/v1/join/{link}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2694,7 +2775,7 @@ async fn an_invited_colleague_sets_their_own_password_and_gets_to_work() {
 
     let (status, accepted, _) = fixture
         .send(
-            Request::post(format!("/v1/invitations/{link}/acceptance"))
+            Request::post(format!("/v1/join/{link}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::json!({ "password": "sara's own password" }).to_string(),
@@ -2709,7 +2790,7 @@ async fn an_invited_colleague_sets_their_own_password_and_gets_to_work() {
     // manage accounts.
     let (status, body, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/ledger/accounts")
+            Request::post("/v1/ledger/accounts")
                 .header(header::AUTHORIZATION, format!("Bearer {sara}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2726,7 +2807,7 @@ async fn an_invited_colleague_sets_their_own_password_and_gets_to_work() {
     // ...but not the tenant itself, because she was invited as an accountant.
     let (status, _, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/invitations")
+            Request::post("/v1/invitations")
                 .header(header::AUTHORIZATION, format!("Bearer {sara}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -2771,7 +2852,7 @@ async fn an_invitation_works_once_and_then_says_nothing() {
         .await;
 
     let accept = |link: String, password: &'static str| {
-        Request::post(format!("/v1/invitations/{link}/acceptance"))
+        Request::post(format!("/v1/join/{link}"))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 serde_json::json!({ "password": password }).to_string(),
@@ -2790,7 +2871,7 @@ async fn an_invitation_works_once_and_then_says_nothing() {
     let (fake, _, _) = fixture
         .send(
             Request::get(
-                "/v1/invitations/0000000000000000000000000000000000000000000000000000000000000000",
+                "/v1/join/0000000000000000000000000000000000000000000000000000000000000000",
             )
             .body(Body::empty())
             .unwrap(),
@@ -2798,7 +2879,7 @@ async fn an_invitation_works_once_and_then_says_nothing() {
         .await;
     let (spent, _, _) = fixture
         .send(
-            Request::get(format!("/v1/invitations/{link}"))
+            Request::get(format!("/v1/join/{link}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2829,7 +2910,7 @@ async fn accepting_for_an_existing_account_needs_that_accounts_password() {
 
     let (status, pending, _) = fixture
         .send(
-            Request::get(format!("/v1/invitations/{link}"))
+            Request::get(format!("/v1/join/{link}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2839,7 +2920,7 @@ async fn accepting_for_an_existing_account_needs_that_accounts_password() {
     // Somebody who got hold of the link, guessing.
     let (status, body, _) = fixture
         .send(
-            Request::post(format!("/v1/invitations/{link}/acceptance"))
+            Request::post(format!("/v1/join/{link}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::json!({ "password": "not sara's password" }).to_string(),
@@ -2854,7 +2935,7 @@ async fn accepting_for_an_existing_account_needs_that_accounts_password() {
     // into a support ticket.
     let (status, _, _) = fixture
         .send(
-            Request::post(format!("/v1/invitations/{link}/acceptance"))
+            Request::post(format!("/v1/join/{link}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::json!({ "password": "sara's real password" }).to_string(),
@@ -2886,7 +2967,7 @@ async fn revoking_and_re_inviting_leave_exactly_one_live_link() {
     assert_ne!(first, second);
 
     let live = |link: &str| {
-        Request::get(format!("/v1/invitations/{link}"))
+        Request::get(format!("/v1/join/{link}"))
             .body(Body::empty())
             .unwrap()
     };
@@ -2904,7 +2985,7 @@ async fn revoking_and_re_inviting_leave_exactly_one_live_link() {
     // Only one outstanding, and revoking it leaves none.
     let (_, list, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/invitations")
+            Request::get("/v1/invitations")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2916,7 +2997,7 @@ async fn revoking_and_re_inviting_leave_exactly_one_live_link() {
     let id = list[0]["id"].as_str().expect("an id");
     let (status, _, _) = fixture
         .send(
-            Request::delete(format!("/v1/tenants/acme/invitations/{id}"))
+            Request::delete(format!("/v1/invitations/{id}"))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2946,7 +3027,7 @@ async fn an_invitation_cannot_be_revoked_from_another_tenant() {
         .await;
     let (_, list, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/invitations")
+            Request::get("/v1/invitations")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2954,10 +3035,13 @@ async fn an_invitation_cannot_be_revoked_from_another_tenant() {
         .await;
     let id = list[0]["id"].as_str().expect("an id").to_owned();
 
-    // Same owner, same id, wrong tenant in the path.
+    // Same owner, same id, **wrong host**. The invitation belongs to acme and
+    // this asks globex to revoke it — which is the shape of every "I have a
+    // valid id from somewhere else" attempt.
     let (status, _, _) = fixture
         .send(
-            Request::delete(format!("/v1/tenants/globex/invitations/{id}"))
+            Request::delete(format!("/v1/invitations/{id}"))
+                .header(header::HOST, "globex.localhost")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2967,7 +3051,7 @@ async fn an_invitation_cannot_be_revoked_from_another_tenant() {
 
     let (status, _, _) = fixture
         .send(
-            Request::get(format!("/v1/invitations/{link}"))
+            Request::get(format!("/v1/join/{link}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2992,7 +3076,7 @@ async fn inviting_an_existing_member_is_refused() {
 
     let (status, body, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/invitations")
+            Request::post("/v1/invitations")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::ACCEPT_LANGUAGE, "ar")
@@ -3025,7 +3109,7 @@ async fn an_invitation_will_not_accept_a_short_password() {
 
     let (status, body, _) = fixture
         .send(
-            Request::post(format!("/v1/invitations/{link}/acceptance"))
+            Request::post(format!("/v1/join/{link}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::json!({ "password": "short" }).to_string(),
@@ -3039,7 +3123,7 @@ async fn an_invitation_will_not_accept_a_short_password() {
     // The invitation survives it.
     let (status, _, _) = fixture
         .send(
-            Request::get(format!("/v1/invitations/{link}"))
+            Request::get(format!("/v1/join/{link}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3162,7 +3246,7 @@ async fn signing_up_again_with_your_own_address_gives_you_a_second_tenant() {
     for slug in ["acme", "second"] {
         let (status, _, _) = fixture
             .send(
-                Request::get(format!("/v1/tenants/{slug}"))
+                Request::get("/v1/tenant")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -3189,7 +3273,7 @@ async fn somebody_removed_can_be_added_again() {
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
 
     let add = |role: &'static str| {
-        Request::post("/v1/tenants/acme/members")
+        Request::post("/v1/members")
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
@@ -3207,7 +3291,7 @@ async fn somebody_removed_can_be_added_again() {
 
     let (status, _, _) = fixture
         .send(
-            Request::delete(format!("/v1/tenants/acme/members/{identity}"))
+            Request::delete(format!("/v1/members/{identity}"))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -3223,7 +3307,7 @@ async fn somebody_removed_can_be_added_again() {
 
     let (_, members, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/members")
+            Request::get("/v1/members")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -3258,7 +3342,7 @@ async fn managing_somebody_who_is_not_a_member_here_is_a_404() {
 
     let (status, body, _) = fixture
         .send(
-            Request::patch(format!("/v1/tenants/acme/members/{stranger}"))
+            Request::patch(format!("/v1/members/{stranger}"))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -3272,7 +3356,7 @@ async fn managing_somebody_who_is_not_a_member_here_is_a_404() {
 
     let (status, _, _) = fixture
         .send(
-            Request::delete(format!("/v1/tenants/acme/members/{stranger}"))
+            Request::delete(format!("/v1/members/{stranger}"))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -3311,7 +3395,7 @@ async fn a_tenant_can_configure_where_sales_post() {
     // Untouched: the shipped defaults, and honest about being defaults.
     let (status, body, _) = fixture
         .send(
-            bearer(Request::get("/v1/tenants/acme/sales/posting-accounts"))
+            bearer(Request::get("/v1/sales/posting-accounts"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3324,7 +3408,7 @@ async fn a_tenant_can_configure_where_sales_post() {
     // future invoice.
     let (status, body, _) = fixture
         .send(
-            bearer(Request::put("/v1/tenants/acme/sales/posting-accounts"))
+            bearer(Request::put("/v1/sales/posting-accounts"))
                 .body(Body::from(
                     serde_json::json!({
                         "receivable": "9999", "revenue": "4000", "output_vat": "2100"
@@ -3340,7 +3424,7 @@ async fn a_tenant_can_configure_where_sales_post() {
     // The services chart has 4900 "Discounts given" — a real account to move to.
     let (status, body, _) = fixture
         .send(
-            bearer(Request::put("/v1/tenants/acme/sales/posting-accounts"))
+            bearer(Request::put("/v1/sales/posting-accounts"))
                 .body(Body::from(
                     serde_json::json!({
                         "receivable": "1100", "revenue": "4900", "output_vat": "2100"
@@ -3354,7 +3438,7 @@ async fn a_tenant_can_configure_where_sales_post() {
 
     let (_, body, _) = fixture
         .send(
-            bearer(Request::get("/v1/tenants/acme/sales/posting-accounts"))
+            bearer(Request::get("/v1/sales/posting-accounts"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3365,7 +3449,7 @@ async fn a_tenant_can_configure_where_sales_post() {
     // And the next invoice goes there.
     let (status, body, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::post("/v1/sales/invoices"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "INV-CONFIGURED",
@@ -3412,7 +3496,7 @@ async fn configuring_posting_accounts_needs_manage_accounts() {
 
         let (status, body, _) = fixture
             .send(
-                Request::put("/v1/tenants/acme/sales/posting-accounts")
+                Request::put("/v1/sales/posting-accounts")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -3476,7 +3560,7 @@ async fn one_person_can_have_a_different_role_in_a_different_module() {
     // does not make her able to decide who else has access.
     let (status, _, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/invitations")
+            Request::post("/v1/invitations")
                 .header(header::AUTHORIZATION, format!("Bearer {sara_token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -3546,7 +3630,7 @@ async fn clearing_a_module_role_restores_the_tenant_wide_one() {
     // And the members list stops mentioning it.
     let (_, members, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/members")
+            Request::get("/v1/members")
                 .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -3588,7 +3672,7 @@ async fn removing_somebody_clears_their_module_exceptions() {
 
     let (status, _, _) = fixture
         .send(
-            Request::delete(format!("/v1/tenants/acme/members/{sara}"))
+            Request::delete(format!("/v1/members/{sara}"))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -3599,7 +3683,7 @@ async fn removing_somebody_clears_their_module_exceptions() {
     // Back as an accountant, with no lingering exception.
     let (status, _, _) = fixture
         .send(
-            Request::post("/v1/tenants/acme/members")
+            Request::post("/v1/members")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -3679,7 +3763,7 @@ async fn an_entry_posted_in_error_can_be_reversed_over_http() {
 
     let (status, body, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/ledger/entries"))
+            bearer(Request::post("/v1/ledger/entries"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "E-OOPS",
@@ -3701,18 +3785,16 @@ async fn an_entry_posted_in_error_can_be_reversed_over_http() {
     assert_eq!(fixture.ledger_balance(&token, "acme", "1000").await, 50_000);
 
     let reverse = |id: &'static str| {
-        bearer(Request::post(
-            "/v1/tenants/acme/ledger/entries/E-OOPS/reversal",
-        ))
-        .body(Body::from(
-            serde_json::json!({
-                "id": id,
-                "occurred_on": "2026-03-05T00:00:00Z",
-                "memo": "correcting E-OOPS"
-            })
-            .to_string(),
-        ))
-        .unwrap()
+        bearer(Request::post("/v1/ledger/entries/E-OOPS/reversal"))
+            .body(Body::from(
+                serde_json::json!({
+                    "id": id,
+                    "occurred_on": "2026-03-05T00:00:00Z",
+                    "memo": "correcting E-OOPS"
+                })
+                .to_string(),
+            ))
+            .unwrap()
     };
 
     let (status, body, _) = fixture.send(reverse("E-OOPS-R")).await;
@@ -3736,14 +3818,12 @@ async fn an_entry_posted_in_error_can_be_reversed_over_http() {
     // not the request's shape.
     let (status, body, _) = fixture
         .send(
-            bearer(Request::post(
-                "/v1/tenants/acme/ledger/entries/NOPE/reversal",
-            ))
-            .body(Body::from(
-                serde_json::json!({ "id": "NOPE-R", "occurred_on": "2026-03-05T00:00:00Z" })
-                    .to_string(),
-            ))
-            .unwrap(),
+            bearer(Request::post("/v1/ledger/entries/NOPE/reversal"))
+                .body(Body::from(
+                    serde_json::json!({ "id": "NOPE-R", "occurred_on": "2026-03-05T00:00:00Z" })
+                        .to_string(),
+                ))
+                .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
@@ -3772,7 +3852,7 @@ async fn an_invoice_can_be_credited_and_stops_being_owed() {
     assert_eq!(fixture.ledger_balance(&token, "acme", "1100").await, 11_500);
 
     let credit = |id: &'static str| {
-        Request::post("/v1/tenants/acme/sales/invoices/INV-OOPS/credit-note")
+        Request::post("/v1/sales/invoices/INV-OOPS/credit-note")
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
@@ -3799,7 +3879,7 @@ async fn an_invoice_can_be_credited_and_stops_being_owed() {
 
     let (_, invoices, _) = fixture
         .send(
-            Request::get("/v1/tenants/acme/sales/invoices")
+            Request::get("/v1/sales/invoices")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -3840,7 +3920,7 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
 
     let (status, body, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::post("/v1/sales/invoices"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "INV-VAT",
@@ -3863,11 +3943,9 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     let period = "from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR";
     let (status, filed, _) = fixture
         .send(
-            bearer(Request::get(format!(
-                "/v1/tenants/acme/tax_sa/vat-return?{period}"
-            )))
-            .body(Body::empty())
-            .unwrap(),
+            bearer(Request::get(format!("/v1/tax_sa/vat-return?{period}")))
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{filed}");
@@ -3891,7 +3969,7 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     let (status, body, _) = fixture
         .send(
             bearer(Request::get(
-                "/v1/tenants/acme/tax_sa/vat-return\
+                "/v1/tax_sa/vat-return\
                  ?from=2026-04-01T00:00:00Z&until=2026-01-01T00:00:00Z&currency=SAR",
             ))
             .body(Body::empty())
@@ -3906,11 +3984,9 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     // missing `from` is the same shape as every other failure.
     let (status, body, content_type) = fixture
         .send(
-            bearer(Request::get(
-                "/v1/tenants/acme/tax_sa/vat-return?currency=SAR",
-            ))
-            .body(Body::empty())
-            .unwrap(),
+            bearer(Request::get("/v1/tax_sa/vat-return?currency=SAR"))
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -4012,7 +4088,7 @@ mod contract {
     /// The templated path this concrete one was served by.
     ///
     /// Prefers the candidate with the most literal segments, so
-    /// `/v1/sessions/current` is not read as `/v1/tenants/{slug}`-shaped noise.
+    /// `/v1/sessions/current` is not read as `/v1/tenant`-shaped noise.
     fn template_for(doc: &Value, path: &str) -> Option<String> {
         let actual: Vec<&str> = path.split('/').collect();
         let mut best: Option<(usize, String)> = None;
@@ -4238,43 +4314,37 @@ mod contract {
         let doc = &*DOCUMENT;
         let cases = [
             ("/v1/health", Some("/v1/health")),
-            ("/v1/modules", Some("/v1/modules")),
+            ("/v1/catalogue", Some("/v1/catalogue")),
             ("/v1/sessions", Some("/v1/sessions")),
             ("/v1/sessions/current", Some("/v1/sessions/current")),
-            ("/v1/invitations/abc123", Some("/v1/invitations/{token}")),
+            ("/v1/join/abc123", Some("/v1/join/{token}")),
+            ("/v1/tenant", Some("/v1/tenant")),
+            ("/v1/members", Some("/v1/members")),
             (
-                "/v1/invitations/abc123/acceptance",
-                Some("/v1/invitations/{token}/acceptance"),
-            ),
-            ("/v1/tenants/acme", Some("/v1/tenants/{slug}")),
-            (
-                "/v1/tenants/acme/members",
-                Some("/v1/tenants/{slug}/members"),
+                "/v1/members/01a00000-0000-7000-8000-000000000000/modules/sales",
+                Some("/v1/members/{identity}/modules/{module}"),
             ),
             (
-                "/v1/tenants/acme/members/01a00000-0000-7000-8000-000000000000/modules/sales",
-                Some("/v1/tenants/{slug}/members/{identity}/modules/{module}"),
+                "/v1/ledger/entries/JE-1/reversal",
+                Some("/v1/ledger/entries/{entry}/reversal"),
             ),
             (
-                "/v1/tenants/acme/ledger/entries/JE-1/reversal",
-                Some("/v1/tenants/{slug}/ledger/entries/{entry}/reversal"),
+                "/v1/sales/invoices/INV-1",
+                Some("/v1/sales/invoices/{invoice}"),
             ),
             (
-                "/v1/tenants/acme/sales/invoices/INV-1",
-                Some("/v1/tenants/{slug}/sales/invoices/{invoice}"),
+                "/v1/sales/invoices/INV-1/credit-note",
+                Some("/v1/sales/invoices/{invoice}/credit-note"),
             ),
             (
-                "/v1/tenants/acme/sales/invoices/INV-1/credit-note",
-                Some("/v1/tenants/{slug}/sales/invoices/{invoice}/credit-note"),
+                "/v1/sales/posting-accounts",
+                Some("/v1/sales/posting-accounts"),
             ),
-            (
-                "/v1/tenants/acme/sales/posting-accounts",
-                Some("/v1/tenants/{slug}/sales/posting-accounts"),
-            ),
+            ("/v1/tax_sa/vat-return", Some("/v1/tax_sa/vat-return")),
             // Nothing serves these. Resolving them would swallow the 404 tests
             // that prove a route does not exist for a tenant.
             ("/v1/nonsense", None),
-            ("/v1/tenants/acme/nonsense", None),
+            ("/v1/nonsense/deeper", None),
         ];
 
         for (concrete, expected) in cases {
@@ -4459,7 +4529,7 @@ async fn a_tenant_files_output_tax_less_input_tax() {
     // Charged: 1,000.00 at 15% → 150.00 of output tax.
     let (status, issued, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::post("/v1/sales/invoices"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "crm-1",
@@ -4480,7 +4550,7 @@ async fn a_tenant_files_output_tax_less_input_tax() {
     // Paid: 400.00 at 15% → 60.00 of input tax, as the supplier stated it.
     let (status, recorded, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/purchases/bills"))
+            bearer(Request::post("/v1/purchases/bills"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "ap-1",
@@ -4505,7 +4575,7 @@ async fn a_tenant_files_output_tax_less_input_tax() {
     let (status, filed, _) = fixture
         .send(
             bearer(Request::get(
-                "/v1/tenants/acme/tax_sa/vat-return\
+                "/v1/tax_sa/vat-return\
                  ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
             ))
             .body(Body::empty())
@@ -4530,7 +4600,7 @@ async fn a_tenant_files_output_tax_less_input_tax() {
     let (status, empty, _) = fixture
         .send(
             bearer(Request::get(
-                "/v1/tenants/acme/tax_sa/vat-return\
+                "/v1/tax_sa/vat-return\
                  ?from=2026-07-01T00:00:00Z&until=2026-10-01T00:00:00Z&currency=SAR",
             ))
             .body(Body::empty())
@@ -4567,7 +4637,7 @@ async fn a_return_for_a_tenant_with_one_side_reports_the_other_as_nothing() {
 
     let (status, issued, _) = fixture
         .send(
-            bearer(Request::post("/v1/tenants/acme/sales/invoices"))
+            bearer(Request::post("/v1/sales/invoices"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "crm-1",
@@ -4589,7 +4659,7 @@ async fn a_return_for_a_tenant_with_one_side_reports_the_other_as_nothing() {
     let (status, filed, _) = fixture
         .send(
             bearer(Request::get(
-                "/v1/tenants/acme/tax_sa/vat-return\
+                "/v1/tax_sa/vat-return\
                  ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
             ))
             .body(Body::empty())
@@ -4609,7 +4679,7 @@ async fn a_return_for_a_tenant_with_one_side_reports_the_other_as_nothing() {
     // And the purchases routes themselves are not there for this tenant.
     let (status, body, _) = fixture
         .send(
-            bearer(Request::get("/v1/tenants/acme/purchases/bills"))
+            bearer(Request::get("/v1/purchases/bills"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4638,7 +4708,7 @@ async fn a_deprecated_module_is_kept_by_whoever_has_it_and_offered_to_nobody() {
     // catalogue says so, and a client building a picker can rely on the field
     // being there rather than discovering it the day one is.
     let (status, body, _) = fixture
-        .send(Request::get("/v1/modules").body(Body::empty()).unwrap())
+        .send(Request::get("/v1/catalogue").body(Body::empty()).unwrap())
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     for module in body.as_array().expect("a list") {
@@ -4654,6 +4724,302 @@ async fn a_deprecated_module_is_kept_by_whoever_has_it_and_offered_to_nobody() {
             .is_some_and(|c| c.iter().any(|m| m["name"] == **name)),
         "the catalogue does not offer {name}"
     );
+
+    fixture.cleanup().await;
+}
+
+/// **ZATCA, over HTTP.** Registering, the two obligations, and the chain.
+///
+/// The decision this exercises is the one a Saudi business is inspected on:
+/// an invoice to a VAT-registered buyer is a *standard* one and has to be
+/// cleared before they get it; a receipt at a till is *simplified* and has to be
+/// reported within a day.
+#[tokio::test]
+async fn a_tenant_can_see_where_it_stands_with_zatca() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    // Nothing registered yet, and the standing says exactly that.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/zatca"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["registered"], false);
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/registration"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "tax_sa.not_registered");
+
+    // A VAT number that is not one is refused here rather than by ZATCA, and
+    // the message says which rule.
+    let registration = |vat: &str, name: &str| {
+        serde_json::json!({
+            "vat_number": vat,
+            "name": name,
+            "name_latin": "Acme Trading",
+            "scheme": "crn",
+            "identifier": "1010101010",
+            "address": {
+                "street": "طريق الملك فهد",
+                "building": "2322",
+                "additional": "9999",
+                "district": "العليا",
+                "city": "الرياض",
+                "postal_code": "12211",
+                "country": "SA"
+            },
+            "effective_from": "2026-01-01T00:00:00Z"
+        })
+    };
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::put("/v1/tax_sa/registration"))
+                .body(Body::from(
+                    registration("123456789012345", "أكمي للتجارة").to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "tax_sa.invalid_registration");
+
+    // And a name with no Arabic in it, because the invoice is an Arabic
+    // document.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::put("/v1/tax_sa/registration"))
+                .body(Body::from(
+                    registration("310122393500003", "Acme Trading").to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "tax_sa.invalid_registration");
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::put("/v1/tax_sa/registration"))
+                .body(Body::from(
+                    registration("310122393500003", "أكمي للتجارة").to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["vat_number"], "310122393500003");
+
+    fixture.cleanup().await;
+}
+
+/// **The decision a Saudi business is inspected on.** An invoice to a
+/// VAT-registered buyer is a *standard* one and has to be cleared before they
+/// get it; a receipt at a till is *simplified* and has to be reported within a
+/// day.
+#[tokio::test]
+async fn zatca_documents_say_which_obligation_they_fall_under() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    fixture.register_with_zatca(&token).await;
+
+    // One invoice to a business, one receipt to a consumer.
+    let invoice = |id: &str, buyer: serde_json::Value, net: i64| {
+        bearer(Request::post("/v1/sales/invoices"))
+            .body(Body::from(
+                serde_json::json!({
+                    "id": id,
+                    "customer": buyer,
+                    "issued_on": "2026-02-10T00:00:00Z",
+                    "currency": "SAR",
+                    "lines": [{ "description": "استشارات", "net": net, "vat": "standard" }]
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture
+        .send(invoice(
+            "b2b",
+            serde_json::json!({ "name": "روابي", "vat_number": "300000000000003" }),
+            100_000,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, body, _) = fixture
+        .send(invoice("b2c", serde_json::json!({ "name": "زبون" }), 2_000))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    fixture.project_tax(tenant).await;
+
+    // **The decision.** The buyer's VAT number is what makes it standard.
+    let (status, documents, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/zatca/documents"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{documents}");
+    let documents = documents.as_array().expect("a list");
+    assert_eq!(documents.len(), 2);
+
+    let business = documents
+        .iter()
+        .find(|d| d["number"] == "INV-00001")
+        .expect("the B2B invoice");
+    assert_eq!(business["kind"], "standard");
+    assert_eq!(business["type_code"], 388);
+    assert_eq!(business["status"], "pending");
+    assert_eq!(business["icv"], 1);
+
+    let consumer = documents
+        .iter()
+        .find(|d| d["number"] == "INV-00002")
+        .expect("the till receipt");
+    assert_eq!(consumer["kind"], "simplified");
+    assert_eq!(consumer["icv"], 2);
+    assert_eq!(
+        consumer["previous_hash"], business["invoice_hash"],
+        "the chain does not link the second document to the first"
+    );
+
+    // One document, with the bytes that were hashed and the QR that goes on the
+    // print.
+    let (status, one, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/zatca/documents/INV-00001"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{one}");
+    let xml = one["xml"].as_str().expect("the canonical UBL");
+    assert!(xml.starts_with("<Invoice xmlns="));
+    assert!(xml.contains("name=\"0100000\""), "not marked standard");
+    assert!(xml.contains("<cbc:CompanyID>310122393500003</cbc:CompanyID>"));
+    assert!(
+        one["qr"].as_str().is_some_and(|qr| !qr.is_empty()),
+        "no QR on a document that has to print one"
+    );
+    assert!(
+        one["stamped_xml"].is_null(),
+        "nothing is stamped until ZATCA stamps it"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The two numbers an inspection asks about**, which are different questions:
+/// simplified invoices past their twenty-four hours, and standard invoices the
+/// buyer must not have been given yet.
+#[tokio::test]
+async fn the_zatca_standing_separates_late_from_merely_waiting() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    fixture.register_with_zatca(&token).await;
+
+    for (id, buyer, net) in [
+        (
+            "b2b",
+            serde_json::json!({ "name": "روابي", "vat_number": "300000000000003" }),
+            100_000,
+        ),
+        ("b2c", serde_json::json!({ "name": "زبون" }), 2_000),
+    ] {
+        let (status, body, _) = fixture
+            .send(
+                bearer(Request::post("/v1/sales/invoices"))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": id,
+                            "customer": buyer,
+                            "issued_on": "2026-02-10T00:00:00Z",
+                            "currency": "SAR",
+                            "lines": [{ "description": "استشارات", "net": net, "vat": "standard" }]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    fixture.project_tax(tenant).await;
+
+    // The standing, judged as of a day later: the till receipt is past its
+    // twenty-four hours and the standard invoice is waiting for clearance.
+    let (status, standing, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/zatca?as_of=2026-02-12T00:00:00Z"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{standing}");
+    assert_eq!(standing["registered"], true);
+    assert_eq!(standing["overdue"], 1, "the receipt is late");
+    assert_eq!(standing["awaiting_clearance"], 1, "the invoice is not");
+    assert_eq!(standing["chain_length"], 2);
+    assert_eq!(standing["counts"]["pending"], 2);
+
+    // A document nobody issued.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/zatca/documents/INV-99999"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "tax_sa.no_such_document");
 
     fixture.cleanup().await;
 }

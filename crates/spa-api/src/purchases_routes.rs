@@ -213,9 +213,9 @@ fn view(summary: purchases::BillSummary) -> BillView {
 /// does. The tax is taken **as the supplier stated it** — see `tax` on a line.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/purchases/bills",
+    path = "/v1/purchases/bills",
     tag = "purchases",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = NewBill,
     responses(
         (status = CREATED, description = "Recorded, or already recorded under this key.", body = Recorded),
@@ -299,10 +299,10 @@ async fn record_bill(
 /// Pay a supplier against a bill.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/purchases/bills/{bill}/payments",
+    path = "/v1/purchases/bills/{bill}/payments",
     tag = "purchases",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("bill" = String, Path, description = "Your key for the bill."),
     ),
     request_body = NewBillPayment,
@@ -355,10 +355,10 @@ async fn pay_bill(
 /// Bills, most recently billed first.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/purchases/bills",
+    path = "/v1/purchases/bills",
     tag = "purchases",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
@@ -395,10 +395,10 @@ async fn list_bills(
 /// One bill, with its lines and its payments.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/purchases/bills/{bill}",
+    path = "/v1/purchases/bills/{bill}",
     tag = "purchases",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("bill" = String, Path, description = "Your key for the bill."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),

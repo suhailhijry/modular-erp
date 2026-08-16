@@ -198,11 +198,11 @@ fn only_the_deliberately_public_routes_are_public() {
         ("get", "/v1/openapi.json"),
         ("post", "/v1/sessions"),
         ("post", "/v1/signups"),
-        ("get", "/v1/modules"),
+        ("get", "/v1/catalogue"),
         ("get", "/v1/ledger/charts"),
         // The token in the path is the credential.
-        ("get", "/v1/invitations/{token}"),
-        ("post", "/v1/invitations/{token}/acceptance"),
+        ("get", "/v1/join/{token}"),
+        ("post", "/v1/join/{token}"),
     ];
 
     for (path, method, operation) in operations(&document()) {
@@ -346,6 +346,9 @@ fn no_two_operations_share_an_id() {
 
 /// Every `{placeholder}` in a path is a declared, required parameter.
 ///
+/// There is no `{slug}` any more — the tenant is the subdomain — so what is left
+/// is genuinely part of the path: an invoice number, an identity, a token.
+///
 /// `utoipa-axum` takes the axum route *from* the path string, so the string is
 /// always right — but the `params(…)` block beside it is hand-written, and a
 /// document with an undeclared placeholder is invalid `OpenAPI`. Generators
@@ -397,7 +400,7 @@ fn every_placeholder_in_a_path_is_declared() {
     }
 
     assert!(
-        checked > 20,
+        checked >= 12,
         "only {checked} placeholders — did they register?"
     );
 }
@@ -488,7 +491,7 @@ fn every_module_has_routes() {
         .collect();
 
     for (name, setup) in spa_api::modules() {
-        let prefix = format!("/v1/tenants/{{slug}}/{}/", setup.module.as_str());
+        let prefix = format!("/v1/{}/", setup.module.as_str());
         assert!(
             paths.iter().any(|path| path.starts_with(&prefix)),
             "the {name} module has no routes; a tenant could enable it and find \

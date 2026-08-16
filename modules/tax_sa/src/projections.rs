@@ -83,10 +83,104 @@ impl Projection for FiledReturns {
     }
 }
 
+/// What ZATCA said, applied to the document it said it about.
+///
+/// The only projection here that *updates* rather than inserts, because the
+/// document already exists — it was built from the invoice, and this is the
+/// answer arriving later.
+#[derive(Debug)]
+pub struct Outcomes;
+
+#[async_trait::async_trait]
+impl Projection for Outcomes {
+    type Group = TaxSa;
+
+    fn name(&self) -> &'static str {
+        "zatca_outcomes"
+    }
+
+    async fn apply(
+        &self,
+        ctx: &ProjectionCtx<'_>,
+        envelope: &Envelope,
+        conn: &mut PgConnection,
+    ) -> Result<(), ProjectionError> {
+        use crate::clearance::ClearanceEvent;
+
+        if !ClearanceEvent::NAMES.contains(&envelope.event_name.as_str()) {
+            return Ok(());
+        }
+
+        let event =
+            ctx.decode::<ClearanceEvent>(envelope)
+                .map_err(|source| ProjectionError::Decode {
+                    event_name: envelope.event_name.as_str().to_owned(),
+                    position: envelope.position,
+                    source,
+                })?;
+
+        let (document, status, remarks, stamped, at) = match &event {
+            ClearanceEvent::Accepted {
+                document,
+                kind,
+                warnings,
+                stamped,
+                at,
+            } => (
+                document,
+                // The two obligations have two names for having been met, and
+                // the difference is visible to a person reading the list.
+                match kind {
+                    crate::zatca::Kind::Standard => "cleared",
+                    crate::zatca::Kind::Simplified => "reported",
+                },
+                serde_json::to_value(warnings).unwrap_or(serde_json::Value::Null),
+                stamped.clone(),
+                *at,
+            ),
+            ClearanceEvent::Refused {
+                document,
+                errors,
+                at,
+            } => (
+                document,
+                "refused",
+                serde_json::to_value(errors).unwrap_or(serde_json::Value::Null),
+                None,
+                *at,
+            ),
+        };
+
+        sqlx::query(
+            "UPDATE zatca_document
+                SET status = $2, remarks = $3, stamped_xml = $4, settled_at = $5
+              WHERE id = $1",
+        )
+        .bind(document)
+        .bind(status)
+        .bind(remarks)
+        .bind(stamped)
+        .bind(at)
+        .execute(&mut *conn)
+        .await?;
+
+        Ok(())
+    }
+}
+
 /// Every projection this module contributes.
 #[must_use]
 pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = TaxSa>>> {
-    vec![std::sync::Arc::new(FiledReturns)]
+    vec![
+        std::sync::Arc::new(FiledReturns),
+        // **Before the documents**, so an invoice issued in the same batch as
+        // the registration is rendered under it rather than filed as
+        // unregistered. Within one event the projections run in this order; the
+        // registration event still has to come first in the log.
+        std::sync::Arc::new(crate::documents::Taxpayers),
+        std::sync::Arc::new(crate::documents::ZatcaDocuments),
+        std::sync::Arc::new(Outcomes),
+    ]
 }
 
 // ---------------------------------------------------------------------------

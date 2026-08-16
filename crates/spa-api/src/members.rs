@@ -83,9 +83,9 @@ struct RoleChange {
 /// thing a viewer most needs to be able to check.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/members",
+    path = "/v1/members",
     tag = "members",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, body = Vec<MemberView>),
         (status = UNAUTHORIZED, body = Problem),
@@ -130,13 +130,13 @@ async fn list_members(
 ///
 /// If the address already has an account here, that account gains access rather
 /// than a second one being created for the same person. `POST
-/// /v1/tenants/{slug}/invitations` is the other way round: the recipient picks
+/// /v1/invitations` is the other way round: the recipient picks
 /// their own password and nobody has to hand one over.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/members",
+    path = "/v1/members",
     tag = "members",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = NewMember,
     responses(
         (status = CREATED, body = MemberAdded),
@@ -176,11 +176,11 @@ async fn add_member(
 /// Change what somebody may do across the whole tenant.
 #[utoipa::path(
     patch,
-    path = "/v1/tenants/{slug}/members/{identity}",
+    path = "/v1/members/{identity}",
     tag = "members",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
-        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/members`."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/members`."),
     ),
     request_body = RoleChange,
     responses(
@@ -196,7 +196,7 @@ async fn change_role(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
-    Path((_slug, identity)): Path<(String, IdentityId)>,
+    Path(identity): Path<IdentityId>,
     Json(body): Json<RoleChange>,
 ) -> Result<StatusCode, Problem> {
     let role = parse_role(&body.role, locale)?;
@@ -216,11 +216,11 @@ async fn change_role(
 /// a second one.
 #[utoipa::path(
     delete,
-    path = "/v1/tenants/{slug}/members/{identity}",
+    path = "/v1/members/{identity}",
     tag = "members",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
-        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/members`."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/members`."),
     ),
     responses(
         (status = NO_CONTENT, description = "Removed."),
@@ -234,7 +234,7 @@ async fn remove_member(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
-    Path((_slug, identity)): Path<(String, IdentityId)>,
+    Path(identity): Path<IdentityId>,
 ) -> Result<StatusCode, Problem> {
     state
         .control
@@ -255,11 +255,11 @@ async fn remove_member(
 /// would put that in front of everybody who does not need it.
 #[utoipa::path(
     put,
-    path = "/v1/tenants/{slug}/members/{identity}/modules/{module}",
+    path = "/v1/members/{identity}/modules/{module}",
     tag = "members",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
-        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/members`."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/members`."),
         ("module" = String, Path, description = "A name from `GET /v1/modules`."),
     ),
     request_body = RoleChange,
@@ -275,7 +275,7 @@ async fn set_module_role(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
-    Path((_slug, identity, module)): Path<(String, IdentityId, String)>,
+    Path((identity, module)): Path<(IdentityId, String)>,
     Json(body): Json<RoleChange>,
 ) -> Result<StatusCode, Problem> {
     let role = parse_role(&body.role, locale)?;
@@ -302,11 +302,11 @@ async fn set_module_role(
 /// later change to their tenant-wide role reaches this module too.
 #[utoipa::path(
     delete,
-    path = "/v1/tenants/{slug}/members/{identity}/modules/{module}",
+    path = "/v1/members/{identity}/modules/{module}",
     tag = "members",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
-        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/members`."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/members`."),
         ("module" = String, Path, description = "A name from `GET /v1/modules`."),
     ),
     responses(
@@ -321,7 +321,7 @@ async fn clear_module_role(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
-    Path((_slug, identity, module)): Path<(String, IdentityId, String)>,
+    Path((identity, module)): Path<(IdentityId, String)>,
 ) -> Result<StatusCode, Problem> {
     let module = crate::modules::find(&module, locale)?.module;
 

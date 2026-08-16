@@ -37,9 +37,11 @@ pub enum FilingEvent {
         filed_on: Timestamp,
         /// ZATCA's acknowledgement, once there is one to record.
         ///
-        /// ponytail: `None` until clearance is built, which needs a certificate
-        /// and the first real outbox handler. The field is here because a
-        /// filing without a reference is a filing nobody can prove.
+        /// **Not invoice clearance** — that is `tax_sa.zatca.accepted`, one
+        /// event per document. This is the acknowledgement for the *return*,
+        /// which is filed on ZATCA's portal rather than through the invoicing
+        /// API, so there is nothing here to automate yet. The field is here
+        /// because a filing without a reference is a filing nobody can prove.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<String>,
     },

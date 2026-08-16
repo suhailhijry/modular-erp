@@ -1,9 +1,19 @@
 //! Inviting a colleague, and taking up an invitation.
 //!
-//! Two audiences, which is why the routes are split across two prefixes. The
-//! `/v1/tenants/{slug}/invitations` ones need `ManageTenant`; the
-//! `/v1/invitations/{token}` ones are **unauthenticated**, because the person
-//! accepting has no account yet — the token is the credential.
+//! Two audiences, and two prefixes, which flattening the paths turned from a
+//! stylistic choice into a requirement.
+//!
+//! `/v1/invitations` is the **records this tenant manages** — list, send,
+//! withdraw — and needs `ManageTenant`. `/v1/join/{token}` is the **link
+//! somebody was sent**, is unauthenticated because the person accepting has no
+//! account yet, and lives on the apex rather than under a tenant because they
+//! do not know which one they are joining until they look.
+//!
+//! They used to be `/v1/tenants/{slug}/invitations/{invitation}` and
+//! `/v1/invitations/{token}`, kept apart by a prefix that no longer exists. Once
+//! the tenant moved to the subdomain both became `/v1/invitations/{x}` and the
+//! router refused to start — which was the right answer: they were two different
+//! resources sharing a name, and only the tenant segment had been hiding it.
 
 use crate::wire::Json;
 use axum::extract::{Path, State};
@@ -30,10 +40,10 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_invitations, invite))
         .routes(routes!(revoke_invitation))
-        // No authentication: whoever is accepting does not have an account yet,
-        // and the token in the path is what proves they were invited.
-        .routes(routes!(show_invitation))
-        .routes(routes!(accept_invitation))
+        // No authentication, and no tenant: whoever is accepting does not have
+        // an account yet and does not know which company they are joining until
+        // they look. The token in the path is what proves they were invited.
+        .routes(routes!(show_invitation, accept_invitation))
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +70,9 @@ struct InvitationCreated {
     token: String,
     /// Where the token goes, so a client does not have to build the URL itself
     /// and get it subtly wrong.
+    ///
+    /// On the **apex**, not the tenant's subdomain: the recipient may have no
+    /// account anywhere yet.
     accept_path: String,
 }
 
@@ -117,9 +130,9 @@ struct AcceptedView {
 /// you already talk to this person. A lost link is re-issued, not recovered.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/invitations",
+    path = "/v1/invitations",
     tag = "invitations",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = NewInvitation,
     responses(
         (status = CREATED, body = InvitationCreated),
@@ -159,7 +172,7 @@ async fn invite(
             handle: invitation.handle,
             role: invitation.role.as_str(),
             expires_at: invitation.expires_at,
-            accept_path: format!("/v1/invitations/{}/acceptance", token.expose()),
+            accept_path: format!("/v1/join/{}", token.expose()),
             token: token.expose().to_owned(),
         }),
     ))
@@ -168,9 +181,9 @@ async fn invite(
 /// Invitations sent and not yet taken up.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/invitations",
+    path = "/v1/invitations",
     tag = "invitations",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, description = "Pending invitations. The tokens are not here — they were shown once.", body = Vec<InvitationView>),
         (status = UNAUTHORIZED, body = Problem),
@@ -206,11 +219,11 @@ async fn list_invitations(
 /// Withdraw an invitation before it is taken up.
 #[utoipa::path(
     delete,
-    path = "/v1/tenants/{slug}/invitations/{invitation}",
+    path = "/v1/invitations/{invitation}",
     tag = "invitations",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
-        ("invitation" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/invitations`."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("invitation" = uuid::Uuid, Path, description = "From `GET /v1/invitations`."),
     ),
     responses(
         (status = NO_CONTENT, description = "Withdrawn. The token no longer works."),
@@ -251,7 +264,7 @@ async fn revoke_invitation(
 /// accept without reading.
 #[utoipa::path(
     get,
-    path = "/v1/invitations/{token}",
+    path = "/v1/join/{token}",
     tag = "invitations",
     security(),
     params(("token" = String, Path, description = "From the invitation link.")),
@@ -288,7 +301,7 @@ async fn show_invitation(
 /// session: accepting signs you in.
 #[utoipa::path(
     post,
-    path = "/v1/invitations/{token}/acceptance",
+    path = "/v1/join/{token}",
     tag = "invitations",
     security(),
     params(("token" = String, Path, description = "From the invitation link.")),

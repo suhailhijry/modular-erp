@@ -1935,3 +1935,160 @@ rebuilds is the fourth and is its own increment — see the note at the end.
 
 - **The demo files a return.** A tax module nobody has filed with demonstrates an
   arithmetic exercise rather than the thing being bought.
+
+## The tenant is the subdomain
+
+- **`/v1/tenants/{slug}/sales/invoices` was wrong, and it was wrong in a way
+  every route repeated.** A tenant is a company, and a company on this platform
+  is `bassat.spa.com` — not a path segment that every handler has to remember to
+  scope by. The slug moved into the `Host` header, and the paths became what they
+  describe: `/v1/login`, `/v1/sales/invoices`, `/v1/tax_sa/vat-return`.
+
+  It is the smaller diff *and* the stronger guarantee. A path parameter is
+  something a handler can forget to use; a subdomain is resolved once, in the
+  `Tenant` extractor, before any handler runs — and a handler that does not take
+  `Tenant` cannot reach a tenant database at all, because `TenantDb` has no
+  public constructor.
+
+- **Exactly one label under the configured domain.** `demo.spa.test` is a tenant;
+  `spa.test` is not, `a.demo.spa.test` is not, and neither is anything under a
+  domain this build was not told about. The port is stripped, a trailing dot is
+  stripped, and the comparison is lowercase, because all three arrive in real
+  `Host` headers. `PUBLIC_DOMAIN` configures it and defaults to `localhost`, so
+  `demo.localhost` works in a browser with no hosts-file editing.
+
+- **Two collisions, and both were the paths telling me something.** With the
+  slug gone, `GET /v1/invitations/{invitation}` — a manager reading an invitation
+  they sent — collided with `GET /v1/invitations/{token}`, which is a stranger
+  holding a link and belongs to no tenant. They were never the same resource; the
+  public one is `/v1/join/{token}` now. `GET /v1/modules` collided the same way:
+  the catalogue of what is *offered* is not the list of what a tenant *has*, and
+  it is `/v1/catalogue`.
+
+- **`just clean-databases` left the people behind.** It already deleted tenant
+  rows whose database was gone; identities outlived them, so the next `just demo`
+  with a different password failed with `invalid_credentials` against an account
+  whose company no longer existed. The same bug one table over, and the recipe
+  deletes memberless identities now.
+
+  Getting there turned up something worth knowing: `audit_entry` refuses UPDATE
+  and DELETE by trigger, which makes the `ON DELETE SET NULL` on its actor
+  columns **unreachable** — an identity that has ever acted cannot be deleted at
+  all. Fine for the dev recipe, which truncates. Not fine for a Saudi PDPL
+  erasure request, and that is a decision to take deliberately: an audit trail
+  that keeps a name forever, or actor columns that can be nulled by a path the
+  trigger allows.
+
+## ZATCA — clearance and reporting
+
+- **Two obligations, and one field decides which.** A buyer who gives a VAT
+  number gets a **standard** invoice, which ZATCA has to *clear* **before the
+  buyer is given it**. Everyone else gets a **simplified** one, handed over at
+  the till and *reported* within twenty-four hours. `Kind::of` is the only place
+  that decision is taken, and everything downstream — the endpoint, the
+  `InvoiceTypeCode` subtype, the deadline, the two counts in the standing report
+  — follows from it.
+
+- **The document is a projection, and that is the first real extension module.**
+  Nothing in the issuing transaction can build a ZATCA document: `sales` issues
+  the invoice and must not know Saudi Arabia exists, because the dependency runs
+  `tax_sa → sales` and inverting it would put ZATCA in the sales module of every
+  tenant in every country.
+
+  So `tax_sa` **subscribes** to `sales.invoice.issued` and
+  `sales.invoice.cancelled` in its own projection group. Three things the kernel
+  already had made it work with no new mechanism: a projection reads the whole
+  log rather than its own module's slice, a projection group is the unit of
+  consistency so this writes only into `proj_tax_sa`, and — the one addition —
+  `Upcasters::also`, which folds `sales`' event history into `tax_sa`'s so a
+  version `sales` adds next year is readable here without a second copy of its
+  chain that could disagree with the first.
+
+  **This is the answer to "how does a module extend another?"** The module being
+  extended does not know. There is no registry, no hook, and nothing in `sales`
+  to change.
+
+- **The registration had to be an event, and the reason is the hash chain.**
+  Every other tenant setting here is configuration, read inside the command's
+  transaction and stamped onto the event. That mechanism was unavailable — the
+  issuing command cannot read a ZATCA registration — and the obvious fallback,
+  reading `configuration` inside the projection, is a **silent** disaster:
+  rebuild after the business moves offices and every historic invoice renders
+  with the new address, hashes differently, and breaks the chain. Each document
+  on its own would still look fine.
+
+  So `tax_sa.taxpayer.registered` is a fact in the log with a position, like
+  everything else the projection reads. An invoice issued in March renders under
+  the registration that was current in March whatever happened in April, and
+  `a_correction_applies_from_where_it_was_made` pins it.
+
+- **The XML is written by hand, already canonical.** ZATCA hashes the
+  *canonicalised* document (C14N 1.1) and the seller signs that hash, so a
+  serialiser that reorders an attribute or collapses `<a></a>` into `<a/>`
+  invalidates the signature. The usual pipeline is DOM → serialise → XSL strip →
+  canonicalise → hash: four places to be wrong, and three dependencies.
+
+  Writing canonical form directly makes canonicalisation the identity function,
+  so `hash(bytes) == hash(c14n(bytes))`. The rules that keeps true are checked by
+  a scanner in the test module that walks the output with a tag stack and knows
+  nothing about how it was produced — balanced tags, no empty-element form, no
+  undeclared prefix, namespaces on the root in C14N's order (**the default one
+  first**, because it has no local name and so sorts least), attributes sorted,
+  `&`/`<`/`>` escaped in text. `the_scanner_refuses_what_it_claims_to` breaks
+  each of those and watches it say no.
+
+  What this does *not* prove is byte-equality with a real C14N 1.1
+  implementation, and there is not one in this workspace — `xmllint --c14n11`
+  would settle it, and Python's stdlib canonicaliser is C14N **2.0**, which
+  rewrites namespace declarations down to where they are used and answers a
+  different question. The one that matters is ZATCA's own SDK, and that needs a
+  certificate.
+
+- **The first link in the chain is encoded differently from every other one, and
+  that is not a bug.** ZATCA's genesis PIH is `base64(hex(sha256("0")))` — 88
+  characters encoding the *text* `5feceb66…` — while every subsequent PIH is
+  `base64(sha256(bytes))`, 44 characters. A chain that "fixes" the inconsistency
+  is rejected at the first invoice, so `the_first_link_is_zatcas_odd_one_out`
+  pins the literal.
+
+- **A refusal and a failure to ask are different facts.** ZATCA saying *no* is
+  about the document and is final. A timeout, a 503 or an expired certificate is
+  about us — nothing was decided, so nothing is appended, the document stays
+  pending, and the next sweep tries again. Collapsing them marks a perfectly good
+  invoice permanently refused because a token expired, and it marks *every*
+  invoice in the batch, which is why the sweep stops on the first `Unanswered`
+  rather than working through the rest.
+  `an_outage_marks_nothing_refused_and_stops_the_sweep` breaks it and watches.
+
+- **What cannot be built here, and what was built instead.** Submitting needs a
+  production CSID — a certificate ZATCA issues after onboarding a specific
+  solution for a specific taxpayer — and an XAdES signature made with it. There
+  is no honest way to have that in this repository, and a fake that pretended
+  would be worse than none, because the whole point of a clearance record is that
+  it happened.
+
+  So the seam is `wire::Submitter`, one method, and everything up to the socket
+  is here and tested: the request and response bodies, both endpoints, the
+  `Clearance-Status` header, and above all `Verdict::of` — which reads an HTTP
+  status and a body into *cleared with warnings*, *refused*, or *no verdict at
+  all*, including the case where ZATCA answers `200` with `NOT_CLEARED` and the
+  status line has to beat the HTTP code.
+
+  The sweep is a function rather than a worker job for the same reason: a job
+  registered with nothing behind it is code with no caller, which is the failure
+  this codebase keeps finding. `submit_pending` has a real caller in its tests,
+  and wrapping it in a job is three lines the day there is a certificate.
+
+- **Documents issued before registration are recorded, not skipped.** The chain
+  starts at onboarding, so they have no place in it and cannot be cleared
+  retrospectively — but a business needs to know they exist, and silently
+  dropping them is the "quietly under-reporting" failure the worker docs warn
+  about. They sit at `unregistered` and the standing report counts them.
+
+- **The QR carries no hash yet, deliberately.** Tags 1–5 are what a build without
+  a certificate can honestly produce. Tag 6 is the invoice hash and 7–9 are the
+  stamp; a QR carrying a hash and no signature claims more than it can show, and
+  fails validation for it. The encoder takes them as `Option`s and the length
+  byte is a **byte** count, which is the mistake an Arabic seller name makes
+  expensive — `the_length_is_bytes_and_not_characters` asserts the two counts
+  differ, so it cannot pass by accident.

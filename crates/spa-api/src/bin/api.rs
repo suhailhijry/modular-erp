@@ -29,6 +29,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::env::var("PRIMARY_CLUSTER_URL").map_err(|_| "PRIMARY_CLUSTER_URL is not set")?;
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
 
+    // **Tenants are subdomains of this.** `bassat.spa.com` is one company and
+    // `najd.spa.com` is another, which is why no path carries a tenant name.
+    //
+    // Defaults to `localhost` so a developer gets `acme.localhost` working with
+    // no DNS and no `/etc/hosts` — every browser and curl resolve `*.localhost`
+    // to the loopback already.
+    let domain = std::env::var("PUBLIC_DOMAIN").unwrap_or_else(|_| "localhost".to_owned());
+
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(16)
         .connect(&control_url)
@@ -40,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         TenantPools::new(clusters, PoolConfig::default()),
     ));
 
-    let app = router(AppState::new(control))
+    let app = router(AppState::on(control, &domain))
         .layer(TraceLayer::new_for_http())
         // 504, not 408: the request was fine, we were slow.
         .layer(TimeoutLayer::with_status_code(

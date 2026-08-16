@@ -191,7 +191,7 @@ struct InvoiceView {
     paid: i64,
     outstanding: i64,
     /// How many payments have been recorded. The payments themselves are on
-    /// `GET /v1/tenants/{slug}/sales/invoices/{invoice}`.
+    /// `GET /v1/sales/invoices/{invoice}`.
     ///
     /// Not `payments`: the detail view flattens this one and adds the list, and
     /// two shapes under one name on the same resource is a client generator's
@@ -272,9 +272,9 @@ fn view(summary: sales::InvoiceSummary) -> InvoiceView {
 /// which is the breakdown a Saudi invoice has to print.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/sales/invoices",
+    path = "/v1/sales/invoices",
     tag = "sales",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = NewInvoice,
     responses(
         (status = CREATED, description = "Issued, or already issued under this key.", body = Issued),
@@ -359,10 +359,10 @@ async fn issue_invoice(
 /// refused rather than left as a negative balance.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/sales/invoices/{invoice}/payments",
+    path = "/v1/sales/invoices/{invoice}/payments",
     tag = "sales",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("invoice" = String, Path, description = "The invoice number."),
     ),
     request_body = NewPayment,
@@ -421,10 +421,10 @@ async fn record_payment(
 /// they need the credit note to be a document with its own tax point.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/sales/invoices/{invoice}/credit-note",
+    path = "/v1/sales/invoices/{invoice}/credit-note",
     tag = "sales",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("invoice" = String, Path, description = "The invoice number being credited."),
     ),
     request_body = NewCreditNote,
@@ -476,10 +476,10 @@ async fn credit_note(
 /// ponytail: the most recent 200, with no cursor. See `sales::invoices`.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/sales/invoices",
+    path = "/v1/sales/invoices",
     tag = "sales",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
@@ -516,10 +516,10 @@ async fn list_invoices(
 /// One invoice, with its lines, its tax breakdown and its payments.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/sales/invoices/{invoice}",
+    path = "/v1/sales/invoices/{invoice}",
     tag = "sales",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("invoice" = String, Path, description = "The invoice number."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
@@ -629,9 +629,9 @@ struct ConfiguredAccounts {
 /// so with `configured: false`.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/sales/posting-accounts",
+    path = "/v1/sales/posting-accounts",
     tag = "sales",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, body = ConfiguredAccounts),
         (status = UNAUTHORIZED, body = Problem),
@@ -687,9 +687,9 @@ async fn posting_accounts(
 /// error here.
 #[utoipa::path(
     put,
-    path = "/v1/tenants/{slug}/sales/posting-accounts",
+    path = "/v1/sales/posting-accounts",
     tag = "sales",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = AccountsView,
     responses(
         (status = NO_CONTENT, description = "Stored. Applies to the next invoice, not to past ones."),

@@ -662,33 +662,39 @@ same artifact. `origin` lets a form-authored rule render back as its form.
 ## 6. Workspace
 
 ```
-crates/
+crates/                                                        ← core: what a tenant cannot disable
   spa-types       (no deps)    newtypes, Money, NonEmpty — WASM-safe, frontend-shareable
-  spa-rules       types        Facts, DynCondition, registries, Rule<E>, StateMachine
-  spa-eventlog    types        gapless append, load, snapshot, upcasters, outbox
-  spa-projection  eventlog     groups, ProjectionCtx, scheduler, leases, shadow replay
-  spa-config      types,rules  declarations, layers, versioned resolution
-  spa-control     eventlog,config  identities, tenants, entitlements, TenantDb, migrator,
-                               per-visit tenant leases
-  spa-kernel      eventlog,rules,projection,config  permits, Module trait + registry,
-                               numbering, health-check registry. No domain (D11).
-  spa-worker      control,eventlog,projection  Job trait, tenant visit loop,
-                               cancellation and drain, bin/worker
-  spa-api         control,kernel,modules  routing, problem+json, OpenAPI, composition root
-  spa-testkit     all          template-DB fixtures, generators, fault injection, differ
-modules/
-  ledger          kernel       accounts, journal entries, fiscal periods, BalancedLines,
-                               posting rules, the trial-balance invariant
-  invoicing       kernel       depends_on: [ledger]
-  <others>        kernel       inventory, pos, payroll, … one crate each
+  spa-i18n        types        message catalogs, locales, the Localize trait
+  spa-eventlog    types        gapless append, load, upcasters, numbering, configuration, outbox
+  spa-projection  eventlog     groups, ProjectionCtx, runner, leases, shadow replay and swap
+  spa-control     eventlog     identities, tenants, entitlements, clusters, TenantDb, fleet
+  spa-worker      control,projection  Job trait, tenant visit loop, cancellation and drain,
+                               bin/worker, bin/migrator, bin/reaper
+  spa-api         control,modules  routing, problem+json, OpenAPI, composition root
+  spa-demo        api          the seeded tenant, and bin/demo
+  spa-testkit     all          template-DB fixtures, fault injection, differ
+modules/                                                       ← what a tenant chooses
+  ledger          core         accounts, journal entries, fiscal periods, VAT treatment,
+                               charts, the trial-balance invariant
+  sales           ledger       invoices, credit notes, payments received
+  purchases       ledger       bills, payments made, input tax
+  tax_sa          sales,purchases  the Saudi rate, the VAT return, ZATCA
 ```
 
-Direction is the enforcement: `modules/*` depend on `spa-kernel` and never on each
-other or on `spa-control`. A module physically cannot reach the control plane or
-another module's tables. Cross-module interaction goes through events, which is
-also what keeps L3 enforceable — and is why the ledger being a module rather than
-kernel costs nothing: invoicing emits an event, the ledger's posting rules turn it
-into a journal entry, and neither crate knows the other's types.
+**Core is what a tenant cannot disable**; a module is what they choose. Direction
+is the enforcement, and it points one way: modules depend on core, and may depend
+on modules *below* them. `tax_sa → {sales, purchases} → ledger` is deliberate — a
+VAT return nets output tax against input tax, and the thing that nets them has to
+be above both rather than a third sibling reaching sideways. What no module may do
+is reach the control plane, or reach another module's tables (L3).
+
+**Extension is by subscription, and the extended module does not know.** `tax_sa`
+builds a ZATCA document out of `sales.invoice.issued` without a line of `sales`
+changing: a projection reads the whole log rather than its own module's slice, its
+group is the unit of consistency so it writes only into `proj_tax_sa`, and
+`Upcasters::also` folds `sales`' event history into its own so a version added
+later stays readable. No registry, no hook, no callback — which is why an
+extension cannot break what it extends.
 
 ---
 

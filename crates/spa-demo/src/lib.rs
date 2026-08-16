@@ -73,6 +73,9 @@ pub struct Seeded {
     /// calculation rather than a business.
     pub filed: usize,
     pub journal_entries: usize,
+    /// ZATCA documents built and waiting to be cleared or reported. Every
+    /// invoice and every credit note is one.
+    pub zatca_documents: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -152,6 +155,12 @@ pub async fn seed(
     let tenant = signed_up.tenant;
     let token = signed_up.token.clone();
 
+    // **Before any invoice.** A document issued before the business is
+    // registered with ZATCA has no place in the hash chain and cannot be
+    // cleared retrospectively — so a demo that registers afterwards is a demo
+    // of a business that lost its first quarter.
+    register_with_zatca(&app, slug, &token).await?;
+
     install_chart(&app, slug, &token).await?;
     let journal_entries = seed_opening_balances(&app, slug, &token).await?;
     let invoices = seed_invoices(&app, slug, &token).await?;
@@ -200,6 +209,9 @@ pub async fn seed(
         })?
         .database_name;
 
+    // After the last projection run, so it counts what is actually there.
+    let zatca_documents = count_zatca_documents(&app, slug, &token).await?;
+
     Ok(Seeded {
         tenant,
         slug: slug.to_owned(),
@@ -214,6 +226,7 @@ pub async fn seed(
         bills,
         filed,
         journal_entries,
+        zatca_documents,
     })
 }
 
@@ -271,6 +284,7 @@ async fn sign_up(app: &axum::Router, slug: &str, password: &str) -> Result<Signe
     let email = format!("owner@{slug}.example");
     let body = post(
         app,
+        slug,
         "/v1/signups",
         None,
         &serde_json::json!({
@@ -310,7 +324,8 @@ async fn sign_up(app: &axum::Router, slug: &str, password: &str) -> Result<Signe
 async fn install_chart(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
     post(
         app,
-        &format!("/v1/tenants/{slug}/ledger/chart"),
+        slug,
+        "/v1/ledger/chart",
         Some(token),
         &serde_json::json!({ "template": "services", "currency": "SAR" }),
         StatusCode::OK,
@@ -363,7 +378,8 @@ async fn seed_opening_balances(
     for (id, occurred_on, memo, lines) in &entries {
         post(
             app,
-            &format!("/v1/tenants/{slug}/ledger/entries"),
+            slug,
+            "/v1/ledger/entries",
             Some(token),
             &serde_json::json!({
                 "id": id,
@@ -384,10 +400,55 @@ async fn seed_opening_balances(
 /// A demo of a tax module in which nothing has been declared shows an
 /// arithmetic exercise. This is the thing a prospective customer is actually
 /// buying.
+/// **The Saudi registration**, which every document this tenant issues carries.
+///
+/// Real-looking and not real: the VAT number satisfies ZATCA's shape — fifteen
+/// digits from three to three — because the API refuses anything else, and the
+/// whole point of refusing it here is that ZATCA would.
+async fn register_with_zatca(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
+    put(
+        app,
+        slug,
+        "/v1/tax_sa/registration",
+        token,
+        &serde_json::json!({
+            "vat_number": "310122393500003",
+            "name": "روابي للاستشارات",
+            "name_latin": "Rawabi Consulting",
+            "scheme": "crn",
+            "identifier": "1010101010",
+            "address": {
+                "street": "طريق الملك فهد",
+                "building": "2322",
+                "additional": "9999",
+                "district": "العليا",
+                "city": "الرياض",
+                "postal_code": "12211",
+                "country": "SA"
+            },
+            "effective_from": "2026-01-01T00:00:00Z"
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+    Ok(())
+}
+
+/// How many ZATCA documents were built, read back through the API.
+async fn count_zatca_documents(
+    app: &axum::Router,
+    slug: &str,
+    token: &str,
+) -> Result<usize, DemoError> {
+    let body = get(app, slug, "/v1/tax_sa/zatca", token).await?;
+    Ok(usize::try_from(body["chain_length"].as_i64().unwrap_or_default()).unwrap_or_default())
+}
+
 async fn seed_filing(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
     post(
         app,
-        &format!("/v1/tenants/{slug}/tax_sa/returns"),
+        slug,
+        "/v1/tax_sa/returns",
         Some(token),
         &serde_json::json!({
             "from": "2026-01-01T00:00:00Z",
@@ -460,7 +521,8 @@ async fn seed_bills(app: &axum::Router, slug: &str, token: &str) -> Result<usize
     for (id, supplier, vat_number, reference, billed_on, lines) in &bills {
         post(
             app,
-            &format!("/v1/tenants/{slug}/purchases/bills"),
+            slug,
+            "/v1/purchases/bills",
             Some(token),
             &serde_json::json!({
                 "id": id,
@@ -478,7 +540,8 @@ async fn seed_bills(app: &axum::Router, slug: &str, token: &str) -> Result<usize
     // One of them settled, so a payables list has something in every state.
     post(
         app,
-        &format!("/v1/tenants/{slug}/purchases/bills/ap-2201/payments"),
+        slug,
+        "/v1/purchases/bills/ap-2201/payments",
         Some(token),
         &serde_json::json!({
             "reference": "TRF-90218",
@@ -558,7 +621,8 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
     for (id, issued_on, customer, vat_number, lines) in &invoices {
         post(
             app,
-            &format!("/v1/tenants/{slug}/sales/invoices"),
+            slug,
+            "/v1/sales/invoices",
             Some(token),
             &serde_json::json!({
                 "id": id,
@@ -591,7 +655,8 @@ async fn seed_payments(app: &axum::Router, slug: &str, token: &str) -> Result<us
     for (invoice, reference, minor, received_on) in &payments {
         post(
             app,
-            &format!("/v1/tenants/{slug}/sales/invoices/{invoice}/payments"),
+            slug,
+            &format!("/v1/sales/invoices/{invoice}/payments"),
             Some(token),
             &serde_json::json!({
                 "reference": reference,
@@ -616,7 +681,8 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
     // An invoice raised against the wrong customer, and put right.
     post(
         app,
-        &format!("/v1/tenants/{slug}/sales/invoices"),
+        slug,
+        "/v1/sales/invoices",
         Some(token),
         &serde_json::json!({
             "id": "crm-4544",
@@ -635,7 +701,8 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
 
     post(
         app,
-        &format!("/v1/tenants/{slug}/sales/invoices/crm-4544/credit-note"),
+        slug,
+        "/v1/sales/invoices/crm-4544/credit-note",
         Some(token),
         &serde_json::json!({
             "id": "crm-4544-void",
@@ -649,7 +716,8 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
     // And a journal entry posted for the wrong amount, reversed.
     post(
         app,
-        &format!("/v1/tenants/{slug}/ledger/entries"),
+        slug,
+        "/v1/ledger/entries",
         Some(token),
         &serde_json::json!({
             "id": "UTILITIES-2026-02",
@@ -666,7 +734,8 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
 
     post(
         app,
-        &format!("/v1/tenants/{slug}/ledger/entries/UTILITIES-2026-02/reversal"),
+        slug,
+        "/v1/ledger/entries/UTILITIES-2026-02/reversal",
         Some(token),
         &serde_json::json!({
             "id": "UTILITIES-2026-02-R",
@@ -695,7 +764,8 @@ async fn seed_colleague(
 
     let added = post(
         app,
-        &format!("/v1/tenants/{slug}/members"),
+        slug,
+        "/v1/members",
         Some(token),
         &serde_json::json!({ "email": handle, "password": password, "role": "viewer" }),
         StatusCode::CREATED,
@@ -705,15 +775,17 @@ async fn seed_colleague(
     let identity = added["identity"]
         .as_str()
         .ok_or_else(|| DemoError::Unexpected {
-            path: format!("/v1/tenants/{slug}/members"),
+            path: "/v1/members".to_owned(),
             body: added.to_string(),
         })?;
 
     put(
         app,
-        &format!("/v1/tenants/{slug}/members/{identity}/modules/sales"),
+        slug,
+        &format!("/v1/members/{identity}/modules/sales"),
         token,
         &serde_json::json!({ "role": "accountant" }),
+        StatusCode::NO_CONTENT,
     )
     .await?;
 
@@ -725,11 +797,14 @@ async fn seed_colleague(
 /// A `PUT`, for the handful of things that are settings rather than events.
 async fn put(
     app: &axum::Router,
+    slug: &str,
     path: &str,
     token: &str,
     body: &serde_json::Value,
+    expected: StatusCode,
 ) -> Result<serde_json::Value, DemoError> {
     let request = Request::put(path)
+        .header(header::HOST, format!("{slug}.localhost"))
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::from(body.to_string()))
@@ -738,17 +813,23 @@ async fn put(
             body: e.to_string(),
         })?;
 
-    send(app, "PUT", path, request, StatusCode::NO_CONTENT).await
+    send(app, "PUT", path, request, expected).await
 }
 
 async fn post(
     app: &axum::Router,
+    // The tenant this is addressed to. **The subdomain is the tenant now**, so
+    // the demo has to address one the way a browser does — which is also what
+    // makes it a test of that, rather than of a path it constructed.
+    slug: &str,
     path: &str,
     token: Option<&str>,
     body: &serde_json::Value,
     expected: StatusCode,
 ) -> Result<serde_json::Value, DemoError> {
-    let mut request = Request::post(path).header(header::CONTENT_TYPE, "application/json");
+    let mut request = Request::post(path)
+        .header(header::HOST, format!("{slug}.localhost"))
+        .header(header::CONTENT_TYPE, "application/json");
     if let Some(token) = token {
         request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
@@ -769,10 +850,12 @@ async fn post(
 /// produces a half-built demo that looks like a product bug (L6).
 pub async fn get(
     app: &axum::Router,
+    slug: &str,
     path: &str,
     token: &str,
 ) -> Result<serde_json::Value, DemoError> {
     let request = Request::get(path)
+        .header(header::HOST, format!("{slug}.localhost"))
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
         .map_err(|e| DemoError::Unexpected {

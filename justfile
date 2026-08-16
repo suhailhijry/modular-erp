@@ -98,7 +98,20 @@ openapi:
 # the rows outlive their databases, and the next `just demo` fails with
 # `slug_taken` against a tenant whose database is gone — which is a confusing
 # way to find out this recipe left the two halves disagreeing.
+#
+# And then the people who belonged to them, for the same reason one table over:
+# a membership goes with its tenant, an identity does not, and the next
+# `just demo` with a different password fails with `invalid_credentials` against
+# an account whose company no longer exists. An identity nobody is a member of
+# cannot sign in to anything, so there is nothing here to keep.
+#
+# `TRUNCATE` on the audit trail, and it has to be: `audit_entry` refuses UPDATE
+# and DELETE by trigger, which makes the `ON DELETE SET NULL` on its actor
+# columns unreachable — deleting an identity that has ever acted raises
+# `audit_entry is append-only`. TRUNCATE fires no row trigger, which is the only
+# way past it and is what this recipe means anyway.
 clean-databases:
     psql "{{admin_url}}" -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'spa_test_%' OR datname LIKE 'spa_tmpl_%' OR datname LIKE 'spa_tenant_%'" \
       | xargs -r -I{} psql "{{admin_url}}" -q -c 'DROP DATABASE IF EXISTS "{}" WITH (FORCE)'
     psql "{{base_url}}" -q -c "DELETE FROM tenant WHERE database_name NOT IN (SELECT datname FROM pg_database)" 2>/dev/null || true
+    psql "{{base_url}}" -q -c "TRUNCATE audit_entry" -c "DELETE FROM identity WHERE id NOT IN (SELECT identity_id FROM membership)" 2>/dev/null || true

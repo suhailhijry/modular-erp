@@ -98,7 +98,7 @@ Minor units and an explicit currency, never a decimal string and never a float. 
         (name = "ledger", description = "Accounts, journal entries, and the trial balance."),
         (name = "sales", description = "Invoices, payments, credit notes, and the VAT return."),
         (name = "purchases", description = "Supplier bills, what is owed, and the tax paid on them."),
-        (name = "tax_sa", description = "Saudi Arabia: the VAT return, and what has been filed."),
+        (name = "tax_sa", description = "Saudi Arabia: the VAT return, what has been filed, and ZATCA clearance and reporting."),
         (name = "service", description = "Liveness and this document."),
     ),
 )]
@@ -471,9 +471,9 @@ struct TenantView {
 /// skips either.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}",
+    path = "/v1/tenant",
     tag = "tenants",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, body = TenantView),
         (status = UNAUTHORIZED, body = Problem),

@@ -89,6 +89,7 @@ impl Demo {
     async fn get(&self, path: &str) -> serde_json::Value {
         spa_demo::get(
             &spa_api::router(self.state.clone()),
+            &self.seeded.slug,
             path,
             &self.seeded.token,
         )
@@ -118,7 +119,7 @@ impl Demo {
 async fn every_module_is_enabled_and_answering() {
     let demo = Demo::build("demo").await;
 
-    let tenant = demo.get("/v1/tenants/demo").await;
+    let tenant = demo.get("/v1/tenant").await;
     let mut reported: Vec<&str> = tenant["modules"]
         .as_array()
         .expect("a module list")
@@ -137,13 +138,13 @@ async fn every_module_is_enabled_and_answering() {
 
     // Enabled is not the same as working, so every module is asked for
     // something only it can answer.
-    let accounts = demo.get("/v1/tenants/demo/ledger/accounts").await;
+    let accounts = demo.get("/v1/ledger/accounts").await;
     assert!(
         accounts.as_array().expect("a list").len() > 10,
         "the ledger has a chart"
     );
 
-    let invoices = demo.get("/v1/tenants/demo/sales/invoices").await;
+    let invoices = demo.get("/v1/sales/invoices").await;
     assert_eq!(
         invoices.as_array().expect("a list").len(),
         demo.seeded.invoices,
@@ -158,7 +159,7 @@ async fn every_module_is_enabled_and_answering() {
 async fn the_demo_shows_a_business_rather_than_a_row() {
     let demo = Demo::build("demo-shape").await;
 
-    let invoices = demo.get("/v1/tenants/demo-shape/sales/invoices").await;
+    let invoices = demo.get("/v1/sales/invoices").await;
     let invoices = invoices.as_array().expect("a list");
 
     let settled = invoices.iter().filter(|i| i["outstanding"] == 0).count();
@@ -177,9 +178,7 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
     let mut treatments: Vec<String> = Vec::new();
     for invoice in invoices {
         let id = invoice["id"].as_str().expect("an id");
-        let detail = demo
-            .get(&format!("/v1/tenants/demo-shape/sales/invoices/{id}"))
-            .await;
+        let detail = demo.get(&format!("/v1/sales/invoices/{id}")).await;
         for band in detail["tax_breakdown"].as_array().expect("bands") {
             treatments.push(band["vat"].as_str().expect("a treatment").to_owned());
         }
@@ -215,7 +214,7 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
     // This also covers the demo's own projection list: a module the demo signs
     // up for and never advances has empty read models, and reads as "the demo is
     // broken" rather than "somebody forgot a line".
-    let bills = demo.get("/v1/tenants/demo-shape/purchases/bills").await;
+    let bills = demo.get("/v1/purchases/bills").await;
     let bills = bills.as_array().expect("a list");
     assert_eq!(
         bills.len(),
@@ -234,7 +233,7 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
     // The whole return: charged, reclaimed, and the difference.
     let filed = demo
         .get(
-            "/v1/tenants/demo-shape/tax_sa/vat-return\
+            "/v1/tax_sa/vat-return\
              ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
         )
         .await;
@@ -259,7 +258,7 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
 
     // And the books are not made only of sales — an accounting demo in which
     // nothing was ever spent is not a demo of accounting.
-    let accounts = demo.get("/v1/tenants/demo-shape/ledger/accounts").await;
+    let accounts = demo.get("/v1/ledger/accounts").await;
     let expenses: i64 = accounts
         .as_array()
         .expect("a list")
@@ -281,7 +280,7 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
 async fn the_demo_has_filed_a_vat_return() {
     let demo = Demo::build("demo-tax").await;
 
-    let returns = demo.get("/v1/tenants/demo-tax/tax_sa/returns").await;
+    let returns = demo.get("/v1/tax_sa/returns").await;
     let returns = returns.as_array().expect("a list");
     assert_eq!(returns.len(), demo.seeded.filed, "the demo filed nothing");
 
@@ -381,6 +380,36 @@ async fn the_demo_passes_every_invariant() {
     let outbox = spa_eventlog::outbox_health(&mut conn).await.expect("reads");
     assert_eq!(outbox.dead, 0, "the demo dead-lettered an effect");
 
+    // **Every document has a place in the ZATCA chain.** The demo registers
+    // before it issues anything, so nothing should be `unregistered` — and a
+    // gap in the chain is the failure that would be invisible until a tax
+    // authority found it.
+    let documents = tax_sa::documents(&mut conn, 500).await.expect("reads");
+    assert_eq!(
+        documents.len(),
+        demo.seeded.invoices + demo.seeded.credited,
+        "every invoice and every credit note is a ZATCA document"
+    );
+    let mut positions: Vec<i64> = documents.iter().filter_map(|d| d.icv).collect();
+    positions.sort_unstable();
+    assert_eq!(
+        positions,
+        (1..=i64::try_from(documents.len()).unwrap_or_default()).collect::<Vec<_>>(),
+        "the chain has a gap or a repeat in it"
+    );
+    assert!(
+        documents
+            .iter()
+            .all(|d| d.status == tax_sa::Status::Pending),
+        "the demo registered before it issued, so nothing should be unregistered"
+    );
+    assert!(
+        documents
+            .iter()
+            .all(|d| d.qr.as_deref().is_some_and(|qr| !qr.is_empty())),
+        "a document with no QR is one that cannot be printed"
+    );
+
     drop(conn);
     drop(db);
     demo.cleanup().await;
@@ -413,7 +442,7 @@ async fn the_demo_can_be_signed_into_afterwards() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     let token = body["token"].as_str().expect("a token");
 
-    let trial_balance = spa_demo::get(&app, "/v1/tenants/demo-login/ledger/trial-balance", token)
+    let trial_balance = spa_demo::get(&app, &demo.seeded.slug, "/v1/ledger/trial-balance", token)
         .await
         .expect("reads");
     assert!(
@@ -508,14 +537,18 @@ async fn the_demo_has_somebody_who_cannot_do_everything() {
     let sara = body["token"].as_str().expect("a token");
 
     // She can see the invoices she is responsible for...
-    spa_demo::get(&app, "/v1/tenants/demo-people/sales/invoices", sara)
+    spa_demo::get(&app, &demo.seeded.slug, "/v1/sales/invoices", sara)
         .await
         .expect("sales is her job");
 
     // ...and cannot restructure the chart of accounts.
     let response = tower::ServiceExt::oneshot(
         app,
-        axum::http::Request::post("/v1/tenants/demo-people/ledger/accounts")
+        axum::http::Request::post("/v1/ledger/accounts")
+            .header(
+                axum::http::header::HOST,
+                format!("{}.localhost", demo.seeded.slug),
+            )
             .header(axum::http::header::AUTHORIZATION, format!("Bearer {sara}"))
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(

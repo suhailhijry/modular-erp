@@ -31,8 +31,8 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_modules, enable_module))
         .routes(routes!(disable_module))
-        // Unauthenticated on purpose: a pricing page needs the catalogue before
-        // anyone has an account. It is product information, not data.
+        // Unauthenticated on purpose, and on the apex: a pricing page needs the
+        // catalogue before anyone has an account.
         .routes(routes!(catalogue))
 }
 
@@ -146,11 +146,17 @@ struct Enable {
 
 /// Every module this build offers.
 ///
-/// Unauthenticated: a signup form and a pricing page both need this before
-/// anyone has an account. It is product information, not data.
+/// Unauthenticated, and on the **apex** — a signup form and a pricing page both
+/// need this before anyone has an account, and before there is a subdomain to
+/// ask from. It is product information, not data.
+///
+/// `/v1/catalogue` rather than `/v1/modules` because that is now what a tenant's
+/// own list is called. The two collided the moment the tenant moved to the
+/// subdomain, and the router refused to start — correctly: a path has to name
+/// one thing, because nothing routes on the host.
 #[utoipa::path(
     get,
-    path = "/v1/modules",
+    path = "/v1/catalogue",
     tag = "modules",
     security(),
     responses((status = OK, body = Vec<CatalogueView>)),
@@ -171,9 +177,9 @@ async fn catalogue() -> Json<Vec<CatalogueView>> {
 /// What this tenant has, and what else it could have.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/modules",
+    path = "/v1/modules",
     tag = "modules",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, body = Vec<ModuleView>),
         (status = UNAUTHORIZED, body = Problem),
@@ -204,9 +210,9 @@ async fn list_modules(tenant: Allowed<Read>) -> Json<Vec<ModuleView>> {
 /// Enabling something already on is a no-op, not a conflict.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/modules",
+    path = "/v1/modules",
     tag = "modules",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = Enable,
     responses(
         (status = NO_CONTENT, description = "On. Already-on is the same answer."),
@@ -261,10 +267,10 @@ async fn enable_module(
 /// requirement applied to the one operation most likely to violate it.
 #[utoipa::path(
     delete,
-    path = "/v1/tenants/{slug}/modules/{module}",
+    path = "/v1/modules/{module}",
     tag = "modules",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("module" = String, Path, description = "A name from `GET /v1/modules`."),
     ),
     responses(

@@ -71,6 +71,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         seeded.journal_entries,
         seeded.filed
     );
+    println!(
+        "zatca    {} documents chained and waiting to be cleared or reported",
+        seeded.zatca_documents
+    );
     match seeded.expires_after {
         Some(_) => println!("expires  in {ttl_days} days, when the reaper next runs"),
         None => println!("expires  never; nothing will clean this tenant up"),

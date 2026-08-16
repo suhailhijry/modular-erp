@@ -1,8 +1,6 @@
 //! What a handler gets to assume, and who checked it.
 
-use std::collections::HashMap;
-
-use axum::extract::{FromRequestParts, Path};
+use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use spa_control::{Lane, Session, TenantDb};
@@ -89,20 +87,16 @@ impl FromRequestParts<AppState> for Tenant {
             .unwrap_or(Language(Locale::DEFAULT));
         let auth = Authenticated::from_request_parts(parts, state).await?;
 
-        // By name, not by position. `Path<String>` only matches a route with
-        // exactly one parameter, so it silently 404s on
-        // `/tenants/{slug}/members/{identity}` — every nested route this API
-        // will ever grow.
-        let Path(params): Path<HashMap<String, String>> = Path::from_request_parts(parts, state)
-            .await
-            .map_err(|_| not_found(locale))?;
-        let slug = params.get("slug").ok_or_else(|| not_found(locale))?;
+        // **The tenant is the subdomain.** `bassat.spa.com` is Bassat Media
+        // Productions, and every path below it is about them — which is why no
+        // route carries a `{slug}` any more.
+        let slug = subdomain(parts, &state.domain).ok_or_else(|| not_found(locale))?;
 
         // Slug → id is one cached lookup, and the same 404 covers "no such
         // tenant" and "not yours".
         let tenant = state
             .control
-            .tenant_by_slug(slug)
+            .tenant_by_slug(&slug)
             .await
             .map_err(|e| ApiError::Access(e).into_problem(locale))?
             .ok_or_else(|| {
@@ -120,6 +114,47 @@ impl FromRequestParts<AppState> for Tenant {
             session: auth.session,
         })
     }
+}
+
+/// The tenant's name, from the host a request arrived on.
+///
+/// # Why the `Host` header is safe to trust with this
+///
+/// It is not trusted with anything. A forged host reaches a tenant the caller is
+/// **already a member of**, or it reaches nothing: `ControlPlane::enter` is what
+/// decides, and it is the same check a forged `{slug}` used to run into. What a
+/// host does is *name* a tenant, and the name has never been the secret.
+///
+/// # Where it comes from
+///
+/// `Host` on HTTP/1.1, and the URI's authority on HTTP/2, where `Host` is often
+/// absent because `:authority` replaced it. A reverse proxy in front of this has
+/// to pass one of them through unchanged — if it rewrites the host to its own,
+/// every tenant-scoped request becomes a 404, which is at least loud.
+fn subdomain(parts: &Parts, domain: &str) -> Option<String> {
+    let host = parts
+        .headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| parts.uri.host().map(str::to_owned))?;
+
+    // A port is not part of the name: `acme.localhost:8080` in development is
+    // the same tenant as `acme.localhost`. Nor is a trailing dot.
+    let host = host
+        .split(':')
+        .next()
+        .unwrap_or(&host)
+        .trim()
+        .to_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host);
+
+    // The apex is not a tenant. It is where signing up and logging in happen.
+    let label = host.strip_suffix(domain)?.strip_suffix('.')?;
+
+    // Exactly one label. `a.b.acme.spa.com` is not a tenant, and treating it as
+    // one would let arbitrary nesting under a wildcard certificate name things.
+    (!label.is_empty() && !label.contains('.')).then(|| label.to_owned())
 }
 
 /// The same 404 a genuinely missing tenant gets.
@@ -216,8 +251,8 @@ impl<C: Capability> std::ops::Deref for Allowed<C> {
 ///
 /// # Why the path decides
 ///
-/// `/v1/tenants/{slug}/sales/invoices` is a sales request; `/v1/tenants/{slug}/members`
-/// is not any module's business. The URL namespace *is* the module namespace,
+/// `/v1/sales/invoices` is a sales request; `/v1/members` is not any
+/// module's business. The URL namespace *is* the module namespace,
 /// by construction — every module mounts under its own name — so reading it
 /// here means a module route added tomorrow is scoped without anybody
 /// remembering to scope it.
@@ -229,12 +264,11 @@ impl<C: Capability> std::ops::Deref for Allowed<C> {
 /// `module_paths_are_what_they_look_like` pins the mapping, so a route that
 /// moves changes a test rather than changing permissions quietly.
 fn module_of(path: &str) -> Option<ModuleId> {
-    // /v1/tenants/{slug}/{module}/...
+    // /v1/{module}/...
     let mut segments = path.split('/').filter(|s| !s.is_empty());
-    if segments.next()? != "v1" || segments.next()? != "tenants" {
+    if segments.next()? != "v1" {
         return None;
     }
-    segments.next()?; // the slug
     let candidate = segments.next()?;
 
     // Only names this build actually offers. An unknown segment is a route that
@@ -291,46 +325,102 @@ mod tests {
         let module = |path: &str| module_of(path).map(|m| m.as_str().to_owned());
 
         // Every module's routes, scoped to it.
+        assert_eq!(module("/v1/sales/invoices").as_deref(), Some("sales"));
         assert_eq!(
-            module("/v1/tenants/acme/sales/invoices").as_deref(),
+            module("/v1/sales/invoices/INV-1/payments").as_deref(),
             Some("sales")
         );
-        assert_eq!(
-            module("/v1/tenants/acme/sales/invoices/INV-1/payments").as_deref(),
-            Some("sales")
-        );
-        assert_eq!(
-            module("/v1/tenants/acme/ledger/accounts").as_deref(),
-            Some("ledger")
-        );
-        assert_eq!(
-            module("/v1/tenants/acme/ledger/chart").as_deref(),
-            Some("ledger")
-        );
+        assert_eq!(module("/v1/ledger/accounts").as_deref(), Some("ledger"));
+        assert_eq!(module("/v1/ledger/chart").as_deref(), Some("ledger"));
+        assert_eq!(module("/v1/purchases/bills").as_deref(), Some("purchases"));
+        assert_eq!(module("/v1/tax_sa/vat-return").as_deref(), Some("tax_sa"));
 
         // The tenant's own surface belongs to no module, so it is judged on the
         // tenant-wide role. This is what stops an accountant-for-sales from
         // deciding who else has access.
         for tenant_wide in [
-            "/v1/tenants/acme",
-            "/v1/tenants/acme/members",
-            "/v1/tenants/acme/members/01a00000-0000-7000-8000-000000000000",
-            "/v1/tenants/acme/modules",
-            "/v1/tenants/acme/invitations",
+            "/v1/tenant",
+            "/v1/members",
+            "/v1/members/01a00000-0000-7000-8000-000000000000",
+            "/v1/modules",
+            "/v1/invitations",
         ] {
             assert_eq!(module(tenant_wide), None, "{tenant_wide}");
         }
 
-        // Nothing outside a tenant is a module's business either.
-        for outside in [
-            "/v1/health",
-            "/v1/sessions",
-            "/v1/signups",
-            "/v1/modules",
-            "/",
-        ] {
+        // Nothing outside a module is a module's business either.
+        for outside in ["/v1/health", "/v1/sessions", "/v1/signups", "/"] {
             assert_eq!(module(outside), None, "{outside}");
         }
+    }
+
+    fn host(value: &str) -> Parts {
+        let mut request = axum::http::Request::builder();
+        if !value.is_empty() {
+            request = request.header(header::HOST, value);
+        }
+        request
+            .uri("/v1/tenant")
+            .body(())
+            .unwrap_or_else(|_| unreachable!("a valid request"))
+            .into_parts()
+            .0
+    }
+
+    /// **Which host names which tenant.**
+    ///
+    /// The tenant used to be a path segment somebody could mistype; it is a
+    /// subdomain now, and the parsing is the one place that decides. Off by one
+    /// label here is a request served against the wrong company.
+    #[test]
+    fn a_tenant_is_exactly_one_label_under_the_domain() {
+        let of = |h: &str| subdomain(&host(h), "spa.com");
+
+        assert_eq!(of("bassat.spa.com").as_deref(), Some("bassat"));
+        assert_eq!(
+            of("BASSAT.SPA.COM").as_deref(),
+            Some("bassat"),
+            "hosts are case-insensitive and tenants are lower case"
+        );
+        assert_eq!(
+            of("bassat.spa.com:8080").as_deref(),
+            Some("bassat"),
+            "a port is not part of the name"
+        );
+        assert_eq!(
+            of("bassat.spa.com.").as_deref(),
+            Some("bassat"),
+            "a fully-qualified name ends in a dot and means the same thing"
+        );
+
+        // The apex is where signing up and logging in happen. It is not a
+        // tenant, and reading it as one would make `www` a company.
+        assert_eq!(of("spa.com"), None);
+        assert_eq!(of(""), None, "no host at all");
+
+        // Exactly one label. Nesting under a wildcard certificate must not name
+        // anything, or `evil.bassat.spa.com` starts looking addressable.
+        assert_eq!(of("a.bassat.spa.com"), None);
+        assert_eq!(of(".spa.com"), None);
+
+        // A different domain is not this deployment.
+        assert_eq!(of("bassat.example.com"), None);
+        assert_eq!(
+            of("notspa.com"),
+            None,
+            "a suffix match is not a subdomain match"
+        );
+    }
+
+    /// Development runs under `.localhost`, which resolves without touching
+    /// `/etc/hosts` in every browser and in curl.
+    #[test]
+    fn localhost_works_the_same_way() {
+        assert_eq!(
+            subdomain(&host("acme.localhost"), "localhost").as_deref(),
+            Some("acme")
+        );
+        assert_eq!(subdomain(&host("localhost"), "localhost"), None);
     }
 
     /// A request cannot opt out of its tenant-wide role by inventing a segment.
@@ -340,9 +430,9 @@ mod tests {
     /// fell back to a role they were deliberately not given there.
     #[test]
     fn an_invented_module_segment_is_not_a_module() {
-        assert_eq!(module_of("/v1/tenants/acme/nonsense/x"), None);
-        assert_eq!(module_of("/v1/tenants/acme/Sales/invoices"), None);
-        assert_eq!(module_of("/v1/tenants/acme/../sales/invoices"), None);
+        assert_eq!(module_of("/v1/nonsense/x"), None);
+        assert_eq!(module_of("/v1/Sales/invoices"), None);
+        assert_eq!(module_of("/v1/../sales/invoices"), None);
     }
 
     /// Every module this build offers is reachable as a path segment, so no
@@ -350,7 +440,7 @@ mod tests {
     #[test]
     fn every_module_is_addressable_by_its_own_name() {
         for (name, setup) in crate::modules::available() {
-            let path = format!("/v1/tenants/acme/{name}/anything");
+            let path = format!("/v1/{name}/anything");
             assert_eq!(
                 module_of(&path).as_ref(),
                 Some(&setup.module),

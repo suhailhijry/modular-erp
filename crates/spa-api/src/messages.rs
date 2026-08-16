@@ -12,6 +12,7 @@ pub const PASSWORD_TOO_SHORT: MessageCode = MessageCode::new("request.password_t
 pub const UNKNOWN_MODULE: MessageCode = MessageCode::new("request.unknown_module");
 pub const UNKNOWN_CHART: MessageCode = MessageCode::new("request.unknown_chart");
 pub const UNKNOWN_ROLE: MessageCode = MessageCode::new("request.unknown_role");
+pub const UNKNOWN_ID_SCHEME: MessageCode = MessageCode::new("request.unknown_id_scheme");
 /// 503. The caller asked to see a write that has not been projected yet.
 pub const NOT_CAUGHT_UP: MessageCode = MessageCode::new("request.not_caught_up");
 /// A module was asked for without one it cannot work without.
@@ -44,6 +45,7 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_MODULE,
     UNKNOWN_CHART,
     UNKNOWN_ROLE,
+    UNKNOWN_ID_SCHEME,
     NOT_CAUGHT_UP,
     MODULE_REQUIRES,
     MODULE_NOT_ENABLED,
@@ -217,6 +219,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         UNKNOWN_ROLE,
         Locale::Arabic,
         Template::Simple("{role} ليس دورًا. استخدم owner أو accountant أو clerk أو viewer."),
+    ),
+    (
+        UNKNOWN_ID_SCHEME,
+        Locale::English,
+        Template::Simple(
+            "{scheme} is not an identification scheme. Use crn, mom, mls, sag, number700 or other.",
+        ),
+    ),
+    (
+        UNKNOWN_ID_SCHEME,
+        Locale::Arabic,
+        Template::Simple(
+            "{scheme} ليس نوع سجل. استخدم crn أو mom أو mls أو sag أو number700 أو other.",
+        ),
     ),
     (
         NOT_CAUGHT_UP,

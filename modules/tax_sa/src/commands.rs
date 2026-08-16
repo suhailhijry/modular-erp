@@ -16,6 +16,10 @@ pub enum TaxError {
     #[error("{0} cannot be used as a period identifier")]
     InvalidPeriod(String),
     #[error(transparent)]
+    Registration(#[from] crate::taxpayer::InvalidRegistration),
+    #[error("{0} cannot be used as a document identifier")]
+    InvalidDocument(String),
+    #[error(transparent)]
     Read(#[from] sqlx::Error),
 }
 
@@ -30,6 +34,13 @@ impl spa_i18n::Localize for TaxError {
                 .with("on", MessageArg::text(on.to_rfc3339())),
             Self::InvalidPeriod(period) => Message::new(messages::INVALID_PERIOD)
                 .with("period", MessageArg::text(period.clone())),
+            // The registration's own error says which field and why, and it is
+            // the only thing that knows — so it is passed through as text rather
+            // than flattened into a code per field.
+            Self::Registration(reason) => Message::new(messages::INVALID_REGISTRATION)
+                .with("reason", MessageArg::text(reason.to_string())),
+            Self::InvalidDocument(document) => Message::new(messages::INVALID_DOCUMENT)
+                .with("document", MessageArg::text(document.clone())),
             // Ours: the read models are unwell, not something a user did.
             Self::Read(_) => Message::new(spa_eventlog::messages::INTERNAL),
         }
@@ -198,3 +209,98 @@ const _: fn() = || {
     }
     let _ = commands_are_send;
 };
+
+// ---------------------------------------------------------------------------
+// ZATCA
+// ---------------------------------------------------------------------------
+
+/// Records the business's ZATCA registration, from here on.
+///
+/// Every document rendered after this carries it; nothing already rendered
+/// changes, which is the point — see [`crate::taxpayer`]. Registering again is a
+/// correction and a new event, not an edit.
+///
+/// Rejects anything ZATCA would reject, because the alternative is finding out
+/// at clearance: a standard invoice cannot be given to the buyer until it is
+/// cleared, so a bad VAT number stops a sale rather than producing a warning.
+pub async fn register_taxpayer(
+    db: &TenantDb,
+    registration: crate::taxpayer::Registration,
+    on: Timestamp,
+    metadata: &Metadata,
+) -> Result<Committed<crate::taxpayer::TaxpayerEvent>, CommandError<TaxError>> {
+    registration
+        .check()
+        .map_err(|e| rejected(TaxError::Registration(e)))?;
+
+    db.execute::<crate::taxpayer::Taxpayer, _, TaxError>(
+        &crate::taxpayer::taxpayer_id(),
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            // Registering the same details twice writes nothing. A retried
+            // request is not a correction.
+            if loaded.aggregate.registration.as_ref() == Some(&registration) {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(crate::taxpayer::TaxpayerEvent::Registered {
+                registration: registration.clone(),
+                on,
+            }))
+        },
+    )
+    .await
+}
+
+/// Records what ZATCA decided about one document.
+///
+/// Called by whatever submitted it, **after** the call returned. Only a verdict
+/// reaches here: a timeout or an expired certificate is not a decision about the
+/// document and appends nothing, so the document stays pending and the next
+/// sweep tries again.
+///
+/// Recording the same verdict twice writes nothing, which is what makes a
+/// submitter that crashed between the call and the append safe to re-run.
+pub async fn record_outcome(
+    db: &TenantDb,
+    document: &str,
+    kind: crate::zatca::Kind,
+    verdict: &crate::zatca::wire::Verdict,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<Committed<crate::clearance::ClearanceEvent>, CommandError<TaxError>> {
+    let id = AggregateId::new(document)
+        .map_err(|_| rejected(TaxError::InvalidDocument(document.to_owned())))?;
+
+    let event = match verdict {
+        crate::zatca::wire::Verdict::Accepted { warnings, stamped } => {
+            crate::clearance::ClearanceEvent::Accepted {
+                document: document.to_owned(),
+                kind,
+                warnings: warnings.clone(),
+                stamped: stamped.clone(),
+                at,
+            }
+        }
+        crate::zatca::wire::Verdict::Refused { errors } => {
+            crate::clearance::ClearanceEvent::Refused {
+                document: document.to_owned(),
+                errors: errors.clone(),
+                at,
+            }
+        }
+    };
+
+    db.execute::<crate::clearance::Clearance, _, TaxError>(
+        &id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if loaded.aggregate.settled {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(event.clone()))
+        },
+    )
+    .await
+}

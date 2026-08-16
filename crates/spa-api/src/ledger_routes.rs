@@ -101,7 +101,7 @@ struct NewEntry {
 
 #[derive(Debug, Deserialize, ToSchema)]
 struct NewLine {
-    /// An account code from `GET /v1/tenants/{slug}/ledger/accounts`.
+    /// An account code from `GET /v1/ledger/accounts`.
     account: String,
     /// Positive debits, negative credits.
     amount: Amount,
@@ -138,10 +138,10 @@ struct TrialBalanceView {
 /// second number that can be wrong.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/ledger/accounts",
+    path = "/v1/ledger/accounts",
     tag = "ledger",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
@@ -191,9 +191,9 @@ async fn list_accounts(
 /// Open an account.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/ledger/accounts",
+    path = "/v1/ledger/accounts",
     tag = "ledger",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = NewAccount,
     responses(
         (status = CREATED, description = "Opened."),
@@ -252,9 +252,9 @@ async fn open_account(
 /// `Idempotency-Key` header.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/ledger/entries",
+    path = "/v1/ledger/entries",
     tag = "ledger",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = NewEntry,
     responses(
         (status = OK, description = "Posted, or already posted under this id.", body = EntryPosted),
@@ -337,10 +337,10 @@ struct NewReversal {
 /// the mistake and the correction, which is what makes them auditable.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/ledger/entries/{entry}/reversal",
+    path = "/v1/ledger/entries/{entry}/reversal",
     tag = "ledger",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("entry" = String, Path, description = "The id of the entry being undone."),
     ),
     request_body = NewReversal,
@@ -396,10 +396,10 @@ async fn reverse_entry(
 /// an unbalanced set — so it is worth alerting on.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/ledger/trial-balance",
+    path = "/v1/ledger/trial-balance",
     tag = "ledger",
     params(
-        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
@@ -521,9 +521,9 @@ struct BooksView {
 /// How far the books are closed.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/ledger/books",
+    path = "/v1/ledger/books",
     tag = "ledger",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, body = BooksView),
         (status = UNAUTHORIZED, body = Problem),
@@ -568,9 +568,9 @@ async fn books(
 /// able to do to them.
 #[utoipa::path(
     put,
-    path = "/v1/tenants/{slug}/ledger/books",
+    path = "/v1/ledger/books",
     tag = "ledger",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = BooksView,
     responses(
         (status = NO_CONTENT, description = "Closed. Entries dated before it are refused from now on."),
@@ -634,9 +634,9 @@ struct RatesView {
 /// What this business charges VAT at.
 #[utoipa::path(
     get,
-    path = "/v1/tenants/{slug}/ledger/vat-rates",
+    path = "/v1/ledger/vat-rates",
     tag = "ledger",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, body = RatesView),
         (status = UNAUTHORIZED, body = Problem),
@@ -677,9 +677,9 @@ async fn vat_rates(
 /// and this is how anyone else corrects it.
 #[utoipa::path(
     put,
-    path = "/v1/tenants/{slug}/ledger/vat-rates",
+    path = "/v1/ledger/vat-rates",
     tag = "ledger",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = RatesView,
     responses(
         (status = NO_CONTENT, description = "Set. Applies to the next invoice, not to past ones."),
@@ -806,9 +806,9 @@ struct ChartInstalled {
 /// as `skipped` and left exactly as they are, names included.
 #[utoipa::path(
     post,
-    path = "/v1/tenants/{slug}/ledger/chart",
+    path = "/v1/ledger/chart",
     tag = "ledger",
-    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
     request_body = InstallChart,
     responses(
         (status = OK, body = ChartInstalled),

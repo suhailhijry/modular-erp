@@ -317,6 +317,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — {currency} is not a currency code. Use three letters, like SAR.
 - **ar** — {currency} ليس رمز عملة. استخدم ثلاثة أحرف، مثل SAR.
 
+### `request.unknown_id_scheme`
+
+- **en** — {scheme} is not an identification scheme. Use crn, mom, mls, sag, number700 or other.
+- **ar** — {scheme} ليس نوع سجل. استخدم crn أو mom أو mls أو sag أو number700 أو other.
+
 ### `request.unknown_module`
 
 - **en** — There is no module called {module}.
@@ -421,8 +426,28 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — A period must end after it starts. `until` is exclusive.
 - **ar** — يجب أن تنتهي الفترة بعد بدايتها. تاريخ الانتهاء غير شامل.
 
+### `tax_sa.invalid_document`
+
+- **en** — {document} cannot be used as a document identifier.
+- **ar** — لا يمكن استخدام {document} كمعرّف مستند.
+
 ### `tax_sa.invalid_period`
 
 - **en** — {period} cannot be used as a period identifier.
 - **ar** — لا يمكن استخدام {period} كمعرّف فترة.
+
+### `tax_sa.invalid_registration`
+
+- **en** — That ZATCA registration cannot be used: {reason}. It is checked here because a standard invoice cannot be given to a buyer until ZATCA has cleared it.
+- **ar** — لا يمكن استخدام بيانات التسجيل لدى هيئة الزكاة والضريبة والجمارك: {reason}. تُفحص هنا لأن الفاتورة الضريبية لا تُسلَّم للمشتري قبل اعتمادها.
+
+### `tax_sa.no_such_document`
+
+- **en** — There is no ZATCA document numbered {document}.
+- **ar** — لا يوجد مستند برقم {document}.
+
+### `tax_sa.not_registered`
+
+- **en** — This business has no ZATCA registration yet, so no invoice can be cleared or reported. Register one first.
+- **ar** — لا يوجد تسجيل لدى هيئة الزكاة والضريبة والجمارك لهذه المنشأة بعد، فلا يمكن اعتماد أي فاتورة أو الإبلاغ عنها. سجِّل البيانات أولًا.
 

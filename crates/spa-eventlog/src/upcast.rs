@@ -106,6 +106,32 @@ impl Upcasters {
         self
     }
 
+    /// Everything another module knows how to read, folded into this one.
+    ///
+    /// # Why a module needs this
+    ///
+    /// A module that **extends** another reads its events: `tax_sa` builds a
+    /// ZATCA document from `sales.invoice.issued`, which means its projection
+    /// group must be able to decode an event it did not define. Declaring the
+    /// names again here would be a second copy of `sales`' history, wrong the
+    /// day sales adds a version — and it would be wrong *silently*, because the
+    /// two copies disagreeing looks exactly like an event from the future.
+    ///
+    /// So the extending module folds in the extended module's chain and gets its
+    /// upcasters for free, including ones written later. `gaps()` then covers
+    /// both, and the pre-deploy version check sees the whole set.
+    ///
+    /// Later declarations win, so a module can never quietly downgrade the
+    /// version another module owns — it can only be the same or a build bug.
+    #[must_use]
+    pub fn also(mut self, other: &Self) -> Self {
+        self.current
+            .extend(other.current.iter().map(|(k, v)| (k.clone(), *v)));
+        self.steps
+            .extend(other.steps.iter().map(|(k, v)| (k.clone(), *v)));
+        self
+    }
+
     /// Registers the step from `from` to `from + 1`.
     #[must_use]
     pub fn step(mut self, event_name: &EventName, from: SchemaVersion, step: UpcastStep) -> Self {
@@ -230,6 +256,31 @@ mod tests {
             .declare(&name(), v(3))
             .step(&name(), v(1), add_currency)
             .step(&name(), v(2), rename_name_to_label)
+    }
+
+    /// A module that reads another module's events gets its whole chain, steps
+    /// included — which is the thing that would rot if the names were copied.
+    #[test]
+    fn folding_in_another_registry_brings_its_upcasters_with_it() {
+        let theirs = registry();
+        let mine = Upcasters::new()
+            .declare(&EventName::new("mine.thing").expect("valid"), v(1))
+            .also(&theirs);
+
+        // Mine still reads mine.
+        assert_eq!(
+            mine.current_version(&EventName::new("mine.thing").expect("valid")),
+            Some(v(1))
+        );
+        // And theirs, at their version, through their steps.
+        assert_eq!(mine.current_version(&name()), Some(v(3)));
+        assert_eq!(
+            mine.upcast(&name(), v(1), serde_json::json!({ "name": "Cash" }))
+                .expect("upcasts through both of their steps"),
+            serde_json::json!({ "label": "Cash", "currency": "SAR" })
+        );
+        // No gaps invented by the fold.
+        assert!(mine.gaps().is_empty(), "{:?}", mine.gaps());
     }
 
     #[test]
