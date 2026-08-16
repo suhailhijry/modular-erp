@@ -5,7 +5,7 @@
 //! are all under test. A handler tested by calling it has skipped the part most
 //! likely to be wrong.
 
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::sync::Arc;
 
@@ -105,6 +105,8 @@ impl Fixture {
     }
 
     async fn send(&self, request: Request<Body>) -> (StatusCode, serde_json::Value, Vec<u8>) {
+        let method = request.method().as_str().to_lowercase();
+        let path = request.uri().path().to_owned();
         let response = self
             .app
             .clone()
@@ -123,6 +125,8 @@ impl Fixture {
             .await
             .expect("body reads");
         let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        // Every response in this file is also a contract test. See `contract`.
+        contract::check(&method, &path, status, &json);
         (status, json, content_type)
     }
 
@@ -572,9 +576,13 @@ async fn errors_are_localized_but_their_codes_are_not() {
 
 /// An unparseable body is a 400, and does not reveal anything about the route.
 #[tokio::test]
-async fn a_malformed_body_is_a_400() {
+async fn a_malformed_body_is_a_400_in_the_shape_every_other_failure_has() {
     let fixture = Fixture::new().await;
-    let (status, _, _) = fixture
+
+    // axum's own `Json` rejection is `text/plain` with no `code`, so a client
+    // that always parses `problem+json` broke on the most common mistake there
+    // is. `wire::Json` is what makes this the same shape as everything else.
+    let (status, body, content_type) = fixture
         .send(
             Request::post("/v1/sessions")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -584,6 +592,40 @@ async fn a_malformed_body_is_a_400() {
         .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(content_type, b"application/problem+json");
+    assert_eq!(body["code"], "request.malformed_body");
+    assert!(
+        body["args"]["reason"]["value"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty()),
+        "the parser's account of what it found is what makes this fixable: {body}"
+    );
+
+    // Valid JSON of the wrong shape is a different status and the same shape.
+    let (status, body, content_type) = fixture
+        .send(
+            Request::post("/v1/sessions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"handle": "someone@acme.test"}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(content_type, b"application/problem+json");
+    assert_eq!(body["code"], "request.malformed_body");
+
+    // And a body with no content type at all.
+    let (status, body, content_type) = fixture
+        .send(
+            Request::post("/v1/sessions")
+                .body(Body::from(r#"{"handle": "a", "password": "b"}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{body}");
+    assert_eq!(content_type, b"application/problem+json");
+    assert_eq!(body["code"], "request.unsupported_media_type");
+
     fixture.cleanup().await;
 }
 
@@ -3702,5 +3744,533 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "request.empty_period");
 
+    // The query string is the other place a parser answers before any handler
+    // does, and axum's own rejection there is `text/plain` with no code. A
+    // missing `from` is the same shape as every other failure.
+    let (status, body, content_type) = fixture
+        .send(
+            bearer(Request::get(
+                "/v1/tenants/acme/sales/vat-return?currency=SAR",
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(content_type, b"application/problem+json");
+    assert_eq!(body["code"], "request.invalid_query");
+
     fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+
+/// **Every response in this file, checked against the published document.**
+///
+/// # Why this exists
+///
+/// `utoipa-axum` makes the *paths* structural — a route is registered from its
+/// `#[utoipa::path]` attribute, so the document cannot miss one. It does not
+/// make the **responses** structural: `(status = OK, body = AccountView)` is
+/// hand-written, and nothing in the compiler notices when a handler starts
+/// answering with something else, or with a status nobody documented.
+///
+/// So every response the tests above receive is validated against the schema the
+/// document publishes for that path, method and status. Three thousand lines of
+/// existing coverage become contract coverage for the cost of one call in
+/// [`Fixture::send`], and the failure mode this catches — a document that is
+/// believed and wrong — is the expensive one.
+///
+/// ponytail: a hand-written subset of JSON Schema rather than the `jsonschema`
+/// crate — `$ref`, `allOf`, `oneOf`/`anyOf`, `required`, `properties`,
+/// `additionalProperties`, `items`, and `type` (including `["T", "null"]`), which
+/// is everything utoipa emits here. `every_schema_keyword_is_understood` fails
+/// when that stops being true, and the upgrade path is one dev-dependency.
+mod contract {
+    use std::collections::BTreeSet;
+    use std::sync::LazyLock;
+
+    use axum::http::StatusCode;
+    use serde_json::Value;
+
+    static DOCUMENT: LazyLock<Value> = LazyLock::new(|| {
+        serde_json::to_value(spa_api::openapi()).expect("the document serializes")
+    });
+
+    /// Fails when a response does not match what the document promises.
+    pub(super) fn check(method: &str, path: &str, status: StatusCode, body: &Value) {
+        let doc = &*DOCUMENT;
+        let Some(template) = template_for(doc, path) else {
+            // Not a route this API serves — a test proving a 404, or one of
+            // axum's own rejections. Nothing to check it against.
+            return;
+        };
+
+        let operation = &doc["paths"][&template][method];
+        if operation.is_null() {
+            assert!(
+                status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_FOUND,
+                "{method} {template} answered {status} and is not in the document"
+            );
+            return;
+        }
+
+        let responses = &operation["responses"];
+        let response = &responses[status.as_str()];
+        assert!(
+            !response.is_null(),
+            "{method} {template} answered {status}, which the document does not \
+             declare. It declares {:?}.",
+            responses
+                .as_object()
+                .map(|r| r.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
+
+        let Some(schema) = response["content"]["application/json"]["schema"]
+            .as_object()
+            .or_else(|| response["content"]["application/problem+json"]["schema"].as_object())
+        else {
+            // Content declared with no schema is a body nothing can describe —
+            // `/v1/openapi.json` answers with an arbitrary OpenAPI document.
+            // No content at all is a promise the body carries nothing.
+            if response["content"].is_object() {
+                return;
+            }
+            assert!(
+                body.is_null(),
+                "{method} {template} → {status} declares no body and sent {body}"
+            );
+            return;
+        };
+
+        let schema = Value::Object(schema.clone());
+        if let Err(why) = validate(doc, &schema, body, "$", Closed::Yes) {
+            panic!(
+                "{method} {template} → {status} does not match the document: {why}\nbody: {body}"
+            );
+        }
+    }
+
+    /// The templated path this concrete one was served by.
+    ///
+    /// Prefers the candidate with the most literal segments, so
+    /// `/v1/sessions/current` is not read as `/v1/tenants/{slug}`-shaped noise.
+    fn template_for(doc: &Value, path: &str) -> Option<String> {
+        let actual: Vec<&str> = path.split('/').collect();
+        let mut best: Option<(usize, String)> = None;
+
+        for template in doc["paths"].as_object()?.keys() {
+            let parts: Vec<&str> = template.split('/').collect();
+            if parts.len() != actual.len() {
+                continue;
+            }
+            let mut literals = 0;
+            let matches = parts.iter().zip(&actual).all(|(want, got)| {
+                if want.starts_with('{') && want.ends_with('}') {
+                    !got.is_empty()
+                } else {
+                    literals += 1;
+                    want == got
+                }
+            });
+            if matches && best.as_ref().is_none_or(|(score, _)| literals > *score) {
+                best = Some((literals, template.clone()));
+            }
+        }
+        best.map(|(_, template)| template)
+    }
+
+    fn resolve<'a>(doc: &'a Value, schema: &'a Value) -> &'a Value {
+        match schema["$ref"].as_str() {
+            Some(reference) => {
+                let name = reference
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or_else(|| panic!("{reference} is not a local reference"));
+                let target = &doc["components"]["schemas"][name];
+                assert!(!target.is_null(), "{reference} does not resolve");
+                target
+            }
+            None => schema,
+        }
+    }
+
+    /// Whether a stray property is an error at this level.
+    ///
+    /// `No` inside an `allOf` branch, where the fields it does not declare
+    /// belong to a sibling — the union is checked once, at the `allOf`.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Closed {
+        Yes,
+        No,
+    }
+
+    fn validate(
+        doc: &Value,
+        schema: &Value,
+        value: &Value,
+        at: &str,
+        closed: Closed,
+    ) -> Result<(), String> {
+        let schema = resolve(doc, schema);
+
+        if let Some(branches) = schema["oneOf"].as_array().or(schema["anyOf"].as_array()) {
+            return branches
+                .iter()
+                .any(|branch| validate(doc, branch, value, at, closed).is_ok())
+                .then_some(())
+                .ok_or_else(|| {
+                    format!("{at} matches none of the {} alternatives", branches.len())
+                });
+        }
+
+        if let Some(branches) = schema["allOf"].as_array() {
+            for branch in branches {
+                validate(doc, branch, value, at, Closed::No)?;
+            }
+            if closed == Closed::No {
+                return Ok(());
+            }
+            let mut declared = BTreeSet::new();
+            for branch in branches {
+                declared.extend(properties_of(doc, branch));
+            }
+            return no_strays(value, &declared, at);
+        }
+
+        match type_of(schema) {
+            Some(types) if !types.iter().any(|t| holds(t, value)) => {
+                return Err(format!(
+                    "{at} is {} and the document says {types:?}",
+                    kind(value)
+                ));
+            }
+            _ => {}
+        }
+        if value.is_null() {
+            return Ok(());
+        }
+
+        if let Some(object) = value.as_object() {
+            for required in schema["required"].as_array().unwrap_or(&Vec::new()) {
+                let name = required.as_str().unwrap_or_default();
+                if !object.contains_key(name) {
+                    return Err(format!("{at}.{name} is required and absent"));
+                }
+            }
+            for (name, child) in object {
+                let declared = &schema["properties"][name];
+                if declared.is_null() {
+                    // A free-form map (`additionalProperties: <schema>`) says
+                    // what its *values* look like, not their names.
+                    let extra = &schema["additionalProperties"];
+                    if extra.is_object() {
+                        validate(doc, extra, child, &format!("{at}.{name}"), Closed::Yes)?;
+                    }
+                    continue;
+                }
+                validate(doc, declared, child, &format!("{at}.{name}"), Closed::Yes)?;
+            }
+            if closed == Closed::Yes
+                && schema["properties"].is_object()
+                && !schema["additionalProperties"].is_object()
+            {
+                no_strays(value, &properties_of(doc, schema), at)?;
+            }
+        }
+
+        if let Some(items) = value.as_array()
+            && schema["items"].is_object()
+        {
+            for (index, item) in items.iter().enumerate() {
+                validate(
+                    doc,
+                    &schema["items"],
+                    item,
+                    &format!("{at}[{index}]"),
+                    Closed::Yes,
+                )?;
+            }
+        }
+
+        // `minimum` is what an unsigned Rust integer publishes. Cheap to honour,
+        // and a negative count is a defect worth catching.
+        if let Some(minimum) = schema["minimum"].as_i64()
+            && let Some(number) = value.as_i64()
+            && number < minimum
+        {
+            return Err(format!(
+                "{at} is {number} and the document says at least {minimum}"
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Every property name a schema declares, following `$ref` and `allOf`.
+    fn properties_of(doc: &Value, schema: &Value) -> BTreeSet<String> {
+        let schema = resolve(doc, schema);
+        let mut names: BTreeSet<String> = schema["properties"]
+            .as_object()
+            .map(|p| p.keys().cloned().collect())
+            .unwrap_or_default();
+        for branch in schema["allOf"].as_array().unwrap_or(&Vec::new()) {
+            names.extend(properties_of(doc, branch));
+        }
+        names
+    }
+
+    /// A field the server sends and the document does not mention is the drift
+    /// that costs an integrator most: it looks like their client is wrong.
+    fn no_strays(value: &Value, declared: &BTreeSet<String>, at: &str) -> Result<(), String> {
+        let Some(object) = value.as_object() else {
+            return Ok(());
+        };
+        for name in object.keys() {
+            if !declared.contains(name) {
+                return Err(format!("{at}.{name} is sent and undocumented"));
+            }
+        }
+        Ok(())
+    }
+
+    fn type_of(schema: &Value) -> Option<Vec<&str>> {
+        match &schema["type"] {
+            Value::String(one) => Some(vec![one.as_str()]),
+            Value::Array(many) => Some(many.iter().filter_map(Value::as_str).collect()),
+            _ => None,
+        }
+    }
+
+    fn holds(declared: &str, value: &Value) -> bool {
+        match declared {
+            "null" => value.is_null(),
+            "boolean" => value.is_boolean(),
+            "string" => value.is_string(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "number" => value.is_number(),
+            "array" => value.is_array(),
+            "object" => value.is_object(),
+            other => panic!("unknown schema type {other:?}"),
+        }
+    }
+
+    fn kind(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
+    /// **The guard on the lookup.**
+    ///
+    /// [`check`] returns without checking anything when no template matches the
+    /// path — right for a test proving a 404, and a silent skip of *everything*
+    /// if the matcher ever breaks. `the_validator_is_not_vacuous` would not
+    /// notice: it calls `validate` directly.
+    ///
+    /// So every shape of path this API serves is pinned to the template that
+    /// serves it, and two that nothing serves are pinned to `None`.
+    #[test]
+    fn every_shape_of_path_finds_its_template() {
+        let doc = &*DOCUMENT;
+        let cases = [
+            ("/v1/health", Some("/v1/health")),
+            ("/v1/modules", Some("/v1/modules")),
+            ("/v1/sessions", Some("/v1/sessions")),
+            ("/v1/sessions/current", Some("/v1/sessions/current")),
+            ("/v1/invitations/abc123", Some("/v1/invitations/{token}")),
+            (
+                "/v1/invitations/abc123/acceptance",
+                Some("/v1/invitations/{token}/acceptance"),
+            ),
+            ("/v1/tenants/acme", Some("/v1/tenants/{slug}")),
+            (
+                "/v1/tenants/acme/members",
+                Some("/v1/tenants/{slug}/members"),
+            ),
+            (
+                "/v1/tenants/acme/members/01a00000-0000-7000-8000-000000000000/modules/sales",
+                Some("/v1/tenants/{slug}/members/{identity}/modules/{module}"),
+            ),
+            (
+                "/v1/tenants/acme/ledger/entries/JE-1/reversal",
+                Some("/v1/tenants/{slug}/ledger/entries/{entry}/reversal"),
+            ),
+            (
+                "/v1/tenants/acme/sales/invoices/INV-1",
+                Some("/v1/tenants/{slug}/sales/invoices/{invoice}"),
+            ),
+            (
+                "/v1/tenants/acme/sales/invoices/INV-1/credit-note",
+                Some("/v1/tenants/{slug}/sales/invoices/{invoice}/credit-note"),
+            ),
+            (
+                "/v1/tenants/acme/sales/posting-accounts",
+                Some("/v1/tenants/{slug}/sales/posting-accounts"),
+            ),
+            // Nothing serves these. Resolving them would swallow the 404 tests
+            // that prove a route does not exist for a tenant.
+            ("/v1/nonsense", None),
+            ("/v1/tenants/acme/nonsense", None),
+        ];
+
+        for (concrete, expected) in cases {
+            assert_eq!(
+                template_for(doc, concrete).as_deref(),
+                expected,
+                "{concrete} resolved to the wrong operation"
+            );
+        }
+    }
+
+    /// **The guard on the guard.**
+    ///
+    /// This validator understands a subset of JSON Schema, and a subset is only
+    /// safe while it is a superset of what is emitted. A keyword nobody here
+    /// implements is a constraint silently not checked — which is how a
+    /// hand-rolled validator becomes a test that passes because it looks at
+    /// nothing.
+    #[test]
+    fn every_schema_keyword_is_understood() {
+        const UNDERSTOOD: &[&str] = &[
+            "$ref",
+            "additionalProperties",
+            "allOf",
+            "anyOf",
+            "items",
+            "oneOf",
+            "properties",
+            "required",
+            "type",
+            // Documentation, not constraints.
+            "default",
+            "deprecated",
+            "description",
+            "example",
+            "examples",
+            "format",
+            "propertyNames",
+            "title",
+            // Constrains a value this validator does not check on its own, but
+            // `oneOf` discrimination does — see `MessageArg`.
+            "enum",
+            // Honoured; see `validate`.
+            "minimum",
+        ];
+
+        let doc = &*DOCUMENT;
+        let mut seen = BTreeSet::new();
+        for schema in doc["components"]["schemas"]
+            .as_object()
+            .expect("there are schemas")
+            .values()
+        {
+            keywords(schema, &mut seen);
+        }
+        assert!(!seen.is_empty(), "no schemas at all");
+
+        let unknown: Vec<&String> = seen
+            .iter()
+            .filter(|k| !UNDERSTOOD.contains(&k.as_str()))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "the document uses schema keywords this validator ignores: {unknown:?}. \
+             Implement them, or swap in a real JSON Schema validator."
+        );
+    }
+
+    /// Every key that appears in a schema position.
+    fn keywords(value: &Value, into: &mut BTreeSet<String>) {
+        // These carry *values*, not schemas. Descending into them would report
+        // an example's field names as keywords.
+        const NOT_SCHEMAS: &[&str] = &["default", "enum", "example", "examples"];
+
+        if let Some(object) = value.as_object() {
+            for (key, child) in object {
+                into.insert(key.clone());
+                if NOT_SCHEMAS.contains(&key.as_str()) {
+                    continue;
+                }
+                // `properties` keys are field names; its values are schemas.
+                if key == "properties" {
+                    for field in child.as_object().into_iter().flatten() {
+                        keywords(field.1, into);
+                    }
+                    continue;
+                }
+                keywords(child, into);
+            }
+        } else if let Some(items) = value.as_array() {
+            for item in items {
+                keywords(item, into);
+            }
+        }
+    }
+
+    /// The validator says no when the document and the body disagree.
+    ///
+    /// Without this the whole module could be a no-op and every test above would
+    /// still be green — which is exactly the failure it exists to prevent.
+    #[test]
+    fn the_validator_is_not_vacuous() {
+        let doc = &*DOCUMENT;
+        let schema = serde_json::json!({ "$ref": "#/components/schemas/AccountView" });
+
+        let good = serde_json::json!({
+            "code": "1000", "name": "Cash", "kind": "asset",
+            "balance": 100, "currency": "SAR", "closed": false, "postings": 2
+        });
+        assert!(validate(doc, &schema, &good, "$", Closed::Yes).is_ok());
+
+        let mut missing = good.clone();
+        missing.as_object_mut().unwrap().remove("balance");
+        assert!(
+            validate(doc, &schema, &missing, "$", Closed::Yes).is_err(),
+            "missing field"
+        );
+
+        let mut renamed = good.clone();
+        let object = renamed.as_object_mut().unwrap();
+        object.remove("postings");
+        object.insert("posting_count".into(), 2.into());
+        assert!(
+            validate(doc, &schema, &renamed, "$", Closed::Yes).is_err(),
+            "renamed field"
+        );
+
+        let mut retyped = good.clone();
+        retyped["balance"] = serde_json::json!("100");
+        assert!(
+            validate(doc, &schema, &retyped, "$", Closed::Yes).is_err(),
+            "retyped field"
+        );
+
+        let mut extra = good.clone();
+        extra["surprise"] = serde_json::json!(1);
+        assert!(
+            validate(doc, &schema, &extra, "$", Closed::Yes).is_err(),
+            "extra field"
+        );
+
+        // And through `allOf`, which is how `#[serde(flatten)]` is published.
+        let detail = serde_json::json!({ "$ref": "#/components/schemas/InvoiceDetailView" });
+        let flattened = serde_json::json!({
+            "id": "INV-1", "customer": "Acme", "customer_vat": null,
+            "issued_on": "2026-08-15T00:00:00Z", "due_on": null, "cancelled_on": null,
+            "credit_note": null, "currency": "SAR", "net": 100, "tax": 15, "gross": 115,
+            "paid": 0, "outstanding": 115, "payment_count": 0, "note": "",
+            "lines": [], "tax_breakdown": [], "payments_": []
+        });
+        assert!(
+            validate(doc, &detail, &flattened, "$", Closed::Yes).is_err(),
+            "a flattened shape missing `payments` and carrying `payments_` must fail"
+        );
+    }
 }

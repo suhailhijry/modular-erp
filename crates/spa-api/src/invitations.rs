@@ -5,13 +5,16 @@
 //! `/v1/invitations/{token}` ones are **unauthenticated**, because the person
 //! accepting has no account yet — the token is the credential.
 
+use crate::wire::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::{Json, Router, routing};
 use serde::{Deserialize, Serialize};
 use spa_control::{Actor, InvitationError, Role};
 use spa_i18n::{Locale, Localize};
 use spa_types::Timestamp;
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::error::ApiError;
 use crate::extract::{Allowed, Language, ManageTenant};
@@ -23,38 +26,35 @@ use crate::wire::bad_request;
 /// password as one chosen at signup, so the rule is the same one.
 const MIN_PASSWORD: usize = 12;
 
-pub(crate) fn routes() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/v1/tenants/{slug}/invitations",
-            routing::get(list).post(invite),
-        )
-        .route(
-            "/v1/tenants/{slug}/invitations/{invitation}",
-            routing::delete(revoke),
-        )
+pub(crate) fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(list_invitations, invite))
+        .routes(routes!(revoke_invitation))
         // No authentication: whoever is accepting does not have an account yet,
         // and the token in the path is what proves they were invited.
-        .route("/v1/invitations/{token}", routing::get(show))
-        .route("/v1/invitations/{token}/acceptance", routing::post(accept))
+        .routes(routes!(show_invitation))
+        .routes(routes!(accept_invitation))
 }
 
 // ---------------------------------------------------------------------------
 // Wire shapes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "handle": "khalid@acme.example", "role": "accountant" }))]
 struct NewInvitation {
     /// The address to invite. Also the login handle they will end up with.
     handle: String,
+    /// `owner`, `manager`, `accountant` or `viewer`.
     role: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct InvitationCreated {
     id: String,
     handle: String,
     role: &'static str,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     expires_at: Timestamp,
     /// **Shown once.** Pass it on however you already talk to this person.
     /// Nothing stores it, so a lost link is re-issued rather than recovered.
@@ -64,16 +64,18 @@ struct InvitationCreated {
     accept_path: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct InvitationView {
     id: String,
     handle: String,
     role: &'static str,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     expires_at: Timestamp,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     created_at: Timestamp,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct PendingView {
     /// What you are being invited to, and as what. A link that does not say is
     /// a link people accept without reading.
@@ -81,24 +83,28 @@ struct PendingView {
     slug: String,
     handle: String,
     role: &'static str,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     expires_at: Timestamp,
     /// `true` when that address already has an account here — so the form asks
     /// for the existing password rather than offering to choose a new one.
     has_account: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "password": "correct horse battery staple" }))]
 struct Acceptance {
     /// The existing account's password, or the one being chosen for a new
     /// account. Which it is depends on `has_account`.
     password: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AcceptedView {
+    #[schema(value_type = uuid::Uuid)]
     tenant: spa_types::TenantId,
     /// Ready to use — accepting signs you in.
     token: String,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     expires_at: Timestamp,
 }
 
@@ -106,6 +112,25 @@ struct AcceptedView {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// Invite somebody, leaving the password to them.
+///
+/// The `token` comes back **once** and is stored nowhere — pass it on however
+/// you already talk to this person. A lost link is re-issued, not recovered.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/invitations",
+    tag = "invitations",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = NewInvitation,
+    responses(
+        (status = CREATED, body = InvitationCreated),
+        (status = BAD_REQUEST, description = "No such role", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "Already a member here", body = Problem),
+    ),
+)]
 async fn invite(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
@@ -141,7 +166,20 @@ async fn invite(
     ))
 }
 
-async fn list(
+/// Invitations sent and not yet taken up.
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/invitations",
+    tag = "invitations",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    responses(
+        (status = OK, description = "Pending invitations. The tokens are not here — they were shown once.", body = Vec<InvitationView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn list_invitations(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
@@ -166,7 +204,24 @@ async fn list(
     ))
 }
 
-async fn revoke(
+/// Withdraw an invitation before it is taken up.
+#[utoipa::path(
+    delete,
+    path = "/v1/tenants/{slug}/invitations/{invitation}",
+    tag = "invitations",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("invitation" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/invitations`."),
+    ),
+    responses(
+        (status = NO_CONTENT, description = "Withdrawn. The token no longer works."),
+        (status = BAD_REQUEST, description = "Not a well-formed id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn revoke_invitation(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
@@ -190,7 +245,23 @@ async fn revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn show(
+/// What an invitation is for, before accepting it.
+///
+/// Unauthenticated: whoever is accepting has no account yet, and the token *is*
+/// the credential. A link that does not say what it is for is a link people
+/// accept without reading.
+#[utoipa::path(
+    get,
+    path = "/v1/invitations/{token}",
+    tag = "invitations",
+    security(),
+    params(("token" = String, Path, description = "From the invitation link.")),
+    responses(
+        (status = OK, body = PendingView),
+        (status = NOT_FOUND, description = "No such token, or a spent or expired one — the same answer for all three", body = Problem),
+    ),
+)]
+async fn show_invitation(
     State(state): State<AppState>,
     Language(locale): Language,
     Path(token): Path<String>,
@@ -211,7 +282,27 @@ async fn show(
     }))
 }
 
-async fn accept(
+/// Take up an invitation.
+///
+/// `password` is the existing account's password when `has_account` was `true`,
+/// and the one being chosen otherwise. Either way the response is a working
+/// session: accepting signs you in.
+#[utoipa::path(
+    post,
+    path = "/v1/invitations/{token}/acceptance",
+    tag = "invitations",
+    security(),
+    params(("token" = String, Path, description = "From the invitation link.")),
+    request_body = Acceptance,
+    responses(
+        (status = CREATED, body = AcceptedView),
+        (status = BAD_REQUEST, description = "A password under 12 characters", body = Problem),
+        (status = UNAUTHORIZED, description = "The invitation was real; the password for the existing account was not", body = Problem),
+        (status = NOT_FOUND, description = "No such token, or a spent or expired one", body = Problem),
+        (status = CONFLICT, description = "Already a member there", body = Problem),
+    ),
+)]
+async fn accept_invitation(
     State(state): State<AppState>,
     Language(locale): Language,
     Path(token): Path<String>,

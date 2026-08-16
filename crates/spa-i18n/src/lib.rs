@@ -181,7 +181,7 @@ impl std::fmt::Display for MessageCode {
 /// locale-dependent: a count selects a plural form, a date renders differently
 /// under a Hijri calendar, and money carries a currency whose symbol placement
 /// varies. Handing the renderer a `String` throws away everything it needs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum MessageArg {
     /// Latin-script text — an identifier, a slug, a code. Bidi-isolated when

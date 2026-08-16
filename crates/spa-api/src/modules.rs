@@ -12,31 +12,28 @@
 //! ask about dependencies — signing up, enabling later, and refusing to disable
 //! — all read the same field, so they cannot drift.
 
+use crate::wire::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::{Json, Router, routing};
 use serde::{Deserialize, Serialize};
 use spa_control::{Actor, ModuleSetup};
 use spa_i18n::{Locale, Message, MessageArg};
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::error::ApiError;
 use crate::extract::{Allowed, Language, ManageTenant, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
 
-pub(crate) fn routes() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/v1/tenants/{slug}/modules",
-            routing::get(list).post(enable),
-        )
-        .route(
-            "/v1/tenants/{slug}/modules/{module}",
-            routing::delete(disable),
-        )
+pub(crate) fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(list_modules, enable_module))
+        .routes(routes!(disable_module))
         // Unauthenticated on purpose: a pricing page needs the catalogue before
         // anyone has an account. It is product information, not data.
-        .route("/v1/modules", routing::get(catalogue))
+        .routes(routes!(catalogue))
 }
 
 /// Every module this build offers, as `(name, setup)`.
@@ -93,7 +90,7 @@ pub(crate) fn check_requirements(
 // Wire shapes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ModuleView {
     name: &'static str,
     /// What this module needs underneath it. A client building a picker needs
@@ -102,14 +99,16 @@ struct ModuleView {
     enabled: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct CatalogueView {
     name: &'static str,
     requires: &'static [&'static str],
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "module": "sales" }))]
 struct Enable {
+    /// A name from `GET /v1/modules`.
     module: String,
 }
 
@@ -117,7 +116,17 @@ struct Enable {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// The catalogue, for a signup form or a pricing page.
+/// Every module this build offers.
+///
+/// Unauthenticated: a signup form and a pricing page both need this before
+/// anyone has an account. It is product information, not data.
+#[utoipa::path(
+    get,
+    path = "/v1/modules",
+    tag = "modules",
+    security(),
+    responses((status = OK, body = Vec<CatalogueView>)),
+)]
 async fn catalogue() -> Json<Vec<CatalogueView>> {
     Json(
         available()
@@ -131,7 +140,19 @@ async fn catalogue() -> Json<Vec<CatalogueView>> {
 }
 
 /// What this tenant has, and what else it could have.
-async fn list(tenant: Allowed<Read>) -> Json<Vec<ModuleView>> {
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/modules",
+    tag = "modules",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    responses(
+        (status = OK, body = Vec<ModuleView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn list_modules(tenant: Allowed<Read>) -> Json<Vec<ModuleView>> {
     Json(
         available()
             .into_iter()
@@ -149,7 +170,23 @@ async fn list(tenant: Allowed<Read>) -> Json<Vec<ModuleView>> {
 /// Installs its read models *and* records the entitlement — both, because
 /// either alone is a tenant that 500s: entitled with no tables, or tables
 /// nothing can reach.
-async fn enable(
+///
+/// Enabling something already on is a no-op, not a conflict.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/modules",
+    tag = "modules",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = Enable,
+    responses(
+        (status = NO_CONTENT, description = "On. Already-on is the same answer."),
+        (status = BAD_REQUEST, description = "No such module, or one whose dependencies are not enabled", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn enable_module(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
@@ -191,7 +228,23 @@ async fn enable(
 /// the read models stay exactly where they are, so a tenant who downgrades and
 /// comes back finds their data. That is the "updates never break old data"
 /// requirement applied to the one operation most likely to violate it.
-async fn disable(
+#[utoipa::path(
+    delete,
+    path = "/v1/tenants/{slug}/modules/{module}",
+    tag = "modules",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("module" = String, Path, description = "A name from `GET /v1/modules`."),
+    ),
+    responses(
+        (status = NO_CONTENT, description = "Off. Nothing was deleted; already-off is the same answer."),
+        (status = BAD_REQUEST, description = "No such module, or one another enabled module is built on", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn disable_module(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,

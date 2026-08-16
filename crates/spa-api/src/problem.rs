@@ -27,16 +27,29 @@ use spa_i18n::{Catalog, Locale, Localize, Message};
 /// Where a client can read about an error code.
 const TYPE_PREFIX: &str = "https://errors.spa.example/";
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+#[schema(example = json!({
+    "type": "https://errors.spa.example/auth.invalid_credentials",
+    "title": "Unauthorized",
+    "status": 401,
+    "code": "auth.invalid_credentials",
+    "detail": "Those login details are not right. Please try again.",
+}))]
 pub struct Problem {
+    /// `https://errors.spa.example/` followed by the code. Stable, and a place
+    /// to look it up — see `docs/ERRORS.md` for every code this API can answer
+    /// with.
     #[serde(rename = "type")]
     pub type_uri: String,
     pub title: &'static str,
     pub status: u16,
     /// The stable identifier. Branch on this, never on `detail`.
     pub code: String,
-    /// The message in the caller's language.
+    /// The message in the caller's language, chosen by `Accept-Language`.
     pub detail: String,
+    /// The values the message names, typed — which account, which module, how
+    /// much was outstanding. A client that renders its own sentence reads these
+    /// instead of parsing `detail`. Absent when the message takes none.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub args: std::collections::BTreeMap<String, spa_i18n::MessageArg>,
 }

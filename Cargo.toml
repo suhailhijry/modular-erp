@@ -45,6 +45,20 @@ axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
 
+# The OpenAPI document is derived from the handlers and the wire types rather
+# than written alongside them, for the same reason `docs/ERRORS.md` is generated:
+# a hand-written one is wrong within a month, in the direction that costs an
+# integrator a day. `utoipa-axum` is what makes it structural — a route is
+# registered from its `#[utoipa::path]` attribute, so a handler that is served
+# and not documented does not compile.
+# Deliberately without `axum_extras`: it infers path parameters from the
+# handler's signature and hits an `unreachable!()` on `Path<HashMap<_, _>>`,
+# which is how every nested route here reads its parameters by name. Parameters
+# are declared in the attribute instead, which is where their descriptions
+# belong regardless.
+utoipa = { version = "5", features = ["chrono", "uuid"] }
+utoipa-axum = "0.2"
+
 # Storage
 sqlx = { version = "0.9", default-features = false, features = [
     "postgres",

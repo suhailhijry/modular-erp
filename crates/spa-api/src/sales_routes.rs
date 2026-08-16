@@ -6,52 +6,36 @@
 //! router, and a mapping from the module's rejections onto statuses. That is
 //! Phase 4's to build, and it is now a description rather than a guess.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::{Json, Router, routing};
 use sales::{Customer, Draft, InvoiceLine, Receipt, SalesError, Vat, VatCategory};
 use serde::{Deserialize, Serialize};
 use spa_control::CommandError;
 use spa_eventlog::ExecuteError;
 use spa_i18n::{Locale, Localize};
 use spa_types::{CurrencyCode, Timestamp};
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::consistency::{Consistency, nudge};
 use crate::error::ApiError;
 use crate::extract::{Allowed, Language, ManageAccounts, PostEntries, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
-use crate::wire::{Amount, bad_request, metadata, parse_id, require_module};
+use crate::wire::{Amount, Json, Query, bad_request, metadata, parse_id, require_module};
 
-pub(crate) fn routes() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/v1/tenants/{slug}/sales/invoices",
-            routing::get(list_invoices).post(issue_invoice),
-        )
-        .route(
-            "/v1/tenants/{slug}/sales/invoices/{invoice}",
-            routing::get(get_invoice),
-        )
-        .route(
-            "/v1/tenants/{slug}/sales/invoices/{invoice}/payments",
-            routing::post(record_payment),
-        )
-        .route(
-            "/v1/tenants/{slug}/sales/invoices/{invoice}/credit-note",
-            routing::post(credit_note),
-        )
-        .route(
-            "/v1/tenants/{slug}/sales/vat-return",
-            routing::get(vat_return),
-        )
+pub(crate) fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(list_invoices, issue_invoice))
+        .routes(routes!(get_invoice))
+        .routes(routes!(record_payment))
+        .routes(routes!(credit_note))
+        .routes(routes!(vat_return))
         // Typed on purpose. The store underneath is key-value; this is not, so
         // a value that reaches it has already been through the type that gives
         // it meaning. See `spa_eventlog::config`.
-        .route(
-            "/v1/tenants/{slug}/sales/posting-accounts",
-            routing::get(posting_accounts).put(set_posting_accounts),
-        )
+        .routes(routes!(posting_accounts, set_posting_accounts))
 }
 
 /// How many invoices a list returns. ponytail: no cursor until a tenant has a
@@ -62,50 +46,78 @@ const PAGE: i64 = 200;
 // Wire shapes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "id": "INV-2026-0001",
+    "customer": { "name": "Al-Faisal Trading", "vat_number": "310000000000003" },
+    "issued_on": "2026-08-15T00:00:00Z",
+    "due_on": "2026-09-14T00:00:00Z",
+    "currency": "SAR",
+    "lines": [
+        { "description": "Consulting, August", "net": 500_000, "vat": "standard" }
+    ],
+    "note": ""
+}))]
 struct NewInvoice {
     /// The invoice number, chosen by the client. Issuing the same one twice is a
     /// no-op, which is what makes a retried request safe.
     id: String,
+    /// Copied onto the invoice as values, never as a reference. A tax invoice
+    /// is a legal document; last year's copy must not change when a customer
+    /// record does.
     customer: NewCustomer,
+    /// The tax point. A date the business chose, not a clock reading.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     issued_on: Timestamp,
     #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
     due_on: Option<Timestamp>,
+    /// ISO 4217. Every line is in this currency.
     currency: String,
+    /// At least one line that comes to something.
     lines: Vec<NewLine>,
     #[serde(default)]
     note: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct NewCustomer {
     name: String,
+    /// The buyer's VAT registration number, printed on the invoice.
     #[serde(default)]
     vat_number: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct NewLine {
     description: String,
     /// Minor units, in the invoice's currency. Excluding tax.
     net: i64,
     /// `standard`, `zero` or `exempt`. The *rate* is not a client's to choose —
-    /// it is statutory, and resolved here.
+    /// it is statutory, and resolved here. Zero-rated and exempt are both 0%
+    /// and mean different things on a return, so both are kept.
     vat: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "reference": "BANK-88231",
+    "amount": { "minor": 575_000, "currency": "SAR" },
+    "received_on": "2026-08-20T00:00:00Z",
+    "account": "1000"
+}))]
 struct NewPayment {
     /// The payer's or the bank's reference. Recording the same one twice against
     /// the same invoice is a no-op.
     reference: String,
     amount: Amount,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     received_on: Timestamp,
     /// The cash or bank account it landed in.
     account: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct Written {
     id: String,
     /// Where it landed in the log. A client that wants to read its own write
@@ -113,7 +125,10 @@ struct Written {
     position: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "id": "CN-2026-0001", "reason": "Returned in full", "on": "2026-08-25T00:00:00Z"
+}))]
 struct NewCreditNote {
     /// The credit note's own number. Crediting the same invoice twice with the
     /// same one is a no-op; a different one is refused.
@@ -122,19 +137,23 @@ struct NewCreditNote {
     reason: String,
     /// When the credit is treated as happening. Usually today, not the date of
     /// the invoice.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     on: Timestamp,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct InvoiceView {
     id: String,
     /// Set once a credit note has cancelled it. A cancelled invoice owes
     /// nothing, and `outstanding` says so too.
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
     cancelled_on: Option<Timestamp>,
     credit_note: Option<String>,
     customer: String,
     customer_vat: Option<String>,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     issued_on: Timestamp,
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
     due_on: Option<Timestamp>,
     currency: String,
     net: i64,
@@ -142,11 +161,17 @@ struct InvoiceView {
     gross: i64,
     paid: i64,
     outstanding: i64,
-    payments: i64,
+    /// How many payments have been recorded. The payments themselves are on
+    /// `GET /v1/tenants/{slug}/sales/invoices/{invoice}`.
+    ///
+    /// Not `payments`: the detail view flattens this one and adds the list, and
+    /// two shapes under one name on the same resource is a client generator's
+    /// worst afternoon.
+    payment_count: i64,
     note: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct InvoiceDetailView {
     #[serde(flatten)]
     invoice: InvoiceView,
@@ -156,7 +181,7 @@ struct InvoiceDetailView {
     payments: Vec<PaymentView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct LineView {
     description: String,
     net: i64,
@@ -166,7 +191,7 @@ struct LineView {
     vat_rate: i32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct TaxView {
     vat: &'static str,
     vat_rate: i32,
@@ -174,10 +199,11 @@ struct TaxView {
     tax: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct PaymentView {
     reference: String,
     amount: i64,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     received_on: Timestamp,
     account: String,
 }
@@ -197,7 +223,7 @@ fn view(summary: sales::InvoiceSummary) -> InvoiceView {
         gross: summary.gross.minor(),
         paid: summary.paid.minor(),
         outstanding: summary.outstanding.minor(),
-        payments: summary.payments,
+        payment_count: summary.payments,
         note: summary.note,
     }
 }
@@ -206,6 +232,31 @@ fn view(summary: sales::InvoiceSummary) -> InvoiceView {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// Issue a tax invoice, and post it to the ledger.
+///
+/// One transaction: the invoice and its journal entry either both happen or
+/// neither does. `id` is the invoice number the tenant chose, and issuing the
+/// same one twice is a no-op — which is what makes a retried request safe.
+///
+/// Tax is charged once per rate band on the band's subtotal, not line by line,
+/// which is the breakdown a Saudi invoice has to print.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/sales/invoices",
+    tag = "sales",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = NewInvoice,
+    responses(
+        (status = CREATED, description = "Issued, or already issued under this number.", body = Written),
+        (status = BAD_REQUEST, description = "No lines that come to anything, mixed currencies, an unknown VAT category, or an unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such tenant, not yours, or the sales module is not enabled here", body = Problem),
+        (status = CONFLICT, description = "Sustained contention on this invoice. Retryable.", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The posting accounts are missing or closed", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
 async fn issue_invoice(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
@@ -270,6 +321,31 @@ async fn issue_invoice(
     ))
 }
 
+/// Record a payment against an invoice.
+///
+/// `reference` is the payer's or the bank's; recording the same one twice
+/// against the same invoice is a no-op. Paying more than is outstanding is
+/// refused rather than left as a negative balance.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/sales/invoices/{invoice}/payments",
+    tag = "sales",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("invoice" = String, Path, description = "The invoice number."),
+    ),
+    request_body = NewPayment,
+    responses(
+        (status = OK, description = "Recorded, or already recorded under this reference.", body = Written),
+        (status = BAD_REQUEST, description = "A non-positive amount, or an unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "More than is outstanding — read the invoice again and decide", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such invoice, or one that was never issued", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
 async fn record_payment(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
@@ -309,6 +385,29 @@ async fn record_payment(
 ///
 /// A `POST`, not a `DELETE`: the invoice stays, its journal entry is reversed,
 /// and the books show both.
+///
+/// Cancels the whole invoice. ponytail: partial credit notes are not built —
+/// they need the credit note to be a document with its own tax point.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/sales/invoices/{invoice}/credit-note",
+    tag = "sales",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("invoice" = String, Path, description = "The invoice number being credited."),
+    ),
+    request_body = NewCreditNote,
+    responses(
+        (status = OK, description = "Credited, or already credited by this note.", body = Written),
+        (status = BAD_REQUEST, description = "An unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "Already cancelled by a *different* credit note", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such invoice, or one with payments against it — refund those first", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
 async fn credit_note(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
@@ -340,6 +439,25 @@ async fn credit_note(
     }))
 }
 
+/// Invoices, most recently issued first.
+///
+/// ponytail: the most recent 200, with no cursor. See `sales::invoices`.
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/sales/invoices",
+    tag = "sales",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
+    ),
+    responses(
+        (status = OK, body = Vec<InvoiceView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "The projection did not reach `consistent_after` in time. Retryable.", body = Problem),
+    ),
+)]
 async fn list_invoices(
     tenant: Allowed<Read>,
     Language(locale): Language,
@@ -363,6 +481,24 @@ async fn list_invoices(
     Ok(Json(invoices.into_iter().map(view).collect()))
 }
 
+/// One invoice, with its lines, its tax breakdown and its payments.
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/sales/invoices/{invoice}",
+    tag = "sales",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("invoice" = String, Path, description = "The invoice number."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
+    ),
+    responses(
+        (status = OK, body = InvoiceDetailView),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such invoice, no such tenant, or the sales module is not enabled here", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
 async fn get_invoice(
     tenant: Allowed<Read>,
     Language(locale): Language,
@@ -430,18 +566,20 @@ async fn get_invoice(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct Period {
     /// Inclusive.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     from: Timestamp,
     /// **Exclusive.** A period ending "31 March inclusive" is a comparison
     /// somebody gets wrong once a quarter, and two consecutive returns built
     /// that way either double-count the boundary or drop it.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     until: Timestamp,
     currency: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct VatBandView {
     vat: &'static str,
     vat_rate: i32,
@@ -450,9 +588,11 @@ struct VatBandView {
     invoices: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct VatReturnView {
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     from: Timestamp,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     until: Timestamp,
     currency: String,
     bands: Vec<VatBandView>,
@@ -465,6 +605,29 @@ struct VatReturnView {
 ///
 /// What the business *charged*. A full return also nets off input tax on
 /// purchases, which needs a purchases module — this is the side that exists.
+///
+/// Cancelled invoices are excluded rather than netted to zero, which is right
+/// when the credit note lands in the same period and wrong across a boundary.
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/sales/vat-return",
+    tag = "sales",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("from" = String, Query, description = "Start of the period, inclusive. RFC 3339."),
+        ("until" = String, Query, description = "End of the period, **exclusive**. RFC 3339."),
+        ("currency" = String, Query, description = "ISO 4217."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
+    ),
+    responses(
+        (status = OK, description = "One band per rate, and the totals that go on the return.", body = VatReturnView),
+        (status = BAD_REQUEST, description = "An unknown currency, or a period that ends before it starts", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
 async fn vat_return(
     tenant: Allowed<Read>,
     Language(locale): Language,
@@ -529,7 +692,8 @@ async fn vat_return(
 // Configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({ "receivable": "1100", "revenue": "4000", "output_vat": "2100" }))]
 struct AccountsView {
     /// Debited by what customers owe. Defaults to 1100.
     receivable: String,
@@ -539,7 +703,7 @@ struct AccountsView {
     output_vat: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ConfiguredAccounts {
     #[serde(flatten)]
     accounts: AccountsView,
@@ -549,8 +713,22 @@ struct ConfiguredAccounts {
     configured: bool,
 }
 
-/// What sales posts to. Answers with the shipped defaults when the tenant has
-/// never chosen.
+/// What sales posts to.
+///
+/// Answers with the shipped defaults when the tenant has never chosen, and says
+/// so with `configured: false`.
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/sales/posting-accounts",
+    tag = "sales",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    responses(
+        (status = OK, body = ConfiguredAccounts),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
 async fn posting_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
@@ -593,6 +771,24 @@ async fn posting_accounts(
 /// **Not retrospective.** Invoices already issued keep the accounts they were
 /// posted to, because those went into the journal entry as values. Changing
 /// this changes the next invoice and nothing before it (L5).
+///
+/// Each account is checked against the tenant's own chart before it is stored —
+/// a configuration that looks fine and refuses every invoice is worse than an
+/// error here.
+#[utoipa::path(
+    put,
+    path = "/v1/tenants/{slug}/sales/posting-accounts",
+    tag = "sales",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = AccountsView,
+    responses(
+        (status = NO_CONTENT, description = "Stored. Applies to the next invoice, not to past ones."),
+        (status = BAD_REQUEST, description = "An unusable code, or one that is not an open account here", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
 async fn set_posting_accounts(
     tenant: Allowed<ManageAccounts>,
     Language(locale): Language,

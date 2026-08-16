@@ -13,61 +13,56 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::{Json, Router, routing};
 use ledger::{AccountKind, BalancedLines, Line};
 use serde::{Deserialize, Serialize};
 use spa_control::CommandError;
 use spa_eventlog::ExecuteError;
 use spa_i18n::{Locale, Localize};
 use spa_types::{CurrencyCode, Timestamp};
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::consistency::{Consistency, nudge};
 use crate::error::ApiError;
 use crate::extract::{Allowed, Language, ManageAccounts, PostEntries, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
-use crate::wire::{Amount, bad_request, metadata, parse_id, require_module};
+use crate::wire::{Amount, Json, bad_request, metadata, parse_id, require_module};
 
-pub(crate) fn routes() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/v1/tenants/{slug}/ledger/accounts",
-            routing::get(list_accounts).post(open_account),
-        )
-        .route(
-            "/v1/tenants/{slug}/ledger/entries",
-            routing::post(post_entry),
-        )
-        .route(
-            "/v1/tenants/{slug}/ledger/entries/{entry}/reversal",
-            routing::post(reverse_entry),
-        )
-        .route(
-            "/v1/tenants/{slug}/ledger/trial-balance",
-            routing::get(trial_balance),
-        )
+pub(crate) fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(list_accounts, open_account))
+        .routes(routes!(post_entry))
+        .routes(routes!(reverse_entry))
+        .routes(routes!(trial_balance))
         // Unauthenticated on purpose: a signup form needs to show the choices
         // before anyone has an account. It is product information, not data.
-        .route("/v1/ledger/charts", routing::get(list_charts))
-        .route(
-            "/v1/tenants/{slug}/ledger/chart",
-            routing::post(install_chart),
-        )
+        .routes(routes!(list_charts))
+        .routes(routes!(install_chart))
 }
 
 // ---------------------------------------------------------------------------
 // Wire shapes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "code": "1100", "name": "Trade receivables", "kind": "asset", "currency": "SAR"
+}))]
 struct NewAccount {
+    /// The account code, as the tenant numbers their chart.
     code: String,
     name: String,
+    /// `asset`, `liability`, `equity`, `revenue` or `expense`. Decides which
+    /// side of the account a positive balance sits on.
     kind: String,
+    /// ISO 4217. An account holds one currency, and postings in another are
+    /// refused.
     currency: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AccountView {
     code: String,
     name: String,
@@ -78,19 +73,33 @@ struct AccountView {
     postings: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "id": "JE-2026-0001",
+    "occurred_on": "2026-08-15T00:00:00Z",
+    "memo": "Opening the bank account",
+    "lines": [
+        { "account": "1000", "amount": { "minor": 100_000, "currency": "SAR" } },
+        { "account": "3000", "amount": { "minor": -100_000, "currency": "SAR" } }
+    ]
+}))]
 struct NewEntry {
     /// The client's own identifier for the entry. Posting the same one twice is
     /// a no-op, which is what makes a retried request safe.
     id: String,
+    /// The date the business treats this as happening — not a clock reading.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     occurred_on: Timestamp,
     #[serde(default)]
     memo: String,
+    /// Must sum to zero, in one currency. An unbalanced set is a 400 carrying
+    /// the difference.
     lines: Vec<NewLine>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 struct NewLine {
+    /// An account code from `GET /v1/tenants/{slug}/ledger/accounts`.
     account: String,
     /// Positive debits, negative credits.
     amount: Amount,
@@ -98,7 +107,7 @@ struct NewLine {
     memo: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct EntryPosted {
     id: String,
     /// Where it landed in the log. A client that wants to read its own write
@@ -107,7 +116,7 @@ struct EntryPosted {
     lines: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct TrialBalanceView {
     currency: String,
     debits: i64,
@@ -121,6 +130,26 @@ struct TrialBalanceView {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// Every account and what it holds.
+///
+/// Balances are summed from the postings rather than maintained, so there is no
+/// second number that can be wrong.
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/ledger/accounts",
+    tag = "ledger",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
+    ),
+    responses(
+        (status = OK, body = Vec<AccountView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such tenant, not yours, or the ledger module is not enabled here", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "The projection did not reach `consistent_after` in time. Retryable.", body = Problem),
+    ),
+)]
 async fn list_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
@@ -157,6 +186,23 @@ async fn list_accounts(
     ))
 }
 
+/// Open an account.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/ledger/accounts",
+    tag = "ledger",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = NewAccount,
+    responses(
+        (status = CREATED, description = "Opened."),
+        (status = BAD_REQUEST, description = "An unusable code, an unknown kind, or an unknown currency", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "That code is already open", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
 async fn open_account(
     tenant: Allowed<ManageAccounts>,
     State(state): State<AppState>,
@@ -197,6 +243,28 @@ async fn open_account(
     Ok(StatusCode::CREATED)
 }
 
+/// Post a journal entry.
+///
+/// `id` is the client's own identifier, and posting the same one twice is a
+/// no-op — which is what makes a retried request safe without an
+/// `Idempotency-Key` header.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/ledger/entries",
+    tag = "ledger",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = NewEntry,
+    responses(
+        (status = OK, description = "Posted, or already posted under this id.", body = EntryPosted),
+        (status = BAD_REQUEST, description = "Lines that do not sum to zero, mixed currencies, or an unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "Sustained contention on this entry. Retryable.", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "An account that does not exist or is closed", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
 async fn post_entry(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
@@ -243,7 +311,10 @@ async fn post_entry(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "id": "JE-2026-0002", "occurred_on": "2026-08-16T00:00:00Z", "memo": "Reverses JE-2026-0001"
+}))]
 struct NewReversal {
     /// The client's own identifier for the *reversing* entry. Sending the same
     /// one twice is a no-op; a different one against an already-reversed entry
@@ -252,6 +323,7 @@ struct NewReversal {
     /// When the correction is treated as happening. Usually today, not the date
     /// of the mistake — reversing into a closed period is how a filed return
     /// stops matching the books.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     occurred_on: Timestamp,
     #[serde(default)]
     memo: String,
@@ -261,6 +333,26 @@ struct NewReversal {
 ///
 /// A `POST`, not a `DELETE`: nothing is removed. The books end up showing both
 /// the mistake and the correction, which is what makes them auditable.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/ledger/entries/{entry}/reversal",
+    tag = "ledger",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("entry" = String, Path, description = "The id of the entry being undone."),
+    ),
+    request_body = NewReversal,
+    responses(
+        (status = OK, description = "Reversed, or already reversed by this id.", body = EntryPosted),
+        (status = BAD_REQUEST, description = "An unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "Already reversed by a *different* entry", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such entry", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
 async fn reverse_entry(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
@@ -296,6 +388,26 @@ async fn reverse_entry(
     }))
 }
 
+/// Debits and credits per currency, and whether they agree.
+///
+/// `balances: false` on a healthy system is impossible — the entry type refuses
+/// an unbalanced set — so it is worth alerting on.
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/ledger/trial-balance",
+    tag = "ledger",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
+    ),
+    responses(
+        (status = OK, description = "One row per currency.", body = Vec<TrialBalanceView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
 async fn trial_balance(
     tenant: Allowed<Read>,
     Language(locale): Language,
@@ -384,7 +496,7 @@ fn ledger_problem(error: &CommandError<ledger::LedgerError>, locale: Locale) -> 
 // Charts of accounts
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ChartView {
     id: &'static str,
     name: &'static str,
@@ -396,14 +508,25 @@ struct ChartView {
     preview: Vec<ChartAccountView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ChartAccountView {
     code: &'static str,
     name: &'static str,
     kind: &'static str,
 }
 
-/// The catalogue, in the caller's language.
+/// Ready-made charts of accounts, in the caller's language.
+///
+/// Unauthenticated: a signup form needs to show the choices before anyone has an
+/// account. Every account is renameable and closeable after installing, so the
+/// `preview` is a starting point rather than a commitment.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/charts",
+    tag = "ledger",
+    security(),
+    responses((status = OK, body = Vec<ChartView>)),
+)]
 async fn list_charts(Language(locale): Language) -> Json<Vec<ChartView>> {
     Json(
         ledger::CHARTS
@@ -427,20 +550,41 @@ async fn list_charts(Language(locale): Language) -> Json<Vec<ChartView>> {
     )
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "template": "sa_trading", "currency": "SAR" }))]
 struct InstallChart {
     /// The chart's id, from `GET /v1/ledger/charts`.
     template: String,
+    /// The currency every account is opened in.
     currency: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ChartInstalled {
     opened: usize,
     /// Accounts that were already there. Installing twice is not an error.
     skipped: usize,
 }
 
+/// Open every account in a ready-made chart.
+///
+/// Installing twice is not an error: accounts that are already open are counted
+/// as `skipped` and left exactly as they are, names included.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/ledger/chart",
+    tag = "ledger",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = InstallChart,
+    responses(
+        (status = OK, body = ChartInstalled),
+        (status = BAD_REQUEST, description = "No such chart, or an unknown currency", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
 async fn install_chart(
     tenant: Allowed<ManageAccounts>,
     State(state): State<AppState>,

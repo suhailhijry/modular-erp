@@ -9,13 +9,16 @@
 //! Thin is also what makes it compile. See `spa-control/src/provision.rs` on why
 //! a chain of `async fn`s here cannot be proven `Send`.
 
+use crate::wire::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::{Json, Router, routing};
 use serde::{Deserialize, Serialize};
 use spa_control::ModuleSetup;
 use spa_i18n::Locale;
 use spa_types::Timestamp;
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::error::ApiError;
 use crate::extract::Language;
@@ -28,11 +31,18 @@ use crate::state::AppState;
 /// people toward `Password1!`; NIST dropped them in 2017.
 const MIN_PASSWORD: usize = 12;
 
-pub(crate) fn routes() -> Router<AppState> {
-    Router::new().route("/v1/signups", routing::post(sign_up))
+pub(crate) fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new().routes(routes!(sign_up))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "slug": "acme",
+    "company": "Acme Trading Co.",
+    "email": "owner@acme.example",
+    "password": "correct horse battery staple",
+    "modules": ["ledger", "sales"]
+}))]
 struct Signup {
     /// The tenant's name in URLs. 2–50 characters.
     slug: String,
@@ -47,16 +57,37 @@ struct Signup {
     modules: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct SignedUp {
+    #[schema(value_type = uuid::Uuid)]
     tenant: spa_types::TenantId,
     slug: String,
     /// Ready to use — signing up logs you in.
     token: String,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     expires_at: Timestamp,
     modules: Vec<String>,
 }
 
+/// Register a new tenant.
+///
+/// Creates the company, its database, its first owner, and a session — in one
+/// operation that compensates if any part of it fails. The response is a
+/// working bearer token: signing up logs you in.
+#[utoipa::path(
+    post,
+    path = "/v1/signups",
+    tag = "signup",
+    // Unauthenticated by definition: the point is to arrive without an account.
+    security(),
+    request_body = Signup,
+    responses(
+        (status = CREATED, body = SignedUp),
+        (status = BAD_REQUEST, description = "A password under 12 characters, or a module that does not exist", body = Problem),
+        (status = UNAUTHORIZED, description = "The address already has an account and the password did not match it", body = Problem),
+        (status = CONFLICT, description = "The slug is taken", body = Problem),
+    ),
+)]
 async fn sign_up(
     State(state): State<AppState>,
     Language(locale): Language,

@@ -194,6 +194,16 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — {id} cannot be used as an identifier.
 - **ar** — لا يمكن استخدام {id} كمعرّف.
 
+### `request.invalid_query`
+
+- **en** — The query string could not be read: {reason}
+- **ar** — تعذّرت قراءة معطيات الاستعلام: {reason}
+
+### `request.malformed_body`
+
+- **en** — The request body could not be read: {reason}
+- **ar** — تعذّرت قراءة محتوى الطلب: {reason}
+
 ### `request.module_in_use`
 
 - **en** — {dependent} needs {module}. Turn {dependent} off first.
@@ -253,6 +263,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — {vat} is not a VAT treatment. Use standard, zero or exempt.
 - **ar** — {vat} ليست معاملة ضريبية. استخدم standard أو zero أو exempt.
+
+### `request.unsupported_media_type`
+
+- **en** — This endpoint takes `Content-Type: application/json`.
+- **ar** — يقبل هذا المسار `Content-Type: application/json` فقط.
 
 
 ## `sales`

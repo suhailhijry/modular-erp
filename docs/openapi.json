@@ -1,0 +1,5278 @@
+{
+  "components": {
+    "schemas": {
+      "Acceptance": {
+        "example": {
+          "password": "correct horse battery staple"
+        },
+        "properties": {
+          "password": {
+            "description": "The existing account's password, or the one being chosen for a new\naccount. Which it is depends on `has_account`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "type": "object"
+      },
+      "AcceptedView": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "tenant": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "token": {
+            "description": "Ready to use — accepting signs you in.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenant",
+          "token",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "AccountView": {
+        "properties": {
+          "balance": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "closed": {
+            "type": "boolean"
+          },
+          "code": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "postings": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "kind",
+          "balance",
+          "currency",
+          "closed",
+          "postings"
+        ],
+        "type": "object"
+      },
+      "AccountsView": {
+        "example": {
+          "output_vat": "2100",
+          "receivable": "1100",
+          "revenue": "4000"
+        },
+        "properties": {
+          "output_vat": {
+            "description": "Credited by tax charged and owed to ZATCA. Defaults to 2100.",
+            "type": "string"
+          },
+          "receivable": {
+            "description": "Debited by what customers owe. Defaults to 1100.",
+            "type": "string"
+          },
+          "revenue": {
+            "description": "Credited by what was earned, excluding tax. Defaults to 4000.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receivable",
+          "revenue",
+          "output_vat"
+        ],
+        "type": "object"
+      },
+      "Amount": {
+        "description": "An amount, as a client sends it.\n\nMinor units and an explicit currency — never a decimal string, and never a\nfloat. A client that sends `10.50` has already lost the argument about how\nmany decimal places the currency has.",
+        "example": {
+          "currency": "SAR",
+          "minor": 1050
+        },
+        "properties": {
+          "currency": {
+            "description": "ISO 4217, upper case.",
+            "type": "string"
+          },
+          "minor": {
+            "description": "The amount in the currency's smallest unit. 1050 is 10.50 SAR.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "minor",
+          "currency"
+        ],
+        "type": "object"
+      },
+      "CatalogueView": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "requires"
+        ],
+        "type": "object"
+      },
+      "ChartAccountView": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "ChartInstalled": {
+        "properties": {
+          "opened": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "Accounts that were already there. Installing twice is not an error.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "opened",
+          "skipped"
+        ],
+        "type": "object"
+      },
+      "ChartView": {
+        "properties": {
+          "accounts": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "preview": {
+            "description": "Enough to show the chart before installing it, which is the\n\"modify before installing\" story's first half — after installing, every\naccount is renameable and closeable.",
+            "items": {
+              "$ref": "#/components/schemas/ChartAccountView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "accounts",
+          "preview"
+        ],
+        "type": "object"
+      },
+      "ConfiguredAccounts": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AccountsView"
+          },
+          {
+            "properties": {
+              "configured": {
+                "description": "`false` when nothing has been configured and these are the shipped\ndefaults — so a settings screen can say \"using the standard chart\"\nrather than implying somebody chose this.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "Credentials": {
+        "example": {
+          "handle": "owner@acme.example",
+          "password": "correct horse battery staple"
+        },
+        "properties": {
+          "handle": {
+            "description": "The email address the account was registered with.",
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "handle",
+          "password"
+        ],
+        "type": "object"
+      },
+      "Enable": {
+        "example": {
+          "module": "sales"
+        },
+        "properties": {
+          "module": {
+            "description": "A name from `GET /v1/modules`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "module"
+        ],
+        "type": "object"
+      },
+      "EntryPosted": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "lines": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "position": {
+            "description": "Where it landed in the log. A client that wants to read its own write\nback passes this as `?consistent_after=`.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "lines"
+        ],
+        "type": "object"
+      },
+      "Health": {
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "InstallChart": {
+        "example": {
+          "currency": "SAR",
+          "template": "sa_trading"
+        },
+        "properties": {
+          "currency": {
+            "description": "The currency every account is opened in.",
+            "type": "string"
+          },
+          "template": {
+            "description": "The chart's id, from `GET /v1/ledger/charts`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "template",
+          "currency"
+        ],
+        "type": "object"
+      },
+      "InvitationCreated": {
+        "properties": {
+          "accept_path": {
+            "description": "Where the token goes, so a client does not have to build the URL itself\nand get it subtly wrong.",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "token": {
+            "description": "**Shown once.** Pass it on however you already talk to this person.\nNothing stores it, so a lost link is re-issued rather than recovered.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "handle",
+          "role",
+          "expires_at",
+          "token",
+          "accept_path"
+        ],
+        "type": "object"
+      },
+      "InvitationView": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "handle",
+          "role",
+          "expires_at",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "InvoiceDetailView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/InvoiceView"
+          },
+          {
+            "properties": {
+              "lines": {
+                "items": {
+                  "$ref": "#/components/schemas/LineView"
+                },
+                "type": "array"
+              },
+              "payments": {
+                "items": {
+                  "$ref": "#/components/schemas/PaymentView"
+                },
+                "type": "array"
+              },
+              "tax_breakdown": {
+                "description": "One row per rate, which is what a Saudi tax invoice has to print.",
+                "items": {
+                  "$ref": "#/components/schemas/TaxView"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "lines",
+              "tax_breakdown",
+              "payments"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InvoiceView": {
+        "properties": {
+          "cancelled_on": {
+            "description": "Set once a credit note has cancelled it. A cancelled invoice owes\nnothing, and `outstanding` says so too.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "credit_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currency": {
+            "type": "string"
+          },
+          "customer": {
+            "type": "string"
+          },
+          "customer_vat": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due_on": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gross": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "issued_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "note": {
+            "type": "string"
+          },
+          "outstanding": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "paid": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "payment_count": {
+            "description": "How many payments have been recorded. The payments themselves are on\n`GET /v1/tenants/{slug}/sales/invoices/{invoice}`.\n\nNot `payments`: the detail view flattens this one and adds the list, and\ntwo shapes under one name on the same resource is a client generator's\nworst afternoon.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "customer",
+          "issued_on",
+          "currency",
+          "net",
+          "tax",
+          "gross",
+          "paid",
+          "outstanding",
+          "payment_count",
+          "note"
+        ],
+        "type": "object"
+      },
+      "LineView": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "vat": {
+            "type": "string"
+          },
+          "vat_rate": {
+            "description": "Basis points — 1500 is 15%. The rate that applied when it was issued, not\ntoday's.",
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "description",
+          "net",
+          "vat",
+          "vat_rate"
+        ],
+        "type": "object"
+      },
+      "MemberAdded": {
+        "properties": {
+          "identity": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity"
+        ],
+        "type": "object"
+      },
+      "MemberView": {
+        "properties": {
+          "handle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identity": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "module_roles": {
+            "description": "Where the tenant said something different. Usually empty.",
+            "items": {
+              "$ref": "#/components/schemas/ModuleRoleView"
+            },
+            "type": "array"
+          },
+          "role": {
+            "description": "What they are here, and in any module not listed below.",
+            "type": "string"
+          },
+          "since": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "suspended": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "identity",
+          "role",
+          "module_roles",
+          "since",
+          "suspended"
+        ],
+        "type": "object"
+      },
+      "MessageArg": {
+        "description": "A value interpolated into a message.\n\nTyped rather than pre-formatted strings, because formatting is\nlocale-dependent: a count selects a plural form, a date renders differently\nunder a Hijri calendar, and money carries a currency whose symbol placement\nvaries. Handing the renderer a `String` throws away everything it needs.",
+        "oneOf": [
+          {
+            "description": "Latin-script text — an identifier, a slug, a code. Bidi-isolated when\nrendered into an RTL locale.",
+            "properties": {
+              "type": {
+                "enum": [
+                  "text"
+                ],
+                "type": "string"
+              },
+              "value": {
+                "description": "Latin-script text — an identifier, a slug, a code. Bidi-isolated when\nrendered into an RTL locale.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "value",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A plain number, not a count. Does not select a plural form.",
+            "properties": {
+              "type": {
+                "enum": [
+                  "int"
+                ],
+                "type": "string"
+              },
+              "value": {
+                "description": "A plain number, not a count. Does not select a plural form.",
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A quantity. Selects the plural form of the template.",
+            "properties": {
+              "type": {
+                "enum": [
+                  "count"
+                ],
+                "type": "string"
+              },
+              "value": {
+                "description": "A quantity. Selects the plural form of the template.",
+                "format": "int64",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "value",
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ModuleRoleView": {
+        "properties": {
+          "module": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "module",
+          "role"
+        ],
+        "type": "object"
+      },
+      "ModuleView": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "requires": {
+            "description": "What this module needs underneath it. A client building a picker needs\nthis to grey out the impossible combinations rather than discover them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "requires",
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "NewAccount": {
+        "example": {
+          "code": "1100",
+          "currency": "SAR",
+          "kind": "asset",
+          "name": "Trade receivables"
+        },
+        "properties": {
+          "code": {
+            "description": "The account code, as the tenant numbers their chart.",
+            "type": "string"
+          },
+          "currency": {
+            "description": "ISO 4217. An account holds one currency, and postings in another are\nrefused.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`asset`, `liability`, `equity`, `revenue` or `expense`. Decides which\nside of the account a positive balance sits on.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "kind",
+          "currency"
+        ],
+        "type": "object"
+      },
+      "NewCreditNote": {
+        "example": {
+          "id": "CN-2026-0001",
+          "on": "2026-08-25T00:00:00Z",
+          "reason": "Returned in full"
+        },
+        "properties": {
+          "id": {
+            "description": "The credit note's own number. Crediting the same invoice twice with the\nsame one is a no-op; a different one is refused.",
+            "type": "string"
+          },
+          "on": {
+            "description": "When the credit is treated as happening. Usually today, not the date of\nthe invoice.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "on"
+        ],
+        "type": "object"
+      },
+      "NewCustomer": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "vat_number": {
+            "description": "The buyer's VAT registration number, printed on the invoice.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "NewEntry": {
+        "example": {
+          "id": "JE-2026-0001",
+          "lines": [
+            {
+              "account": "1000",
+              "amount": {
+                "currency": "SAR",
+                "minor": 100000
+              }
+            },
+            {
+              "account": "3000",
+              "amount": {
+                "currency": "SAR",
+                "minor": -100000
+              }
+            }
+          ],
+          "memo": "Opening the bank account",
+          "occurred_on": "2026-08-15T00:00:00Z"
+        },
+        "properties": {
+          "id": {
+            "description": "The client's own identifier for the entry. Posting the same one twice is\na no-op, which is what makes a retried request safe.",
+            "type": "string"
+          },
+          "lines": {
+            "description": "Must sum to zero, in one currency. An unbalanced set is a 400 carrying\nthe difference.",
+            "items": {
+              "$ref": "#/components/schemas/NewLine"
+            },
+            "type": "array"
+          },
+          "memo": {
+            "type": "string"
+          },
+          "occurred_on": {
+            "description": "The date the business treats this as happening — not a clock reading.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "occurred_on",
+          "lines"
+        ],
+        "type": "object"
+      },
+      "NewInvitation": {
+        "example": {
+          "handle": "khalid@acme.example",
+          "role": "accountant"
+        },
+        "properties": {
+          "handle": {
+            "description": "The address to invite. Also the login handle they will end up with.",
+            "type": "string"
+          },
+          "role": {
+            "description": "`owner`, `manager`, `accountant` or `viewer`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "handle",
+          "role"
+        ],
+        "type": "object"
+      },
+      "NewInvoice": {
+        "example": {
+          "currency": "SAR",
+          "customer": {
+            "name": "Al-Faisal Trading",
+            "vat_number": "310000000000003"
+          },
+          "due_on": "2026-09-14T00:00:00Z",
+          "id": "INV-2026-0001",
+          "issued_on": "2026-08-15T00:00:00Z",
+          "lines": [
+            {
+              "description": "Consulting, August",
+              "net": 500000,
+              "vat": "standard"
+            }
+          ],
+          "note": ""
+        },
+        "properties": {
+          "currency": {
+            "description": "ISO 4217. Every line is in this currency.",
+            "type": "string"
+          },
+          "customer": {
+            "$ref": "#/components/schemas/NewCustomer",
+            "description": "Copied onto the invoice as values, never as a reference. A tax invoice\nis a legal document; last year's copy must not change when a customer\nrecord does."
+          },
+          "due_on": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "The invoice number, chosen by the client. Issuing the same one twice is a\nno-op, which is what makes a retried request safe.",
+            "type": "string"
+          },
+          "issued_on": {
+            "description": "The tax point. A date the business chose, not a clock reading.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "lines": {
+            "description": "At least one line that comes to something.",
+            "items": {
+              "$ref": "#/components/schemas/NewLine"
+            },
+            "type": "array"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "customer",
+          "issued_on",
+          "currency",
+          "lines"
+        ],
+        "type": "object"
+      },
+      "NewLine": {
+        "properties": {
+          "account": {
+            "description": "An account code from `GET /v1/tenants/{slug}/ledger/accounts`.",
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount",
+            "description": "Positive debits, negative credits."
+          },
+          "memo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "account",
+          "amount"
+        ],
+        "type": "object"
+      },
+      "NewMember": {
+        "example": {
+          "email": "sara@acme.example",
+          "password": "correct horse battery staple",
+          "role": "accountant"
+        },
+        "properties": {
+          "email": {
+            "description": "Their login. If it already belongs to someone, that account gains access\nrather than a second one being created for the same person.",
+            "type": "string"
+          },
+          "password": {
+            "description": "Chosen by the owner and handed over. An invitation flow would leave this\nto the recipient — see `spa-control/src/members.rs`.",
+            "type": "string"
+          },
+          "role": {
+            "description": "`owner`, `manager`, `accountant` or `viewer`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password",
+          "role"
+        ],
+        "type": "object"
+      },
+      "NewPayment": {
+        "example": {
+          "account": "1000",
+          "amount": {
+            "currency": "SAR",
+            "minor": 575000
+          },
+          "received_on": "2026-08-20T00:00:00Z",
+          "reference": "BANK-88231"
+        },
+        "properties": {
+          "account": {
+            "description": "The cash or bank account it landed in.",
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "received_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "reference": {
+            "description": "The payer's or the bank's reference. Recording the same one twice against\nthe same invoice is a no-op.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "amount",
+          "received_on",
+          "account"
+        ],
+        "type": "object"
+      },
+      "NewReversal": {
+        "example": {
+          "id": "JE-2026-0002",
+          "memo": "Reverses JE-2026-0001",
+          "occurred_on": "2026-08-16T00:00:00Z"
+        },
+        "properties": {
+          "id": {
+            "description": "The client's own identifier for the *reversing* entry. Sending the same\none twice is a no-op; a different one against an already-reversed entry\nis refused.",
+            "type": "string"
+          },
+          "memo": {
+            "type": "string"
+          },
+          "occurred_on": {
+            "description": "When the correction is treated as happening. Usually today, not the date\nof the mistake — reversing into a closed period is how a filed return\nstops matching the books.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "occurred_on"
+        ],
+        "type": "object"
+      },
+      "PaymentView": {
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "amount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "received_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "amount",
+          "received_on",
+          "account"
+        ],
+        "type": "object"
+      },
+      "PendingView": {
+        "properties": {
+          "company": {
+            "description": "What you are being invited to, and as what. A link that does not say is\na link people accept without reading.",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "has_account": {
+            "description": "`true` when that address already has an account here — so the form asks\nfor the existing password rather than offering to choose a new one.",
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "company",
+          "slug",
+          "handle",
+          "role",
+          "expires_at",
+          "has_account"
+        ],
+        "type": "object"
+      },
+      "Problem": {
+        "example": {
+          "code": "auth.invalid_credentials",
+          "detail": "Those login details are not right. Please try again.",
+          "status": 401,
+          "title": "Unauthorized",
+          "type": "https://errors.spa.example/auth.invalid_credentials"
+        },
+        "properties": {
+          "args": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MessageArg"
+            },
+            "description": "The values the message names, typed — which account, which module, how\nmuch was outstanding. A client that renders its own sentence reads these\ninstead of parsing `detail`. Absent when the message takes none.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "code": {
+            "description": "The stable identifier. Branch on this, never on `detail`.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "The message in the caller's language, chosen by `Accept-Language`.",
+            "type": "string"
+          },
+          "status": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "description": "`https://errors.spa.example/` followed by the code. Stable, and a place\nto look it up — see `docs/ERRORS.md` for every code this API can answer\nwith.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "RoleChange": {
+        "example": {
+          "role": "manager"
+        },
+        "properties": {
+          "role": {
+            "description": "`owner`, `manager`, `accountant` or `viewer`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "type": "object"
+      },
+      "SessionCreated": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "token": {
+            "description": "Send as `Authorization: Bearer <token>`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "SignedUp": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "modules": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "tenant": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "token": {
+            "description": "Ready to use — signing up logs you in.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenant",
+          "slug",
+          "token",
+          "expires_at",
+          "modules"
+        ],
+        "type": "object"
+      },
+      "Signup": {
+        "example": {
+          "company": "Acme Trading Co.",
+          "email": "owner@acme.example",
+          "modules": [
+            "ledger",
+            "sales"
+          ],
+          "password": "correct horse battery staple",
+          "slug": "acme"
+        },
+        "properties": {
+          "company": {
+            "description": "What the business is called.",
+            "type": "string"
+          },
+          "email": {
+            "description": "The first user's login.",
+            "type": "string"
+          },
+          "modules": {
+            "description": "Modules to start with. Unknown names are refused rather than ignored, so\na typo is not a silently missing feature discovered at month end.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "password": {
+            "type": "string"
+          },
+          "slug": {
+            "description": "The tenant's name in URLs. 2–50 characters.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "company",
+          "email",
+          "password"
+        ],
+        "type": "object"
+      },
+      "TaxView": {
+        "properties": {
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "vat": {
+            "type": "string"
+          },
+          "vat_rate": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "vat",
+          "vat_rate",
+          "net",
+          "tax"
+        ],
+        "type": "object"
+      },
+      "TenantView": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "modules": {
+            "description": "The modules this tenant has turned on. A route belonging to any other\nmodule answers 404 here.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "role": {
+            "description": "What the caller may do here, so a client can hide what it must not\noffer. The server refuses regardless — this is for the buttons.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "modules"
+        ],
+        "type": "object"
+      },
+      "TrialBalanceView": {
+        "properties": {
+          "balances": {
+            "type": "boolean"
+          },
+          "credits": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "debits": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "difference": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "postings": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "currency",
+          "debits",
+          "credits",
+          "difference",
+          "postings",
+          "balances"
+        ],
+        "type": "object"
+      },
+      "VatBandView": {
+        "properties": {
+          "invoices": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "vat": {
+            "type": "string"
+          },
+          "vat_rate": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "vat",
+          "vat_rate",
+          "net",
+          "tax",
+          "invoices"
+        ],
+        "type": "object"
+      },
+      "VatReturnView": {
+        "properties": {
+          "bands": {
+            "items": {
+              "$ref": "#/components/schemas/VatBandView"
+            },
+            "type": "array"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "tax": {
+            "description": "What goes on the return.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "until",
+          "currency",
+          "bands",
+          "net",
+          "tax"
+        ],
+        "type": "object"
+      },
+      "Written": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "description": "Where it landed in the log. A client that wants to read its own write\nback passes this as `?consistent_after=`.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "session": {
+        "description": "A token from `POST /v1/sessions`. Sessions expire; a 401 with `auth.session_expired` means log in again.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "A multi-tenant ERP. Every tenant has its own database; every write is an event; every read model is derived and can be rebuilt.\n\n## Authentication\n\n`POST /v1/sessions` returns a bearer token. Send it as `Authorization: Bearer <token>`. Operations documented without the `session` requirement are deliberately open — the module catalogue and the chart-of-accounts catalogue are product information a signup form needs before anyone has an account, and an invitation's token *is* its credential.\n\n## Errors\n\nEvery failure is `application/problem+json` (RFC 9457) carrying a stable `code`. **Branch on the code, never on `detail`**, which is prose in whichever language the request asked for. `args` carries the values the message names, typed, so a client can render its own sentence. `docs/ERRORS.md` lists every code.\n\nTwo exceptions, and they are the honest kind: **413** (a body over 1 MB) and **504** (a request still running after 30 seconds) are refused at the edge, before anything in this document runs, and carry no body at all. Every operation below can answer either.\n\n## Language\n\n`Accept-Language` is honoured on every response, including failures. Arabic and English are first-class; anything else falls back to English rather than failing.\n\n## Reading your own write\n\nRead models are driven by a worker, so a read taken immediately after a write can legitimately not see it. Every write returns the log `position` it landed at; pass it back as `?consistent_after=<position>` and the read waits for the projection to reach it. Without it, reads are served as they are.\n\n## Money\n\nMinor units and an explicit currency, never a decimal string and never a float. `{ \"minor\": 1050, \"currency\": \"SAR\" }` is 10.50 SAR.",
+    "license": {
+      "name": "AGPL-3.0-or-later"
+    },
+    "title": "SPA",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "description": "Deliberately does not touch the database — a health check that fails when\nthe database is slow takes the fleet out during a slow query.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "Liveness.",
+        "tags": [
+          "service"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/invitations/{token}": {
+      "get": {
+        "description": "Unauthenticated: whoever is accepting has no account yet, and the token *is*\nthe credential. A link that does not say what it is for is a link people\naccept without reading.",
+        "operationId": "show_invitation",
+        "parameters": [
+          {
+            "description": "From the invitation link.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such token, or a spent or expired one — the same answer for all three"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "What an invitation is for, before accepting it.",
+        "tags": [
+          "invitations"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/invitations/{token}/acceptance": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "`password` is the existing account's password when `has_account` was `true`,\nand the one being chosen otherwise. Either way the response is a working\nsession: accepting signs you in.",
+        "operationId": "accept_invitation",
+        "parameters": [
+          {
+            "description": "From the invitation link.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Acceptance"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedView"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A password under 12 characters"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The invitation was real; the password for the existing account was not"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such token, or a spent or expired one"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Already a member there"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "Take up an invitation.",
+        "tags": [
+          "invitations"
+        ]
+      }
+    },
+    "/v1/ledger/charts": {
+      "get": {
+        "description": "Unauthenticated: a signup form needs to show the choices before anyone has an\naccount. Every account is renameable and closeable after installing, so the\n`preview` is a starting point rather than a commitment.",
+        "operationId": "list_charts",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ChartView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "Ready-made charts of accounts, in the caller's language.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/modules": {
+      "get": {
+        "description": "Unauthenticated: a signup form and a pricing page both need this before\nanyone has an account. It is product information, not data.",
+        "operationId": "catalogue",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CatalogueView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "Every module this build offers.",
+        "tags": [
+          "modules"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "description": "Point any `OpenAPI` viewer at it. Deliberately not a bundled UI: the bundles\nare megabytes of vendored assets fetched at build time, which is a network\ndependency in a build that otherwise has none.",
+        "operationId": "openapi_json",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {}
+            },
+            "description": "This document, as OpenAPI 3.1"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "This document.",
+        "tags": [
+          "service"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/sessions": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "log_in",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credentials"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCreated"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Wrong handle or password — the same answer for both, deliberately"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "Log in.",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/current": {
+      "delete": {
+        "operationId": "log_out",
+        "responses": {
+          "204": {
+            "description": "Ended. The token no longer works."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Log out, ending the session this request authenticated with.",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/signups": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Creates the company, its database, its first owner, and a session — in one\noperation that compensates if any part of it fails. The response is a\nworking bearer token: signing up logs you in.",
+        "operationId": "sign_up",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Signup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignedUp"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A password under 12 characters, or a module that does not exist"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The address already has an account and the password did not match it"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The slug is taken"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "Register a new tenant.",
+        "tags": [
+          "signup"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}": {
+      "get": {
+        "description": "Proves the whole path: `Allowed<Read>` in the signature means membership was\nchecked *and* the role permits it, and there is no way to obtain one that\nskips either.",
+        "operationId": "tenant",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so the API is not a tenant-enumeration oracle"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant is real and entitled, and not serving right now. Retryable."
+          }
+        },
+        "summary": "What this tenant is, and what you may do in it.",
+        "tags": [
+          "tenants"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/tenants/{slug}/invitations": {
+      "get": {
+        "operationId": "list_invitations",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InvitationView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Pending invitations. The tokens are not here — they were shown once."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Invitations sent and not yet taken up.",
+        "tags": [
+          "invitations"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The `token` comes back **once** and is stored nowhere — pass it on however\nyou already talk to this person. A lost link is re-issued, not recovered.",
+        "operationId": "invite",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewInvitation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationCreated"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such role"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Already a member here"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Invite somebody, leaving the password to them.",
+        "tags": [
+          "invitations"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/invitations/{invitation}": {
+      "delete": {
+        "operationId": "revoke_invitation",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `GET /v1/tenants/{slug}/invitations`.",
+            "in": "path",
+            "name": "invitation",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Withdrawn. The token no longer works."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a well-formed id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Withdraw an invitation before it is taken up.",
+        "tags": [
+          "invitations"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/tenants/{slug}/ledger/accounts": {
+      "get": {
+        "description": "Balances are summed from the postings rather than maintained, so there is no\nsecond number that can be wrong.",
+        "operationId": "list_accounts",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AccountView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, not yours, or the ledger module is not enabled here"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The projection did not reach `consistent_after` in time. Retryable."
+          }
+        },
+        "summary": "Every account and what it holds.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "open_account",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewAccount"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Opened."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unusable code, an unknown kind, or an unknown currency"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That code is already open"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Open an account.",
+        "tags": [
+          "ledger"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/ledger/chart": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Installing twice is not an error: accounts that are already open are counted\nas `skipped` and left exactly as they are, names included.",
+        "operationId": "install_chart",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallChart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChartInstalled"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such chart, or an unknown currency"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Open every account in a ready-made chart.",
+        "tags": [
+          "ledger"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/ledger/entries": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "`id` is the client's own identifier, and posting the same one twice is a\nno-op — which is what makes a retried request safe without an\n`Idempotency-Key` header.",
+        "operationId": "post_entry",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewEntry"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryPosted"
+                }
+              }
+            },
+            "description": "Posted, or already posted under this id."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Lines that do not sum to zero, mixed currencies, or an unusable id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Sustained contention on this entry. Retryable."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An account that does not exist or is closed"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Post a journal entry.",
+        "tags": [
+          "ledger"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/ledger/entries/{entry}/reversal": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "A `POST`, not a `DELETE`: nothing is removed. The books end up showing both\nthe mistake and the correction, which is what makes them auditable.",
+        "operationId": "reverse_entry",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The id of the entry being undone.",
+            "in": "path",
+            "name": "entry",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewReversal"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryPosted"
+                }
+              }
+            },
+            "description": "Reversed, or already reversed by this id."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unusable id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Already reversed by a *different* entry"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such entry"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Undoes an entry by posting its opposite.",
+        "tags": [
+          "ledger"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/ledger/trial-balance": {
+      "get": {
+        "description": "`balances: false` on a healthy system is impossible — the entry type refuses\nan unbalanced set — so it is worth alerting on.",
+        "operationId": "trial_balance",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TrialBalanceView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "One row per currency."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Debits and credits per currency, and whether they agree.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/tenants/{slug}/members": {
+      "get": {
+        "description": "Knowing who can see your books is not an administrative privilege; it is the\nthing a viewer most needs to be able to check.",
+        "operationId": "list_members",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MemberView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Reading the list is `Read`, not `ManageTenant`.",
+        "tags": [
+          "members"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "If the address already has an account here, that account gains access rather\nthan a second one being created for the same person. `POST\n/v1/tenants/{slug}/invitations` is the other way round: the recipient picks\ntheir own password and nobody has to hand one over.",
+        "operationId": "add_member",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewMember"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberAdded"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A password under 12 characters, or a role that does not exist"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Already a member here — change their role instead"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Add somebody, choosing their password for them.",
+        "tags": [
+          "members"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/members/{identity}": {
+      "delete": {
+        "description": "Their profile stays. Adding them back later restores it rather than starting\na second one.",
+        "operationId": "remove_member",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `GET /v1/tenants/{slug}/members`.",
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a member here"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The last owner cannot be removed"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Take somebody's access away.",
+        "tags": [
+          "members"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "operationId": "change_role",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `GET /v1/tenants/{slug}/members`.",
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Changed."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such role"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a member here"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The last owner cannot be demoted"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Change what somebody may do across the whole tenant.",
+        "tags": [
+          "members"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/members/{identity}/modules/{module}": {
+      "delete": {
+        "description": "Different from setting them to `viewer` there: the exception is gone, so a\nlater change to their tenant-wide role reaches this module too.",
+        "operationId": "clear_module_role",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `GET /v1/tenants/{slug}/members`.",
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A name from `GET /v1/modules`.",
+            "in": "path",
+            "name": "module",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Cleared. They are back on their tenant-wide role here."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such module"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a member here"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Puts somebody back on their tenant-wide role in a module.",
+        "tags": [
+          "members"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "# Why this is a separate route rather than a field on the member\n\nBecause it is the exception. \"Sara does the invoicing, Khalid does the\nbooks\" is a real arrangement and this is how a tenant says so — but most\npeople have one job, and a members form with a row per module per person\nwould put that in front of everybody who does not need it.",
+        "operationId": "set_module_role",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `GET /v1/tenants/{slug}/members`.",
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A name from `GET /v1/modules`.",
+            "in": "path",
+            "name": "module",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Set. Applies in this module only."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such role, or no such module"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a member here"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Gives somebody a different role in one module.",
+        "tags": [
+          "members"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/modules": {
+      "get": {
+        "operationId": "list_modules",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ModuleView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "What this tenant has, and what else it could have.",
+        "tags": [
+          "modules"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Installs its read models *and* records the entitlement — both, because\neither alone is a tenant that 500s: entitled with no tables, or tables\nnothing can reach.\n\nEnabling something already on is a no-op, not a conflict.",
+        "operationId": "enable_module",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Enable"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "On. Already-on is the same answer."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such module, or one whose dependencies are not enabled"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Turns a module on for a running tenant.",
+        "tags": [
+          "modules"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/modules/{module}": {
+      "delete": {
+        "description": "**Nothing is deleted.** The entitlement is marked disabled, the routes stop\nanswering and the worker stops visiting on its behalf — but the events and\nthe read models stay exactly where they are, so a tenant who downgrades and\ncomes back finds their data. That is the \"updates never break old data\"\nrequirement applied to the one operation most likely to violate it.",
+        "operationId": "disable_module",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A name from `GET /v1/modules`.",
+            "in": "path",
+            "name": "module",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Off. Nothing was deleted; already-off is the same answer."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such module, or one another enabled module is built on"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Turns a module off.",
+        "tags": [
+          "modules"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/tenants/{slug}/sales/invoices": {
+      "get": {
+        "description": "ponytail: the most recent 200, with no cursor. See `sales::invoices`.",
+        "operationId": "list_invoices",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InvoiceView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The projection did not reach `consistent_after` in time. Retryable."
+          }
+        },
+        "summary": "Invoices, most recently issued first.",
+        "tags": [
+          "sales"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "One transaction: the invoice and its journal entry either both happen or\nneither does. `id` is the invoice number the tenant chose, and issuing the\nsame one twice is a no-op — which is what makes a retried request safe.\n\nTax is charged once per rate band on the band's subtotal, not line by line,\nwhich is the breakdown a Saudi invoice has to print.",
+        "operationId": "issue_invoice",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewInvoice"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Written"
+                }
+              }
+            },
+            "description": "Issued, or already issued under this number."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No lines that come to anything, mixed currencies, an unknown VAT category, or an unusable id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, not yours, or the sales module is not enabled here"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Sustained contention on this invoice. Retryable."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The posting accounts are missing or closed"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Issue a tax invoice, and post it to the ledger.",
+        "tags": [
+          "sales"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/sales/invoices/{invoice}": {
+      "get": {
+        "operationId": "get_invoice",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The invoice number.",
+            "in": "path",
+            "name": "invoice",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvoiceDetailView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such invoice, no such tenant, or the sales module is not enabled here"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "One invoice, with its lines, its tax breakdown and its payments.",
+        "tags": [
+          "sales"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/tenants/{slug}/sales/invoices/{invoice}/credit-note": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "A `POST`, not a `DELETE`: the invoice stays, its journal entry is reversed,\nand the books show both.\n\nCancels the whole invoice. ponytail: partial credit notes are not built —\nthey need the credit note to be a document with its own tax point.",
+        "operationId": "credit_note",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The invoice number being credited.",
+            "in": "path",
+            "name": "invoice",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewCreditNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Written"
+                }
+              }
+            },
+            "description": "Credited, or already credited by this note."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unusable id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Already cancelled by a *different* credit note"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such invoice, or one with payments against it — refund those first"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Cancels an invoice by crediting it.",
+        "tags": [
+          "sales"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/sales/invoices/{invoice}/payments": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "`reference` is the payer's or the bank's; recording the same one twice\nagainst the same invoice is a no-op. Paying more than is outstanding is\nrefused rather than left as a negative balance.",
+        "operationId": "record_payment",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The invoice number.",
+            "in": "path",
+            "name": "invoice",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPayment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Written"
+                }
+              }
+            },
+            "description": "Recorded, or already recorded under this reference."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A non-positive amount, or an unusable id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "More than is outstanding — read the invoice again and decide"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such invoice, or one that was never issued"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Record a payment against an invoice.",
+        "tags": [
+          "sales"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/sales/posting-accounts": {
+      "get": {
+        "description": "Answers with the shipped defaults when the tenant has never chosen, and says\nso with `configured: false`.",
+        "operationId": "posting_accounts",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfiguredAccounts"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "What sales posts to.",
+        "tags": [
+          "sales"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "`ManageAccounts`, not `ManageTenant`: this is a decision about the chart of\naccounts, and the person who maintains the chart is the person who should\nmake it.\n\n**Not retrospective.** Invoices already issued keep the accounts they were\nposted to, because those went into the journal entry as values. Changing\nthis changes the next invoice and nothing before it (L5).\n\nEach account is checked against the tenant's own chart before it is stored —\na configuration that looks fine and refuses every invoice is worse than an\nerror here.",
+        "operationId": "set_posting_accounts",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountsView"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Stored. Applies to the next invoice, not to past ones."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unusable code, or one that is not an open account here"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Chooses what sales posts to.",
+        "tags": [
+          "sales"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/sales/vat-return": {
+      "get": {
+        "description": "What the business *charged*. A full return also nets off input tax on\npurchases, which needs a purchases module — this is the side that exists.\n\nCancelled invoices are excluded rather than netted to zero, which is right\nwhen the credit note lands in the same period and wrong across a boundary.",
+        "operationId": "vat_return",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Start of the period, inclusive. RFC 3339.",
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "End of the period, **exclusive**. RFC 3339.",
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "ISO 4217.",
+            "in": "query",
+            "name": "currency",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VatReturnView"
+                }
+              }
+            },
+            "description": "One band per rate, and the totals that go on the return."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unknown currency, or a period that ends before it starts"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "The output-tax side of a VAT return, for a period.",
+        "tags": [
+          "sales"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    }
+  },
+  "security": [
+    {
+      "session": []
+    }
+  ],
+  "tags": [
+    {
+      "description": "Getting a system of your own.",
+      "name": "signup"
+    },
+    {
+      "description": "Logging in and out.",
+      "name": "sessions"
+    },
+    {
+      "description": "The company you are working in.",
+      "name": "tenants"
+    },
+    {
+      "description": "Who else has access, and as what.",
+      "name": "members"
+    },
+    {
+      "description": "Inviting a colleague, and taking up an invitation.",
+      "name": "invitations"
+    },
+    {
+      "description": "Which parts of the system this tenant has turned on.",
+      "name": "modules"
+    },
+    {
+      "description": "Accounts, journal entries, and the trial balance.",
+      "name": "ledger"
+    },
+    {
+      "description": "Invoices, payments, credit notes, and the VAT return.",
+      "name": "sales"
+    },
+    {
+      "description": "Liveness and this document.",
+      "name": "service"
+    }
+  ]
+}

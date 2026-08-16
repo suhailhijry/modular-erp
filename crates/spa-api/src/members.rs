@@ -1,12 +1,15 @@
 //! Who else has access to a tenant.
 
+use crate::wire::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::{Json, Router, routing};
 use serde::{Deserialize, Serialize};
 use spa_control::{Actor, MemberError, Role};
 use spa_i18n::{Locale, Localize};
 use spa_types::{IdentityId, Timestamp};
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::error::ApiError;
 use crate::extract::{Allowed, Language, ManageTenant, Read};
@@ -19,38 +22,39 @@ use crate::state::AppState;
 /// more trustworthy than one they pick for themselves.
 const MIN_PASSWORD: usize = 12;
 
-pub(crate) fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/v1/tenants/{slug}/members", routing::get(list).post(add))
-        .route(
-            "/v1/tenants/{slug}/members/{identity}",
-            routing::patch(change_role).delete(remove),
-        )
-        .route(
-            "/v1/tenants/{slug}/members/{identity}/modules/{module}",
-            routing::put(set_module_role).delete(clear_module_role),
-        )
+pub(crate) fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(list_members, add_member))
+        .routes(routes!(change_role, remove_member))
+        .routes(routes!(set_module_role, clear_module_role))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ModuleRoleView {
     module: String,
     role: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct MemberView {
+    #[schema(value_type = uuid::Uuid)]
     identity: IdentityId,
     handle: Option<String>,
     /// What they are here, and in any module not listed below.
     role: &'static str,
     /// Where the tenant said something different. Usually empty.
     module_roles: Vec<ModuleRoleView>,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     since: Timestamp,
     suspended: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "email": "sara@acme.example",
+    "password": "correct horse battery staple",
+    "role": "accountant"
+}))]
 struct NewMember {
     /// Their login. If it already belongs to someone, that account gains access
     /// rather than a second one being created for the same person.
@@ -58,16 +62,20 @@ struct NewMember {
     /// Chosen by the owner and handed over. An invitation flow would leave this
     /// to the recipient — see `spa-control/src/members.rs`.
     password: String,
+    /// `owner`, `manager`, `accountant` or `viewer`.
     role: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct MemberAdded {
+    #[schema(value_type = uuid::Uuid)]
     identity: IdentityId,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "role": "manager" }))]
 struct RoleChange {
+    /// `owner`, `manager`, `accountant` or `viewer`.
     role: String,
 }
 
@@ -75,7 +83,19 @@ struct RoleChange {
 ///
 /// Knowing who can see your books is not an administrative privilege; it is the
 /// thing a viewer most needs to be able to check.
-async fn list(
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/members",
+    tag = "members",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    responses(
+        (status = OK, body = Vec<MemberView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn list_members(
     tenant: Allowed<Read>,
     State(state): State<AppState>,
     Language(locale): Language,
@@ -108,7 +128,28 @@ async fn list(
     ))
 }
 
-async fn add(
+/// Add somebody, choosing their password for them.
+///
+/// If the address already has an account here, that account gains access rather
+/// than a second one being created for the same person. `POST
+/// /v1/tenants/{slug}/invitations` is the other way round: the recipient picks
+/// their own password and nobody has to hand one over.
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{slug}/members",
+    tag = "members",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = NewMember,
+    responses(
+        (status = CREATED, body = MemberAdded),
+        (status = BAD_REQUEST, description = "A password under 12 characters, or a role that does not exist", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "Already a member here — change their role instead", body = Problem),
+    ),
+)]
+async fn add_member(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
@@ -134,6 +175,25 @@ async fn add(
     Ok((StatusCode::CREATED, Json(MemberAdded { identity })))
 }
 
+/// Change what somebody may do across the whole tenant.
+#[utoipa::path(
+    patch,
+    path = "/v1/tenants/{slug}/members/{identity}",
+    tag = "members",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/members`."),
+    ),
+    request_body = RoleChange,
+    responses(
+        (status = NO_CONTENT, description = "Changed."),
+        (status = BAD_REQUEST, description = "No such role", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "Not a member here", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The last owner cannot be demoted", body = Problem),
+    ),
+)]
 async fn change_role(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
@@ -152,7 +212,27 @@ async fn change_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn remove(
+/// Take somebody's access away.
+///
+/// Their profile stays. Adding them back later restores it rather than starting
+/// a second one.
+#[utoipa::path(
+    delete,
+    path = "/v1/tenants/{slug}/members/{identity}",
+    tag = "members",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/members`."),
+    ),
+    responses(
+        (status = NO_CONTENT, description = "Removed."),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "Not a member here", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The last owner cannot be removed", body = Problem),
+    ),
+)]
+async fn remove_member(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
@@ -175,6 +255,24 @@ async fn remove(
 /// books" is a real arrangement and this is how a tenant says so — but most
 /// people have one job, and a members form with a row per module per person
 /// would put that in front of everybody who does not need it.
+#[utoipa::path(
+    put,
+    path = "/v1/tenants/{slug}/members/{identity}/modules/{module}",
+    tag = "members",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/members`."),
+        ("module" = String, Path, description = "A name from `GET /v1/modules`."),
+    ),
+    request_body = RoleChange,
+    responses(
+        (status = NO_CONTENT, description = "Set. Applies in this module only."),
+        (status = BAD_REQUEST, description = "No such role, or no such module", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "Not a member here", body = Problem),
+    ),
+)]
 async fn set_module_role(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
@@ -204,6 +302,23 @@ async fn set_module_role(
 ///
 /// Different from setting them to `viewer` there: the exception is gone, so a
 /// later change to their tenant-wide role reaches this module too.
+#[utoipa::path(
+    delete,
+    path = "/v1/tenants/{slug}/members/{identity}/modules/{module}",
+    tag = "members",
+    params(
+        ("slug" = String, Path, description = "The tenant's name in URLs."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/tenants/{slug}/members`."),
+        ("module" = String, Path, description = "A name from `GET /v1/modules`."),
+    ),
+    responses(
+        (status = NO_CONTENT, description = "Cleared. They are back on their tenant-wide role here."),
+        (status = BAD_REQUEST, description = "No such module", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "Not a member here", body = Problem),
+    ),
+)]
 async fn clear_module_role(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,

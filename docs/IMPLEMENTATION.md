@@ -230,8 +230,12 @@ Built only where the ledger produced a second consumer.
 - [ ] Numbering (gapless per-tenant document sequences)
 - [x] `docs/ERRORS.md` — every error code in both languages, generated from the
       catalog the API renders from, with a CI drift check (`just errors`)
-- [ ] OpenAPI generation with CI drift check *(the endpoint shapes; the codes
-      are done)*
+- [x] `docs/openapi.json` — every route, generated from the router that serves
+      them, with a CI drift check (`just openapi`) and served at
+      `GET /v1/openapi.json`. `utoipa-axum` registers the axum route *from* the
+      `#[utoipa::path]` attribute, so a served route cannot be undocumented; the
+      hand-written half (which status carries what) is checked by validating
+      every response in `tests/http.rs` against the published schema
 - [ ] Authorization matrix tests
 
 **Exit for 3a+3b:** a person signs in and reads their own tenant over HTTP, in
@@ -1296,3 +1300,81 @@ here and folded back into ARCHITECTURE.md.
   Recorded because the reflex was wrong, not because the outcome was
   interesting: "allocation on a hot path" is a shape, not a measurement, and
   this codebase has a soak test precisely so the difference can be settled.
+
+- **The OpenAPI document found three defects, and none of them was in the
+  document.** Generating it was supposed to be a writing job. What it produced
+  was a list of places where the server and the promise had quietly diverged:
+
+  1. **`payments` carried two types on the same resource.** `InvoiceView` has a
+     `payments` **count**; `InvoiceDetailView` flattens `InvoiceView` and adds a
+     `payments` **array**. serde writes the flattened fields first, so on the
+     detail endpoint the array silently overwrote the count — `GET .../invoices`
+     answered `"payments": 2` and `GET .../invoices/INV-1` answered
+     `"payments": [ … ]`. Every generated client would have broken on it, and no
+     test noticed because each endpoint was only ever read on its own. The count
+     is now `payment_count`.
+  2. **The most common client mistake did not get the documented error shape.**
+     axum's `Json` rejection is `text/plain` with no `code`, so "every failure is
+     `application/problem+json` with a stable code" was untrue for a malformed
+     body — on exactly the request where a client most needs the message. Fixed
+     at the root with `wire::Json` and `wire::Query`, which keep axum's status
+     (400 / 415 / 422) and replace only the body. Six imports changed; nothing
+     else did.
+  3. **Undocumented statuses.** A 500 can come back from any route and was
+     declared on none.
+
+  All three surfaced the same way: the document's hand-written half — which
+  status carries what — was checked against real responses.
+
+- **What is structural and what had to be checked.** `utoipa-axum` registers the
+  axum route *from* the `#[utoipa::path]` attribute, so path and method are one
+  string rather than two that agree today; a handler with no attribute does not
+  compile inside `routes!`, and schemas come from the wire types by derive. That
+  covers everything except the `responses(…)` blocks, which are prose about
+  types the compiler never relates to the handler's return value.
+
+  So `tests/http.rs` validates **every response it receives** against the schema
+  the document publishes for that path, method and status — sixty-five tests and
+  three thousand lines become contract coverage for the cost of one call in
+  `Fixture::send`. The validator is a hand-written subset of JSON Schema rather
+  than a dependency, and it carries its own two guards:
+  `every_schema_keyword_is_understood` fails when the document starts using a
+  keyword nobody implemented (a constraint silently unchecked is how a
+  hand-rolled validator becomes a test that looks at nothing), and
+  `the_validator_is_not_vacuous` proves it says no to a missing, renamed,
+  retyped, or extra field. Both were confirmed by breaking the code.
+
+- **Conventions belong in one place, applied to the finished document.** The
+  bearer scheme, `Accept-Language` on every path, what each status means, and the
+  responses every operation can give regardless of what it does — all of it is
+  uniform, and declaring it per-handler would be thirty chances to leave one out.
+
+  utoipa's `modifiers(…)` is the wrong hook: it runs on `ApiDoc::openapi()`,
+  *before* any route is registered, so a modifier that walks `paths` walks
+  nothing. The first version did exactly that and reached zero operations —
+  caught by `every_path_takes_accept_language`, which is there because a
+  convention that silently applies to nothing is worse than one never written.
+  `Conventions` now runs on the document `split_for_parts` produces.
+
+- **Three routes were called `list`.** utoipa derives `operationId` from the
+  handler's name, and handler names are unique *per module* — `members::list`,
+  `invitations::list` and `modules::list` all became `list`. A generator handed
+  that emits three `list()` functions and drops two, or refuses the document
+  outright. Found by checking the generated file against the OpenAPI Object
+  schema by hand, which is also where the 413/504 gap came from; both are now
+  tests. The handlers are `list_members`, `list_invitations` and `list_modules`,
+  which is what the rest of the crate already did (`list_accounts`,
+  `list_charts`).
+
+- **Two failures are outside the document, and it says so.** `bin/api` wraps the
+  router in a body limit and a timeout, so a body over 1 MB is a 413 and a
+  request still running after thirty seconds is a 504 — both refused at the edge,
+  before anything the document describes, and both with no body at all. Writing
+  them into the operations would be a lie (they carry no `Problem`); leaving them
+  out entirely would be a different one. The `info` description names them.
+
+- **The one thing a document must not be wrong about is authentication.**
+  `only_the_deliberately_public_routes_are_public` lists the eight open
+  operations and fails on any other that opts out. It caught `POST /v1/signups`,
+  which is public and was documented as needing a session — harmless in that
+  direction, and the same test is what catches the harmful one.

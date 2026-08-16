@@ -24,6 +24,12 @@ pub const NO_SUCH_INVOICE: MessageCode = MessageCode::new("request.no_such_invoi
 pub const MODULE_IN_USE: MessageCode = MessageCode::new("request.module_in_use");
 /// A reporting period that ends before it begins, or on the day it begins.
 pub const EMPTY_PERIOD: MessageCode = MessageCode::new("request.empty_period");
+/// 400 or 422. The body is not JSON, or not the JSON this route wanted.
+pub const MALFORMED_BODY: MessageCode = MessageCode::new("request.malformed_body");
+/// 415. A body was sent without `Content-Type: application/json`.
+pub const UNSUPPORTED_MEDIA_TYPE: MessageCode = MessageCode::new("request.unsupported_media_type");
+/// 400. The query string is missing something, or carries something unreadable.
+pub const INVALID_QUERY: MessageCode = MessageCode::new("request.invalid_query");
 
 pub static CODES: &[MessageCode] = &[
     UNKNOWN_CURRENCY,
@@ -40,9 +46,45 @@ pub static CODES: &[MessageCode] = &[
     NO_SUCH_INVOICE,
     MODULE_IN_USE,
     EMPTY_PERIOD,
+    MALFORMED_BODY,
+    UNSUPPORTED_MEDIA_TYPE,
+    INVALID_QUERY,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    // `reason` is the parser's own account of what it found, in English. It is
+    // for whoever is writing the client, and it is the one thing that turns
+    // "400" into a fixable message.
+    (
+        MALFORMED_BODY,
+        Locale::English,
+        Template::Simple("The request body could not be read: {reason}"),
+    ),
+    (
+        MALFORMED_BODY,
+        Locale::Arabic,
+        Template::Simple("تعذّرت قراءة محتوى الطلب: {reason}"),
+    ),
+    (
+        UNSUPPORTED_MEDIA_TYPE,
+        Locale::English,
+        Template::Simple("This endpoint takes `Content-Type: application/json`."),
+    ),
+    (
+        UNSUPPORTED_MEDIA_TYPE,
+        Locale::Arabic,
+        Template::Simple("يقبل هذا المسار `Content-Type: application/json` فقط."),
+    ),
+    (
+        INVALID_QUERY,
+        Locale::English,
+        Template::Simple("The query string could not be read: {reason}"),
+    ),
+    (
+        INVALID_QUERY,
+        Locale::Arabic,
+        Template::Simple("تعذّرت قراءة معطيات الاستعلام: {reason}"),
+    ),
     (
         UNKNOWN_CURRENCY,
         Locale::English,

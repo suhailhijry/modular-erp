@@ -11,14 +11,17 @@
 //!
 //! - Every error is `application/problem+json` with a stable `code`. Branch on
 //!   the code, never on `detail`, which is prose in whatever language was asked
-//!   for.
+//!   for. `docs/ERRORS.md` lists every one.
 //! - `Accept-Language` is honoured on every response, including failures.
+//! - The `OpenAPI` document at `GET /v1/openapi.json` — also `docs/openapi.json` —
+//!   describes every route, and is generated from the router that serves them
+//!   rather than written alongside it. See [`routes`].
 //!
 //! # What is not here yet
 //!
-//! Fine-grained authorization, `Idempotency-Key`, `ETag`/`If-Match`, cursors and
-//! an `OpenAPI` document. Each needs a real mutation to attach to, and the first arrives
-//! with the ledger module — building them now would be guessing at their shape.
+//! `Idempotency-Key`, `ETag`/`If-Match`, and cursors. Writes are already
+//! idempotent on a client-chosen id, which is most of what the first buys; the
+//! other two need a list long enough and a conflict real enough to shape them.
 
 mod catalog;
 mod consistency;
@@ -50,5 +53,5 @@ pub use extract::{
 };
 pub use modules::available as modules;
 pub use problem::Problem;
-pub use routes::router;
+pub use routes::{openapi, router};
 pub use state::AppState;

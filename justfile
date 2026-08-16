@@ -67,6 +67,11 @@ reap:
 errors:
     REGENERATE_DOCS=1 cargo test --quiet -p spa-api --test errors
 
+# Regenerate the OpenAPI document from the router that serves the requests.
+# `just check` fails when `docs/openapi.json` no longer matches.
+openapi:
+    REGENERATE_DOCS=1 cargo test --quiet -p spa-api --test openapi
+
 # Drop every database this project creates. Does not touch anything else.
 #
 # Includes `spa_tenant_%`: a soak test that fails an assertion panics before its
