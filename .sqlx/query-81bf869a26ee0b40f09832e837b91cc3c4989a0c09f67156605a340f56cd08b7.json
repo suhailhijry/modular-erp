@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO module_secret (key, sealed, sealed_with)\n         VALUES ($1, $2, $3)\n         ON CONFLICT (key) DO UPDATE\n            SET sealed = EXCLUDED.sealed,\n                sealed_with = EXCLUDED.sealed_with,\n                updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "81bf869a26ee0b40f09832e837b91cc3c4989a0c09f67156605a340f56cd08b7"
+}

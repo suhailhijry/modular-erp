@@ -44,6 +44,12 @@ sha2 = "0.11"
 base64 = "0.22"
 hex = "0.4"
 
+# Key generation, the CSR, and sealing secrets at rest. **Already linked**: sqlx
+# builds against it for Postgres TLS, so this is the library the process has
+# rather than a second one. See `tax_sa::zatca::csr` for what ZATCA needs from
+# it — secp256k1, a PKCS#10 request, and two extensions written as exact DER.
+openssl = "0.10"
+
 # Async
 async-trait = "0.1"
 
@@ -52,6 +58,19 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 # HTTP
 axum = { version = "0.8", features = ["macros"] }
+
+# The client, for the one external service this system talks to: ZATCA.
+#
+# `default-tls` rather than `rustls-tls` deliberately. sqlx already links
+# native-tls against OpenSSL for Postgres, and every piece of cryptography here
+# — key generation, the CSR, signing, sealing — is OpenSSL too. Choosing rustls
+# would put a second TLS implementation in the same process for no benefit.
+#
+# No cookies, no gzip, no blocking client: six JSON endpoints on one host.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "default-tls",
+] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
 

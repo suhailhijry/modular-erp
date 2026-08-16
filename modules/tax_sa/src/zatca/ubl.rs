@@ -45,13 +45,64 @@ pub struct NotRenderable {
     pub found: char,
 }
 
-/// The canonical bytes: what gets hashed, and what gets submitted.
+/// The three things ZATCA strips before hashing, put back for submission.
+///
+/// The signature and the QR are computed **from** the hashed document, so they
+/// cannot be in it. This is what wraps around those bytes afterwards — see
+/// [`signed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enveloped<'a> {
+    /// The whole `ext:UBLExtensions` block from
+    /// [`signing::Signature`](super::signing::Signature).
+    pub extensions: &'a str,
+    /// The base64 TLV a phone reads.
+    pub qr: &'a str,
+}
+
+/// The canonical bytes: what gets hashed, and what the signature is over.
 ///
 /// No XML declaration, because C14N removes one — so a document with a
 /// declaration and one without hash the same, and this build hashes what it
 /// sends. [`with_declaration`] adds it back for anything that stores or displays
 /// the document.
+///
+/// # This is not a document, it is a canonicalisation artefact
+///
+/// ZATCA hashes what it receives **after** removing three elements with an XSL
+/// transform — and a transform removes *elements*, not the whitespace text
+/// nodes around them. Removing `<ext:UBLExtensions>` from
+///
+/// ```text
+///   <Invoice …>\n  <ext:UBLExtensions>…</ext:UBLExtensions>\n  <cbc:ProfileID>
+/// ```
+///
+/// leaves the `"\n  "` before it *and* the `"\n  "` after it, so the result is
+/// `<Invoice …>\n  \n  <cbc:ProfileID>` — with a line carrying nothing but
+/// indentation. This build never renders those elements, so it has to put their
+/// leftovers in deliberately, or its hash is not the hash ZATCA computes.
+///
+/// **Confirmed against ZATCA**, which is the only way it could have been: with
+/// the leftovers, a signed invoice is accepted; without them, the answer is
+/// `invalid-invoice-hash`. See `modules/tax_sa/tests/sandbox.rs`.
 pub fn render(document: &Document) -> Result<String, NotRenderable> {
+    render_with(document, None)
+}
+
+/// The document as it is **submitted**: the hashed bytes, plus the signature,
+/// the QR and the `cac:Signature` that points at it.
+///
+/// Rendered rather than spliced into [`render`]'s output. A string insertion at
+/// a marker is a second parser that has to agree with the first about where the
+/// document's parts are, and the two disagreeing would produce a document whose
+/// hash is right and whose shape is wrong.
+pub fn signed(document: &Document, enveloped: &Enveloped<'_>) -> Result<String, NotRenderable> {
+    render_with(document, Some(enveloped))
+}
+
+fn render_with(
+    document: &Document,
+    enveloped: Option<&Enveloped<'_>>,
+) -> Result<String, NotRenderable> {
     let element = document.type_code.element();
     let mut out = String::with_capacity(4096);
 
@@ -63,6 +114,14 @@ pub fn render(document: &Document) -> Result<String, NotRenderable> {
          xmlns:cbc=\"urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2\" \
          xmlns:ext=\"urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2\">"
     );
+
+    // **First child of the root**, and the first of the three things the hash
+    // leaves out.
+    match enveloped {
+        Some(enveloped) => out.push_str(enveloped.extensions),
+        // The whitespace the element left behind. See `left_behind`.
+        None => out.push_str("  \n"),
+    }
 
     // The profile ZATCA registers every document under.
     text(&mut out, 1, "cbc:ProfileID", "reporting:1.0", "profile")?;
@@ -123,30 +182,13 @@ pub fn render(document: &Document) -> Result<String, NotRenderable> {
         out.push_str("  </cac:BillingReference>\n");
     }
 
-    // The counter, and the document before this one. Two references, both
-    // required, and the order is ZATCA's.
-    out.push_str("  <cac:AdditionalDocumentReference>\n");
-    text(&mut out, 2, "cbc:ID", "ICV", "icv")?;
-    text(
-        &mut out,
-        2,
-        "cbc:UUID",
-        &document.link.icv.to_string(),
-        "icv",
-    )?;
-    out.push_str("  </cac:AdditionalDocumentReference>\n");
+    chain(&mut out, document)?;
 
-    out.push_str("  <cac:AdditionalDocumentReference>\n");
-    text(&mut out, 2, "cbc:ID", "PIH", "pih")?;
-    out.push_str("    <cac:Attachment>\n");
-    let _ = write!(
-        out,
-        "      <cbc:EmbeddedDocumentBinaryObject mimeCode=\"text/plain\">"
-    );
-    escaped(&mut out, &document.link.previous, "pih")?;
-    out.push_str("</cbc:EmbeddedDocumentBinaryObject>\n");
-    out.push_str("    </cac:Attachment>\n");
-    out.push_str("  </cac:AdditionalDocumentReference>\n");
+    match enveloped {
+        Some(enveloped) => stamp(&mut out, enveloped)?,
+        // Two elements removed here, so two text nodes left behind.
+        None => out.push_str("  \n  \n"),
+    }
 
     supplier(&mut out, &document.seller)?;
     buyer(&mut out, document)?;
@@ -163,6 +205,16 @@ pub fn render(document: &Document) -> Result<String, NotRenderable> {
         "issued_at",
     )?;
     out.push_str("  </cac:Delivery>\n");
+
+    if document.type_code != TypeCode::Invoice {
+        why_the_note_was_issued(&mut out, document)?;
+    }
+
+    // **After `cac:PaymentMeans`, before `cac:TaxTotal`** — UBL's order, and a
+    // document out of it is one ZATCA's schema check refuses.
+    for allowance in &document.allowances {
+        discount(&mut out, document, allowance)?;
+    }
 
     tax_total(&mut out, document)?;
     monetary_total(&mut out, document);
@@ -184,6 +236,143 @@ pub fn render(document: &Document) -> Result<String, NotRenderable> {
 #[must_use]
 pub fn with_declaration(canonical: &str) -> String {
     format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{canonical}")
+}
+
+/// One discount, as `cac:AllowanceCharge`.
+///
+/// # Why the tax category is on it
+///
+/// Because a discount reduces the tax only if the thing discounted carried
+/// any. UBL puts the treatment on the allowance itself, so a business can take
+/// 10 off the standard-rated part of an invoice without touching the exempt
+/// part — and so the taxable amount below adds up.
+fn discount(
+    out: &mut String,
+    document: &Document,
+    allowance: &super::Allowance,
+) -> Result<(), NotRenderable> {
+    let currency = document.currency.as_str();
+
+    out.push_str("  <cac:AllowanceCharge>\n");
+    // `false` is an allowance; `true` would be a charge. This build issues no
+    // charges — a surcharge is a line, and one nobody has asked for.
+    text(out, 2, "cbc:ChargeIndicator", "false", "allowance")?;
+    text(
+        out,
+        2,
+        "cbc:AllowanceChargeReason",
+        &allowance.reason,
+        "allowance_reason",
+    )?;
+    money(out, 2, "cbc:Amount", &amount(allowance.amount), currency);
+
+    out.push_str("    <cac:TaxCategory>\n");
+    let _ = writeln!(
+        out,
+        "      <cbc:ID schemeAgencyID=\"6\" schemeID=\"UN/ECE 5305\">{}</cbc:ID>",
+        category_code(allowance.category)
+    );
+    let _ = writeln!(
+        out,
+        "      <cbc:Percent>{}</cbc:Percent>",
+        percent(allowance.rate_bp)
+    );
+    out.push_str("      <cac:TaxScheme>\n");
+    let _ = writeln!(
+        out,
+        "        <cbc:ID schemeAgencyID=\"6\" schemeID=\"UN/ECE 5153\">VAT</cbc:ID>"
+    );
+    out.push_str("      </cac:TaxScheme>\n");
+    out.push_str("    </cac:TaxCategory>\n");
+    out.push_str("  </cac:AllowanceCharge>\n");
+    Ok(())
+}
+
+/// The counter and the document before this one. Two references, both
+/// required, and the order is ZATCA's.
+fn chain(out: &mut String, document: &Document) -> Result<(), NotRenderable> {
+    out.push_str("  <cac:AdditionalDocumentReference>\n");
+    text(out, 2, "cbc:ID", "ICV", "icv")?;
+    text(out, 2, "cbc:UUID", &document.link.icv.to_string(), "icv")?;
+    out.push_str("  </cac:AdditionalDocumentReference>\n");
+
+    out.push_str("  <cac:AdditionalDocumentReference>\n");
+    text(out, 2, "cbc:ID", "PIH", "pih")?;
+    out.push_str("    <cac:Attachment>\n");
+    let _ = write!(
+        out,
+        "      <cbc:EmbeddedDocumentBinaryObject mimeCode=\"text/plain\">"
+    );
+    escaped(out, &document.link.previous, "pih")?;
+    out.push_str("</cbc:EmbeddedDocumentBinaryObject>\n");
+    out.push_str("    </cac:Attachment>\n");
+    out.push_str("  </cac:AdditionalDocumentReference>\n");
+    Ok(())
+}
+
+/// **The reason a note was issued**, which ZATCA reads out of KSA-10 —
+/// `cac:PaymentMeans/cbc:InstructionNote` — and not out of the general
+/// `cbc:Note` where an earlier version of this put it. Without it, `BR-KSA-17`
+/// refuses every credit and debit note.
+///
+/// UBL order: after `cac:Delivery`, before `cac:TaxTotal`. Only notes carry it:
+/// an ordinary invoice is accepted without one, and adding it there would be
+/// inventing a payment method nobody chose.
+fn why_the_note_was_issued(out: &mut String, document: &Document) -> Result<(), NotRenderable> {
+    out.push_str("  <cac:PaymentMeans>\n");
+    // UN/ECE 4461. Not meaningful on a note, and required by UBL wherever
+    // `cac:PaymentMeans` appears at all.
+    text(out, 2, "cbc:PaymentMeansCode", "10", "payment_means")?;
+    text(
+        out,
+        2,
+        "cbc:InstructionNote",
+        if document.note.is_empty() {
+            "تصحيح"
+        } else {
+            &document.note
+        },
+        "note",
+    )?;
+    out.push_str("  </cac:PaymentMeans>\n");
+    Ok(())
+}
+
+/// The QR and the `cac:Signature` that points at it.
+///
+/// UBL puts `cac:Signature` after the last `cac:AdditionalDocumentReference` and
+/// before the parties, and a document out of that order is one ZATCA's schema
+/// check refuses.
+fn stamp(out: &mut String, enveloped: &Enveloped<'_>) -> Result<(), NotRenderable> {
+    out.push_str("  <cac:AdditionalDocumentReference>\n");
+    text(out, 2, "cbc:ID", "QR", "qr")?;
+    out.push_str("    <cac:Attachment>\n");
+    let _ = write!(
+        out,
+        "      <cbc:EmbeddedDocumentBinaryObject mimeCode=\"text/plain\">"
+    );
+    escaped(out, enveloped.qr, "qr")?;
+    out.push_str("</cbc:EmbeddedDocumentBinaryObject>\n");
+    out.push_str("    </cac:Attachment>\n");
+    out.push_str("  </cac:AdditionalDocumentReference>\n");
+
+    out.push_str("  <cac:Signature>\n");
+    text(
+        out,
+        2,
+        "cbc:ID",
+        "urn:oasis:names:specification:ubl:signature:Invoice",
+        "signature",
+    )?;
+    text(
+        out,
+        2,
+        "cbc:SignatureMethod",
+        "urn:oasis:names:specification:ubl:dsig:enveloped:xades",
+        "signature",
+    )?;
+    out.push_str("  </cac:Signature>\n");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +416,10 @@ fn buyer(out: &mut String, document: &Document) -> Result<(), NotRenderable> {
     out.push_str("  <cac:AccountingCustomerParty>\n");
     out.push_str("    <cac:Party>\n");
 
+    if let Some(address) = document.buyer.as_ref().and_then(|b| b.address.as_ref()) {
+        buyer_address(out, address)?;
+    }
+
     if let Some(vat_number) = document.buyer.as_ref().and_then(|b| b.vat_number.as_ref()) {
         out.push_str("      <cac:PartyTaxScheme>\n");
         text(out, 4, "cbc:CompanyID", vat_number, "buyer_vat_number")?;
@@ -236,6 +429,8 @@ fn buyer(out: &mut String, document: &Document) -> Result<(), NotRenderable> {
         out.push_str("      </cac:PartyTaxScheme>\n");
     }
 
+    // UBL order: the address comes before the tax scheme and the legal entity,
+    // so it is written into the buffer ahead of them.
     if let Some(name) = document.buyer.as_ref().map(|b| &b.name) {
         out.push_str("      <cac:PartyLegalEntity>\n");
         text(out, 4, "cbc:RegistrationName", name, "buyer_name")?;
@@ -244,6 +439,41 @@ fn buyer(out: &mut String, document: &Document) -> Result<(), NotRenderable> {
 
     out.push_str("    </cac:Party>\n");
     out.push_str("  </cac:AccountingCustomerParty>\n");
+    Ok(())
+}
+
+/// The buyer's address, which is a looser shape than the seller's: a customer
+/// abroad has no Saudi national address, and ZATCA asks only for street, city
+/// and country.
+fn buyer_address(out: &mut String, address: &sales::Address) -> Result<(), NotRenderable> {
+    out.push_str("      <cac:PostalAddress>\n");
+    text(out, 4, "cbc:StreetName", &address.street, "buyer_street")?;
+    if let Some(building) = &address.building {
+        text(out, 4, "cbc:BuildingNumber", building, "buyer_building")?;
+    }
+    if let Some(district) = &address.district {
+        text(
+            out,
+            4,
+            "cbc:CitySubdivisionName",
+            district,
+            "buyer_district",
+        )?;
+    }
+    text(out, 4, "cbc:CityName", &address.city, "buyer_city")?;
+    if let Some(postal_code) = &address.postal_code {
+        text(out, 4, "cbc:PostalZone", postal_code, "buyer_postal_code")?;
+    }
+    out.push_str("        <cac:Country>\n");
+    text(
+        out,
+        5,
+        "cbc:IdentificationCode",
+        &address.country,
+        "buyer_country",
+    )?;
+    out.push_str("        </cac:Country>\n");
+    out.push_str("      </cac:PostalAddress>\n");
     Ok(())
 }
 
@@ -344,17 +574,36 @@ fn tax_total(out: &mut String, document: &Document) -> Result<(), NotRenderable>
         out.push_str("    </cac:TaxSubtotal>\n");
     }
     out.push_str("  </cac:TaxTotal>\n");
+
+    // **A second, bare total.** BR-KSA-EN16931-09: when `cbc:TaxCurrencyCode`
+    // is present, exactly one `cac:TaxTotal` without subtotals must be too.
+    // ZATCA warns about its absence rather than refusing, which is how the
+    // first accepted document still had something wrong with it.
+    out.push_str("  <cac:TaxTotal>\n");
+    money(
+        out,
+        2,
+        "cbc:TaxAmount",
+        &amount(document.totals.tax),
+        currency,
+    );
+    out.push_str("  </cac:TaxTotal>\n");
     Ok(())
 }
 
 fn monetary_total(out: &mut String, document: &Document) {
     let currency = document.currency.as_str();
-    let net = amount(document.totals.net);
+    // **Three different numbers when there is a discount.** What the lines came
+    // to, what is taxed, and what was taken off in between — and they have to
+    // agree, because ZATCA checks that they do.
+    let lines_came_to = amount(document.totals.lines_came_to());
+    let taxable = amount(document.totals.net);
+    let discounted = amount(document.totals.discount());
     let zero = amount(spa_types::Money::zero(document.currency));
 
     out.push_str("  <cac:LegalMonetaryTotal>\n");
-    money(out, 2, "cbc:LineExtensionAmount", &net, currency);
-    money(out, 2, "cbc:TaxExclusiveAmount", &net, currency);
+    money(out, 2, "cbc:LineExtensionAmount", &lines_came_to, currency);
+    money(out, 2, "cbc:TaxExclusiveAmount", &taxable, currency);
     money(
         out,
         2,
@@ -362,10 +611,10 @@ fn monetary_total(out: &mut String, document: &Document) {
         &amount(document.totals.gross),
         currency,
     );
-    // No allowances and nothing prepaid: `sales` records a discount as a
-    // negative line, which is already in the net above. Stating them as zero is
-    // required, and stating them twice would double-count.
-    money(out, 2, "cbc:AllowanceTotalAmount", &zero, currency);
+    // The sum of the allowances above. Nothing prepaid: a payment against an
+    // invoice is recorded separately and does not change what the invoice was
+    // for.
+    money(out, 2, "cbc:AllowanceTotalAmount", &discounted, currency);
     money(out, 2, "cbc:PrepaidAmount", &zero, currency);
     money(
         out,
@@ -384,14 +633,11 @@ fn invoice_line(
     line: &super::Line,
 ) -> Result<(), NotRenderable> {
     let currency = document.currency.as_str();
-    let element = match document.type_code {
-        TypeCode::Invoice => "cac:InvoiceLine",
-        TypeCode::CreditNote | TypeCode::DebitNote => "cac:CreditNoteLine",
-    };
-    let quantity = match document.type_code {
-        TypeCode::Invoice => "cbc:InvoicedQuantity",
-        TypeCode::CreditNote | TypeCode::DebitNote => "cbc:CreditedQuantity",
-    };
+    // `cac:InvoiceLine` and `cbc:InvoicedQuantity` on all three, for the same
+    // reason the root is always `<Invoice>`: ZATCA's schema is UBL's Invoice
+    // schema, and a credit note is an invoice with a different type code.
+    let element = "cac:InvoiceLine";
+    let quantity = "cbc:InvoicedQuantity";
 
     let _ = writeln!(out, "  <{element}>");
     let _ = writeln!(out, "    <cbc:ID>{}</cbc:ID>", index + 1);
@@ -525,6 +771,14 @@ pub(crate) mod tests {
             buyer: Some(Buyer {
                 name: "شركة الأمل".to_owned(),
                 vat_number: Some("300000000000003".to_owned()),
+                address: Some(Box::new(sales::Address {
+                    street: "طريق العروبة".to_owned(),
+                    city: "الرياض".to_owned(),
+                    country: "SA".to_owned(),
+                    district: Some("الملز".to_owned()),
+                    building: Some("4321".to_owned()),
+                    postal_code: Some("12611".to_owned()),
+                })),
             }),
             lines: vec![Line {
                 description: "استشارات".to_owned(),
@@ -533,9 +787,11 @@ pub(crate) mod tests {
                 rate_bp: 1_500,
                 tax,
             }],
+            allowances: Vec::new(),
             totals: Totals {
                 net,
                 tax,
+                before_discount: None,
                 gross: Money::from_minor(11_500, currency),
                 bands: vec![Band {
                     category: VatCategory::Standard,
@@ -614,6 +870,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_credit_note_is_a_credit_note_all_the_way_down() {
+        let plain_invoice = render(&document()).expect("renders");
         let mut document = document();
         document.type_code = TypeCode::CreditNote;
         document.number = "CN-00001".to_owned();
@@ -624,17 +881,30 @@ pub(crate) mod tests {
         });
 
         let xml = render(&document).expect("renders");
-        assert!(xml.starts_with("<CreditNote xmlns="));
+        // **An `<Invoice>`, with 381 in the type code.** ZATCA's schema is UBL's
+        // Invoice schema; the UBL `CreditNote` document type is rejected by the
+        // gateway before validation begins.
+        assert!(xml.starts_with("<Invoice xmlns="));
+        assert!(xml.ends_with("</Invoice>"));
         assert!(xml.contains("CommonAggregateComponents"));
         assert!(xml.contains("<cbc:InvoiceTypeCode name=\"0100000\">381</cbc:InvoiceTypeCode>"));
-        assert!(xml.contains("<cac:CreditNoteLine>"));
-        assert!(xml.contains("<cbc:CreditedQuantity unitCode=\"PCE\">1</cbc:CreditedQuantity>"));
+        assert!(xml.contains("<cac:InvoiceLine>"));
+        assert!(xml.contains("<cbc:InvoicedQuantity unitCode=\"PCE\">1</cbc:InvoicedQuantity>"));
+        assert!(
+            !xml.contains("CreditNoteLine"),
+            "UBL's credit-note shape is not ZATCA's"
+        );
         // The invoice it credits, which ZATCA requires on one.
         assert!(xml.contains("<cac:BillingReference>"));
         assert!(xml.contains("<cbc:ID>INV-00001</cbc:ID>"));
-        // And why.
+        // **And why**, in KSA-10 — `cac:PaymentMeans/cbc:InstructionNote`, not
+        // the general note. `BR-KSA-17` refuses a note without it.
+        assert!(xml.contains("<cbc:InstructionNote>إرجاع</cbc:InstructionNote>"));
+        assert!(xml.contains("<cbc:PaymentMeansCode>10</cbc:PaymentMeansCode>"));
         assert!(xml.contains("<cbc:Note>إرجاع</cbc:Note>"));
-        assert!(xml.ends_with("</CreditNote>"));
+
+        // An ordinary invoice carries neither, and ZATCA accepts it without.
+        assert!(!plain_invoice.contains("<cac:PaymentMeans>"));
     }
 
     /// Zero-rated and exempt lines need a reason, and they need different ones.
@@ -863,6 +1133,167 @@ pub(crate) mod tests {
         }
     }
 
+    /// **The hashed document and the submitted one are the same document.**
+    ///
+    /// The signature is over the first, and the second is what ZATCA receives
+    /// and re-derives the first from — by removing exactly the three things
+    /// [`signed`] added.
+    #[test]
+    fn the_submitted_document_is_the_hashed_one_plus_the_three_removed_things() {
+        let document = document();
+        let hashed = render(&document).expect("renders");
+        let submitted = signed(
+            &document,
+            &Enveloped {
+                extensions: "  <ext:UBLExtensions>the signature</ext:UBLExtensions>\n",
+                qr: "AQID",
+            },
+        )
+        .expect("renders");
+
+        assert!(submitted.len() > hashed.len());
+        assert!(submitted.contains("<ext:UBLExtensions>"));
+        assert!(submitted.contains("<cbc:ID>QR</cbc:ID>"));
+        assert!(submitted.contains(">AQID</cbc:EmbeddedDocumentBinaryObject>"));
+        assert!(submitted.contains("<cac:Signature>"));
+        assert!(submitted.contains("urn:oasis:names:specification:ubl:dsig:enveloped:xades"));
+
+        // The extensions are the first child of the root, where ZATCA looks.
+        let root_ends = submitted.find('\n').unwrap_or_default();
+        assert!(
+            submitted[root_ends..root_ends + 40].contains("<ext:UBLExtensions>"),
+            "the extensions are not the first child"
+        );
+
+        // **The order UBL requires**: the QR reference is still an
+        // AdditionalDocumentReference, and cac:Signature comes after the last of
+        // them and before the parties.
+        let qr = submitted
+            .find("<cbc:ID>QR</cbc:ID>")
+            .expect("the QR reference");
+        let signature = submitted.find("<cac:Signature>").expect("the signature");
+        let supplier = submitted
+            .find("<cac:AccountingSupplierParty>")
+            .expect("the supplier");
+        let pih = submitted.find("<cbc:ID>PIH</cbc:ID>").expect("the chain");
+        assert!(pih < qr, "the QR reference comes after the chain");
+        assert!(qr < signature, "cac:Signature comes after the references");
+        assert!(
+            signature < supplier,
+            "cac:Signature comes before the parties"
+        );
+
+        // And removing what was added gets the hashed document back — which is
+        // what ZATCA's verifier does with the XPath transforms.
+        assert!(hashed.contains("<cbc:ID>INV-00001</cbc:ID>"));
+        assert!(!hashed.contains("<ext:UBLExtensions>"));
+        assert!(!hashed.contains("<cac:Signature>"));
+        assert!(!hashed.contains("<cbc:ID>QR</cbc:ID>"));
+    }
+
+    /// The signed document has to survive the same scanner as the unsigned one,
+    /// because it is the one that is actually submitted.
+    #[test]
+    fn the_signed_document_is_still_well_formed() {
+        let signed = signed(
+            &document(),
+            &Enveloped {
+                extensions: "  <ext:UBLExtensions>\n    <ext:UBLExtension>x</ext:UBLExtension>\n  </ext:UBLExtensions>\n",
+                qr: "AQID",
+            },
+        )
+        .expect("renders");
+        match scan(&signed) {
+            Ok(elements) => assert!(elements > 45, "only {elements} elements"),
+            Err(problem) => panic!("{problem}"),
+        }
+    }
+
+    /// **A discount is its own figure on the document**, and the three monetary
+    /// totals it produces have to agree.
+    #[test]
+    fn a_discount_is_an_allowance_charge_and_the_totals_add_up() {
+        let currency = sar();
+        let mut document = document();
+        document.allowances = vec![crate::zatca::Allowance {
+            reason: "خصم".to_owned(),
+            amount: Money::from_minor(1_500, currency),
+            category: VatCategory::Standard,
+            rate_bp: 1_500,
+        }];
+        // 100.00 of lines, 15.00 off, so 85.00 taxed at 15% = 12.75.
+        document.totals = Totals {
+            net: Money::from_minor(8_500, currency),
+            tax: Money::from_minor(1_275, currency),
+            gross: Money::from_minor(9_775, currency),
+            before_discount: Some(Money::from_minor(10_000, currency)),
+            bands: vec![Band {
+                category: VatCategory::Standard,
+                rate_bp: 1_500,
+                net: Money::from_minor(8_500, currency),
+                tax: Money::from_minor(1_275, currency),
+            }],
+        };
+
+        let xml = render(&document).expect("renders");
+
+        assert!(xml.contains("<cac:AllowanceCharge>"));
+        assert!(xml.contains("<cbc:ChargeIndicator>false</cbc:ChargeIndicator>"));
+        assert!(xml.contains("<cbc:AllowanceChargeReason>خصم</cbc:AllowanceChargeReason>"));
+        assert!(xml.contains("<cbc:Amount currencyID=\"SAR\">15.00</cbc:Amount>"));
+
+        // **The three numbers.** What the lines came to, what was taken off,
+        // and what is taxed — ZATCA checks that they agree.
+        assert!(xml.contains(
+            "<cbc:LineExtensionAmount currencyID=\"SAR\">100.00</cbc:LineExtensionAmount>"
+        ));
+        assert!(xml.contains(
+            "<cbc:AllowanceTotalAmount currencyID=\"SAR\">15.00</cbc:AllowanceTotalAmount>"
+        ));
+        assert!(
+            xml.contains(
+                "<cbc:TaxExclusiveAmount currencyID=\"SAR\">85.00</cbc:TaxExclusiveAmount>"
+            )
+        );
+        assert!(
+            xml.contains(
+                "<cbc:TaxInclusiveAmount currencyID=\"SAR\">97.75</cbc:TaxInclusiveAmount>"
+            )
+        );
+        assert!(xml.contains("<cbc:PayableAmount currencyID=\"SAR\">97.75</cbc:PayableAmount>"));
+        // And the band reports the discounted amount, because that is what was
+        // supplied.
+        assert!(xml.contains("<cbc:TaxableAmount currencyID=\"SAR\">85.00</cbc:TaxableAmount>"));
+
+        // UBL order: after `cac:Delivery`, before `cac:TaxTotal`.
+        let delivery = xml.find("<cac:Delivery>").expect("delivery");
+        let allowance = xml.find("<cac:AllowanceCharge>").expect("allowance");
+        let tax = xml.find("<cac:TaxTotal>").expect("tax total");
+        assert!(delivery < allowance && allowance < tax);
+
+        match scan(&xml) {
+            Ok(_) => {}
+            Err(problem) => panic!("{problem}"),
+        }
+    }
+
+    /// An invoice with no discount says so by saying nothing, and its totals
+    /// are the ones every invoice had before discounts existed.
+    #[test]
+    fn without_a_discount_nothing_is_allowed_and_the_totals_are_unchanged() {
+        let xml = render(&document()).expect("renders");
+        assert!(!xml.contains("<cac:AllowanceCharge>"));
+        assert!(xml.contains(
+            "<cbc:AllowanceTotalAmount currencyID=\"SAR\">0.00</cbc:AllowanceTotalAmount>"
+        ));
+        assert!(xml.contains(
+            "<cbc:LineExtensionAmount currencyID=\"SAR\">100.00</cbc:LineExtensionAmount>"
+        ));
+        assert!(xml.contains(
+            "<cbc:TaxExclusiveAmount currencyID=\"SAR\">100.00</cbc:TaxExclusiveAmount>"
+        ));
+    }
+
     /// Two renders of the same document are the same bytes — or the chain breaks
     /// on the first rebuild.
     #[test]
@@ -876,6 +1307,7 @@ pub(crate) mod tests {
         document.buyer = Some(Buyer {
             name: "Ampersand & <Sons>".to_owned(),
             vat_number: Some("300000000000003".to_owned()),
+            address: None,
         });
 
         let xml = render(&document).expect("renders");

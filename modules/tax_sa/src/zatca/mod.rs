@@ -46,7 +46,12 @@
 //! and the extending module subscribes.
 
 pub mod chain;
+pub mod csr;
+pub mod http;
+pub mod onboarding;
 pub mod qr;
+pub mod samples;
+pub mod signing;
 pub mod ubl;
 pub mod wire;
 
@@ -150,14 +155,19 @@ impl TypeCode {
         }
     }
 
-    /// The UBL element name. A credit note is a different *document type* in
-    /// UBL, not an invoice with a flag — and ZATCA reads it as one.
+    /// The UBL element name, which is **`Invoice` for all three**.
+    ///
+    /// Generic UBL has a separate `CreditNote` document type, and an earlier
+    /// version of this used it. ZATCA does not: its schema is the UBL *Invoice*
+    /// schema, and a credit note is an `<Invoice>` whose `cbc:InvoiceTypeCode`
+    /// says 381. Sending a `<CreditNote>` root is rejected before validation
+    /// even begins — `HTTP 400 Invalid Request`, plain text, from the gateway
+    /// rather than the validator, with nothing to say what was wrong.
+    ///
+    /// Confirmed against ZATCA; see `modules/tax_sa/tests/sandbox.rs`.
     #[must_use]
     pub const fn element(self) -> &'static str {
-        match self {
-            Self::Invoice => "Invoice",
-            Self::CreditNote | Self::DebitNote => "CreditNote",
-        }
+        "Invoice"
     }
 }
 
@@ -168,6 +178,11 @@ pub struct Buyer {
     /// Present exactly when this is a standard invoice — it is what makes it one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vat_number: Option<String>,
+    /// Where they are. ZATCA wants street, city and country on a standard
+    /// invoice (BT-50, BT-52, BT-55) and accepts one without them **with a
+    /// warning** — which is a warning that becomes a finding at an inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<Box<sales::Address>>,
 }
 
 /// One charged thing, with the tax that was charged on it.
@@ -197,13 +212,49 @@ pub struct Band {
     pub tax: Money,
 }
 
+/// Something taken off the whole document — UBL's `cac:AllowanceCharge`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Allowance {
+    pub reason: String,
+    /// Positive: what comes off.
+    pub amount: Money,
+    pub category: VatCategory,
+    pub rate_bp: i32,
+}
+
 /// What the document comes to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Totals {
+    /// **After the discounts**, and therefore what is taxed —
+    /// `TaxExclusiveAmount`.
     pub net: Money,
     pub tax: Money,
     pub gross: Money,
+    /// What the lines came to before any discount — `LineExtensionAmount`.
+    ///
+    /// Stored rather than derived because a document is rendered from what was
+    /// recorded, and `net + sum(allowances)` would be a second computation that
+    /// has to agree with the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_discount: Option<Money>,
     pub bands: Vec<Band>,
+}
+
+impl Totals {
+    /// `LineExtensionAmount`: what the lines came to. The same as `net` when
+    /// nothing was discounted.
+    #[must_use]
+    pub fn lines_came_to(&self) -> Money {
+        self.before_discount.unwrap_or(self.net)
+    }
+
+    /// `AllowanceTotalAmount`.
+    #[must_use]
+    pub fn discount(&self) -> Money {
+        self.lines_came_to()
+            .checked_sub(self.net)
+            .unwrap_or_else(|_| Money::zero(self.net.currency()))
+    }
 }
 
 /// The invoice a credit note is against.
@@ -232,6 +283,9 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buyer: Option<Buyer>,
     pub lines: Vec<Line>,
+    /// What was taken off the whole document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowances: Vec<Allowance>,
     pub totals: Totals,
     pub link: Link,
     /// The invoice this credits, on a credit note.
@@ -257,6 +311,16 @@ pub fn document_uuid(vat_number: &str, number: &str) -> Uuid {
     let namespace = Uuid::new_v5(&Uuid::NAMESPACE_URL, b"https://zatca.gov.sa/einvoicing");
     Uuid::new_v5(&namespace, format!("{vat_number}:{number}").as_bytes())
 }
+
+/// How the QR's timestamp is written.
+///
+/// **No `Z`**, though ZATCA's own QR specification shows one. Its validator
+/// compares the value against `cbc:IssueDate` + `T` + `cbc:IssueTime`, which
+/// carries no zone — so a `Z` produces
+/// `invoiceTimeStamp_QRCODE_INVALID: Time on QR Code does not match with
+/// Invoice Issue Time`. Confirmed against ZATCA; see
+/// `modules/tax_sa/tests/sandbox.rs`.
+pub const QR_TIME: &str = "%Y-%m-%dT%H:%M:%S";
 
 /// An amount as ZATCA prints it: the bare number, at the currency's exponent.
 ///
@@ -353,12 +417,18 @@ mod tests {
         }
     }
 
+    /// **In generic UBL a credit note is a different document type; to ZATCA it
+    /// is an `<Invoice>` with a different code.** Sending the UBL `CreditNote`
+    /// root is rejected by the gateway before validation, with nothing said
+    /// about why — so this is pinned rather than left to read naturally.
     #[test]
-    fn a_credit_note_is_a_different_document_and_not_a_flag() {
+    fn every_document_type_is_an_invoice_element_whatever_its_code_says() {
         assert_eq!(TypeCode::Invoice.code(), 388);
         assert_eq!(TypeCode::CreditNote.code(), 381);
-        assert_eq!(TypeCode::Invoice.element(), "Invoice");
-        assert_eq!(TypeCode::CreditNote.element(), "CreditNote");
+        assert_eq!(TypeCode::DebitNote.code(), 383);
+        for type_code in [TypeCode::Invoice, TypeCode::CreditNote, TypeCode::DebitNote] {
+            assert_eq!(type_code.element(), "Invoice", "{type_code:?}");
+        }
     }
 
     #[test]

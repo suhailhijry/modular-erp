@@ -21,7 +21,10 @@ use spa_control::{CommandError, TenantDb};
 use spa_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
 use spa_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
 
-use crate::invoice::{Customer, DraftLine, Invoice, InvoiceEvent, InvoiceLine};
+use crate::invoice::{
+    Customer, Discount as InvoiceDiscount, DraftDiscount, DraftLine, Invoice, InvoiceEvent,
+    InvoiceLine,
+};
 use crate::posting::{PostingAccounts, entry_for_issue, entry_for_payment};
 use crate::vat::TaxError;
 
@@ -88,6 +91,11 @@ impl spa_i18n::Localize for SalesError {
             Self::InvalidReference(reference) => Message::new(messages::INVALID_REFERENCE)
                 .with("reference", MessageArg::text(reference.clone())),
             Self::Tax(TaxError::MixedCurrencies) => Message::new(messages::MIXED_CURRENCIES),
+            Self::Tax(TaxError::NotADiscount) => Message::new(messages::NOT_A_DISCOUNT),
+            Self::Tax(TaxError::DiscountWithoutABand) => {
+                Message::new(messages::DISCOUNT_WITHOUT_A_BAND)
+            }
+            Self::Tax(TaxError::DiscountTooLarge) => Message::new(messages::DISCOUNT_TOO_LARGE),
             Self::Tax(TaxError::OutOfRange) => Message::new(messages::AMOUNT_OUT_OF_RANGE),
             // All four already say the right thing in both languages.
             Self::Config(e) => e.message(),
@@ -130,6 +138,11 @@ pub struct Draft {
     /// comes from the tenant's configuration, resolved in the transaction that
     /// writes the invoice.
     pub lines: Vec<DraftLine>,
+    /// What comes off the whole invoice. Each becomes a `cac:AllowanceCharge`
+    /// on the document, so a customer sees the discount rather than a smaller
+    /// number with no explanation.
+    #[allow(clippy::struct_field_names, reason = "it is what it is called")]
+    pub discounts: Vec<DraftDiscount>,
     pub note: String,
 }
 
@@ -212,8 +225,25 @@ async fn issue_in(
         })
         .collect();
 
-    let totals = crate::vat::total(lines.iter().map(|l| (l.vat, l.net)), draft.currency)
-        .map_err(|e| ExecuteError::Rejected(SalesError::Tax(e)))?;
+    // The rate comes from the same configuration the lines' does, so a discount
+    // on a standard-rated invoice reduces the tax at the rate that invoice was
+    // stamped with.
+    let discounts: Vec<InvoiceDiscount> = draft
+        .discounts
+        .iter()
+        .map(|discount| InvoiceDiscount {
+            reason: discount.reason.clone(),
+            amount: discount.amount,
+            vat: crate::vat::Vat::at(rates, discount.category),
+        })
+        .collect();
+
+    let totals = crate::vat::total(
+        lines.iter().map(|l| (l.vat, l.net)),
+        discounts.iter().map(|d| (d.vat, d.amount)),
+        draft.currency,
+    )
+    .map_err(|e| ExecuteError::Rejected(SalesError::Tax(e)))?;
     let totals = &totals;
 
     // Resolved **in this transaction**, so what the invoice was posted to and
@@ -259,6 +289,7 @@ async fn issue_in(
                 due_on: draft.due_on,
                 currency: draft.currency,
                 lines: lines.clone(),
+                discounts: discounts.clone(),
                 totals: totals.clone(),
                 note: draft.note.trim().to_owned(),
             }))

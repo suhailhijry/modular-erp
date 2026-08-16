@@ -168,8 +168,16 @@ impl Verdict {
             other => return Err(Unanswered::Unavailable(format!("HTTP {other}: {body}"))),
         }
 
-        let answer: Answer =
-            serde_json::from_str(body).map_err(|e| Unanswered::Unreadable(e.to_string()))?;
+        // **With the body.** An answer that will not parse is diagnosed from
+        // what it said, and a message carrying only the serde error ("expected
+        // value at line 1 column 1") describes every empty body ever returned.
+        let answer: Answer = serde_json::from_str(body).map_err(|e| {
+            Unanswered::Unreadable(format!(
+                "{e} — HTTP {status}, {} bytes: {}",
+                body.len(),
+                body.chars().take(200).collect::<String>()
+            ))
+        })?;
 
         // The status line is the authority, not the HTTP code: ZATCA has
         // answered `200` with `NOT_CLEARED` on documents it refused.

@@ -2092,3 +2092,389 @@ rebuilds is the fourth and is its own increment — see the note at the end.
   byte is a **byte** count, which is the mistake an Arabic seller name makes
   expensive — `the_length_is_bytes_and_not_characters` asserts the two counts
   differ, so it cannot pass by accident.
+
+## ZATCA onboarding: the OTP, the key, and the certificate
+
+- **"Certificate generation" is a key pair and a CSR, and the private key never
+  moves.** A taxpayer never issues their own certificate: ZATCA signs the request
+  and returns one. What this generates is an ECDSA key pair and a PKCS#10
+  request, and the key stays sealed in the tenant's database for the rest of its
+  life.
+
+- **secp256k1, which is one character from the curve everything else defaults
+  to.** ZATCA specifies the Koblitz curve; almost every X.509 stack reaches for
+  secp256r1/P-256. A CSR on the wrong one is refused at onboarding with no
+  useful message, so `the_curve_is_the_koblitz_one_and_not_the_usual_one` reads
+  the curve back out of the encoded request rather than trusting the constant.
+
+- **OpenSSL was already linked, so key generation cost nothing.** `sqlx` builds
+  against it for Postgres TLS, which means the process already had `EcKey`,
+  `X509Req`, `X509Extension` and AES-GCM. The alternative was four RustCrypto
+  crates for the same capability and a second TLS-adjacent stack in the binary.
+
+- **The two extensions are written as DER by hand.** ZATCA reads the EGS unit's
+  identity out of `subjectAltName` as a `directoryName`, and reads which
+  environment to onboard into out of `1.3.6.1.4.1.311.20.2`. Neither is
+  expressible through openssl-rs's config-string API — `X509Extension::new`
+  wants an OpenSSL config section and the Rust binding cannot build one — so both
+  are `new_from_der` over sixty bytes this build writes itself. That also makes
+  them assertable: the tests decode the finished request and look for the pipe-
+  separated EGS serial and the UID OID.
+
+  A whole DER library for sixty bytes would have been the other answer, and the
+  encoder here is a tag, a length and somebody else's bytes.
+
+- **The environment is not a default.** Sandbox, simulation and production differ
+  by one string in one extension. Getting it wrong does not fail — it succeeds
+  against the wrong authority, which is why `Environment` is a required argument
+  everywhere it appears.
+
+- **A module had nowhere to keep a secret, so core grew one.** The three places a
+  module had were all wrong for a private key: the event log is immutable and
+  replayed forever, `configuration` is read by anything that can read the tenant,
+  and `proj_<module>` is **dropped and rebuilt** by an ordinary maintenance
+  operation. `module_secret` is a core table holding opaque sealed bytes under a
+  module's own key — the same shape as `configuration` and `document_number`,
+  which are also core tables only modules use.
+
+  Sealed with AES-256-GCM under a key from the deployment's environment, nonce
+  and tag inside the value so a row is self-describing. `the_sealed_bytes_do_not_
+  contain_the_plaintext` and `a_tampered_value_is_refused_rather_than_decrypted`
+  are the two that matter.
+
+- **No sealing key means refusal, not a plaintext fallback.** `SEALING_KEY` is
+  optional and its absence is not a degraded mode: the endpoint answers 503 and
+  stores nothing. Law L6, applied to the one place where degrading would mean
+  writing a signing key to disk in the clear because an environment variable was
+  missing.
+
+- **The certificate is checked against our key before it is stored.** ZATCA
+  returning a certificate over somebody else's key is not a smaller problem than
+  returning none — it is accepted, stored, and then every invoice signed with it
+  is rejected at clearance, on a document a customer is waiting for, with an
+  error that says nothing about why. `accept` compares the public keys and
+  refuses; `a_certificate_that_is_not_for_our_key_is_refused` breaks it.
+
+- **The OTP is never stored, never logged, and never in an event.** It is the
+  taxpayer's proof of identity for about an hour. `Otp`'s `Debug` prints
+  `<withheld>` so it cannot reach a log through a panic or a `tracing` field, and
+  `the_log_records_the_certificate_and_never_the_key` greps the actual event
+  payloads for it.
+
+- **What goes in the log is the certificate's identity.** Subject, serial,
+  validity, environment, stage — everything a person needs to answer "which
+  certificate signed this invoice?" three years later, and nothing secret. The
+  secret material is sealed beside it, where it can be rotated; a secret in the
+  log could never be.
+
+- **Onboarding works today with no HTTP client.** It is a once-per-tenant act
+  with a human in the middle — somebody has to log into Fatoora and read six
+  digits off a screen — so the two halves separate cleanly:
+  `POST /v1/tax_sa/zatca/onboarding` generates the key and hands back the
+  request, and `PUT …/certificate` takes what ZATCA issued. An operator can carry
+  the middle step with `curl`.
+
+  That is not a workaround for the missing transport. It is the path a deployment
+  falls back to **when the automated one breaks**, which for a once-per-tenant
+  act guarded by an hour-long credential is worth having regardless. `Registrar`
+  is the automated path's seam, and `Onboarder` drives both halves through it.
+
+- **Two things here are reconstructed from ZATCA's specification and want a
+  sandbox round-trip before anyone relies on them**: whether `csr` carries the
+  base64 of the whole PEM or of the DER body, and which of those two
+  `binarySecurityToken` comes back as. The second is handled by accepting both —
+  they are distinguishable, since DER starts with a `SEQUENCE` tag and base64
+  text does not. The first is a guess documented at
+  `Generated::csr_for_zatca`, and it is the first thing a deployment's sandbox
+  onboarding will confirm or deny.
+
+## The XAdES signature
+
+- **Signing cannot happen in a projection, and the reason is ECDSA.** Every
+  signature over the same bytes with the same key is different, because a fresh
+  `k` goes into each one. A projection that signed would produce different tables
+  on every rebuild — in the column a tax authority holds a copy of. It would also
+  need the private key, and a projection that could read `module_secret` is a
+  projection that could leak it.
+
+  So signing happens once, outside, and `tax_sa.zatca.signed` records the result.
+  The projection **replays** a signature rather than recomputing one, which is
+  the same argument as recording what ZATCA said, applied to something we did
+  ourselves. `a_rebuild_reproduces_the_signature_it_cannot_recompute` breaks it
+  by recomputing and watches the shadow differ.
+
+- **Two sweeps, because they fail for different reasons.** `sign_pending` needs a
+  certificate; `submit_pending` needs ZATCA to answer. A document needs the first
+  even when the second cannot happen — a simplified invoice's QR carries the
+  cryptographic stamp, and that receipt goes to the customer at the till whether
+  or not the network is up. `pending` hands out only signed documents, so an
+  unsigned one is never submitted to be told what we already know.
+
+- **The signature covers `ds:SignedInfo`, which covers two digests.** The invoice
+  digest is the one already in the chain — ZATCA hashes the document with the
+  extensions, the signature and the QR reference removed, and this build never
+  renders those into the bytes it hashes. The second is over
+  `xades:SignedProperties`, which carries the signing time and the certificate.
+  Breaking the first (signing the invoice digest directly instead) makes the
+  signature fail to verify under its own certificate, which is what the test
+  checks.
+
+- **The submitted document is rendered, not spliced.** `ubl::signed` is the same
+  renderer with the three parts put back in UBL's required order — extensions as
+  the first child of the root, the QR reference after the chain, `cac:Signature`
+  after the last `AdditionalDocumentReference` and before the parties. Splicing
+  strings at a marker would be a second parser that has to agree with the first
+  about where a document's parts are.
+
+- **Three things here are reconstructed from ZATCA's specification and deviate
+  from the standards they are built on.** Each is one named function, marked
+  `UNCONFIRMED`, so a sandbox round-trip changes one line:
+
+  1. `certificate_digest` hashes the certificate's **base64 text**, not its DER.
+     XAdES says DER. ZATCA's SDK says text. The same class of quirk as the
+     genesis PIH, and pinned by a test that asserts the two differ.
+  2. The ECDSA signature goes in as **DER**; XML-DSig specifies the raw `r ‖ s`
+     pair. ZATCA's published samples decode to DER.
+  3. The whitespace inside `xades:SignedProperties` is **inside the digest**, so
+     it cannot be normalised away and the element is one string rather than a
+     builder. An editor reflowing that function changes every signature it makes.
+
+- **The demo stays unsigned, deliberately.** It has no ZATCA certificate, and
+  inventing one would be inventing a compliance record — the same reason there is
+  no fake `Submitter`. `just demo` says so in as many words, and the standing
+  report's `unsigned` count is the number that tells a real tenant they are not
+  live yet whatever else looks fine.
+
+## The transport, and the compliance checks
+
+- **reqwest with `default-tls`, not `rustls-tls`.** sqlx already links native-tls
+  against OpenSSL for Postgres, and every piece of cryptography here — key
+  generation, the CSR, signing, sealing — is OpenSSL too. Choosing rustls would
+  have put a second TLS implementation in the same process for no benefit. No
+  cookies, no gzip, no blocking client: six JSON endpoints on one host.
+
+- **The client is tested against a real socket, not a mock.** A forty-line
+  one-request HTTP server in the test module accepts a connection, reads the
+  bytes, and hands them back as a string — so the assertions are on **what
+  actually went out**: `OTP: 123456` in a header, `Clearance-Status: 1` for
+  clearance and `0` for reporting, the basic auth built from the CSID, the JSON
+  field names. Removing the OTP header or fixing `Clearance-Status` to one value
+  both fail. A mocked client would have asserted on the mock.
+
+- **Failing to ask is still not a verdict, now that there is a socket to fail
+  at.** A timeout, a refused connection and a 5xx all become `Unanswered`; a
+  `400` with a body is parsed, because that body is where ZATCA explains itself.
+  `a_connection_that_fails_is_not_a_verdict` points the client at a closed port
+  and checks which of the two it produced.
+
+- **A client for one environment refuses a call for another.** The sandbox and
+  production differ by a hostname and a string in a certificate, and a mismatch
+  otherwise succeeds against the wrong authority.
+
+- **The compliance samples are invented, and their chain is thrown away.** ZATCA
+  wants one of every document type the CSR declared — six for a unit that issues
+  both kinds — before it will issue a production certificate. There are no real
+  invoices to send, because a business onboards before it issues, so the samples
+  are synthetic: the taxpayer's own registration, one line, one riyal, a number
+  starting `COMPLIANCE-`.
+
+  They chain among themselves from ZATCA's genesis value and **never touch the
+  tenant's counter**, which has not started yet and must start at one when it
+  does. Deriving them from the real chain would either burn six positions or
+  leave a gap where the samples were — and a gap is the one thing the chain
+  exists to make impossible. Collapsing them onto one position fails
+  `the_chain_is_broken`.
+
+- **`POST /v1/tax_sa/zatca/onboarding/activate` is the whole flow.** Key pair and
+  CSR, the OTP exchange, the six signed samples, and the production certificate —
+  four calls to ZATCA in the order it requires, from one request carrying six
+  digits. Nothing is stored unless the step that produced it succeeded.
+
+- **A refused compliance sample answers 502, not 400.** The samples are generated
+  here, so ZATCA refusing one is a fault in this software and not in the caller's
+  request — the message says so, in both languages, and the full failure list
+  goes to the log where somebody can act on it. Getting that backwards would tell
+  a business to fix something they did not do.
+
+- **The manual path still exists, and is still the one to reach for when the
+  automated one breaks.** `POST …/onboarding` hands back a CSR and
+  `PUT …/onboarding/certificate` takes what comes back, so an operator with
+  `curl` can complete an onboarding whose automated attempt failed at any step.
+
+## What live traffic to ZATCA proved, and what it did not
+
+The first run against `gw-fatoora.zatca.gov.sa` was worth more than the tests it
+passed. In order:
+
+- **The sandbox issued a real certificate to a CSR this build generated.**
+  `POST /e-invoicing/developer-portal/compliance` answered `ISSUED` with a
+  `binarySecurityToken`, which the flow then read, checked against the private
+  key, and sealed — serial `01A00C782957`. That settles the parts that were
+  reconstructed from the specification: the curve, the two extensions, the
+  subject, the base64 wrapping of the CSR, and the shape of the request body are
+  **all accepted by ZATCA**.
+
+- **Simulation and production accept the same request and reject only the OTP.**
+  Both answered `{"code":"Invalid-OTP"}` to a made-up six digits, which is the
+  furthest a build without a real taxpayer's portal login can get.
+
+- **`dispositionMessage` is sometimes absent.** ZATCA returns an invalid-OTP
+  refusal with nothing but `errors`, and an earlier version of this rendered that
+  as an empty pair of brackets. The recorded body is now a test.
+
+- **Two diagnostics were wrong, and only live traffic showed it.** The first
+  failure reported "ZATCA could not be reached" — and the certificate had in fact
+  been issued and stored; what failed was the *compliance check*, three steps
+  later. Onboarding makes four calls that all fail the same way, so the error now
+  names the step, and `Verdict::of` puts the HTTP status and the first 200 bytes
+  of the body in the message. The same failure now reads:
+
+  > ZATCA could not be reached while **submitting a compliance document**:
+  > ZATCA's answer could not be read: expected value at line 1 column 1 —
+  > **HTTP 400, 15 bytes: Invalid Request**
+
+  An hour of bisecting a flow that talks to a tax authority, turned into one
+  line. This is the failure mode worth designing against: not that a call fails,
+  but that the failure names the wrong thing.
+
+- **What is still unconfirmed: the signed document itself.** The sandbox answers
+  `/compliance/invoices` with the non-JSON string `Invalid Request` — and it
+  answers deliberate garbage the same way, so it does not distinguish. It appears
+  to be a stub for certificate issuance rather than a validating endpoint.
+  Settling the `XAdES` signature, the certificate digest and the DER-vs-`r ‖ s`
+  question needs the **simulation** environment with a real taxpayer's OTP, which
+  is the first thing to do with one.
+
+## What a real certificate settled
+
+A working sandbox CSID from another implementation, plus the key it was issued
+against, turned every open question here into an answer. `modules/tax_sa/tests/
+sandbox.rs` submits a document built by the ordinary renderer and signed by the
+ordinary signer; ZATCA now accepts both a standard and a simplified invoice
+**with no warnings and no errors**. Five things came out of it.
+
+- **The hashed document carries the whitespace the removed elements left
+  behind, and this was the one that mattered.** ZATCA hashes what it receives
+  after an XSL transform removes `ext:UBLExtensions`, `cac:Signature` and the QR
+  reference — and a transform removes *elements*, not the whitespace text nodes
+  around them. Removing an element from
+
+  ```text
+    <Invoice …>\n  <ext:UBLExtensions>…</ext:UBLExtensions>\n  <cbc:ProfileID>
+  ```
+
+  leaves the `"\n  "` before it *and* the `"\n  "` after it. This build never
+  renders those elements, so it now emits their leftovers deliberately. Without
+  them the answer was `invalid-invoice-hash`; with them, accepted. There was no
+  way to deduce that from the specification, and no unit test that could have
+  caught it.
+
+- **The certificate digest and the DER signature were both right.** Two guesses
+  that deviate from `XAdES` and XML-DSig in ZATCA's direction, and both hold.
+
+- **`BR-KSA-EN16931-09`: a second, bare `cac:TaxTotal`.** When
+  `cbc:TaxCurrencyCode` is present, ZATCA wants one tax total *with* subtotals
+  and one *without*. It warns rather than refusing, which is how the first
+  accepted document still had something wrong with it.
+
+- **The QR timestamp has no `Z`.** ZATCA's QR specification shows one; its
+  validator compares the value against `cbc:IssueDate` + `T` + `cbc:IssueTime`,
+  which carries no zone, and answers `invoiceTimeStamp_QRCODE_INVALID`. The
+  specification and the validator disagree, and the validator is the one that
+  decides.
+
+- **A buyer needs an address, so `sales::Customer` grew one.** ZATCA wants
+  street, city and country on a standard invoice (BT-50, BT-52, BT-55) and warns
+  without them. Optional and `#[serde(default)]`, so every invoice issued before
+  the field existed still decodes — an absent address is exactly what those had,
+  which is why it needs no upcaster. Snapshotted onto the invoice like the name,
+  for the same reason.
+
+- **And the template name was wrong.** Their CSR carries
+  `PREZATCA-Code-Signing` where this build had `TSTZATCACA-Code-Signing` for
+  both sandbox and simulation. The sandbox issues a certificate against any of
+  the three, so the mistake would have surfaced at the first *simulation*
+  onboarding and nowhere before it. Three environments, three template names,
+  now pinned to their literals.
+
+## The compliance checks, against the sandbox
+
+Step 3 now passes: **all six documents accepted, no warnings and no errors** —
+standard and simplified, invoice, credit note and debit note. Two more things
+came out of running them, and neither was deducible from the specification.
+
+- **A credit note is an `<Invoice>`, not a UBL `<CreditNote>`.** Generic UBL has
+  a separate document type for one, and this build used it. ZATCA's schema is
+  UBL's *Invoice* schema throughout: a credit note is an `<Invoice>` whose
+  `cbc:InvoiceTypeCode` says 381, with `cac:InvoiceLine` and
+  `cbc:InvoicedQuantity` like any other.
+
+  The tell was the *shape* of the refusal. A `<CreditNote>` root came back as
+  `HTTP 400 Invalid Request` — fifteen bytes of plain text from the gateway,
+  before the validator ran, with nothing to say what was wrong. Every other
+  rejection in this exercise was JSON naming a BR-KSA rule. **A refusal that
+  does not name a rule means the document was never read**, which is a different
+  class of problem and worth recognising on sight.
+
+- **`BR-KSA-17`: the reason goes in KSA-10, which is
+  `cac:PaymentMeans/cbc:InstructionNote`.** This build had it in `cbc:Note`,
+  which is BT-22 — a general note, and not what the rule reads. Every credit and
+  debit note was refused for it. `cac:PaymentMeans` also needs a
+  `cbc:PaymentMeansCode`, which is not meaningful on a note and is required by
+  UBL wherever the element appears at all.
+
+  Only notes carry it: an ordinary invoice is accepted without one, and adding
+  it there would be inventing a payment method nobody chose.
+
+- **The generator is separable from the driver**, which is what made this
+  quick. `compliance_submissions` builds, chains and signs the six with no
+  database and no network; `pass_compliance_checks` loads the sealed credentials
+  and submits them. The part that had to be right could be run against ZATCA on
+  its own.
+
+## Document-level discounts
+
+- **A discount was a negative line, and that is invisible on the document.** The
+  invoice showed a smaller total and nothing said why. ZATCA models one as
+  `cac:AllowanceCharge` — an amount, a reason and the tax treatment it comes off
+  — and prints it as its own figure, so a customer sees what they were charged
+  *and* what they were let off. The demo had exactly this problem: an "Early
+  settlement discount" line of −1,500.00 that no reader could distinguish from a
+  refund or a mistake.
+
+- **The tax comes off with it, which is the whole difference from a credit
+  note.** A discounted invoice was never for the larger amount, so the smaller
+  one is what is taxed and what is declared: 100.00 less 15.00 is taxed on
+  85.00, and the tax is 12.75. A credit note, by contrast, reverses an invoice
+  that really was issued for the larger amount. `total()` subtracts the
+  discounts before it works out any tax, which is the one line that makes this
+  true.
+
+- **A discount names the band it comes off, and only that one.** UBL puts a tax
+  category on the allowance itself, and it has to: discounting the exempt part
+  of a mixed invoice must not reduce the tax on the standard-rated part, because
+  that tax was charged. Discounting at a rate the invoice does not carry is
+  refused outright (`DiscountWithoutABand`) — it would reclaim tax that never
+  existed.
+
+- **Three monetary totals where there used to be one number.**
+  `LineExtensionAmount` is what the lines came to, `AllowanceTotalAmount` what
+  was taken off, `TaxExclusiveAmount` what is taxed — and ZATCA checks they
+  agree. `Totals` records what the lines came to rather than deriving it
+  downstream, because a second computation is a second thing that has to match.
+
+- **No upcaster, because absent means what it says.** `Totals::discount` is
+  `Option<Money>` and `Issued::discounts` is `#[serde(default)]`, so an invoice
+  issued before any of this existed decodes as one with no discount — which is
+  what it was. An event written today with no discount is byte-identical to one
+  written last year, and `no_discount_is_absent_rather_than_zero` decodes a
+  verbatim older payload to prove it.
+
+  `Option<Money>` rather than a zero because a `serde` default cannot see the
+  rest of the struct, and there is no zero without a currency. Inventing a
+  sentinel currency to have somewhere to put it would have been the other
+  answer.
+
+- **Confirmed against ZATCA.** A discounted invoice built and signed by this
+  code is accepted by the sandbox with no warnings — the ninth document in
+  `modules/tax_sa/tests/sandbox.rs` to be.

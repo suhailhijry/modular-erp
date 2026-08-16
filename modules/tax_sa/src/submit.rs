@@ -72,6 +72,102 @@ impl From<CommandError<TaxError>> for SweepError {
     }
 }
 
+/// What one signing sweep did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SignedOff {
+    pub signed: usize,
+    /// Documents left unsigned because there was nothing to sign them with.
+    /// Not an error — a tenant that has not finished onboarding is in a normal
+    /// state, and the standing report is where that shows.
+    pub waiting_for_a_certificate: usize,
+}
+
+/// **Signs everything that has been built and not yet signed.**
+///
+/// Runs before [`submit_pending`] and separately from it, because the two fail
+/// for different reasons and a document needs the first even when the second
+/// cannot happen: a simplified invoice's QR carries the stamp, and the receipt
+/// goes to the customer at the till whether or not ZATCA is reachable.
+///
+/// Each signature is recorded as an event. ECDSA is randomised, so the
+/// signature is not something a rebuild could recompute — see
+/// [`zatca::signing`](crate::zatca::signing).
+pub async fn sign_pending(
+    db: &TenantDb,
+    sealing: &spa_eventlog::SealingKey,
+    at: Timestamp,
+    batch: i64,
+    metadata: &Metadata,
+) -> Result<SignedOff, SweepError> {
+    let mut conn = db.read().await?;
+    let waiting = crate::documents::unsigned(&mut conn, batch).await?;
+    drop(conn);
+
+    if waiting.is_empty() {
+        return Ok(SignedOff::default());
+    }
+
+    // The production certificate, or nothing to sign with.
+    let Some(credentials) = crate::zatca::onboarding::production(db, sealing)
+        .await
+        .map_err(|e| SweepError::Record(e.to_string()))?
+    else {
+        return Ok(SignedOff {
+            signed: 0,
+            waiting_for_a_certificate: waiting.len(),
+        });
+    };
+    let Some(key) = crate::zatca::onboarding::private_key(db, sealing)
+        .await
+        .map_err(|e| SweepError::Record(e.to_string()))?
+    else {
+        return Ok(SignedOff {
+            signed: 0,
+            waiting_for_a_certificate: waiting.len(),
+        });
+    };
+
+    let certificate = credentials
+        .certificate()
+        .map_err(|e| SweepError::Record(e.to_string()))?;
+    let serial = crate::zatca::signing::serial_number(&certificate);
+    // Parsed once for the whole batch, not once per invoice.
+    let signer = crate::zatca::signing::Signer::new(&key, &certificate)
+        .map_err(|e| SweepError::Record(e.to_string()))?;
+
+    let mut done = SignedOff::default();
+    for document in waiting {
+        let signature = signer
+            .sign(&document.xml, &document.invoice_hash, at)
+            .map_err(|e| SweepError::Record(e.to_string()))?;
+
+        let qr = signature
+            .qr(
+                &document.seller,
+                &document.vat_number,
+                &document.issued_at.format(crate::zatca::QR_TIME).to_string(),
+                &document.total,
+                &document.tax,
+                &document.invoice_hash,
+            )
+            .map_err(|e| SweepError::Record(e.to_string()))?;
+
+        crate::commands::record_signature(
+            db,
+            &document.number,
+            &signature,
+            &qr,
+            &serial,
+            at,
+            metadata,
+        )
+        .await?;
+        done.signed += 1;
+    }
+
+    Ok(done)
+}
+
 /// Submits everything waiting, oldest first, and records each answer.
 ///
 /// Oldest first because the twenty-four hours run from issue, so the oldest
@@ -95,9 +191,10 @@ pub async fn submit_pending(
         let submission = Submission {
             invoice_hash: document.invoice_hash.clone(),
             uuid: document.uuid.clone(),
-            // The file, declaration and all. ZATCA canonicalises what it is
-            // given before hashing it, which removes the declaration again —
-            // so this and the hash above are over the same document.
+            // The **signed** document, declaration and all. ZATCA strips the
+            // extensions, the signature and the QR reference before hashing
+            // what it receives, which gets back to the bytes `invoice_hash`
+            // was taken over.
             invoice: B64.encode(ubl::with_declaration(&document.xml)),
         };
 

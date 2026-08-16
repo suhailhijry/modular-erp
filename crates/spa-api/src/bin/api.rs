@@ -48,7 +48,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         TenantPools::new(clusters, PoolConfig::default()),
     ));
 
-    let app = router(AppState::on(control, &domain))
+    // **The key module secrets are sealed under.** Optional, and its absence is
+    // not a degraded mode: without it, anything that would store a tenant's
+    // ZATCA signing key refuses rather than storing it in the clear.
+    //
+    // `<id>:<64 hex characters>`. The identifier is stored beside every row it
+    // seals, so a rotation can find what it has not re-sealed yet — generate one
+    // with `openssl rand -hex 32`.
+    let mut state = AppState::on(control, &domain);
+    if let Ok(configured) = std::env::var("SEALING_KEY") {
+        let key = spa_eventlog::SealingKey::parse(&configured)?;
+        tracing::info!(key = key.id(), "sealing key loaded");
+        state = state.sealing_with(key);
+    } else {
+        tracing::warn!("SEALING_KEY is not set; anything that stores a tenant secret will refuse");
+    }
+
+    let app = router(state)
         .layer(TraceLayer::new_for_http())
         // 504, not 408: the request was fine, we were slow.
         .layer(TimeoutLayer::with_status_code(

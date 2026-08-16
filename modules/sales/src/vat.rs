@@ -75,6 +75,18 @@ pub enum TaxError {
     OutOfRange,
     #[error("every line of an invoice must be in the same currency")]
     MixedCurrencies,
+    /// A discount is stated as the amount taken off, so it is positive. A
+    /// negative one is a charge, which is a different UBL element and a
+    /// different conversation with a customer.
+    #[error("a discount must be a positive amount")]
+    NotADiscount,
+    /// Nothing on the invoice is treated the way this discount says it is.
+    /// Discounting a standard-rated invoice at the zero rate would reclaim tax
+    /// that was never charged.
+    #[error("the invoice has no line treated the way this discount is")]
+    DiscountWithoutABand,
+    #[error("a discount cannot be larger than what it is taken off")]
+    DiscountTooLarge,
 }
 
 impl From<spa_types::MoneyError> for TaxError {
@@ -119,11 +131,40 @@ pub struct TaxBand {
 /// What an invoice comes to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Totals {
+    /// **After any discount**, and therefore what is taxed.
     pub net: Money,
     pub tax: Money,
     pub gross: Money,
+    /// What was taken off the whole document, as a positive amount.
+    ///
+    /// Derived from the discounts, like `net` and `tax` are derived from the
+    /// bands — it is here because the monetary totals a tax invoice must print
+    /// cannot be computed without it: what the lines came to is `net +
+    /// discount`, and an invoice has to show both numbers.
+    ///
+    /// **`None` rather than zero**, because a `serde` default cannot see the
+    /// rest of the struct and there is no zero without a currency. Absent is
+    /// what every invoice issued before discounts existed carries, and it means
+    /// exactly what it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discount: Option<Money>,
     /// One band per distinct (category, rate) present, in a stable order.
     pub bands: Vec<TaxBand>,
+}
+
+impl Totals {
+    /// What was discounted, in this invoice's currency. Zero when nothing was.
+    #[must_use]
+    pub fn discount(&self) -> Money {
+        self.discount
+            .unwrap_or_else(|| Money::zero(self.net.currency()))
+    }
+
+    /// What the lines came to before any discount — UBL's
+    /// `LineExtensionAmount`.
+    pub fn before_discount(&self) -> Result<Money, TaxError> {
+        Ok(self.net.checked_add(self.discount())?)
+    }
 }
 
 /// Sums nets by band and taxes each band once.
@@ -133,6 +174,7 @@ pub struct Totals {
 /// same lines in different orders get byte-identical events.
 pub fn total(
     amounts: impl IntoIterator<Item = (Vat, Money)>,
+    discounts: impl IntoIterator<Item = (Vat, Money)>,
     currency: CurrencyCode,
 ) -> Result<Totals, TaxError> {
     // Small and fixed: three categories, and one rate each within an invoice.
@@ -159,6 +201,31 @@ pub fn total(
         }
     }
 
+    // **The discount comes off before the tax is worked out**, which is the
+    // whole difference between a discount and a credit note: a discounted
+    // invoice was never for the larger amount, so the smaller one is what is
+    // taxed and what is declared.
+    let mut discounted = Money::zero(currency);
+    for (vat, amount) in discounts {
+        if amount.currency() != currency {
+            return Err(TaxError::MixedCurrencies);
+        }
+        if amount.minor() <= 0 {
+            return Err(TaxError::NotADiscount);
+        }
+
+        let band = bands
+            .iter_mut()
+            .find(|b| b.category == vat.category && b.basis_points == vat.basis_points)
+            .ok_or(TaxError::DiscountWithoutABand)?;
+
+        band.net = band.net.checked_sub(amount)?;
+        if band.net.minor() < 0 {
+            return Err(TaxError::DiscountTooLarge);
+        }
+        discounted = discounted.checked_add(amount)?;
+    }
+
     // Stable regardless of line order, so a replay and a re-send agree.
     bands.sort_unstable_by_key(|b| (b.category, b.basis_points));
 
@@ -173,11 +240,13 @@ pub fn total(
     let net = Money::checked_sum(bands.iter().map(|b| b.net), currency)?;
     let tax = Money::checked_sum(bands.iter().map(|b| b.tax), currency)?;
     let gross = net.checked_add(tax)?;
+    let discount = (!discounted.is_zero()).then_some(discounted);
 
     Ok(Totals {
         net,
         tax,
         gross,
+        discount,
         bands,
     })
 }
@@ -192,6 +261,145 @@ mod tests {
 
     fn money(minor: i64) -> Money {
         Money::from_minor(minor, sar())
+    }
+
+    /// **The number the whole feature exists for.** 100.00 discounted by 15.00
+    /// is taxed on 85.00, so the tax is 12.75 and not 15.00.
+    #[test]
+    fn a_discount_comes_off_before_the_tax_is_worked_out() {
+        let standard = Vat::shipped(VatCategory::Standard);
+        let totals = total(
+            [(standard, money(10_000))],
+            [(standard, money(1_500))],
+            sar(),
+        )
+        .unwrap();
+
+        assert_eq!(totals.net, money(8_500), "the taxable amount");
+        assert_eq!(totals.tax, money(1_275), "15% of 85.00, not of 100.00");
+        assert_eq!(totals.gross, money(9_775));
+        assert_eq!(totals.discount(), money(1_500));
+        assert_eq!(
+            totals.before_discount().unwrap(),
+            money(10_000),
+            "what the lines came to"
+        );
+        // The band the invoice reports is the discounted one, because that is
+        // what was supplied and what is declared.
+        assert_eq!(totals.bands[0].net, money(8_500));
+        assert_eq!(totals.bands[0].tax, money(1_275));
+    }
+
+    /// A discount comes off the band it names, and **only** that one.
+    ///
+    /// Discounting the exempt part of a mixed invoice must not reduce the tax
+    /// on the standard-rated part, because that tax was charged.
+    #[test]
+    fn a_discount_comes_off_the_band_it_names() {
+        let standard = Vat::shipped(VatCategory::Standard);
+        let exempt = Vat::shipped(VatCategory::Exempt);
+
+        let totals = total(
+            [(standard, money(10_000)), (exempt, money(10_000))],
+            [(exempt, money(5_000))],
+            sar(),
+        )
+        .unwrap();
+
+        let taxed = totals
+            .bands
+            .iter()
+            .find(|b| b.category == VatCategory::Standard)
+            .unwrap();
+        assert_eq!(taxed.net, money(10_000), "the standard band is untouched");
+        assert_eq!(taxed.tax, money(1_500));
+
+        let untaxed = totals
+            .bands
+            .iter()
+            .find(|b| b.category == VatCategory::Exempt)
+            .unwrap();
+        assert_eq!(untaxed.net, money(5_000));
+        assert_eq!(untaxed.tax, money(0));
+
+        assert_eq!(
+            totals.tax,
+            money(1_500),
+            "discounting an exempt supply frees no tax"
+        );
+    }
+
+    /// Nothing on the invoice is treated the way the discount says: taking it
+    /// anyway would reclaim tax that was never charged.
+    #[test]
+    fn a_discount_needs_a_band_to_come_off() {
+        let standard = Vat::shipped(VatCategory::Standard);
+        let zero = Vat::shipped(VatCategory::Zero);
+        assert_eq!(
+            total([(standard, money(10_000))], [(zero, money(100))], sar()),
+            Err(TaxError::DiscountWithoutABand)
+        );
+    }
+
+    #[test]
+    fn a_discount_is_positive_and_no_larger_than_what_it_comes_off() {
+        let standard = Vat::shipped(VatCategory::Standard);
+        assert_eq!(
+            total(
+                [(standard, money(10_000))],
+                [(standard, money(-100))],
+                sar()
+            ),
+            Err(TaxError::NotADiscount),
+            "a negative discount is a charge"
+        );
+        assert_eq!(
+            total([(standard, money(10_000))], [(standard, money(0))], sar()),
+            Err(TaxError::NotADiscount)
+        );
+        assert_eq!(
+            total(
+                [(standard, money(10_000))],
+                [(standard, money(10_001))],
+                sar()
+            ),
+            Err(TaxError::DiscountTooLarge)
+        );
+        // Exactly all of it is allowed: a fully discounted line comes to zero.
+        let nothing = total(
+            [(standard, money(10_000))],
+            [(standard, money(10_000))],
+            sar(),
+        )
+        .unwrap();
+        assert_eq!(nothing.net, money(0));
+        assert_eq!(nothing.tax, money(0));
+    }
+
+    /// An invoice with no discount reports none — which is what every invoice
+    /// issued before this existed decodes as.
+    #[test]
+    fn no_discount_is_absent_rather_than_zero() {
+        let standard = Vat::shipped(VatCategory::Standard);
+        let totals = total([(standard, money(10_000))], [], sar()).unwrap();
+        assert_eq!(totals.discount, None);
+        assert_eq!(totals.discount(), money(0));
+        assert_eq!(totals.before_discount().unwrap(), totals.net);
+
+        // And it does not appear on the wire at all, so an event written today
+        // is byte-identical to one written before discounts existed.
+        let json = serde_json::to_string(&totals).unwrap();
+        assert!(!json.contains("discount"), "{json}");
+
+        // Which is what makes this decode without an upcaster: the payload of
+        // an invoice issued last year, verbatim.
+        let older = r#"{"net":{"minor":10000,"currency":"SAR"},
+                        "tax":{"minor":1500,"currency":"SAR"},
+                        "gross":{"minor":11500,"currency":"SAR"},
+                        "bands":[]}"#;
+        let back: Totals = serde_json::from_str(older).unwrap();
+        assert_eq!(back.discount, None);
+        assert_eq!(back.discount(), money(0));
     }
 
     #[test]
@@ -248,6 +456,7 @@ mod tests {
                 (Vat::shipped(VatCategory::Zero), money(1_000)),
                 (Vat::shipped(VatCategory::Exempt), money(2_000)),
             ],
+            [],
             sar(),
         )
         .unwrap();
@@ -268,7 +477,7 @@ mod tests {
         let per_line: i64 = (0..3)
             .map(|_| standard.on(money(3_333)).unwrap().minor())
             .sum();
-        let per_band = total((0..3).map(|_| (standard, money(3_333))), sar()).unwrap();
+        let per_band = total((0..3).map(|_| (standard, money(3_333))), [], sar()).unwrap();
         assert_eq!(per_line, 1_500);
         assert_eq!(per_band.tax, money(1_500));
 
@@ -277,7 +486,7 @@ mod tests {
         let per_line: i64 = (0..3)
             .map(|_| standard.on(money(10)).unwrap().minor())
             .sum();
-        let per_band = total((0..3).map(|_| (standard, money(10))), sar()).unwrap();
+        let per_band = total((0..3).map(|_| (standard, money(10))), [], sar()).unwrap();
         assert_eq!(per_line, 6);
         assert_eq!(per_band.tax, money(5), "banding is not the same as summing");
     }
@@ -287,8 +496,18 @@ mod tests {
         let a = Vat::shipped(VatCategory::Standard);
         let z = Vat::shipped(VatCategory::Zero);
 
-        let one = total([(a, money(100)), (z, money(200)), (a, money(300))], sar()).unwrap();
-        let two = total([(z, money(200)), (a, money(300)), (a, money(100))], sar()).unwrap();
+        let one = total(
+            [(a, money(100)), (z, money(200)), (a, money(300))],
+            [],
+            sar(),
+        )
+        .unwrap();
+        let two = total(
+            [(z, money(200)), (a, money(300)), (a, money(100))],
+            [],
+            sar(),
+        )
+        .unwrap();
 
         assert_eq!(one, two, "a reordered request must produce the same totals");
     }
@@ -296,7 +515,7 @@ mod tests {
     #[test]
     fn an_empty_invoice_totals_to_nothing_rather_than_failing() {
         // Refusing an empty invoice is the command's job, not the arithmetic's.
-        let totals = total([], sar()).unwrap();
+        let totals = total([], [], sar()).unwrap();
         assert!(totals.bands.is_empty());
         assert_eq!(totals.gross, money(0));
     }

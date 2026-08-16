@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn issuing_debits_the_customer_and_splits_revenue_from_tax() {
         let standard = Vat::shipped(VatCategory::Standard);
-        let totals = total([(standard, money(10_000))], sar()).unwrap();
+        let totals = total([(standard, money(10_000))], [], sar()).unwrap();
         let entry = entry_for_issue(&totals, &PostingAccounts::conventional()).unwrap();
 
         assert_eq!(
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn a_zero_rated_invoice_posts_two_lines_not_a_zero_tax_line() {
         let zero = Vat::shipped(VatCategory::Zero);
-        let totals = total([(zero, money(10_000))], sar()).unwrap();
+        let totals = total([(zero, money(10_000))], [], sar()).unwrap();
         let entry = entry_for_issue(&totals, &PostingAccounts::conventional()).unwrap();
 
         assert_eq!(entry.len(), 2);
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn an_invoice_that_comes_to_nothing_is_refused_rather_than_posted_empty() {
-        let totals = total([], sar()).unwrap();
+        let totals = total([], [], sar()).unwrap();
         assert!(matches!(
             entry_for_issue(&totals, &PostingAccounts::conventional()),
             Err(Unbalanced::TooFewLines(0))
@@ -225,7 +225,12 @@ mod tests {
         // Net zero overall but tax on one band only: +100 standard, -100 exempt.
         let standard = Vat::shipped(VatCategory::Standard);
         let exempt = Vat::shipped(VatCategory::Exempt);
-        let totals = total([(standard, money(10_000)), (exempt, money(-10_000))], sar()).unwrap();
+        let totals = total(
+            [(standard, money(10_000)), (exempt, money(-10_000))],
+            [],
+            sar(),
+        )
+        .unwrap();
 
         assert_eq!(totals.net, money(0));
         assert_eq!(totals.tax, money(1_500));

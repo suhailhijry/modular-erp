@@ -33,8 +33,8 @@ use sqlx::PgConnection;
 use crate::projections::TaxSa;
 use crate::taxpayer::{Registration, TaxpayerEvent};
 use crate::zatca::{
-    Band, Buyer, Document, Kind, Line, Link, Reference, Totals, TypeCode, chain, document_uuid, qr,
-    ubl,
+    Band, Buyer, Document, Kind, Line, Link, QR_TIME, Reference, Totals, TypeCode, chain,
+    document_uuid, qr, ubl,
 };
 
 /// Keeps the registration this module renders documents under.
@@ -130,6 +130,7 @@ impl Projection for ZatcaDocuments {
                 issued_on,
                 currency,
                 lines,
+                discounts,
                 totals,
                 ..
             } => {
@@ -143,6 +144,7 @@ impl Projection for ZatcaDocuments {
                 let buyer = Buyer {
                     name: customer.name.clone(),
                     vat_number: customer.vat_number.clone(),
+                    address: customer.address.clone(),
                 };
                 let built = Built {
                     kind: Kind::of(customer.vat_number.as_ref()),
@@ -153,6 +155,7 @@ impl Projection for ZatcaDocuments {
                     currency,
                     buyer: Some(buyer),
                     lines: lines.iter().map(line).collect(),
+                    allowances: discounts.iter().map(allowance).collect(),
                     totals: totals_of(&totals),
                     reference: None,
                     note: String::new(),
@@ -186,6 +189,9 @@ impl Projection for ZatcaDocuments {
                     currency: invoice.currency,
                     buyer: invoice.buyer.clone(),
                     lines: invoice.lines.clone(),
+                    // A credit note against a discounted invoice credits what
+                    // was actually charged, so it carries the same allowances.
+                    allowances: invoice.allowances.clone(),
                     totals: invoice.totals.clone(),
                     reference: Some(Reference {
                         number: invoice.number.clone(),
@@ -214,6 +220,7 @@ struct Built {
     currency: CurrencyCode,
     buyer: Option<Buyer>,
     lines: Vec<Line>,
+    allowances: Vec<crate::zatca::Allowance>,
     totals: Totals,
     reference: Option<Reference>,
     note: String,
@@ -243,6 +250,7 @@ async fn write(
         seller,
         buyer: built.buyer.clone(),
         lines: built.lines.clone(),
+        allowances: built.allowances.clone(),
         totals: built.totals.clone(),
         link,
         reference: built.reference.clone(),
@@ -261,7 +269,7 @@ async fn write(
     let code = qr::Qr {
         seller: &document.seller.name,
         vat_number: &document.seller.vat_number,
-        issued_at: &document.issued_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        issued_at: &document.issued_at.format(QR_TIME).to_string(),
         total: &crate::zatca::amount(document.totals.gross),
         tax: &crate::zatca::amount(document.totals.tax),
         // Phase two, and only with a certificate: the hash is known here, and a
@@ -421,11 +429,24 @@ fn tax_of(line: &InvoiceLine) -> Money {
         .unwrap_or_else(|_| Money::zero(line.net.currency()))
 }
 
+/// A discount, as the document renders it.
+fn allowance(discount: &sales::Discount) -> crate::zatca::Allowance {
+    crate::zatca::Allowance {
+        reason: discount.reason.clone(),
+        amount: discount.amount,
+        category: discount.vat.category,
+        rate_bp: discount.vat.basis_points,
+    }
+}
+
 fn totals_of(totals: &sales::Totals) -> Totals {
     Totals {
         net: totals.net,
         tax: totals.tax,
         gross: totals.gross,
+        // What the lines came to, which is `net` again when nothing was
+        // discounted — recorded rather than recomputed downstream.
+        before_discount: totals.before_discount().ok(),
         bands: totals
             .bands
             .iter()
@@ -463,6 +484,12 @@ pub struct Stored {
     pub invoice_hash: Option<String>,
     pub xml: Option<String>,
     pub qr: Option<String>,
+    /// `ds:SignatureValue`, once it has been signed.
+    pub signature: Option<String>,
+    /// The document as submitted — the hashed bytes plus the signature, the QR
+    /// and the `cac:Signature`.
+    pub signed_xml: Option<String>,
+    pub signed_at: Option<Timestamp>,
     pub status: Status,
     /// The document ZATCA stamped — **the one the buyer gets**.
     pub stamped_xml: Option<String>,
@@ -556,6 +583,10 @@ pub struct Standing {
     pub oldest_pending: Option<Timestamp>,
     /// The last position in the chain, so a person can see it moving.
     pub chain_length: i64,
+    /// **Documents with no signature yet.** They can be neither submitted nor
+    /// printed — a simplified invoice's QR carries the stamp — so this is the
+    /// number that says a tenant is not really live, whatever else is true.
+    pub unsigned: i64,
 }
 
 /// The registration in force, if there is one.
@@ -572,14 +603,18 @@ pub async fn registered(conn: &mut PgConnection) -> Result<Option<Registration>,
 
 /// What to submit next, oldest first — because the 24-hour clock runs from issue
 /// and the oldest is the closest to running out.
+///
+/// **Signed documents only.** ZATCA refuses an unsigned one, so submitting it
+/// would spend a tenant's rate limit to be told so — and the rejection would be
+/// recorded against a document that is not what is wrong.
 pub async fn pending(conn: &mut PgConnection, limit: i64) -> Result<Vec<Pending>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"SELECT id as "id!", kind as "kind!", issued_at as "issued_at!",
                   document->>'uuid' as "uuid!", invoice_hash as "invoice_hash!",
-                  xml as "xml!"
+                  signed_xml as "xml!"
              FROM proj_tax_sa.zatca_document
             WHERE status = 'pending'
-              AND xml IS NOT NULL AND invoice_hash IS NOT NULL
+              AND signed_xml IS NOT NULL AND invoice_hash IS NOT NULL
             ORDER BY issued_at, id
             LIMIT $1"#,
         limit,
@@ -604,6 +639,67 @@ pub async fn pending(conn: &mut PgConnection, limit: i64) -> Result<Vec<Pending>
         .collect()
 }
 
+/// One document waiting to be signed, with the bytes the signature covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsigned {
+    pub number: String,
+    pub kind: Kind,
+    pub issued_at: Timestamp,
+    /// The canonical bytes, exactly as they were hashed.
+    pub xml: String,
+    pub invoice_hash: String,
+    /// What the QR needs, resolved here so the signer does not go back for it.
+    pub seller: String,
+    pub vat_number: String,
+    pub total: String,
+    pub tax: String,
+}
+
+/// What to sign next, oldest first.
+///
+/// A document has to be signed before it can be submitted **and** before it can
+/// be printed: a simplified invoice's QR carries the stamp, and the receipt goes
+/// to the customer at the till.
+pub async fn unsigned(conn: &mut PgConnection, limit: i64) -> Result<Vec<Unsigned>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id as "id!", kind as "kind!", issued_at as "issued_at!",
+                  xml as "xml!", invoice_hash as "invoice_hash!",
+                  currency as "currency!", tax as "tax!", gross as "gross!",
+                  document #>> '{seller,name}' as "seller!",
+                  document #>> '{seller,vat_number}' as "vat_number!"
+             FROM proj_tax_sa.zatca_document
+            WHERE status = 'pending'
+              AND signed_xml IS NULL
+              AND xml IS NOT NULL AND invoice_hash IS NOT NULL
+            ORDER BY issued_at, id
+            LIMIT $1"#,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let currency =
+                CurrencyCode::new(&row.currency).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+            Ok(Unsigned {
+                number: row.id,
+                kind: row
+                    .kind
+                    .parse()
+                    .map_err(|e: String| sqlx::Error::Decode(Box::new(std::io::Error::other(e))))?,
+                issued_at: row.issued_at,
+                xml: row.xml,
+                invoice_hash: row.invoice_hash,
+                seller: row.seller,
+                vat_number: row.vat_number,
+                total: crate::zatca::amount(Money::from_minor(row.gross, currency)),
+                tax: crate::zatca::amount(Money::from_minor(row.tax, currency)),
+            })
+        })
+        .collect()
+}
+
 /// One document, by its number.
 pub async fn document(
     conn: &mut PgConnection,
@@ -614,7 +710,7 @@ pub async fn document(
                   type_code as "type_code!", issued_at as "issued_at!",
                   currency as "currency!", net as "net!", tax as "tax!", gross as "gross!",
                   icv, previous_hash, invoice_hash, xml, qr, status as "status!",
-                  stamped_xml, remarks, settled_at
+                  signature, signed_xml, signed_at, stamped_xml, remarks, settled_at
              FROM proj_tax_sa.zatca_document WHERE id = $1"#,
         number,
     )
@@ -643,6 +739,9 @@ pub async fn document(
             invoice_hash: row.invoice_hash,
             xml: row.xml,
             qr: row.qr,
+            signature: row.signature,
+            signed_xml: row.signed_xml,
+            signed_at: row.signed_at,
             status: row
                 .status
                 .parse()
@@ -703,6 +802,13 @@ pub async fn standing(conn: &mut PgConnection, now: Timestamp) -> Result<Standin
     .fetch_one(&mut *conn)
     .await?;
 
+    let unsigned = sqlx::query_scalar!(
+        r#"SELECT count(*) as "count!" FROM proj_tax_sa.zatca_document
+            WHERE status = 'pending' AND signed_xml IS NULL"#
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
     Ok(Standing {
         registered: registration > 0,
         counts: counts
@@ -720,6 +826,7 @@ pub async fn standing(conn: &mut PgConnection, now: Timestamp) -> Result<Standin
         awaiting_clearance: late.awaiting,
         oldest_pending: late.oldest,
         chain_length: chain,
+        unsigned,
     })
 }
 

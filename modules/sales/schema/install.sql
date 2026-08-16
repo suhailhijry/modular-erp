@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS invoice (
     net          BIGINT NOT NULL,
     tax          BIGINT NOT NULL,
     gross        BIGINT NOT NULL CHECK (gross = net + tax),
+    -- Taken off the whole document, positive, and **already subtracted from
+    -- `net`** — so `net + discount` is what the lines came to. A tax invoice
+    -- has to print both, which is why the smaller number alone will not do.
+    discount     BIGINT NOT NULL DEFAULT 0 CHECK (discount >= 0),
 
     note         TEXT NOT NULL DEFAULT '',
 
@@ -54,6 +58,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS invoice_number_is_unique ON invoice (number);
 
 CREATE INDEX IF NOT EXISTS invoice_by_date_idx ON invoice (issued_on DESC);
 CREATE INDEX IF NOT EXISTS invoice_by_customer_idx ON invoice (customer);
+
+-- What was taken off the whole invoice, and why.
+--
+-- One row per `cac:AllowanceCharge`: ZATCA prints each as its own figure with
+-- its own reason and tax treatment, so a customer sees the discount rather than
+-- a smaller total with no explanation.
+CREATE TABLE IF NOT EXISTS invoice_discount (
+    -- Derived from the event's log position, so a rebuild reproduces it.
+    id             UUID PRIMARY KEY,
+    invoice_id     TEXT NOT NULL REFERENCES invoice (id) ON DELETE CASCADE,
+    discount_index INT  NOT NULL CHECK (discount_index >= 0),
+
+    reason         TEXT NOT NULL,
+    -- Positive: the amount taken off. A negative one is a charge, which is a
+    -- different element.
+    amount         BIGINT NOT NULL CHECK (amount > 0),
+    -- Which band it comes off. Discounting a standard-rated invoice reduces the
+    -- tax; discounting an exempt one does not, because there was none.
+    vat_category   TEXT NOT NULL CHECK (vat_category IN ('standard', 'zero', 'exempt')),
+    vat_rate_bp    INT  NOT NULL CHECK (vat_rate_bp >= 0),
+
+    CONSTRAINT invoice_discount_is_unique UNIQUE (invoice_id, discount_index)
+);
+
+CREATE INDEX IF NOT EXISTS invoice_discount_by_invoice_idx
+    ON invoice_discount (invoice_id, discount_index);
 
 CREATE TABLE IF NOT EXISTS invoice_line (
     -- Derived from the event's log position, so a rebuild reproduces it.

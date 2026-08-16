@@ -304,3 +304,84 @@ pub async fn record_outcome(
     )
     .await
 }
+
+/// Records that ZATCA issued a certificate for this tenant's unit.
+///
+/// Called by [`crate::zatca::onboarding`] after the call returned and the
+/// certificate was checked against the key. Nothing secret reaches here: the
+/// subject, the serial and the validity are all on a certificate anybody who
+/// receives an invoice can read.
+pub(crate) async fn record_csid(
+    db: &TenantDb,
+    issued: &crate::zatca::onboarding::Issued,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<Committed<crate::onboarded::OnboardingEvent>, CommandError<TaxError>> {
+    let event = crate::onboarded::OnboardingEvent::CsidIssued {
+        stage: issued.stage,
+        environment: issued.environment,
+        request_id: issued.request_id.clone(),
+        subject: issued.subject.clone(),
+        serial: issued.serial.clone(),
+        not_before: issued.not_before.clone(),
+        not_after: issued.not_after.clone(),
+        at,
+    };
+
+    db.execute::<crate::onboarded::Onboarding, _, TaxError>(
+        &crate::onboarded::onboarding_id(),
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            // The same certificate recorded twice writes nothing, which is what
+            // makes an onboarding that crashed after the call safe to re-run.
+            if loaded.aggregate.serial.as_deref() == Some(issued.serial.as_str())
+                && loaded.aggregate.stage == Some(issued.stage)
+            {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(event.clone()))
+        },
+    )
+    .await
+}
+
+/// Records the signature made over one document.
+///
+/// Appending the same document's signature twice writes nothing: ZATCA holds
+/// the first one, and a second signature over the same invoice would be a
+/// second document as far as verification is concerned.
+pub(crate) async fn record_signature(
+    db: &TenantDb,
+    document: &str,
+    signature: &crate::zatca::signing::Signature,
+    qr: &str,
+    certificate_serial: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<Committed<crate::clearance::ClearanceEvent>, CommandError<TaxError>> {
+    let id = AggregateId::new(document)
+        .map_err(|_| rejected(TaxError::InvalidDocument(document.to_owned())))?;
+
+    let event = crate::clearance::ClearanceEvent::Signed {
+        document: document.to_owned(),
+        signature: signature.value.clone(),
+        extensions: signature.extensions.clone(),
+        qr: qr.to_owned(),
+        certificate_serial: certificate_serial.to_owned(),
+        at,
+    };
+
+    db.execute::<crate::clearance::Clearance, _, TaxError>(
+        &id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if loaded.aggregate.signed {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(event.clone()))
+        },
+    )
+    .await
+}

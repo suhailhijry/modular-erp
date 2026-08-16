@@ -57,7 +57,12 @@ impl Fixture {
             .expect("cluster registers");
 
         Self {
-            app: router(AppState::new(Arc::clone(&control))),
+            // With a sealing key, because a deployment that stores tenant
+            // secrets has one — and `no_sealing_key_refuses_rather_than_storing`
+            // covers the deployment that does not.
+            app: router(AppState::new(Arc::clone(&control)).sealing_with(
+                spa_eventlog::SealingKey::new("test", &[5u8; 32]).expect("32 bytes"),
+            )),
             control,
             db,
         }
@@ -1329,6 +1334,7 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Reading, so everyone — a clerk at a till needs to see that the receipt
     // they just handed over has been reported.
     ("registration", ALL_ROLES),
+    ("onboarding_status", ALL_ROLES),
     ("zatca_standing", ALL_ROLES),
     ("zatca_documents", ALL_ROLES),
     ("zatca_document", ALL_ROLES),
@@ -1357,6 +1363,13 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // The tenant's identity to a tax authority. Every invoice it ever issues
     // is stamped with this, so it sits with the owner beside membership.
     ("register", OWNER),
+    // Generating a signing key and taking a certificate for it. The owner
+    // alone, and not because it is administrative — because whoever can do
+    // this can replace the key every invoice this business issues is signed
+    // with, and an accountant keeping the books is not that person.
+    ("begin_onboarding", OWNER),
+    ("accept_certificate", OWNER),
+    ("activate", OWNER),
     ("add_member", OWNER),
     ("change_role", OWNER),
     ("remove_member", OWNER),
@@ -1432,8 +1445,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        42,
-        "expected forty-two role-scoped operations"
+        46,
+        "expected forty-six role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -5020,6 +5033,325 @@ async fn the_zatca_standing_separates_late_from_merely_waiting() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["code"], "tax_sa.no_such_document");
+
+    fixture.cleanup().await;
+}
+
+/// **ZATCA onboarding, over HTTP, with no network.**
+///
+/// The path a deployment falls back to when the automated one breaks, and the
+/// one that works today: generate the key and the request here, take the request
+/// to ZATCA with the taxpayer's OTP, bring back what it issues.
+#[tokio::test]
+async fn a_tenant_can_generate_a_signing_key_and_take_a_certificate_for_it() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.register_with_zatca(&token).await;
+    // The certificate names the business the registration names, and that is
+    // read from the projection — so it has to have caught up.
+    fixture.project_tax(tenant).await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    // Nothing yet.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/zatca/onboarding"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["live"], false);
+    assert_eq!(body["reached"].as_array().expect("a list").len(), 0);
+
+    let unit = |environment: &str| {
+        serde_json::json!({
+            "environment": environment,
+            "branch": "الفرع الرئيسي",
+            "common_name": "EGS1-886431145",
+            "serial": "886431145",
+            "industry": "Consulting"
+        })
+    };
+
+    // An environment nobody has is refused before a key is generated for it.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tax_sa/zatca/onboarding"))
+                .body(Body::from(unit("staging").to_string()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.unknown_zatca_environment");
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tax_sa/zatca/onboarding"))
+                .body(Body::from(unit("simulation").to_string()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["compliance_documents"], 6, "both kinds were declared");
+    assert!(
+        body["submit_to"]
+            .as_str()
+            .is_some_and(|url| url.contains("simulation") && url.ends_with("/compliance")),
+        "{body}"
+    );
+
+    // **The request is a real CSR**, on the curve ZATCA specifies, over a key
+    // this system now holds and never sent.
+    let csr = body["csr"].as_str().expect("a CSR");
+    let pem = base64_decode(csr);
+    let request = openssl::x509::X509Req::from_pem(&pem).expect("a certificate request");
+    assert_eq!(
+        request
+            .public_key()
+            .expect("a key")
+            .ec_key()
+            .expect("an EC key")
+            .group()
+            .curve_name(),
+        Some(openssl::nid::Nid::SECP256K1)
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A certificate for somebody else's key is refused before it is stored**, and
+/// the real one is taken. The first is a document every invoice would be
+/// rejected on; the second is what makes the tenant able to issue at all.
+#[tokio::test]
+async fn a_certificate_is_checked_against_the_key_it_is_meant_for() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.register_with_zatca(&token).await;
+    fixture.project_tax(tenant).await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tax_sa/zatca/onboarding"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "environment": "simulation",
+                        "branch": "الفرع الرئيسي",
+                        "common_name": "EGS1-886431145",
+                        "serial": "886431145",
+                        "industry": "Consulting"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let request =
+        openssl::x509::X509Req::from_pem(&base64_decode(body["csr"].as_str().expect("a CSR")))
+            .expect("a certificate request");
+
+    // A certificate for somebody else's key is refused, and nothing is stored.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::put("/v1/tax_sa/zatca/onboarding/certificate"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "stage": "compliance",
+                        "environment": "simulation",
+                        "token": certificate_for_a_stranger(),
+                        "secret": "the-csid-secret",
+                        "request_id": "1234"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.certificate_key_mismatch");
+
+    // The real one is taken.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::put("/v1/tax_sa/zatca/onboarding/certificate"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "stage": "compliance",
+                        "environment": "simulation",
+                        "token": certificate_over(&request),
+                        "secret": "the-csid-secret",
+                        "request_id": "1234567890123"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["stage"], "compliance");
+    assert!(
+        body["subject"]
+            .as_str()
+            .is_some_and(|s| s.contains("EGS1-886431145")),
+        "{body}"
+    );
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/zatca/onboarding"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reached"], serde_json::json!(["compliance"]));
+    assert_eq!(
+        body["live"], false,
+        "a compliance certificate does not clear real invoices"
+    );
+    assert_eq!(body["environment"], "simulation");
+
+    fixture.cleanup().await;
+}
+
+fn base64_decode(text: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .expect("base64")
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// A certificate over the key in this request, the way ZATCA would issue one.
+fn certificate_over(request: &openssl::x509::X509Req) -> String {
+    base64_encode(&sign_certificate(
+        request.subject_name(),
+        &request.public_key().expect("a key"),
+    ))
+}
+
+/// A certificate over a key nobody here holds.
+fn certificate_for_a_stranger() -> String {
+    let group =
+        openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::SECP256K1).expect("secp256k1");
+    let key = openssl::ec::EcKey::generate(&group).expect("a key");
+    let key = openssl::pkey::PKey::from_ec_key(key).expect("a key");
+    // Only the public half goes in a certificate.
+    let key = openssl::pkey::PKey::public_key_from_pem(&key.public_key_to_pem().expect("pem"))
+        .expect("a public key");
+
+    let mut name = openssl::x509::X509NameBuilder::new().expect("a builder");
+    name.append_entry_by_text("CN", "somebody else")
+        .expect("a name");
+    let name = name.build();
+
+    base64_encode(&sign_certificate(&name, &key))
+}
+
+fn sign_certificate(
+    subject: &openssl::x509::X509NameRef,
+    public: &openssl::pkey::PKey<openssl::pkey::Public>,
+) -> Vec<u8> {
+    let group =
+        openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::SECP256K1).expect("secp256k1");
+    let ca = openssl::ec::EcKey::generate(&group).expect("a CA key");
+    let ca = openssl::pkey::PKey::from_ec_key(ca).expect("a CA key");
+
+    let mut certificate = openssl::x509::X509::builder().expect("a builder");
+    certificate.set_version(2).expect("v3");
+    certificate.set_subject_name(subject).expect("subject");
+    certificate.set_issuer_name(subject).expect("issuer");
+    certificate.set_pubkey(public).expect("public key");
+    certificate
+        .set_not_before(&openssl::asn1::Asn1Time::days_from_now(0).expect("now"))
+        .expect("not before");
+    certificate
+        .set_not_after(&openssl::asn1::Asn1Time::days_from_now(1826).expect("five years"))
+        .expect("not after");
+    let serial = openssl::bn::BigNum::from_u32(0x0BAD_CAFE)
+        .and_then(|bn| openssl::asn1::Asn1Integer::from_bn(&bn))
+        .expect("a serial");
+    certificate.set_serial_number(&serial).expect("serial");
+    certificate
+        .sign(&ca, openssl::hash::MessageDigest::sha256())
+        .expect("signs");
+    certificate.build().to_pem().expect("pem")
+}
+
+/// **A deployment with no sealing key refuses rather than storing a key in the
+/// clear.** Law L6: failures stop, they do not degrade.
+#[tokio::test]
+async fn no_sealing_key_refuses_rather_than_storing_one_in_the_clear() {
+    let mut fixture = Fixture::new().await;
+    // The same control plane, served by a router that was given no sealing key.
+    fixture.app = router(AppState::new(Arc::clone(&fixture.control)));
+
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/tax_sa/zatca/onboarding")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "environment": "sandbox",
+                        "branch": "الفرع الرئيسي",
+                        "common_name": "EGS1",
+                        "serial": "1",
+                        "industry": "Consulting"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "request.no_sealing_key");
+
+    // And nothing was written, so there is no half-generated key to trip over.
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let mut conn = db.acquire().await.expect("connection");
+    let secrets: i64 = sqlx::query_scalar("SELECT count(*) FROM module_secret")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("reads");
+    drop(conn);
+    drop(db);
+    assert_eq!(secrets, 0);
 
     fixture.cleanup().await;
 }

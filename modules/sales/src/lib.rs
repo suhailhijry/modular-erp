@@ -40,7 +40,9 @@ mod vat;
 pub use commands::{
     Draft, Numbered, Receipt, SalesError, cancel_invoice, issue_invoice, record_payment,
 };
-pub use invoice::{Customer, DraftLine, Invoice, InvoiceEvent, InvoiceLine};
+pub use invoice::{
+    Address, Customer, Discount, DraftDiscount, DraftLine, Invoice, InvoiceEvent, InvoiceLine,
+};
 pub use posting::{PostingAccounts, entry_for_issue, entry_for_payment};
 pub use projections::{
     InvoiceDetail, InvoiceLineRow, InvoiceSummary, Invoices, Overpaid, PaymentRow, Sales, TaxRow,

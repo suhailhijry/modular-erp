@@ -69,6 +69,7 @@ impl Projection for Invoices {
                 due_on,
                 currency,
                 lines,
+                discounts,
                 totals,
                 note,
             } => {
@@ -82,6 +83,7 @@ impl Projection for Invoices {
                     due_on,
                     currency,
                     lines,
+                    discounts,
                     totals,
                     note,
                 };
@@ -134,6 +136,7 @@ struct NewInvoice {
     due_on: Option<Timestamp>,
     currency: CurrencyCode,
     lines: Vec<crate::invoice::InvoiceLine>,
+    discounts: Vec<crate::invoice::Discount>,
     totals: crate::vat::Totals,
     note: String,
 }
@@ -149,8 +152,8 @@ async fn write_issued(
     sqlx::query(
         "INSERT INTO invoice
              (id, number, customer, customer_vat, issued_on, due_on, currency,
-              net, tax, gross, note, recorded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+              net, tax, gross, discount, note, recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(id)
     .bind(&invoice.number)
@@ -162,11 +165,31 @@ async fn write_issued(
     .bind(invoice.totals.net.minor())
     .bind(invoice.totals.tax.minor())
     .bind(invoice.totals.gross.minor())
+    .bind(invoice.totals.discount().minor())
     .bind(&invoice.note)
     // The event's time, never the wall clock (L2).
     .bind(ctx.event_time())
     .execute(&mut *conn)
     .await?;
+
+    for (index, discount) in invoice.discounts.iter().enumerate() {
+        let index = i32::try_from(index).unwrap_or(i32::MAX);
+        sqlx::query(
+            "INSERT INTO invoice_discount
+                 (id, invoice_id, discount_index, reason, amount,
+                  vat_category, vat_rate_bp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(ctx.derive_id(&format!("discount-{index}")))
+        .bind(id)
+        .bind(index)
+        .bind(&discount.reason)
+        .bind(discount.amount.minor())
+        .bind(discount.vat.category.as_str())
+        .bind(discount.vat.basis_points)
+        .execute(&mut *conn)
+        .await?;
+    }
 
     for (index, line) in invoice.lines.iter().enumerate() {
         let index = i32::try_from(index).unwrap_or(i32::MAX);

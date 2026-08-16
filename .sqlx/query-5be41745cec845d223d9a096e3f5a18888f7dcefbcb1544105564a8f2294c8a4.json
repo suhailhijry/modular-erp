@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", kind as \"kind!\", issued_at as \"issued_at!\",\n                  document->>'uuid' as \"uuid!\", invoice_hash as \"invoice_hash!\",\n                  xml as \"xml!\"\n             FROM proj_tax_sa.zatca_document\n            WHERE status = 'pending'\n              AND xml IS NOT NULL AND invoice_hash IS NOT NULL\n            ORDER BY issued_at, id\n            LIMIT $1",
+  "query": "SELECT id as \"id!\", kind as \"kind!\", issued_at as \"issued_at!\",\n                  document->>'uuid' as \"uuid!\", invoice_hash as \"invoice_hash!\",\n                  signed_xml as \"xml!\"\n             FROM proj_tax_sa.zatca_document\n            WHERE status = 'pending'\n              AND signed_xml IS NOT NULL AND invoice_hash IS NOT NULL\n            ORDER BY issued_at, id\n            LIMIT $1",
   "describe": {
     "columns": [
       {
@@ -60,7 +60,7 @@
         "origin": {
           "Table": {
             "table": "proj_tax_sa.zatca_document",
-            "name": "xml"
+            "name": "signed_xml"
           }
         }
       }
@@ -79,5 +79,5 @@
       true
     ]
   },
-  "hash": "cec37e58ed716ef7072061de41b6d2c7f6a20b8724cc1cce23dc01c0d2ffc2e7"
+  "hash": "5be41745cec845d223d9a096e3f5a18888f7dcefbcb1544105564a8f2294c8a4"
 }

@@ -13,6 +13,20 @@ pub const UNKNOWN_MODULE: MessageCode = MessageCode::new("request.unknown_module
 pub const UNKNOWN_CHART: MessageCode = MessageCode::new("request.unknown_chart");
 pub const UNKNOWN_ROLE: MessageCode = MessageCode::new("request.unknown_role");
 pub const UNKNOWN_ID_SCHEME: MessageCode = MessageCode::new("request.unknown_id_scheme");
+pub const UNKNOWN_ONBOARDING_STAGE: MessageCode =
+    MessageCode::new("request.unknown_onboarding_stage");
+pub const UNKNOWN_ZATCA_ENVIRONMENT: MessageCode =
+    MessageCode::new("request.unknown_zatca_environment");
+pub const NO_SEALING_KEY: MessageCode = MessageCode::new("request.no_sealing_key");
+pub const UNUSABLE_UNIT: MessageCode = MessageCode::new("request.unusable_unit");
+pub const UNREADABLE_CERTIFICATE: MessageCode = MessageCode::new("request.unreadable_certificate");
+pub const CERTIFICATE_KEY_MISMATCH: MessageCode =
+    MessageCode::new("request.certificate_key_mismatch");
+pub const ONBOARDING_NOT_YET: MessageCode = MessageCode::new("request.onboarding_not_yet");
+pub const CSID_NOT_ISSUED: MessageCode = MessageCode::new("request.csid_not_issued");
+pub const ZATCA_UNREACHABLE: MessageCode = MessageCode::new("request.zatca_unreachable");
+pub const NOT_AN_OTP: MessageCode = MessageCode::new("request.not_an_otp");
+pub const COMPLIANCE_REFUSED: MessageCode = MessageCode::new("request.compliance_refused");
 /// 503. The caller asked to see a write that has not been projected yet.
 pub const NOT_CAUGHT_UP: MessageCode = MessageCode::new("request.not_caught_up");
 /// A module was asked for without one it cannot work without.
@@ -46,6 +60,17 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_CHART,
     UNKNOWN_ROLE,
     UNKNOWN_ID_SCHEME,
+    UNKNOWN_ONBOARDING_STAGE,
+    UNKNOWN_ZATCA_ENVIRONMENT,
+    NO_SEALING_KEY,
+    UNUSABLE_UNIT,
+    UNREADABLE_CERTIFICATE,
+    CERTIFICATE_KEY_MISMATCH,
+    ONBOARDING_NOT_YET,
+    CSID_NOT_ISSUED,
+    ZATCA_UNREACHABLE,
+    NOT_AN_OTP,
+    COMPLIANCE_REFUSED,
     NOT_CAUGHT_UP,
     MODULE_REQUIRES,
     MODULE_NOT_ENABLED,
@@ -232,6 +257,140 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Locale::Arabic,
         Template::Simple(
             "{scheme} ليس نوع سجل. استخدم crn أو mom أو mls أو sag أو number700 أو other.",
+        ),
+    ),
+    (
+        NOT_AN_OTP,
+        Locale::English,
+        Template::Simple(
+            "That is not a Fatoora OTP. It is six digits, generated in the ZATCA portal, and it lasts about an hour.",
+        ),
+    ),
+    (
+        NOT_AN_OTP,
+        Locale::Arabic,
+        Template::Simple(
+            "هذا ليس رمز تحقق من بوابة فاتورة. الرمز ستة أرقام يُنشأ من البوابة وتنتهي صلاحيته خلال ساعة تقريبًا.",
+        ),
+    ),
+    (
+        COMPLIANCE_REFUSED,
+        Locale::English,
+        Template::Simple(
+            "ZATCA refused {failed} of the {submitted} compliance documents this system generated, so it cannot go live. This is a fault in this software rather than in your request: {reason}",
+        ),
+    ),
+    (
+        COMPLIANCE_REFUSED,
+        Locale::Arabic,
+        Template::Simple(
+            "رفضت هيئة الزكاة والضريبة والجمارك {failed} من أصل {submitted} من مستندات الفحص التي أنشأها النظام، فتعذّر التفعيل. الخلل في النظام وليس في طلبك: {reason}",
+        ),
+    ),
+    (
+        UNKNOWN_ONBOARDING_STAGE,
+        Locale::English,
+        Template::Simple("{stage} is not an onboarding stage. Use compliance or production."),
+    ),
+    (
+        UNKNOWN_ONBOARDING_STAGE,
+        Locale::Arabic,
+        Template::Simple("{stage} ليست مرحلة تسجيل. استخدم compliance أو production."),
+    ),
+    (
+        UNKNOWN_ZATCA_ENVIRONMENT,
+        Locale::English,
+        Template::Simple(
+            "{environment} is not a ZATCA environment. Use sandbox, simulation or production.",
+        ),
+    ),
+    (
+        UNKNOWN_ZATCA_ENVIRONMENT,
+        Locale::Arabic,
+        Template::Simple(
+            "{environment} ليست بيئة لدى هيئة الزكاة والضريبة والجمارك. استخدم sandbox أو simulation أو production.",
+        ),
+    ),
+    (
+        NO_SEALING_KEY,
+        Locale::English,
+        Template::Simple(
+            "This deployment has no sealing key, so a private key cannot be stored safely. Set SEALING_KEY and try again.",
+        ),
+    ),
+    (
+        NO_SEALING_KEY,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يوجد مفتاح تشفير مُهيّأ في هذا النظام، فلا يمكن حفظ المفتاح الخاص بأمان. اضبط SEALING_KEY ثم أعد المحاولة.",
+        ),
+    ),
+    (
+        UNUSABLE_UNIT,
+        Locale::English,
+        Template::Simple("That unit cannot go in a certificate request: {reason}."),
+    ),
+    (
+        UNUSABLE_UNIT,
+        Locale::Arabic,
+        Template::Simple("لا يمكن استخدام بيانات الوحدة في طلب الشهادة: {reason}."),
+    ),
+    (
+        UNREADABLE_CERTIFICATE,
+        Locale::English,
+        Template::Simple("That is not a certificate this system can read: {reason}."),
+    ),
+    (
+        UNREADABLE_CERTIFICATE,
+        Locale::Arabic,
+        Template::Simple("تعذّرت قراءة الشهادة: {reason}."),
+    ),
+    (
+        CERTIFICATE_KEY_MISMATCH,
+        Locale::English,
+        Template::Simple(
+            "That certificate is not for the private key held for this business. Every invoice signed with it would be rejected, so it has not been stored.",
+        ),
+    ),
+    (
+        CERTIFICATE_KEY_MISMATCH,
+        Locale::Arabic,
+        Template::Simple(
+            "هذه الشهادة ليست للمفتاح الخاص المحفوظ لهذه المنشأة. كل فاتورة تُوقَّع بها سترفض، لذلك لم تُحفظ.",
+        ),
+    ),
+    (
+        ONBOARDING_NOT_YET,
+        Locale::English,
+        Template::Simple("This business has no {stage} certificate yet."),
+    ),
+    (
+        ONBOARDING_NOT_YET,
+        Locale::Arabic,
+        Template::Simple("لا توجد شهادة {stage} لهذه المنشأة بعد."),
+    ),
+    (
+        CSID_NOT_ISSUED,
+        Locale::English,
+        Template::Simple("ZATCA did not issue a certificate ({disposition}): {detail}"),
+    ),
+    (
+        CSID_NOT_ISSUED,
+        Locale::Arabic,
+        Template::Simple("لم تُصدر هيئة الزكاة والضريبة والجمارك شهادة ({disposition}): {detail}"),
+    ),
+    (
+        ZATCA_UNREACHABLE,
+        Locale::English,
+        Template::Simple(
+            "ZATCA could not be reached while {step}: {reason}. Nothing beyond the last completed step was changed.",
+        ),
+    ),
+    (
+        ZATCA_UNREACHABLE,
+        Locale::Arabic,
+        Template::Simple(
+            "تعذّر الوصول إلى هيئة الزكاة والضريبة والجمارك أثناء {step}: {reason}. لم يتغيّر شيء بعد آخر خطوة اكتملت.",
         ),
     ),
     (

@@ -27,6 +27,7 @@ pub mod messages;
 pub mod numbering;
 mod outbox;
 mod read;
+pub mod secrets;
 mod upcast;
 
 pub use config::{ConfigError, Configured};
@@ -46,6 +47,7 @@ pub use outbox::{
     OutboxHealth, PendingEffect, RetryPolicy, Settlement, enqueue, outbox_health,
 };
 pub use read::{Integrity, ReadError, integrity, read_since, read_stream, read_stream_since};
+pub use secrets::{SealingKey, SecretError};
 pub use upcast::{UpcastError, UpcastStep, Upcasters};
 
 use spa_i18n::StaticCatalog;

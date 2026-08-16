@@ -25,6 +25,47 @@ pub struct Customer {
     /// and absent on a simplified one, which is why it is optional here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vat_number: Option<String>,
+    /// Where they are, as they were at the time.
+    ///
+    /// `#[serde(default)]`, so every invoice issued before this field existed
+    /// still decodes — an absent address is exactly what those invoices had,
+    /// which is why this needs no upcaster.
+    ///
+    /// Boxed because `InvoiceEvent::Issued` is the largest variant in the enum
+    /// and an address is six strings; a `Box` is one pointer and serialises
+    /// identically, so nothing on the wire or in the log changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<Box<Address>>,
+}
+
+/// Where a customer is.
+///
+/// # Why this is on the invoice and not on a customer record
+///
+/// The same reason the name is: a tax invoice is a legal document, and the
+/// address on last year's copy must not change because the customer moved.
+///
+/// # Why it exists at all
+///
+/// ZATCA wants a buyer address on a **standard** invoice — street, city and
+/// country at minimum (BT-50, BT-52, BT-55). Without one it accepts the
+/// document and warns, which is a warning that becomes a finding at an
+/// inspection. Confirmed against ZATCA; see `modules/tax_sa/tests/sandbox.rs`.
+///
+/// Optional, because a consumer at a till gives no address and a simplified
+/// invoice needs none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Address {
+    pub street: String,
+    pub city: String,
+    /// ISO 3166-1 alpha-2. `SA` for a Saudi buyer.
+    pub country: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub district: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub building: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postal_code: Option<String>,
 }
 
 impl Customer {
@@ -33,7 +74,14 @@ impl Customer {
         Self {
             name: name.into(),
             vat_number: None,
+            address: None,
         }
+    }
+
+    #[must_use]
+    pub fn at(mut self, address: Address) -> Self {
+        self.address = Some(Box::new(address));
+        self
     }
 
     #[must_use]
@@ -73,6 +121,41 @@ pub struct DraftLine {
     pub category: ledger::VatCategory,
 }
 
+/// Something taken off the whole invoice, rather than off one line.
+///
+/// # Why this is not just a negative line
+///
+/// A negative line is what this system had, and it is invisible on the
+/// document: the invoice shows a smaller total and nothing says why. ZATCA
+/// models a discount as `cac:AllowanceCharge` — an amount, a reason, and the
+/// tax treatment it comes off — and prints it as its own figure, so a customer
+/// sees what they were charged and what they were let off.
+///
+/// **The tax treatment is part of it.** Discounting a standard-rated invoice
+/// reduces the tax; discounting an exempt one does not, because there was none.
+/// Taking a discount off the wrong band would reclaim tax that was never
+/// charged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Discount {
+    /// Why. ZATCA prints it, and "discount" is a reason a customer can read.
+    pub reason: String,
+    /// What comes off, **positive**. A negative discount is a charge, which is
+    /// a different element and a different conversation.
+    pub amount: Money,
+    /// The treatment **and the rate that applied when it was issued**, for the
+    /// same reason a line carries one.
+    pub vat: Vat,
+}
+
+/// A discount as a client sends it: what and why, but not at what rate — that
+/// is the tenant's configuration, resolved in the command's own transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftDiscount {
+    pub reason: String,
+    pub amount: Money,
+    pub category: ledger::VatCategory,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InvoiceEvent {
@@ -98,6 +181,13 @@ pub enum InvoiceEvent {
         due_on: Option<Timestamp>,
         currency: CurrencyCode,
         lines: Vec<InvoiceLine>,
+        /// What was taken off the whole invoice.
+        ///
+        /// `#[serde(default)]`, so every invoice issued before discounts
+        /// existed decodes as one with none — which is what it was, and why
+        /// this needs no upcaster.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        discounts: Vec<Discount>,
         /// Computed once, at issue, and stored. Recomputing on read would let a
         /// rate change or a rounding fix silently restate a document somebody
         /// has already filed a return against.
@@ -275,7 +365,8 @@ mod tests {
                 net,
                 vat,
             }],
-            totals: total([(vat, net)], currency).unwrap_or_else(|_| unreachable!()),
+            discounts: Vec::new(),
+            totals: total([(vat, net)], [], currency).unwrap_or_else(|_| unreachable!()),
             note: String::new(),
         }
     }

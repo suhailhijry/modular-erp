@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", source_id as \"source_id!\", kind as \"kind!\",\n                  type_code as \"type_code!\", issued_at as \"issued_at!\",\n                  currency as \"currency!\", net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  icv, previous_hash, invoice_hash, xml, qr, status as \"status!\",\n                  stamped_xml, remarks, settled_at\n             FROM proj_tax_sa.zatca_document WHERE id = $1",
+  "query": "SELECT id as \"id!\", source_id as \"source_id!\", kind as \"kind!\",\n                  type_code as \"type_code!\", issued_at as \"issued_at!\",\n                  currency as \"currency!\", net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  icv, previous_hash, invoice_hash, xml, qr, status as \"status!\",\n                  signature, signed_xml, signed_at, stamped_xml, remarks, settled_at\n             FROM proj_tax_sa.zatca_document WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -170,6 +170,39 @@
       },
       {
         "ordinal": 15,
+        "name": "signature",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "signature"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "signed_xml",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "signed_xml"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "signed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "signed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
         "name": "stamped_xml",
         "type_info": "Text",
         "origin": {
@@ -180,7 +213,7 @@
         }
       },
       {
-        "ordinal": 16,
+        "ordinal": 19,
         "name": "remarks",
         "type_info": "Jsonb",
         "origin": {
@@ -191,7 +224,7 @@
         }
       },
       {
-        "ordinal": 17,
+        "ordinal": 20,
         "name": "settled_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -225,8 +258,11 @@
       false,
       true,
       true,
+      true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "6c54045afb1e6ebc2530b437c62519d82d5ff19faf463d8b093a531808fe9e3d"
+  "hash": "1b2596c04c6bf1e4800a5974357c4d07aaf40801bddca66567409039ee5e1f86"
 }

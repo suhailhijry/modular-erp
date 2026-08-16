@@ -7,6 +7,8 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use base64::Engine as _;
+
 use std::sync::Arc;
 
 use ledger::{AccountKind, Ledger, VatCategory, open_account};
@@ -203,6 +205,7 @@ impl Fixture {
                     net,
                     category: VatCategory::Standard,
                 }],
+                discounts: Vec::new(),
                 note: String::new(),
             },
             &Metadata::default(),
@@ -577,6 +580,7 @@ impl Fixture {
                     net,
                     category: VatCategory::Standard,
                 }],
+                discounts: Vec::new(),
                 note: String::new(),
             },
             &Metadata::default(),
@@ -776,18 +780,20 @@ async fn a_credit_note_is_its_own_document_pointing_at_the_invoice() {
     assert_eq!(note.previous_hash, invoice.invoice_hash);
 
     let xml = note.xml.unwrap_or_default();
-    assert!(
-        xml.starts_with("<CreditNote"),
-        "a credit note is its own UBL document"
-    );
+    // **An `<Invoice>` with 381 in the type code.** ZATCA's schema is UBL's
+    // Invoice schema; its `CreditNote` document type is rejected by the gateway
+    // before validation begins.
+    assert!(xml.starts_with("<Invoice"), "{}", &xml[..40]);
+    assert!(xml.contains("<cbc:InvoiceTypeCode name=\"0100000\">381</cbc:InvoiceTypeCode>"));
     assert!(xml.contains("<cac:BillingReference>"));
     assert!(
         xml.contains("<cbc:ID>INV-00001</cbc:ID>"),
         "it must name what it credits"
     );
+    // The reason, in KSA-10 — where `BR-KSA-17` reads it.
     assert!(
-        xml.contains("the wrong service"),
-        "ZATCA requires the reason"
+        xml.contains("<cbc:InstructionNote>the wrong service</cbc:InstructionNote>"),
+        "ZATCA requires the reason in PaymentMeans/InstructionNote"
     );
 
     fixture.cleanup().await;
@@ -868,11 +874,24 @@ async fn a_simplified_invoice_goes_overdue_after_a_day() {
 #[tokio::test]
 async fn a_verdict_is_recorded_and_survives_a_rebuild() {
     let fixture = Fixture::new().await;
+    let sealing = sealing();
     fixture.register().await;
+    fixture.go_live(&sealing).await;
     fixture.sell("inv-1", "2026-02-10", riyals(1_000)).await;
     fixture
         .sell_to_a_consumer("inv-2", "2026-02-11", riyals(20))
         .await;
+    fixture.project().await;
+    // Nothing reaches ZATCA unsigned, so the queue is empty until this runs.
+    tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
     fixture.project().await;
 
     // What a submitter would take from the queue.
@@ -1135,7 +1154,7 @@ impl tax_sa::zatca::wire::Submitter for FakeZatca {
         self.seen
             .lock()
             .expect("not poisoned")
-            .push((endpoint, submission.invoice_hash.clone()));
+            .push((endpoint, submission.invoice.clone()));
         let mut answers = self.answers.lock().expect("not poisoned");
         if answers.is_empty() {
             return Err(tax_sa::zatca::wire::Unanswered::Unavailable(
@@ -1151,11 +1170,23 @@ impl tax_sa::zatca::wire::Submitter for FakeZatca {
 #[tokio::test]
 async fn a_sweep_sends_each_document_to_the_call_its_kind_decides() {
     let fixture = Fixture::new().await;
+    let sealing = sealing();
     fixture.register().await;
+    fixture.go_live(&sealing).await;
     fixture.sell("b2b", "2026-02-10", riyals(1_000)).await;
     fixture
         .sell_to_a_consumer("b2c", "2026-02-11", riyals(20))
         .await;
+    fixture.project().await;
+    tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
     fixture.project().await;
 
     let zatca = FakeZatca::saying(vec![
@@ -1189,14 +1220,21 @@ async fn a_sweep_sends_each_document_to_the_call_its_kind_decides() {
     let seen = zatca.seen();
     assert_eq!(seen[0].0, tax_sa::zatca::wire::Endpoint::Clearance);
     assert_eq!(seen[1].0, tax_sa::zatca::wire::Endpoint::Reporting);
-    // And what was sent is the hash of what was stored.
-    assert_eq!(
-        seen[0].1,
-        fixture
-            .zatca("INV-00001")
-            .await
-            .invoice_hash
-            .unwrap_or_default()
+    // And what was sent is the signed document that was stored.
+    let sent = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(&seen[0].1)
+            .expect("base64"),
+    )
+    .expect("utf-8");
+    assert!(
+        sent.ends_with(
+            &fixture
+                .zatca("INV-00001")
+                .await
+                .signed_xml
+                .unwrap_or_default()
+        )
     );
 
     assert_eq!(
@@ -1216,12 +1254,24 @@ async fn a_sweep_sends_each_document_to_the_call_its_kind_decides() {
 #[tokio::test]
 async fn an_outage_marks_nothing_refused_and_stops_the_sweep() {
     let fixture = Fixture::new().await;
+    let sealing = sealing();
     fixture.register().await;
+    fixture.go_live(&sealing).await;
     for n in 1..=3 {
         fixture
             .sell(&format!("inv-{n}"), "2026-02-10", riyals(100))
             .await;
     }
+    fixture.project().await;
+    tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-11"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
     fixture.project().await;
 
     let zatca = FakeZatca::saying(vec![
@@ -1303,6 +1353,1077 @@ async fn an_outage_marks_nothing_refused_and_stops_the_sweep() {
         0,
         "nothing is left waiting"
     );
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding
+// ---------------------------------------------------------------------------
+
+use tax_sa::zatca::csr::{Environment, Issues, Unit};
+use tax_sa::zatca::onboarding::{
+    ComplianceRequest, Csid, CsidResponse, Onboarder, Otp, ProductionRequest, Registrar, Stage,
+};
+
+fn unit() -> Unit {
+    Unit {
+        vat_number: "310122393500003".to_owned(),
+        organization: "روابي للاستشارات".to_owned(),
+        branch: "الفرع الرئيسي".to_owned(),
+        common_name: "EGS1-886431145".to_owned(),
+        solution: "Spa".to_owned(),
+        version: "1.0".to_owned(),
+        serial: "886431145".to_owned(),
+        address: "الرياض 12211".to_owned(),
+        industry: "Consulting".to_owned(),
+        issues: Issues::both(),
+    }
+}
+
+fn otp() -> Otp {
+    "123456".parse().expect("six digits")
+}
+
+/// A ZATCA that issues certificates, so onboarding can be driven without one.
+///
+/// It signs the CSR it is given with its own CA key — which is what makes the
+/// test meaningful: the certificate that comes back really is over the public
+/// key in the request, so [`Onboarder`]'s check that the certificate matches
+/// the tenant's private key is exercised rather than trusted.
+#[derive(Debug)]
+struct FakeZatcaCa {
+    /// What the taxpayer typed, as it arrived. Onboarding must send it.
+    seen_otp: std::sync::Mutex<Vec<String>>,
+    /// The CSRs it was asked to sign.
+    seen_csr: std::sync::Mutex<Vec<String>>,
+    /// Set to sign with a *different* key, which is the mismatch that must be
+    /// caught before anything is stored.
+    substitute_key: bool,
+    /// Set to answer without issuing.
+    refuse: bool,
+    /// The compliance documents it was shown.
+    checked: std::sync::Mutex<Vec<tax_sa::zatca::wire::Submission>>,
+    /// Set to refuse every compliance document.
+    refuse_checks: bool,
+}
+
+impl FakeZatcaCa {
+    fn new() -> Self {
+        Self {
+            seen_otp: std::sync::Mutex::new(Vec::new()),
+            seen_csr: std::sync::Mutex::new(Vec::new()),
+            substitute_key: false,
+            refuse: false,
+            checked: std::sync::Mutex::new(Vec::new()),
+            refuse_checks: false,
+        }
+    }
+
+    fn otps(&self) -> Vec<String> {
+        self.seen_otp.lock().expect("not poisoned").clone()
+    }
+
+    fn csrs(&self) -> Vec<String> {
+        self.seen_csr.lock().expect("not poisoned").clone()
+    }
+
+    /// Signs the request the way ZATCA would: a certificate over the public key
+    /// in the CSR, from a self-signed CA.
+    fn issue(&self, csr_base64: &str, request_id: &str) -> CsidResponse {
+        let engine = base64::engine::general_purpose::STANDARD;
+
+        self.seen_csr
+            .lock()
+            .expect("not poisoned")
+            .push(csr_base64.to_owned());
+
+        if self.refuse {
+            return CsidResponse {
+                disposition: Some("REJECTED".to_owned()),
+                errors: Some(serde_json::json!(["the OTP has expired"])),
+                ..CsidResponse::default()
+            };
+        }
+
+        let pem = engine.decode(csr_base64).expect("the CSR is base64");
+        let request = openssl::x509::X509Req::from_pem(&pem).expect("a CSR");
+
+        let group =
+            openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::SECP256K1).expect("secp256k1");
+        let ca = openssl::ec::EcKey::generate(&group).expect("a CA key");
+        let ca = openssl::pkey::PKey::from_ec_key(ca).expect("a CA key");
+
+        // Either the key in the request, or somebody else's. Both are
+        // rebuilt from PEM so the two branches have the same type — the public
+        // half is all a certificate carries either way.
+        let subject_key = if self.substitute_key {
+            let other = openssl::ec::EcKey::generate(&group).expect("another key");
+            openssl::pkey::PKey::from_ec_key(other)
+                .expect("another key")
+                .public_key_to_pem()
+                .expect("pem")
+        } else {
+            request
+                .public_key()
+                .expect("the CSR's key")
+                .public_key_to_pem()
+                .expect("pem")
+        };
+        let subject_key = openssl::pkey::PKey::public_key_from_pem(&subject_key).expect("a key");
+
+        let mut certificate = openssl::x509::X509::builder().expect("a builder");
+        certificate.set_version(2).expect("v3");
+        certificate
+            .set_subject_name(request.subject_name())
+            .expect("subject");
+        certificate
+            .set_issuer_name(request.subject_name())
+            .expect("issuer");
+        certificate.set_pubkey(&subject_key).expect("public key");
+        certificate
+            .set_not_before(&openssl::asn1::Asn1Time::days_from_now(0).expect("now"))
+            .expect("not before");
+        certificate
+            .set_not_after(&openssl::asn1::Asn1Time::days_from_now(1826).expect("five years"))
+            .expect("not after");
+        let serial = openssl::bn::BigNum::from_u32(0x0BAD_CAFE)
+            .and_then(|bn| openssl::asn1::Asn1Integer::from_bn(&bn))
+            .expect("a serial");
+        certificate.set_serial_number(&serial).expect("serial");
+        certificate
+            .sign(&ca, openssl::hash::MessageDigest::sha256())
+            .expect("signs");
+        let certificate = certificate.build().to_pem().expect("pem");
+
+        CsidResponse {
+            request_id: Some(serde_json::json!(request_id)),
+            disposition: Some("ISSUED".to_owned()),
+            // Base64 of the PEM, which is one of the two shapes ZATCA uses.
+            token: Some(engine.encode(&certificate)),
+            secret: Some("the-csid-secret".to_owned()),
+            errors: None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Registrar for FakeZatcaCa {
+    async fn compliance_csid(
+        &self,
+        _environment: Environment,
+        otp: &Otp,
+        request: &ComplianceRequest,
+    ) -> Result<CsidResponse, tax_sa::zatca::wire::Unanswered> {
+        self.seen_otp
+            .lock()
+            .expect("not poisoned")
+            .push(otp.header().to_owned());
+        Ok(self.issue(&request.csr, "compliance-1"))
+    }
+
+    async fn check_compliance(
+        &self,
+        _environment: Environment,
+        compliance: &Csid,
+        submission: &tax_sa::zatca::wire::Submission,
+    ) -> Result<tax_sa::zatca::wire::Verdict, tax_sa::zatca::wire::Unanswered> {
+        // Every check authenticates as the compliance certificate, and carries
+        // a signed document.
+        assert!(compliance.authorization().starts_with("Basic "));
+        self.checked
+            .lock()
+            .expect("not poisoned")
+            .push(submission.clone());
+        if self.refuse_checks {
+            return Ok(tax_sa::zatca::wire::Verdict::Refused {
+                errors: vec![tax_sa::zatca::wire::Remark {
+                    code: "BR-KSA-99".to_owned(),
+                    category: "ERROR".to_owned(),
+                    message: "the sample is not acceptable".to_owned(),
+                }],
+            });
+        }
+        Ok(tax_sa::zatca::wire::Verdict::Accepted {
+            warnings: vec![],
+            stamped: None,
+        })
+    }
+
+    async fn production_csid(
+        &self,
+        _environment: Environment,
+        compliance: &Csid,
+        request: &ProductionRequest,
+    ) -> Result<CsidResponse, tax_sa::zatca::wire::Unanswered> {
+        // The production call must quote the compliance request's id, and
+        // authenticate as the compliance certificate.
+        assert_eq!(request.compliance_request_id, compliance.request_id);
+        assert!(compliance.authorization().starts_with("Basic "));
+        Ok(self.issue(
+            &self.csrs().last().cloned().unwrap_or_default(),
+            "production-1",
+        ))
+    }
+
+    async fn renew_csid(
+        &self,
+        _environment: Environment,
+        _production: &Csid,
+        otp: &Otp,
+        request: &ComplianceRequest,
+    ) -> Result<CsidResponse, tax_sa::zatca::wire::Unanswered> {
+        self.seen_otp
+            .lock()
+            .expect("not poisoned")
+            .push(otp.header().to_owned());
+        Ok(self.issue(&request.csr, "renewal-1"))
+    }
+}
+
+fn sealing() -> spa_eventlog::SealingKey {
+    spa_eventlog::SealingKey::new("test", &[3u8; 32]).expect("32 bytes")
+}
+
+/// **The whole onboarding.** An OTP goes in, two certificates come back, and
+/// what is stored is sealed.
+#[tokio::test]
+async fn an_otp_becomes_a_compliance_certificate_and_then_a_production_one() {
+    let fixture = Fixture::new().await;
+    let zatca = FakeZatcaCa::new();
+    let sealing = sealing();
+    let onboarder = Onboarder::new(&fixture.db, &sealing, &zatca);
+
+    // Nothing yet.
+    assert!(
+        tax_sa::zatca::onboarding::reached(&fixture.db)
+            .await
+            .expect("reads")
+            .is_empty()
+    );
+
+    let compliance = onboarder
+        .onboard(
+            &unit(),
+            Environment::Simulation,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards");
+
+    assert_eq!(compliance.stage, Stage::Compliance);
+    assert_eq!(compliance.environment, Environment::Simulation);
+    assert_eq!(compliance.request_id, "compliance-1");
+    assert!(
+        compliance.subject.contains("CN=EGS1-886431145"),
+        "{compliance:?}"
+    );
+    assert!(compliance.serial.contains("BADCAFE"), "{compliance:?}");
+
+    // **The OTP reached ZATCA**, which is the only thing it is for.
+    assert_eq!(zatca.otps(), vec!["123456".to_owned()]);
+
+    // Only compliance so far — going live is a separate call for a reason.
+    assert_eq!(
+        tax_sa::zatca::onboarding::reached(&fixture.db)
+            .await
+            .expect("reads"),
+        vec![Stage::Compliance]
+    );
+    assert!(
+        tax_sa::zatca::onboarding::production(&fixture.db, &sealing)
+            .await
+            .expect("reads")
+            .is_none()
+    );
+
+    let production = onboarder
+        .go_live(
+            Environment::Simulation,
+            on("2026-01-02"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("goes live");
+    assert_eq!(production.stage, Stage::Production);
+    assert_eq!(production.request_id, "production-1");
+
+    let credentials = tax_sa::zatca::onboarding::production(&fixture.db, &sealing)
+        .await
+        .expect("reads")
+        .expect("production credentials");
+    assert_eq!(credentials.secret, "the-csid-secret");
+    assert!(credentials.authorization().starts_with("Basic "));
+    assert!(
+        credentials.certificate().is_ok(),
+        "the token is a certificate"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The private key is sealed, and the plaintext is nowhere in the database.**
+#[tokio::test]
+async fn the_private_key_is_sealed_and_never_stored_in_the_clear() {
+    let fixture = Fixture::new().await;
+    let zatca = FakeZatcaCa::new();
+    let sealing = sealing();
+
+    Onboarder::new(&fixture.db, &sealing, &zatca)
+        .onboard(
+            &unit(),
+            Environment::Sandbox,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards");
+
+    // The key is readable with the sealing key...
+    let key = tax_sa::zatca::onboarding::private_key(&fixture.db, &sealing)
+        .await
+        .expect("reads")
+        .expect("a key");
+    assert!(String::from_utf8_lossy(&key).contains("BEGIN EC PRIVATE KEY"));
+
+    // ...and the row itself contains none of it.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let rows: Vec<(String, Vec<u8>, String)> =
+        sqlx::query_as("SELECT key, sealed, sealed_with FROM module_secret ORDER BY key")
+            .fetch_all(&mut *conn)
+            .await
+            .expect("reads");
+    drop(conn);
+
+    assert_eq!(rows.len(), 2, "the key and the compliance credentials");
+    for (name, sealed, sealed_with) in &rows {
+        assert_eq!(sealed_with, "test");
+        let text = String::from_utf8_lossy(sealed);
+        assert!(
+            !text.contains("BEGIN EC PRIVATE KEY"),
+            "{name} is in the clear"
+        );
+        assert!(!text.contains("the-csid-secret"), "{name} is in the clear");
+    }
+
+    // And another sealing key gets nothing.
+    let other = spa_eventlog::SealingKey::new("other", &[9u8; 32]).expect("32 bytes");
+    assert!(
+        tax_sa::zatca::onboarding::private_key(&fixture.db, &other)
+            .await
+            .is_err(),
+        "another key unsealed it"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A certificate for somebody else's key is refused before it is stored.**
+///
+/// Every signature made with it would be rejected at clearance, on an invoice a
+/// customer is waiting for, with an error that says nothing about why.
+#[tokio::test]
+async fn a_certificate_that_is_not_for_our_key_is_refused() {
+    let fixture = Fixture::new().await;
+    let mut zatca = FakeZatcaCa::new();
+    zatca.substitute_key = true;
+    let sealing = sealing();
+
+    let refused = Onboarder::new(&fixture.db, &sealing, &zatca)
+        .onboard(
+            &unit(),
+            Environment::Production,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect_err("a certificate for another key is refused");
+    assert!(
+        matches!(
+            refused,
+            tax_sa::zatca::onboarding::OnboardError::KeyMismatch
+        ),
+        "{refused:?}"
+    );
+
+    // Nothing was stored, so the tenant is not half onboarded.
+    assert!(
+        tax_sa::zatca::onboarding::reached(&fixture.db)
+            .await
+            .expect("reads")
+            .is_empty()
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A refusal from ZATCA is an error with the reason in it, and stores nothing.
+#[tokio::test]
+async fn a_refused_request_is_reported_with_what_zatca_said() {
+    let fixture = Fixture::new().await;
+    let mut zatca = FakeZatcaCa::new();
+    zatca.refuse = true;
+    let sealing = sealing();
+
+    let refused = Onboarder::new(&fixture.db, &sealing, &zatca)
+        .onboard(
+            &unit(),
+            Environment::Simulation,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect_err("a rejection is not a certificate");
+
+    let tax_sa::zatca::onboarding::OnboardError::NotIssued {
+        disposition,
+        detail,
+    } = refused
+    else {
+        panic!("expected a refusal, got {refused:?}");
+    };
+    assert_eq!(disposition, "REJECTED");
+    assert!(detail.contains("expired"), "{detail}");
+
+    assert!(
+        tax_sa::zatca::onboarding::reached(&fixture.db)
+            .await
+            .expect("reads")
+            .is_empty(),
+        "a refusal left credentials behind"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Going live before there is a compliance certificate is refused here rather
+/// than sent to ZATCA to be refused there.
+#[tokio::test]
+async fn going_live_without_a_compliance_certificate_is_refused() {
+    let fixture = Fixture::new().await;
+    let zatca = FakeZatcaCa::new();
+    let sealing = sealing();
+
+    let refused = Onboarder::new(&fixture.db, &sealing, &zatca)
+        .go_live(
+            Environment::Simulation,
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect_err("there is nothing to go live with");
+    assert!(
+        matches!(
+            refused,
+            tax_sa::zatca::onboarding::OnboardError::NotYet("compliance")
+        ),
+        "{refused:?}"
+    );
+    assert!(zatca.csrs().is_empty(), "it asked ZATCA anyway");
+
+    fixture.cleanup().await;
+}
+
+/// **A renewal keeps the key.** A new one would mean two keys to hold and two
+/// certificates to reconcile.
+#[tokio::test]
+async fn a_renewal_reuses_the_key_and_replaces_the_certificate() {
+    let fixture = Fixture::new().await;
+    let zatca = FakeZatcaCa::new();
+    let sealing = sealing();
+    let onboarder = Onboarder::new(&fixture.db, &sealing, &zatca);
+
+    onboarder
+        .onboard(
+            &unit(),
+            Environment::Production,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards");
+    onboarder
+        .go_live(
+            Environment::Production,
+            on("2026-01-02"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("goes live");
+
+    let key_before = tax_sa::zatca::onboarding::private_key(&fixture.db, &sealing)
+        .await
+        .expect("reads");
+    let before = tax_sa::zatca::onboarding::production(&fixture.db, &sealing)
+        .await
+        .expect("reads")
+        .expect("credentials");
+
+    let renewed = onboarder
+        .renew(
+            &unit(),
+            Environment::Production,
+            &"654321".parse().expect("six digits"),
+            on("2030-12-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("renews");
+    assert_eq!(renewed.stage, Stage::Production);
+    assert_eq!(renewed.request_id, "renewal-1");
+
+    let key_after = tax_sa::zatca::onboarding::private_key(&fixture.db, &sealing)
+        .await
+        .expect("reads");
+    assert_eq!(key_before, key_after, "the renewal changed the key");
+
+    let after = tax_sa::zatca::onboarding::production(&fixture.db, &sealing)
+        .await
+        .expect("reads")
+        .expect("credentials");
+    assert_ne!(
+        before.request_id, after.request_id,
+        "the certificate is the old one"
+    );
+
+    // The second OTP reached ZATCA too.
+    assert_eq!(zatca.otps(), vec!["123456".to_owned(), "654321".to_owned()]);
+
+    fixture.cleanup().await;
+}
+
+/// The log records which certificate is in force, and no secret at all.
+#[tokio::test]
+async fn the_log_records_the_certificate_and_never_the_key() {
+    let fixture = Fixture::new().await;
+    let zatca = FakeZatcaCa::new();
+    let sealing = sealing();
+    let onboarder = Onboarder::new(&fixture.db, &sealing, &zatca);
+
+    onboarder
+        .onboard(
+            &unit(),
+            Environment::Simulation,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards");
+    onboarder
+        .go_live(
+            Environment::Simulation,
+            on("2026-01-02"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("goes live");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let loaded = spa_eventlog::load::<tax_sa::Onboarding>(
+        &mut conn,
+        &tax_sa::onboarding_id(),
+        tax_sa::upcasters(),
+    )
+    .await
+    .expect("loads");
+
+    let events: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "SELECT event_name, payload FROM event
+          WHERE event_name = 'tax_sa.zatca.csid_issued' ORDER BY position",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .expect("reads");
+    drop(conn);
+
+    assert_eq!(loaded.aggregate.stage, Some(Stage::Production));
+    assert_eq!(events.len(), 2, "one per certificate");
+
+    for (_, payload) in &events {
+        let text = payload.to_string();
+        assert!(text.contains("EGS1-886431145"), "the subject is useful");
+        assert!(!text.contains("BEGIN EC PRIVATE KEY"), "{text}");
+        assert!(!text.contains("the-csid-secret"), "{text}");
+        assert!(!text.contains("123456"), "the OTP is in the log: {text}");
+    }
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Signing
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// Takes this tenant all the way to a production certificate.
+    async fn go_live(&self, sealing: &spa_eventlog::SealingKey) {
+        let zatca = FakeZatcaCa::new();
+        let onboarder = Onboarder::new(&self.db, sealing, &zatca);
+        onboarder
+            .onboard(
+                &unit(),
+                Environment::Simulation,
+                &otp(),
+                on("2026-01-01"),
+                &Metadata::default(),
+            )
+            .await
+            .expect("onboards");
+        onboarder
+            .go_live(
+                Environment::Simulation,
+                on("2026-01-02"),
+                &Metadata::default(),
+            )
+            .await
+            .expect("goes live");
+    }
+}
+
+/// **The whole path.** An invoice is issued, built, signed with the tenant's
+/// certificate, and the signature verifies under it.
+#[tokio::test]
+async fn an_invoice_is_signed_with_the_certificate_zatca_issued() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    fixture.register().await;
+    fixture.go_live(&sealing).await;
+    fixture.sell("inv-1", "2026-02-10", riyals(1_000)).await;
+    fixture
+        .sell_to_a_consumer("inv-2", "2026-02-11", riyals(20))
+        .await;
+    fixture.project().await;
+
+    // Built but not signed: it can be neither submitted nor printed.
+    let standing = fixture.standing("2026-02-12").await;
+    assert_eq!(standing.unsigned, 2);
+    {
+        let mut conn = fixture.db.acquire().await.expect("connection");
+        assert!(
+            tax_sa::pending(&mut conn, 10)
+                .await
+                .expect("reads")
+                .is_empty(),
+            "an unsigned document must not be submitted"
+        );
+        drop(conn);
+    }
+
+    let signed = tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
+    assert_eq!(signed.signed, 2);
+    assert_eq!(signed.waiting_for_a_certificate, 0);
+    fixture.project().await;
+
+    let document = fixture.zatca("INV-00001").await;
+    let signature = document.signature.clone().expect("a signature");
+    let submitted = document.signed_xml.clone().expect("the submitted document");
+
+    // The submitted document is the hashed one plus the three things ZATCA
+    // removes before it re-derives the hash.
+    let hashed = document.xml.clone().expect("the canonical bytes");
+    assert!(submitted.contains("<ext:UBLExtensions>"));
+    assert!(submitted.contains("<cac:Signature>"));
+    assert!(submitted.contains("<cbc:ID>QR</cbc:ID>"));
+    assert!(!hashed.contains("<ext:UBLExtensions>"));
+    assert_eq!(
+        document.invoice_hash.as_deref(),
+        Some(tax_sa::zatca::chain::invoice_hash(&hashed).as_str()),
+        "the hash is no longer the hash of the bytes it was taken over"
+    );
+
+    // **The signature verifies under the certificate the tenant holds.**
+    let credentials = tax_sa::zatca::onboarding::production(&fixture.db, &sealing)
+        .await
+        .expect("reads")
+        .expect("credentials");
+    let certificate = credentials.certificate().expect("a certificate");
+    let public = certificate.public_key().expect("a key");
+
+    let properties = tax_sa::zatca::signing::signed_properties(
+        &base64::engine::general_purpose::STANDARD.encode(certificate.to_der().expect("der")),
+        &tax_sa::zatca::signing::issuer_name(&certificate),
+        &tax_sa::zatca::signing::serial_number(&certificate),
+        on("2026-02-12"),
+    );
+    let signed_info = tax_sa::zatca::signing::signed_info(
+        document.invoice_hash.as_deref().unwrap_or_default(),
+        &tax_sa::zatca::signing::digest(&properties),
+    );
+
+    let mut verifier =
+        openssl::sign::Verifier::new(openssl::hash::MessageDigest::sha256(), &public)
+            .expect("a verifier");
+    verifier.update(signed_info.as_bytes()).expect("update");
+    assert!(
+        verifier
+            .verify(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(&signature)
+                    .expect("base64")
+            )
+            .expect("verifies"),
+        "the signature does not verify under the tenant's own certificate"
+    );
+
+    // **The QR gained the stamp**, which is what a customer's phone checks.
+    let fields =
+        tax_sa::zatca::qr::decode(document.qr.as_deref().unwrap_or_default()).expect("a QR");
+    assert_eq!(fields.len(), 9, "a signed invoice carries all nine tags");
+
+    fixture.cleanup().await;
+}
+
+/// A tenant that has not finished onboarding signs nothing, and that is a
+/// normal state rather than an error.
+#[tokio::test]
+async fn without_a_certificate_nothing_is_signed_and_nothing_breaks() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    fixture.register().await;
+    fixture.sell("inv-1", "2026-02-10", riyals(100)).await;
+    fixture.project().await;
+
+    let signed = tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("sweeps");
+
+    assert_eq!(signed.signed, 0);
+    assert_eq!(signed.waiting_for_a_certificate, 1);
+    assert_eq!(fixture.standing("2026-02-12").await.unsigned, 1);
+    assert!(fixture.zatca("INV-00001").await.signature.is_none());
+
+    fixture.cleanup().await;
+}
+
+/// Signing twice would be a second signature over one invoice, and ZATCA holds
+/// the first.
+#[tokio::test]
+async fn a_document_is_signed_once() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    fixture.register().await;
+    fixture.go_live(&sealing).await;
+    fixture.sell("inv-1", "2026-02-10", riyals(100)).await;
+    fixture.project().await;
+
+    let first = tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
+    fixture.project().await;
+    let signature = fixture.zatca("INV-00001").await.signature;
+
+    // Nothing is unsigned any more, so a second sweep finds nothing at all.
+    let again = tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-13"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("sweeps");
+    fixture.project().await;
+
+    assert_eq!(first.signed, 1);
+    assert_eq!(again.signed, 0);
+    assert_eq!(
+        fixture.zatca("INV-00001").await.signature,
+        signature,
+        "the signature changed under a document ZATCA may already hold"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A rebuild reproduces the signed document**, because the signature is
+/// replayed from the log rather than recomputed — which it could not be.
+#[tokio::test]
+async fn a_rebuild_reproduces_the_signature_it_cannot_recompute() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    fixture.register().await;
+    fixture.go_live(&sealing).await;
+    fixture.sell("inv-1", "2026-02-10", riyals(100)).await;
+    fixture
+        .sell_to_a_consumer("inv-2", "2026-02-11", riyals(20))
+        .await;
+    fixture.project().await;
+    tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
+    fixture.project().await;
+
+    let pool = fixture.tenant_pool().await;
+    let owned = tax_sa::projections();
+    let refs: Vec<&dyn Projection<Group = TaxSa>> = owned.iter().map(AsRef::as_ref).collect();
+    let report = replay_shadow::<TaxSa>(&pool, &refs, tax_sa::upcasters(), 100)
+        .await
+        .expect("replays");
+    pool.close().await;
+
+    assert!(
+        report.is_reproducible(),
+        "a rebuild changed a signature: {:?}",
+        report.differences()
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Signed, then submitted: the two sweeps in the order a worker runs them.
+#[tokio::test]
+async fn only_a_signed_document_reaches_zatca() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    fixture.register().await;
+    fixture.go_live(&sealing).await;
+    fixture.sell("inv-1", "2026-02-10", riyals(100)).await;
+    fixture.project().await;
+
+    // Submitting before signing sends nothing.
+    let zatca = FakeZatca::saying(vec![Ok(tax_sa::zatca::wire::Verdict::Accepted {
+        warnings: vec![],
+        stamped: None,
+    })]);
+    let swept = tax_sa::submit_pending(
+        &fixture.db,
+        &zatca,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("sweeps");
+    assert_eq!(swept.accepted, 0, "an unsigned document was submitted");
+    assert!(zatca.seen().is_empty());
+
+    // Sign, then submit.
+    tax_sa::sign_pending(
+        &fixture.db,
+        &sealing,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("signs");
+    fixture.project().await;
+
+    let swept = tax_sa::submit_pending(
+        &fixture.db,
+        &zatca,
+        on("2026-02-12"),
+        10,
+        &Metadata::default(),
+    )
+    .await
+    .expect("sweeps");
+    fixture.project().await;
+
+    assert_eq!(swept.accepted, 1);
+    assert_eq!(
+        fixture.zatca("INV-00001").await.status,
+        tax_sa::Status::Cleared
+    );
+
+    // **What went to ZATCA was the signed document.**
+    let sent = zatca.seen();
+    assert_eq!(sent.len(), 1);
+    let submitted = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(&sent[0].1)
+            .expect("base64"),
+    )
+    .expect("utf-8");
+    assert!(submitted.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+    assert!(submitted.contains("<ds:SignatureValue>"));
+    assert!(submitted.contains("<cbc:ID>QR</cbc:ID>"));
+
+    fixture.cleanup().await;
+}
+
+/// **Step 3, end to end.** The solution proves it can produce every document
+/// type it declared, and only then can it go live.
+#[tokio::test]
+async fn the_compliance_checks_submit_one_of_every_declared_document() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    let zatca = FakeZatcaCa::new();
+    let onboarder = Onboarder::new(&fixture.db, &sealing, &zatca);
+
+    onboarder
+        .onboard(
+            &unit(),
+            Environment::Simulation,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards");
+
+    let checks = onboarder
+        .pass_compliance_checks(
+            &registration(),
+            &unit(),
+            Environment::Simulation,
+            on("2026-01-01"),
+        )
+        .await
+        .expect("runs the checks");
+
+    assert_eq!(checks.submitted, 6, "both kinds, three documents each");
+    assert_eq!(checks.passed, 6);
+    assert!(checks.failures.is_empty());
+    assert!(checks.all_passed());
+
+    // **Every one was signed and chained**, which is what ZATCA is checking.
+    let seen = zatca.checked.lock().expect("not poisoned").clone();
+    assert_eq!(seen.len(), 6);
+
+    let mut previous: Option<String> = None;
+    for submission in &seen {
+        let xml = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(&submission.invoice)
+                .expect("base64"),
+        )
+        .expect("utf-8");
+
+        assert!(xml.contains("<ds:SignatureValue>"), "an unsigned sample");
+        assert!(xml.contains("<cbc:ID>QR</cbc:ID>"), "a sample with no QR");
+        // The hash is over the document without those, which is what the
+        // submitted hash has to be.
+        let canonical = xml
+            .split_once('\n')
+            .map(|(_, rest)| rest.to_owned())
+            .unwrap_or_default();
+        assert!(!canonical.is_empty());
+
+        // Each points at the one before it.
+        let pih = xml
+            .split("<cbc:ID>PIH</cbc:ID>")
+            .nth(1)
+            .and_then(|rest| rest.split("mimeCode=\"text/plain\">").nth(1))
+            .and_then(|rest| rest.split('<').next())
+            .unwrap_or_default()
+            .to_owned();
+        match &previous {
+            None => assert_eq!(pih, tax_sa::zatca::chain::genesis(), "the first sample"),
+            Some(hash) => assert_eq!(&pih, hash, "the chain is broken"),
+        }
+        previous = Some(submission.invoice_hash.clone());
+    }
+
+    // And the samples are obviously not sales.
+    assert!(
+        seen.iter()
+            .all(|s| !s.uuid.is_empty() && s.invoice_hash.len() == 44)
+    );
+
+    fixture.cleanup().await;
+}
+
+/// The checks report what ZATCA refused, per document — the whole point of
+/// running them before a real invoice exists.
+#[tokio::test]
+async fn a_failed_compliance_check_names_the_document_and_the_reason() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    let mut zatca = FakeZatcaCa::new();
+    zatca.refuse_checks = true;
+    let onboarder = Onboarder::new(&fixture.db, &sealing, &zatca);
+
+    onboarder
+        .onboard(
+            &unit(),
+            Environment::Simulation,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards");
+
+    let checks = onboarder
+        .pass_compliance_checks(
+            &registration(),
+            &unit(),
+            Environment::Simulation,
+            on("2026-01-01"),
+        )
+        .await
+        .expect("runs the checks");
+
+    assert_eq!(checks.submitted, 6);
+    assert_eq!(checks.passed, 0);
+    assert!(!checks.all_passed());
+    assert_eq!(checks.failures.len(), 6);
+    let (document, errors) = &checks.failures[0];
+    assert!(document.starts_with("COMPLIANCE-"), "{document}");
+    assert_eq!(errors[0].code, "BR-KSA-99");
+
+    fixture.cleanup().await;
+}
+
+/// Running the checks before there is a compliance certificate is refused here
+/// rather than sent to ZATCA to be refused there.
+#[tokio::test]
+async fn the_compliance_checks_need_a_compliance_certificate_first() {
+    let fixture = Fixture::new().await;
+    let sealing = sealing();
+    let zatca = FakeZatcaCa::new();
+
+    let refused = Onboarder::new(&fixture.db, &sealing, &zatca)
+        .pass_compliance_checks(
+            &registration(),
+            &unit(),
+            Environment::Simulation,
+            on("2026-01-01"),
+        )
+        .await
+        .expect_err("there is nothing to sign the samples with");
+    assert!(
+        matches!(
+            refused,
+            tax_sa::zatca::onboarding::OnboardError::NotYet("compliance")
+        ),
+        "{refused:?}"
+    );
+    assert!(zatca.checked.lock().expect("not poisoned").is_empty());
 
     fixture.cleanup().await;
 }

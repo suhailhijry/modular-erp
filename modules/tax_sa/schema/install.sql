@@ -121,6 +121,15 @@ CREATE TABLE IF NOT EXISTS zatca_document (
     -- its invoice and for showing a person the document as structure.
     document      JSONB,
 
+    -- The signature, once there is a certificate to make one with. Recorded
+    -- rather than recomputed: ECDSA is randomised, so re-signing would produce
+    -- a different signature from the one ZATCA holds.
+    signature     TEXT,
+    -- The document as submitted: the hashed bytes plus the signature, the QR
+    -- and the `cac:Signature` that points at it.
+    signed_xml    TEXT,
+    signed_at     TIMESTAMPTZ,
+
     --   unregistered  issued before the business registered with ZATCA; no
     --                 chain position, and it cannot be cleared retrospectively
     --   pending       built, waiting to be submitted
@@ -149,5 +158,11 @@ CREATE INDEX IF NOT EXISTS zatca_document_by_source_idx
     ON zatca_document (source_id);
 
 -- What the submitter sweeps: oldest first, so the 24-hour clock is respected.
+-- Only signed documents — ZATCA refuses an unsigned one, so submitting it would
+-- spend the tenant's rate limit to be told so.
 CREATE INDEX IF NOT EXISTS zatca_document_pending_idx
-    ON zatca_document (issued_at) WHERE status = 'pending';
+    ON zatca_document (issued_at) WHERE status = 'pending' AND signed_xml IS NOT NULL;
+
+-- And what the signer sweeps: built, chained, and not yet signed.
+CREATE INDEX IF NOT EXISTS zatca_document_unsigned_idx
+    ON zatca_document (issued_at) WHERE status = 'pending' AND signed_xml IS NULL;

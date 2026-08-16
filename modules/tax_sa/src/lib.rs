@@ -51,6 +51,7 @@ mod commands;
 mod documents;
 mod filing;
 pub mod messages;
+mod onboarded;
 mod projections;
 mod report;
 mod submit;
@@ -60,13 +61,14 @@ pub mod zatca;
 pub use clearance::{Clearance, ClearanceEvent};
 pub use commands::{Filed, TaxError, file_return, period_id, record_outcome, register_taxpayer};
 pub use documents::{
-    Pending, Standing, Status, Stored, Taxpayers, ZatcaDocuments, document, documents, pending,
-    registered, standing,
+    Pending, Standing, Status, Stored, Taxpayers, Unsigned, ZatcaDocuments, document, documents,
+    pending, registered, standing, unsigned,
 };
 pub use filing::{Filing, FilingEvent};
+pub use onboarded::{Onboarding, OnboardingEvent, onboarding_id};
 pub use projections::{FiledReturn, FiledReturns, Outcomes, TaxSa, filed, projections};
 pub use report::{Band, Return, Side, Sides, vat_return};
-pub use submit::{SweepError, Swept, submit_pending};
+pub use submit::{SignedOff, SweepError, Swept, sign_pending, submit_pending};
 pub use taxpayer::{Registration, Taxpayer, TaxpayerEvent};
 
 use spa_i18n::StaticCatalog;
@@ -153,6 +155,7 @@ pub fn upcasters() -> &'static spa_eventlog::Upcasters {
             .iter()
             .chain(TaxpayerEvent::NAMES.iter())
             .chain(ClearanceEvent::NAMES.iter())
+            .chain(OnboardingEvent::NAMES.iter())
             .fold(spa_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             });

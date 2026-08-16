@@ -16,6 +16,14 @@ pub struct AppState {
     /// touching `/etc/hosts` in every browser and in curl, which is what makes
     /// running this locally bearable.
     pub domain: Arc<str>,
+    /// The key module secrets are sealed under.
+    ///
+    /// `None` when the deployment has not configured one, and then anything
+    /// that would store a secret **refuses** rather than storing it in the
+    /// clear (law L6). A tenant's ZATCA signing key is the first thing this
+    /// protects; there is no version of it that is safe to keep unsealed
+    /// because an environment variable was missing.
+    pub sealing: Option<spa_eventlog::SealingKey>,
 }
 
 impl AppState {
@@ -30,6 +38,14 @@ impl AppState {
         Self {
             control,
             domain: domain.trim().trim_start_matches('.').to_lowercase().into(),
+            sealing: None,
         }
+    }
+
+    /// The same state, able to seal secrets.
+    #[must_use]
+    pub fn sealing_with(mut self, sealing: spa_eventlog::SealingKey) -> Self {
+        self.sealing = Some(sealing);
+        self
     }
 }

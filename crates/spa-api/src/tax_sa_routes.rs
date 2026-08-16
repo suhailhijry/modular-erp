@@ -38,6 +38,9 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(zatca_standing))
         .routes(routes!(zatca_documents))
         .routes(routes!(zatca_document))
+        .routes(routes!(onboarding_status, begin_onboarding))
+        .routes(routes!(accept_certificate))
+        .routes(routes!(activate))
 }
 
 /// How many filed returns a list gives back. A business files four a year.
@@ -495,6 +498,10 @@ struct StandingView {
     oldest_pending: Option<Timestamp>,
     /// How many documents are in the chain.
     chain_length: i64,
+    /// **Documents with no signature yet.** They can be neither submitted nor
+    /// printed with a phase-two QR, so this is the number that says a business
+    /// is not really live whatever else is true.
+    unsigned: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -528,8 +535,13 @@ struct DocumentView {
     icv: Option<i64>,
     previous_hash: Option<String>,
     invoice_hash: Option<String>,
-    /// The base64 TLV block that goes on the printed document.
+    /// The base64 TLV block that goes on the printed document. Five fields
+    /// before the document is signed, nine after — the last four are the stamp.
     qr: Option<String>,
+    /// `ds:SignatureValue`, once it has been signed.
+    signature: Option<String>,
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    signed_at: Option<Timestamp>,
     /// Warnings on an accepted document, errors on a refused one.
     remarks: Vec<RemarkView>,
     #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
@@ -541,8 +553,11 @@ struct DocumentView {
 struct FullDocumentView {
     #[serde(flatten)]
     document: DocumentView,
-    /// The canonical UBL that was hashed and submitted.
+    /// The canonical UBL that was hashed, and what the signature covers.
     xml: Option<String>,
+    /// **The document as submitted**: those bytes plus the signature, the QR
+    /// and the `cac:Signature` that points at it.
+    signed_xml: Option<String>,
     /// **The document ZATCA stamped, base64** — the one a buyer must be given.
     /// Cleared standard invoices only.
     stamped_xml: Option<String>,
@@ -564,6 +579,8 @@ fn document_view(stored: tax_sa::Stored) -> DocumentView {
         previous_hash: stored.previous_hash,
         invoice_hash: stored.invoice_hash,
         qr: stored.qr,
+        signature: stored.signature,
+        signed_at: stored.signed_at,
         remarks: stored
             .remarks
             .into_iter()
@@ -776,6 +793,7 @@ async fn zatca_standing(
         awaiting_clearance: standing.awaiting_clearance,
         oldest_pending: standing.oldest_pending,
         chain_length: standing.chain_length,
+        unsigned: standing.unsigned,
     }))
 }
 
@@ -872,10 +890,681 @@ async fn zatca_document(
     })?;
 
     let xml = stored.xml.clone();
+    let signed_xml = stored.signed_xml.clone();
     let stamped_xml = stored.stamped_xml.clone();
     Ok(Json(FullDocumentView {
         document: document_view(stored),
         xml,
+        signed_xml,
         stamped_xml,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "environment": "simulation",
+    "branch": "الفرع الرئيسي",
+    "common_name": "EGS1-886431145",
+    "serial": "886431145",
+    "industry": "Consulting",
+    "issues_standard": true,
+    "issues_simplified": true
+}))]
+struct OnboardingRequest {
+    /// `sandbox`, `simulation` or `production`. **Not a default** — the only
+    /// visible difference is a string in the request, and a mistake onboards
+    /// into the wrong authority rather than failing.
+    environment: String,
+    /// The branch this unit belongs to. For a VAT group member, their own
+    /// 10-digit TIN.
+    branch: String,
+    /// A name for this unit, unique among the taxpayer's units.
+    common_name: String,
+    /// This unit's serial number, unique per taxpayer.
+    serial: String,
+    /// The taxpayer's industry.
+    industry: String,
+    /// Whether this unit issues standard invoices — the ones cleared before the
+    /// buyer gets them.
+    #[serde(default = "yes")]
+    issues_standard: bool,
+    /// Whether it issues simplified ones — reported within 24 hours.
+    #[serde(default = "yes")]
+    issues_simplified: bool,
+}
+
+const fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct CsrView {
+    /// **The certificate request, base64** — what goes in the `csr` field of
+    /// ZATCA's `POST /compliance`, with the OTP in an `OTP` header.
+    csr: String,
+    /// Where to send it.
+    submit_to: String,
+    /// How many sample documents the compliance checks will want afterwards.
+    compliance_documents: usize,
+    /// What to do with what comes back.
+    next: &'static str,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "stage": "compliance",
+    "environment": "simulation",
+    "token": "TUlJQ...",
+    "secret": "abc123...",
+    "request_id": "1234567890123"
+}))]
+struct CertificateBody {
+    /// `compliance` for what an OTP buys, `production` for what a passed
+    /// compliance check buys.
+    stage: String,
+    environment: String,
+    /// ZATCA's `binarySecurityToken`, verbatim.
+    token: String,
+    /// ZATCA's `secret`, verbatim.
+    secret: String,
+    /// ZATCA's `requestID`. The production request quotes the compliance one.
+    #[serde(default)]
+    request_id: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct CertificateView {
+    stage: &'static str,
+    environment: &'static str,
+    request_id: String,
+    /// The certificate's subject, as one line.
+    subject: String,
+    /// Its serial number, in hex. What ZATCA's support desk asks for.
+    serial: String,
+    not_before: String,
+    not_after: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct OnboardingView {
+    /// Which stages this tenant has credentials for: `compliance`, `production`.
+    reached: Vec<&'static str>,
+    /// Whether it can clear and report real invoices.
+    live: bool,
+    environment: Option<&'static str>,
+    /// The certificate currently on record.
+    serial: Option<String>,
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    issued_at: Option<Timestamp>,
+}
+
+/// Generate the key pair and the certificate request for this tenant's unit.
+///
+/// The private key is sealed here and **never leaves this system** — that is
+/// what a certificate request is for. What comes back is the request, which goes
+/// to ZATCA with the six-digit OTP the taxpayer generates in the Fatoora portal.
+///
+/// **Calling this again generates a new key**, which invalidates any certificate
+/// already issued for the old one. Read the status first.
+#[utoipa::path(
+    post,
+    path = "/v1/tax_sa/zatca/onboarding",
+    tag = "tax_sa",
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    request_body = OnboardingRequest,
+    responses(
+        (status = CREATED, description = "A key pair and a request. The key is sealed here.", body = CsrView),
+        (status = BAD_REQUEST, description = "An unknown environment, or a unit detail that cannot go in a certificate", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such tenant, the module is not enabled, or nothing is registered with ZATCA yet", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "This deployment has no sealing key, so a private key cannot be stored", body = Problem),
+    ),
+)]
+async fn begin_onboarding(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Json(body): Json<OnboardingRequest>,
+) -> Result<(StatusCode, Json<CsrView>), Problem> {
+    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    let sealing = sealing(&state, locale)?;
+    let environment = environment_of(&body.environment, locale)?;
+    let unit = unit_for(&tenant, &body, locale).await?;
+
+    let csr = tax_sa::zatca::onboarding::begin(&tenant.db, sealing, &unit, environment)
+        .await
+        .map_err(|e| onboarding_problem(&e, locale))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CsrView {
+            csr,
+            submit_to: format!("{}/compliance", environment.base_url()),
+            compliance_documents: unit.issues.compliance_documents(),
+            next: "POST it as {\"csr\": …} with an `OTP` header, then PUT what comes \
+                   back to /v1/tax_sa/zatca/onboarding/certificate",
+        }),
+    ))
+}
+
+/// Record a certificate ZATCA issued for this tenant's unit.
+///
+/// Checked against the private key held here **before** anything is stored: a
+/// certificate over somebody else's key would be accepted by this endpoint and
+/// then rejected on every invoice, at clearance, with an error that says nothing
+/// about why.
+#[utoipa::path(
+    put,
+    path = "/v1/tax_sa/zatca/onboarding/certificate",
+    tag = "tax_sa",
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    request_body = CertificateBody,
+    responses(
+        (status = OK, description = "Stored. The tenant can now do what this stage allows.", body = CertificateView),
+        (status = BAD_REQUEST, description = "An unknown stage or environment, a token that is not a certificate, or a certificate for another key", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such tenant, the module is not enabled, or no key has been generated yet", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "This deployment has no sealing key", body = Problem),
+    ),
+)]
+async fn accept_certificate(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Json(body): Json<CertificateBody>,
+) -> Result<Json<CertificateView>, Problem> {
+    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    let sealing = sealing(&state, locale)?;
+    let environment = environment_of(&body.environment, locale)?;
+
+    let issued_for = body
+        .stage
+        .parse::<tax_sa::zatca::onboarding::Stage>()
+        .map_err(|_| {
+            bad_request(
+                crate::messages::UNKNOWN_ONBOARDING_STAGE,
+                "stage",
+                &body.stage,
+                locale,
+            )
+        })?;
+
+    let csid = tax_sa::zatca::onboarding::Csid {
+        token: body.token.trim().to_owned(),
+        secret: body.secret.trim().to_owned(),
+        request_id: body.request_id.trim().to_owned(),
+    };
+
+    let issued = tax_sa::zatca::onboarding::accept_certificate(
+        &tenant.db,
+        sealing,
+        issued_for,
+        environment,
+        &csid,
+        Utc::now(),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| onboarding_problem(&e, locale))?;
+
+    Ok(Json(CertificateView {
+        stage: issued.stage.as_str(),
+        environment: issued.environment.as_str(),
+        request_id: issued.request_id,
+        subject: issued.subject,
+        serial: issued.serial,
+        not_before: issued.not_before,
+        not_after: issued.not_after,
+    }))
+}
+
+/// How far this tenant has got with ZATCA onboarding.
+///
+/// Answered without unsealing anything: whether a secret exists is a different
+/// question from what it is, and this endpoint may only ask the first.
+#[utoipa::path(
+    get,
+    path = "/v1/tax_sa/zatca/onboarding",
+    tag = "tax_sa",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = OnboardingView),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn onboarding_status(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<OnboardingView>, Problem> {
+    require_module(&tenant, &tax_sa::module_id(), locale)?;
+
+    let reached = tax_sa::zatca::onboarding::reached(&tenant.db)
+        .await
+        .map_err(|e| onboarding_problem(&e, locale))?;
+
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    let loaded = spa_eventlog::load::<tax_sa::Onboarding>(
+        &mut conn,
+        &tax_sa::onboarding_id(),
+        tax_sa::upcasters(),
+    )
+    .await
+    .map_err(|e| {
+        // Reading an aggregate is ours to get right, so a failure here is not
+        // something a caller can act on.
+        tracing::error!(error = %e, "loading the onboarding aggregate failed");
+        Problem::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &spa_i18n::Message::new(spa_control::messages::INTERNAL),
+            locale,
+            &crate::catalog::CATALOG,
+        )
+    })?;
+    drop(conn);
+
+    Ok(Json(OnboardingView {
+        live: reached.contains(&tax_sa::zatca::onboarding::Stage::Production),
+        reached: reached
+            .into_iter()
+            .map(tax_sa::zatca::onboarding::Stage::as_str)
+            .collect(),
+        environment: loaded
+            .aggregate
+            .environment
+            .map(tax_sa::zatca::csr::Environment::as_str),
+        serial: loaded.aggregate.serial,
+        issued_at: loaded.aggregate.issued_at,
+    }))
+}
+
+/// The unit, built from the request and from what the tenant already registered.
+///
+/// The VAT number and the legal name are **not** in the request body: they are
+/// the ZATCA registration this tenant already made, and letting a second
+/// endpoint restate them is how the certificate ends up naming a different
+/// business from the invoices.
+async fn unit_for(
+    tenant: &Allowed<ManageTenant>,
+    body: &OnboardingRequest,
+    locale: Locale,
+) -> Result<tax_sa::zatca::csr::Unit, Problem> {
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    let registration = tax_sa::registered(&mut conn)
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    drop(conn);
+
+    let registration = registration.ok_or_else(|| {
+        ApiError::NotFound(spa_i18n::Message::new(tax_sa::messages::NOT_REGISTERED))
+            .into_problem(locale)
+    })?;
+
+    Ok(tax_sa::zatca::csr::Unit {
+        vat_number: registration.vat_number,
+        organization: registration.name,
+        branch: body.branch.trim().to_owned(),
+        common_name: body.common_name.trim().to_owned(),
+        // This software, not the tenant's. A solution name a tenant could set
+        // is one that stops matching what is registered with ZATCA.
+        solution: SOLUTION.to_owned(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        serial: body.serial.trim().to_owned(),
+        address: format!(
+            "{} {} {}",
+            registration.address.street,
+            registration.address.city,
+            registration.address.postal_code
+        ),
+        industry: body.industry.trim().to_owned(),
+        issues: tax_sa::zatca::csr::Issues {
+            standard: body.issues_standard,
+            simplified: body.issues_simplified,
+        },
+    })
+}
+
+/// What this software calls itself to ZATCA. Registered once, per solution.
+const SOLUTION: &str = "Spa";
+
+fn environment_of(value: &str, locale: Locale) -> Result<tax_sa::zatca::csr::Environment, Problem> {
+    value.parse().map_err(|_| {
+        bad_request(
+            crate::messages::UNKNOWN_ZATCA_ENVIRONMENT,
+            "environment",
+            value,
+            locale,
+        )
+    })
+}
+
+/// The deployment's sealing key, or a refusal.
+///
+/// **Not a degraded mode.** Without it there is nowhere safe to put a signing
+/// key, and storing one in the clear because an environment variable is missing
+/// is exactly the "log a warning and continue" this system does not do (L6).
+fn sealing(state: &AppState, locale: Locale) -> Result<&spa_eventlog::SealingKey, Problem> {
+    state.sealing.as_ref().ok_or_else(|| {
+        crate::problem::Problem::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &spa_i18n::Message::new(crate::messages::NO_SEALING_KEY),
+            locale,
+            &crate::catalog::CATALOG,
+        )
+    })
+}
+
+fn onboarding_problem(error: &tax_sa::zatca::onboarding::OnboardError, locale: Locale) -> Problem {
+    use tax_sa::zatca::onboarding::OnboardError;
+
+    let (status, message) = match error {
+        // The caller's, and each one names what to fix.
+        OnboardError::Csr(reason) => (
+            StatusCode::BAD_REQUEST,
+            spa_i18n::Message::new(crate::messages::UNUSABLE_UNIT)
+                .with("reason", spa_i18n::MessageArg::text(reason.to_string())),
+        ),
+        OnboardError::Certificate(reason) => (
+            StatusCode::BAD_REQUEST,
+            spa_i18n::Message::new(crate::messages::UNREADABLE_CERTIFICATE)
+                .with("reason", spa_i18n::MessageArg::text(reason.clone())),
+        ),
+        OnboardError::KeyMismatch => (
+            StatusCode::BAD_REQUEST,
+            spa_i18n::Message::new(crate::messages::CERTIFICATE_KEY_MISMATCH),
+        ),
+        OnboardError::NotYet(what) => (
+            StatusCode::NOT_FOUND,
+            spa_i18n::Message::new(crate::messages::ONBOARDING_NOT_YET)
+                .with("stage", spa_i18n::MessageArg::text((*what).to_owned())),
+        ),
+        // ZATCA's.
+        OnboardError::NotIssued {
+            disposition,
+            detail,
+        } => (
+            StatusCode::BAD_GATEWAY,
+            spa_i18n::Message::new(crate::messages::CSID_NOT_ISSUED)
+                .with(
+                    "disposition",
+                    spa_i18n::MessageArg::text(disposition.clone()),
+                )
+                .with("detail", spa_i18n::MessageArg::text(detail.clone())),
+        ),
+        // **Which of the four calls**, because they all fail the same way and
+        // an error that does not say leaves somebody bisecting a flow that
+        // talked to a tax authority.
+        OnboardError::Unanswered { step, source } => (
+            StatusCode::BAD_GATEWAY,
+            spa_i18n::Message::new(crate::messages::ZATCA_UNREACHABLE)
+                .with("step", spa_i18n::MessageArg::text((*step).to_owned()))
+                .with("reason", spa_i18n::MessageArg::text(source.to_string())),
+        ),
+        // Ours.
+        other => {
+            tracing::error!(error = %other, "ZATCA onboarding failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                spa_i18n::Message::new(spa_control::messages::INTERNAL),
+            )
+        }
+    };
+
+    Problem::new(status, &message, locale, &crate::catalog::CATALOG)
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "environment": "simulation",
+    "otp": "123456",
+    "branch": "الفرع الرئيسي",
+    "common_name": "EGS1-886431145",
+    "serial": "886431145",
+    "industry": "Consulting"
+}))]
+struct ActivationRequest {
+    environment: String,
+    /// **The six digits the taxpayer generates in the Fatoora portal.** Valid
+    /// for about an hour, used once, and never stored here.
+    otp: String,
+    branch: String,
+    common_name: String,
+    serial: String,
+    industry: String,
+    #[serde(default = "yes")]
+    issues_standard: bool,
+    #[serde(default = "yes")]
+    issues_simplified: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct ActivationView {
+    /// The certificate an OTP bought.
+    compliance: CertificateView,
+    /// How many sample documents ZATCA was shown, and how many it accepted.
+    checks_submitted: usize,
+    checks_passed: usize,
+    /// **The one that clears real invoices.**
+    production: CertificateView,
+}
+
+/// Take this business all the way live with ZATCA, from a Fatoora OTP.
+///
+/// Four calls to ZATCA, in the order it requires:
+///
+/// 1. a key pair and a certificate request, generated here,
+/// 2. `POST /compliance` with the OTP — the compliance certificate,
+/// 3. `POST /compliance/invoices` — one signed sample of every document type
+///    this unit declared, which ZATCA must accept before it will go further,
+/// 4. `POST /production/csids` — the certificate that clears real invoices.
+///
+/// **Nothing is stored unless the step that produced it succeeded**, and the
+/// private key is sealed before the first call, so a certificate is never issued
+/// against a key this system no longer has.
+///
+/// If the compliance samples are refused, that is **this software's problem, not
+/// the caller's** — the samples are generated here — and it answers 502 with
+/// what ZATCA said.
+#[utoipa::path(
+    post,
+    path = "/v1/tax_sa/zatca/onboarding/activate",
+    tag = "tax_sa",
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    request_body = ActivationRequest,
+    responses(
+        (status = OK, description = "Live. This business can now clear and report invoices.", body = ActivationView),
+        (status = BAD_REQUEST, description = "An OTP that is not six digits, an unknown environment, or a unit detail that cannot go in a certificate", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such tenant, the module is not enabled, or nothing is registered with ZATCA yet", body = Problem),
+        (status = BAD_GATEWAY, description = "ZATCA refused, or could not be reached. Nothing beyond the last successful step was stored.", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "This deployment has no sealing key", body = Problem),
+    ),
+)]
+async fn activate(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Json(body): Json<ActivationRequest>,
+) -> Result<Json<ActivationView>, Problem> {
+    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    let sealing = sealing(&state, locale)?;
+    let environment = environment_of(&body.environment, locale)?;
+
+    let otp = body
+        .otp
+        .parse::<tax_sa::zatca::onboarding::Otp>()
+        .map_err(|_| {
+            // The value itself never reaches the message: an OTP in a log is a
+            // certificate somebody else can obtain for an hour.
+            bad_request(crate::messages::NOT_AN_OTP, "otp", "", locale)
+        })?;
+
+    let registration = registered_unit(&tenant, locale).await?;
+    let unit = tax_sa::zatca::csr::Unit {
+        branch: body.branch.trim().to_owned(),
+        common_name: body.common_name.trim().to_owned(),
+        serial: body.serial.trim().to_owned(),
+        industry: body.industry.trim().to_owned(),
+        issues: tax_sa::zatca::csr::Issues {
+            standard: body.issues_standard,
+            simplified: body.issues_simplified,
+        },
+        ..unit_from(&registration)
+    };
+
+    let fatoora = tax_sa::zatca::http::Fatoora::new(environment).map_err(|source| {
+        onboarding_problem(
+            &tax_sa::zatca::onboarding::OnboardError::Unanswered {
+                step: "building a client",
+                source,
+            },
+            locale,
+        )
+    })?;
+    let onboarder = tax_sa::zatca::onboarding::Onboarder::new(&tenant.db, sealing, &fatoora);
+    let now = Utc::now();
+
+    let compliance = onboarder
+        .onboard(&unit, environment, &otp, now, &metadata(&tenant))
+        .await
+        .map_err(|e| onboarding_problem(&e, locale))?;
+
+    let checks = onboarder
+        .pass_compliance_checks(&registration, &unit, environment, now)
+        .await
+        .map_err(|e| onboarding_problem(&e, locale))?;
+
+    if !checks.all_passed() {
+        // **Ours, not the caller's.** The samples are generated here, so ZATCA
+        // refusing one is a bug in this software — logged in full, and reported
+        // with enough for somebody to act on.
+        tracing::error!(
+            submitted = checks.submitted,
+            passed = checks.passed,
+            failures = ?checks.failures,
+            "ZATCA refused a compliance document"
+        );
+        let reason = checks
+            .failures
+            .first()
+            .map(|(document, errors)| {
+                let first = errors
+                    .first()
+                    .map_or_else(String::new, |e| format!("{}: {}", e.code, e.message));
+                format!("{document} — {first}")
+            })
+            .unwrap_or_default();
+
+        return Err(Problem::new(
+            StatusCode::BAD_GATEWAY,
+            &spa_i18n::Message::new(crate::messages::COMPLIANCE_REFUSED)
+                .with(
+                    "failed",
+                    spa_i18n::MessageArg::Count(
+                        i64::try_from(checks.submitted - checks.passed).unwrap_or_default(),
+                    ),
+                )
+                .with(
+                    "submitted",
+                    spa_i18n::MessageArg::Count(
+                        i64::try_from(checks.submitted).unwrap_or_default(),
+                    ),
+                )
+                .with("reason", spa_i18n::MessageArg::text(reason)),
+            locale,
+            &crate::catalog::CATALOG,
+        ));
+    }
+
+    let production = onboarder
+        .go_live(environment, now, &metadata(&tenant))
+        .await
+        .map_err(|e| onboarding_problem(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+
+    Ok(Json(ActivationView {
+        compliance: certificate_view(compliance),
+        checks_submitted: checks.submitted,
+        checks_passed: checks.passed,
+        production: certificate_view(production),
+    }))
+}
+
+fn certificate_view(issued: tax_sa::zatca::onboarding::Issued) -> CertificateView {
+    CertificateView {
+        stage: issued.stage.as_str(),
+        environment: issued.environment.as_str(),
+        request_id: issued.request_id,
+        subject: issued.subject,
+        serial: issued.serial,
+        not_before: issued.not_before,
+        not_after: issued.not_after,
+    }
+}
+
+/// The tenant's ZATCA registration, or a 404 that says to make one first.
+async fn registered_unit<C: crate::extract::Capability>(
+    tenant: &Allowed<C>,
+    locale: Locale,
+) -> Result<tax_sa::Registration, Problem> {
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    let found = tax_sa::registered(&mut conn)
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    drop(conn);
+
+    found.ok_or_else(|| {
+        ApiError::NotFound(spa_i18n::Message::new(tax_sa::messages::NOT_REGISTERED))
+            .into_problem(locale)
+    })
+}
+
+/// The parts of a unit that come from the registration rather than the request.
+///
+/// The VAT number and the legal name are **not** in any request body: they are
+/// what this business already registered, and a second endpoint restating them
+/// is how a certificate ends up naming a different business from the invoices.
+fn unit_from(registration: &tax_sa::Registration) -> tax_sa::zatca::csr::Unit {
+    tax_sa::zatca::csr::Unit {
+        vat_number: registration.vat_number.clone(),
+        organization: registration.name.clone(),
+        branch: String::new(),
+        common_name: String::new(),
+        solution: SOLUTION.to_owned(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        serial: String::new(),
+        address: format!(
+            "{} {} {}",
+            registration.address.street,
+            registration.address.city,
+            registration.address.postal_code
+        ),
+        industry: String::new(),
+        issues: tax_sa::zatca::csr::Issues::both(),
+    }
 }

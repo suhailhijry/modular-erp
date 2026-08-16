@@ -119,6 +119,21 @@ impl Projection for Outcomes {
                     source,
                 })?;
 
+        // A signature updates different columns from a verdict, and it can
+        // arrive for a document that is still pending — so it is applied here
+        // rather than folded into the status update below.
+        if let crate::clearance::ClearanceEvent::Signed {
+            document,
+            signature,
+            extensions,
+            qr,
+            at,
+            ..
+        } = &event
+        {
+            return signed(conn, document, signature, extensions, qr, *at).await;
+        }
+
         let (document, status, remarks, stamped, at) = match &event {
             ClearanceEvent::Accepted {
                 document,
@@ -149,6 +164,8 @@ impl Projection for Outcomes {
                 None,
                 *at,
             ),
+            // Handled above, and unreachable here.
+            ClearanceEvent::Signed { .. } => return Ok(()),
         };
 
         sqlx::query(
@@ -232,4 +249,56 @@ pub async fn filed(conn: &mut PgConnection, limit: i64) -> Result<Vec<FiledRetur
             })
         })
         .collect()
+}
+
+/// Applies a signature: the document as submitted, and the QR with the stamp.
+///
+/// The submitted XML is **rendered here** from the stored document and the
+/// recorded extensions, rather than carried in the event. The event holds what
+/// could not be derived — the signature and what it covers — and the rest is
+/// the same deterministic render that produced the hashed bytes in the first
+/// place, so a rebuild reproduces it exactly.
+async fn signed(
+    conn: &mut PgConnection,
+    document: &str,
+    signature: &str,
+    extensions: &str,
+    qr: &str,
+    at: Timestamp,
+) -> Result<(), ProjectionError> {
+    let row: Option<(Option<serde_json::Value>,)> =
+        sqlx::query_as("SELECT document FROM zatca_document WHERE id = $1")
+            .bind(document)
+            .fetch_optional(&mut *conn)
+            .await?;
+
+    // A signature for a document this projection has not built is not something
+    // to guess at — but it is also not a reason to stop the group, because the
+    // event is in the log and the document is not. It can only happen if a
+    // document was signed and then the invoice it came from stopped producing
+    // one, which no code path does.
+    let Some(stored) = row.and_then(|(value,)| value) else {
+        return Ok(());
+    };
+
+    let stored: crate::zatca::Document = serde_json::from_value(stored)
+        .map_err(|e| ProjectionError::Rejected(format!("a stored document cannot be read: {e}")))?;
+
+    let xml = crate::zatca::ubl::signed(&stored, &crate::zatca::ubl::Enveloped { extensions, qr })
+        .map_err(|e| ProjectionError::Rejected(format!("{document} cannot be rendered: {e}")))?;
+
+    sqlx::query(
+        "UPDATE zatca_document
+            SET signature = $2, signed_xml = $3, qr = $4, signed_at = $5
+          WHERE id = $1",
+    )
+    .bind(document)
+    .bind(signature)
+    .bind(&xml)
+    .bind(qr)
+    .bind(at)
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
 }

@@ -79,16 +79,66 @@ struct NewInvoice {
     currency: String,
     /// At least one line that comes to something.
     lines: Vec<NewLine>,
+    /// What comes off the whole invoice, printed as its own figure rather than
+    /// folded into a smaller total.
+    ///
+    /// **The tax comes off with it.** A 15 discount on a standard-rated invoice
+    /// reduces the taxable amount by 15 and the tax by 2.25 — which is why a
+    /// discount is not a negative line, and why it has to say which treatment
+    /// it comes off.
+    #[serde(default)]
+    discounts: Vec<NewDiscount>,
     #[serde(default)]
     note: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+struct NewDiscount {
+    /// Why, printed on the invoice — ZATCA shows it to the customer.
+    reason: String,
+    /// Minor units, **positive**: what comes off. A negative one is a charge,
+    /// which this system does not issue.
+    amount: i64,
+    /// Which treatment it comes off: `standard`, `zero` or `exempt`.
+    ///
+    /// **A discount reduces the tax only on what carried any.** Discounting the
+    /// standard-rated part of a mixed invoice is a different number from
+    /// discounting the exempt part, so the invoice has to say which.
+    vat: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 struct NewCustomer {
     name: String,
     /// The buyer's VAT registration number, printed on the invoice.
+    ///
+    /// **Giving one makes this a standard invoice**, which ZATCA clears before
+    /// the buyer may be given it. Leaving it out makes it a simplified one,
+    /// reported within twenty-four hours.
     #[serde(default)]
     vat_number: Option<String>,
+    /// Where they are, as they are today. Snapshotted onto the invoice, so a
+    /// customer moving does not rewrite what was already issued.
+    ///
+    /// ZATCA wants street, city and country on a standard invoice; without them
+    /// it accepts the document and warns, which is a warning that becomes a
+    /// finding at an inspection.
+    #[serde(default)]
+    address: Option<NewAddress>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+struct NewAddress {
+    street: String,
+    city: String,
+    /// ISO 3166-1 alpha-2. `SA` for a Saudi buyer.
+    country: String,
+    #[serde(default)]
+    district: Option<String>,
+    #[serde(default)]
+    building: Option<String>,
+    #[serde(default)]
+    postal_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -322,9 +372,36 @@ async fn issue_invoice(
         });
     }
 
+    let mut discounts = Vec::with_capacity(body.discounts.len());
+    for discount in body.discounts {
+        let category: VatCategory = discount.vat.parse().map_err(|_| {
+            bad_request(
+                crate::messages::UNKNOWN_VAT_CATEGORY,
+                "vat",
+                &discount.vat,
+                locale,
+            )
+        })?;
+        discounts.push(sales::DraftDiscount {
+            reason: discount.reason.trim().to_owned(),
+            amount: spa_types::Money::from_minor(discount.amount, currency),
+            category,
+        });
+    }
+
     let mut customer = Customer::new(body.customer.name);
     if let Some(number) = body.customer.vat_number {
         customer = customer.with_vat_number(number);
+    }
+    if let Some(address) = body.customer.address {
+        customer = customer.at(sales::Address {
+            street: address.street.trim().to_owned(),
+            city: address.city.trim().to_owned(),
+            country: address.country.trim().to_uppercase(),
+            district: address.district.filter(|v| !v.trim().is_empty()),
+            building: address.building.filter(|v| !v.trim().is_empty()),
+            postal_code: address.postal_code.filter(|v| !v.trim().is_empty()),
+        });
     }
 
     let draft = Draft {
@@ -333,6 +410,7 @@ async fn issue_invoice(
         due_on: body.due_on,
         currency,
         lines,
+        discounts,
         note: body.note,
     };
 

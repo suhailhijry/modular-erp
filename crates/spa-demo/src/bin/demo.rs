@@ -72,7 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         seeded.filed
     );
     println!(
-        "zatca    {} documents chained and waiting to be cleared or reported",
+        "zatca    {} documents chained, unsigned — this demo has no ZATCA \
+         certificate, and inventing one would be inventing a compliance record",
         seeded.zatca_documents
     );
     match seeded.expires_after {

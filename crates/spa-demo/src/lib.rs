@@ -604,7 +604,6 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
             serde_json::json!([
                 { "description": "Systems consulting — February", "net": 4_500_000, "vat": "standard" },
                 { "description": "Staff accommodation recharge", "net": 900_000, "vat": "exempt" },
-                { "description": "Early settlement discount", "net": -150_000, "vat": "standard" },
             ]),
         ),
         (
@@ -618,6 +617,17 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
         ),
     ];
 
+    // **One invoice carries a document-level discount**, which is what a
+    // settlement discount actually is: a figure the customer can see, with the
+    // tax coming off it. It used to be a negative line here, which showed a
+    // smaller total and never said why.
+    let discounts = |id: &str| match id {
+        "crm-4517" => serde_json::json!([
+            { "reason": "Early settlement discount", "amount": 150_000, "vat": "standard" },
+        ]),
+        _ => serde_json::json!([]),
+    };
+
     for (id, issued_on, customer, vat_number, lines) in &invoices {
         post(
             app,
@@ -626,11 +636,24 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
             Some(token),
             &serde_json::json!({
                 "id": id,
-                "customer": { "name": customer, "vat_number": vat_number },
+                "customer": {
+                    "name": customer,
+                    "vat_number": vat_number,
+                    // ZATCA wants a buyer address on a standard invoice, and
+                    // warns without one.
+                    "address": vat_number.map(|_| serde_json::json!({
+                        "street": "طريق الملك فهد",
+                        "city": "الرياض",
+                        "country": "SA",
+                        "district": "العليا",
+                        "postal_code": "12211"
+                    })),
+                },
                 "issued_on": issued_on,
                 "due_on": "2026-04-01T00:00:00Z",
                 "currency": "SAR",
                 "lines": lines,
+                "discounts": discounts(id),
             }),
             StatusCode::CREATED,
         )

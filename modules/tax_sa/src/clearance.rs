@@ -28,6 +28,34 @@ use crate::zatca::wire::Remark;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClearanceEvent {
+    /// The document was signed with this tenant's certificate.
+    ///
+    /// # Why a signature is an event
+    ///
+    /// **ECDSA is randomised.** Signing the same bytes twice gives two
+    /// different signatures, so a projection that signed would produce
+    /// different tables on every rebuild — in the column a tax authority holds
+    /// a copy of. Recording it makes the stored signature a replay of something
+    /// that happened rather than something recomputed.
+    ///
+    /// The whole `ext:UBLExtensions` block is here, not just the signature
+    /// value, because that block **is** the artefact: it carries the signed
+    /// properties, the certificate and the digests that were signed over, and
+    /// reassembling it from parts would be a second implementation of
+    /// `zatca::signing` that has to agree with the first.
+    Signed {
+        document: String,
+        /// `ds:SignatureValue`, base64. Also QR tag 7.
+        signature: String,
+        /// The `ext:UBLExtensions` block, verbatim.
+        extensions: String,
+        /// The QR with the stamp in it — tags 1 to 9.
+        qr: String,
+        /// Which certificate signed it, in hex. The log already says when each
+        /// certificate was issued, so this is what joins the two.
+        certificate_serial: String,
+        at: Timestamp,
+    },
     /// ZATCA accepted the document.
     ///
     /// On a standard invoice this is **clearance**, and `stamped` is the
@@ -61,13 +89,19 @@ pub enum ClearanceEvent {
 }
 
 impl ClearanceEvent {
-    pub const NAMES: [&'static str; 2] = ["tax_sa.zatca.accepted", "tax_sa.zatca.refused"];
+    pub const NAMES: [&'static str; 3] = [
+        "tax_sa.zatca.accepted",
+        "tax_sa.zatca.refused",
+        "tax_sa.zatca.signed",
+    ];
 
     /// The document this is about.
     #[must_use]
     pub fn document(&self) -> &str {
         match self {
-            Self::Accepted { document, .. } | Self::Refused { document, .. } => document,
+            Self::Accepted { document, .. }
+            | Self::Refused { document, .. }
+            | Self::Signed { document, .. } => document,
         }
     }
 }
@@ -77,6 +111,7 @@ impl DomainEvent for ClearanceEvent {
         crate::name(match self {
             Self::Accepted { .. } => Self::NAMES[0],
             Self::Refused { .. } => Self::NAMES[1],
+            Self::Signed { .. } => Self::NAMES[2],
         })
     }
 
@@ -93,6 +128,10 @@ pub struct Clearance {
     /// crashed after the call and before the append safe to re-run.
     pub settled: bool,
     pub accepted: bool,
+    /// Whether it has been signed. A document is signed once — signing it again
+    /// would be a second signature over the same invoice, and ZATCA holds the
+    /// first.
+    pub signed: bool,
     pub at: Option<Timestamp>,
 }
 
@@ -115,6 +154,7 @@ impl Aggregate for Clearance {
                 self.accepted = false;
                 self.at = Some(*at);
             }
+            ClearanceEvent::Signed { .. } => self.signed = true,
         }
     }
 }

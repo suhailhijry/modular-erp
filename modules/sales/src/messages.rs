@@ -11,6 +11,9 @@ pub const ALREADY_CANCELLED: MessageCode = MessageCode::new("sales.already_cance
 pub const HAS_PAYMENTS: MessageCode = MessageCode::new("sales.has_payments");
 pub const INVALID_REFERENCE: MessageCode = MessageCode::new("sales.invalid_reference");
 pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("sales.mixed_currencies");
+pub const NOT_A_DISCOUNT: MessageCode = MessageCode::new("sales.not_a_discount");
+pub const DISCOUNT_WITHOUT_A_BAND: MessageCode = MessageCode::new("sales.discount_without_a_band");
+pub const DISCOUNT_TOO_LARGE: MessageCode = MessageCode::new("sales.discount_too_large");
 pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("sales.amount_out_of_range");
 
 pub static CODES: &[MessageCode] = &[
@@ -23,6 +26,9 @@ pub static CODES: &[MessageCode] = &[
     HAS_PAYMENTS,
     INVALID_REFERENCE,
     MIXED_CURRENCIES,
+    NOT_A_DISCOUNT,
+    DISCOUNT_WITHOUT_A_BAND,
+    DISCOUNT_TOO_LARGE,
     AMOUNT_OUT_OF_RANGE,
 ];
 
@@ -88,6 +94,44 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         INVALID_REFERENCE,
         Locale::Arabic,
         Template::Simple("لا يمكن استخدام {reference} كمرجع. استخدم الحروف والأرقام و. - _ فقط."),
+    ),
+    (
+        NOT_A_DISCOUNT,
+        Locale::English,
+        Template::Simple(
+            "A discount is the amount taken off, so it is positive. A negative one is a charge.",
+        ),
+    ),
+    (
+        NOT_A_DISCOUNT,
+        Locale::Arabic,
+        Template::Simple(
+            "الخصم هو المبلغ المحسوم، لذا يكون موجبًا. القيمة السالبة تُعد رسمًا إضافيًا.",
+        ),
+    ),
+    (
+        DISCOUNT_WITHOUT_A_BAND,
+        Locale::English,
+        Template::Simple(
+            "Nothing on this invoice is taxed the way that discount is. Discounting at a rate the invoice does not charge would reclaim tax that was never charged.",
+        ),
+    ),
+    (
+        DISCOUNT_WITHOUT_A_BAND,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يوجد بند في هذه الفاتورة بنفس المعاملة الضريبية للخصم. الخصم بمعاملة لا تتضمنها الفاتورة يسترد ضريبة لم تُحتسب أصلًا.",
+        ),
+    ),
+    (
+        DISCOUNT_TOO_LARGE,
+        Locale::English,
+        Template::Simple("A discount cannot be larger than what it is taken off."),
+    ),
+    (
+        DISCOUNT_TOO_LARGE,
+        Locale::Arabic,
+        Template::Simple("لا يمكن أن يتجاوز الخصم قيمة ما يُخصم منه."),
     ),
     (
         MIXED_CURRENCIES,

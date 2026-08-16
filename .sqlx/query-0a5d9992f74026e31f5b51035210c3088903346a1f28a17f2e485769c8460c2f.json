@@ -1,0 +1,126 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", kind as \"kind!\", issued_at as \"issued_at!\",\n                  xml as \"xml!\", invoice_hash as \"invoice_hash!\",\n                  currency as \"currency!\", tax as \"tax!\", gross as \"gross!\",\n                  document #>> '{seller,name}' as \"seller!\",\n                  document #>> '{seller,vat_number}' as \"vat_number!\"\n             FROM proj_tax_sa.zatca_document\n            WHERE status = 'pending'\n              AND signed_xml IS NULL\n              AND xml IS NOT NULL AND invoice_hash IS NOT NULL\n            ORDER BY issued_at, id\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "issued_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "issued_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "xml!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "xml"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "invoice_hash!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "invoice_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "tax!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "tax"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.zatca_document",
+            "name": "gross"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "seller!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "vat_number!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "0a5d9992f74026e31f5b51035210c3088903346a1f28a17f2e485769c8460c2f"
+}

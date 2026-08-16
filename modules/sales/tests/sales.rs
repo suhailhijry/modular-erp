@@ -61,6 +61,7 @@ fn draft(lines: Vec<DraftLine>) -> Draft {
         due_on: None,
         currency: sar(),
         lines,
+        discounts: Vec::new(),
         note: String::new(),
     }
 }
@@ -1326,6 +1327,7 @@ async fn issue_on(fixture: &Fixture, id: &str, day: &str, lines: Vec<DraftLine>)
             due_on: None,
             currency: sar(),
             lines,
+            discounts: Vec::new(),
             note: String::new(),
         },
         &Metadata::default(),

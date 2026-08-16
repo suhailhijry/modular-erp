@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) as \"count!\" FROM proj_tax_sa.zatca_document\n            WHERE status = 'pending' AND signed_xml IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "26d8505f1900c6647718cf96f761005004550b069dd615e0373b410af6d5cb20"
+}

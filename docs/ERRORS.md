@@ -242,6 +242,21 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 ## `request`
 
+### `request.certificate_key_mismatch`
+
+- **en** — That certificate is not for the private key held for this business. Every invoice signed with it would be rejected, so it has not been stored.
+- **ar** — هذه الشهادة ليست للمفتاح الخاص المحفوظ لهذه المنشأة. كل فاتورة تُوقَّع بها سترفض، لذلك لم تُحفظ.
+
+### `request.compliance_refused`
+
+- **en** — ZATCA refused {failed} of the {submitted} compliance documents this system generated, so it cannot go live. This is a fault in this software rather than in your request: {reason}
+- **ar** — رفضت هيئة الزكاة والضريبة والجمارك {failed} من أصل {submitted} من مستندات الفحص التي أنشأها النظام، فتعذّر التفعيل. الخلل في النظام وليس في طلبك: {reason}
+
+### `request.csid_not_issued`
+
+- **en** — ZATCA did not issue a certificate ({disposition}): {detail}
+- **ar** — لم تُصدر هيئة الزكاة والضريبة والجمارك شهادة ({disposition}): {detail}
+
 ### `request.empty_period`
 
 - **en** — A period must end after it starts. `until` is exclusive.
@@ -282,6 +297,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — The {module} module needs {required}. Add it to the list.
 - **ar** — تحتاج وحدة {module} إلى {required}. أضفها إلى القائمة.
 
+### `request.no_sealing_key`
+
+- **en** — This deployment has no sealing key, so a private key cannot be stored safely. Set SEALING_KEY and try again.
+- **ar** — لا يوجد مفتاح تشفير مُهيّأ في هذا النظام، فلا يمكن حفظ المفتاح الخاص بأمان. اضبط SEALING_KEY ثم أعد المحاولة.
+
 ### `request.no_such_bill`
 
 - **en** — There is no bill {bill}.
@@ -292,10 +312,20 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — There is no invoice {invoice}.
 - **ar** — لا توجد فاتورة {invoice}.
 
+### `request.not_an_otp`
+
+- **en** — That is not a Fatoora OTP. It is six digits, generated in the ZATCA portal, and it lasts about an hour.
+- **ar** — هذا ليس رمز تحقق من بوابة فاتورة. الرمز ستة أرقام يُنشأ من البوابة وتنتهي صلاحيته خلال ساعة تقريبًا.
+
 ### `request.not_caught_up`
 
 - **en** — Still catching up ({behind} to go). Please try again in a moment.
 - **ar** — لا يزال التحديث جاريًا (متبقٍ {behind}). يُرجى المحاولة بعد لحظات.
+
+### `request.onboarding_not_yet`
+
+- **en** — This business has no {stage} certificate yet.
+- **ar** — لا توجد شهادة {stage} لهذه المنشأة بعد.
 
 ### `request.password_too_short`
 
@@ -327,6 +357,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — There is no module called {module}.
 - **ar** — لا توجد وحدة باسم {module}.
 
+### `request.unknown_onboarding_stage`
+
+- **en** — {stage} is not an onboarding stage. Use compliance or production.
+- **ar** — {stage} ليست مرحلة تسجيل. استخدم compliance أو production.
+
 ### `request.unknown_role`
 
 - **en** — {role} is not a role. Use owner, accountant, clerk or viewer.
@@ -337,15 +372,35 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — {vat} is not a VAT treatment. Use standard, zero or exempt.
 - **ar** — {vat} ليست معاملة ضريبية. استخدم standard أو zero أو exempt.
 
+### `request.unknown_zatca_environment`
+
+- **en** — {environment} is not a ZATCA environment. Use sandbox, simulation or production.
+- **ar** — {environment} ليست بيئة لدى هيئة الزكاة والضريبة والجمارك. استخدم sandbox أو simulation أو production.
+
+### `request.unreadable_certificate`
+
+- **en** — That is not a certificate this system can read: {reason}.
+- **ar** — تعذّرت قراءة الشهادة: {reason}.
+
 ### `request.unsupported_media_type`
 
 - **en** — This endpoint takes `Content-Type: application/json`.
 - **ar** — يقبل هذا المسار `Content-Type: application/json` فقط.
 
+### `request.unusable_unit`
+
+- **en** — That unit cannot go in a certificate request: {reason}.
+- **ar** — لا يمكن استخدام بيانات الوحدة في طلب الشهادة: {reason}.
+
 ### `request.unusable_vat_rate`
 
 - **en** — {rate} is not a usable VAT rate. Give it in basis points, between 0 and 10000 — 1500 is 15%.
 - **ar** — {rate} ليست نسبة ضريبة صالحة. أدخلها بنقاط الأساس بين 0 و10000 — القيمة 1500 تعني 15%.
+
+### `request.zatca_unreachable`
+
+- **en** — ZATCA could not be reached while {step}: {reason}. Nothing beyond the last completed step was changed.
+- **ar** — تعذّر الوصول إلى هيئة الزكاة والضريبة والجمارك أثناء {step}: {reason}. لم يتغيّر شيء بعد آخر خطوة اكتملت.
 
 
 ## `sales`
@@ -359,6 +414,16 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — That amount is too large to record.
 - **ar** — هذا المبلغ أكبر من أن يُسجَّل.
+
+### `sales.discount_too_large`
+
+- **en** — A discount cannot be larger than what it is taken off.
+- **ar** — لا يمكن أن يتجاوز الخصم قيمة ما يُخصم منه.
+
+### `sales.discount_without_a_band`
+
+- **en** — Nothing on this invoice is taxed the way that discount is. Discounting at a rate the invoice does not charge would reclaim tax that was never charged.
+- **ar** — لا يوجد بند في هذه الفاتورة بنفس المعاملة الضريبية للخصم. الخصم بمعاملة لا تتضمنها الفاتورة يسترد ضريبة لم تُحتسب أصلًا.
 
 ### `sales.has_payments`
 
@@ -374,6 +439,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — Every line of an invoice must be in the same currency.
 - **ar** — يجب أن تكون جميع سطور الفاتورة بالعملة نفسها.
+
+### `sales.not_a_discount`
+
+- **en** — A discount is the amount taken off, so it is positive. A negative one is a charge.
+- **ar** — الخصم هو المبلغ المحسوم، لذا يكون موجبًا. القيمة السالبة تُعد رسمًا إضافيًا.
 
 ### `sales.not_a_payment`
 
