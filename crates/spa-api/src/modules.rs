@@ -48,6 +48,7 @@ pub fn available() -> Vec<(&'static str, ModuleSetup)> {
         ("ledger", ledger::setup()),
         ("sales", sales::setup()),
         ("purchases", purchases::setup()),
+        ("tax_sa", tax_sa::setup()),
     ]
 }
 
@@ -342,6 +343,55 @@ mod tests {
                 *setup.requires.first().unwrap_or(&""),
                 "{name} requires itself"
             );
+        }
+    }
+
+    /// **The database is stricter than `ModuleId`, and it wins.**
+    ///
+    /// `ModuleId` accepts `.` and `-`; `entitlement.module_id` is
+    /// `^[a-z][a-z0-9_]{0,47}$`. A module named `tax-sa` therefore constructs
+    /// fine, passes every test that does not touch the control plane, and fails
+    /// at the moment a tenant enables it — which is what happened, and is a
+    /// terrible place to find out.
+    ///
+    /// ponytail: the honest fix is for `ModuleId` to carry the narrower rule, so
+    /// the type refuses what the schema will. That is a change in `spa-types`
+    /// with no consumer asking for it yet; this catches the same mistake at
+    /// build time in the meantime.
+    #[test]
+    fn every_module_id_satisfies_the_entitlement_constraint() {
+        for (name, setup) in available() {
+            let id = setup.module.as_str();
+            let mut chars = id.chars();
+            let first = chars.next().unwrap_or(' ');
+            assert!(
+                first.is_ascii_lowercase()
+                    && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    && (1..=48).contains(&id.len()),
+                "{name} installs under `{id}`, which `entitlement.module_id` refuses: \
+                 it wants `^[a-z][a-z0-9_]{{0,47}}$`"
+            );
+        }
+    }
+
+    /// **`just prepare` guesses this, so it has to be true.**
+    ///
+    /// The type-check database installs each module's schema-relative SQL with
+    /// `search_path` pointed at `proj_<crate directory, hyphens to underscores>`.
+    /// A module that named its schema anything else would have its tables land
+    /// somewhere the qualified read queries do not look, and the failure would
+    /// be a type-check error in a crate nobody touched.
+    #[test]
+    fn a_modules_schema_is_named_after_its_crate() {
+        for (name, setup) in available() {
+            let expected = format!("proj_{}", name.replace('-', "_"));
+            for (group, schema) in setup.groups {
+                assert_eq!(
+                    *schema, expected,
+                    "{name}'s group `{group}` is in `{schema}`, and `just prepare` \
+                     will install it into `{expected}`"
+                );
+            }
         }
     }
 

@@ -25,6 +25,8 @@ pub const NO_SUCH_BILL: MessageCode = MessageCode::new("request.no_such_bill");
 pub const MODULE_IN_USE: MessageCode = MessageCode::new("request.module_in_use");
 /// A module still in the build, no longer offered to anybody new.
 pub const MODULE_DEPRECATED: MessageCode = MessageCode::new("request.module_deprecated");
+/// A VAT rate that is negative or over 100%.
+pub const UNUSABLE_VAT_RATE: MessageCode = MessageCode::new("request.unusable_vat_rate");
 /// A reporting period that ends before it begins, or on the day it begins.
 pub const EMPTY_PERIOD: MessageCode = MessageCode::new("request.empty_period");
 /// 400 or 422. The body is not JSON, or not the JSON this route wanted.
@@ -50,6 +52,7 @@ pub static CODES: &[MessageCode] = &[
     NO_SUCH_BILL,
     MODULE_IN_USE,
     MODULE_DEPRECATED,
+    UNUSABLE_VAT_RATE,
     EMPTY_PERIOD,
     MALFORMED_BODY,
     UNSUPPORTED_MEDIA_TYPE,
@@ -112,6 +115,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         MODULE_DEPRECATED,
         Locale::Arabic,
         Template::Simple("لم تعد وحدة {module} متاحة: {why}. تحتفظ الجهات التي تستخدمها بها."),
+    ),
+    (
+        UNUSABLE_VAT_RATE,
+        Locale::English,
+        Template::Simple(
+            "{rate} is not a usable VAT rate. Give it in basis points, between 0 and 10000 — 1500 is 15%.",
+        ),
+    ),
+    (
+        UNUSABLE_VAT_RATE,
+        Locale::Arabic,
+        Template::Simple(
+            "{rate} ليست نسبة ضريبة صالحة. أدخلها بنقاط الأساس بين 0 و10000 — القيمة 1500 تعني 15%.",
+        ),
     ),
     (
         UNKNOWN_CURRENCY,

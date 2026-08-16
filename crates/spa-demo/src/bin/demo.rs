@@ -63,8 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("modules  {}", spa_demo::modules().join(", "));
     println!("also     {} (sales only)", seeded.colleague);
     println!(
-        "seeded   {} invoices ({} credited), {} bills, {} payments, {} journal entries",
-        seeded.invoices, seeded.credited, seeded.bills, seeded.payments, seeded.journal_entries
+        "seeded   {} invoices ({} credited), {} bills, {} payments, {} journal entries, {} VAT return filed",
+        seeded.invoices,
+        seeded.credited,
+        seeded.bills,
+        seeded.payments,
+        seeded.journal_entries,
+        seeded.filed
     );
     match seeded.expires_after {
         Some(_) => println!("expires  in {ttl_days} days, when the reaper next runs"),

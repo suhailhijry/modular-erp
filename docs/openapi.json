@@ -508,6 +508,55 @@
         ],
         "type": "object"
       },
+      "FiledView": {
+        "properties": {
+          "filed_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "input_tax": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "output_tax": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "payable": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "period": {
+            "description": "The period, as it identifies itself: `SAR.2026-01-01.2026-04-01`.",
+            "type": "string"
+          },
+          "reference": {
+            "description": "ZATCA's acknowledgement, once clearance exists to produce one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "period",
+          "from",
+          "until",
+          "output_tax",
+          "input_tax",
+          "payable",
+          "filed_on"
+        ],
+        "type": "object"
+      },
       "Health": {
         "properties": {
           "status": {
@@ -1219,6 +1268,40 @@
         ],
         "type": "object"
       },
+      "NewFiling": {
+        "example": {
+          "currency": "SAR",
+          "filed_on": "2026-04-28T00:00:00Z",
+          "from": "2026-01-01T00:00:00Z",
+          "until": "2026-04-01T00:00:00Z"
+        },
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "filed_on": {
+            "description": "The date the business treats the filing as made. Not a clock reading, for\nthe same reason a tax point is not one.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "until": {
+            "description": "**Exclusive.**",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "until",
+          "currency",
+          "filed_on"
+        ],
+        "type": "object"
+      },
       "NewInvitation": {
         "example": {
           "handle": "khalid@acme.example",
@@ -1542,6 +1625,22 @@
         ],
         "type": "object"
       },
+      "RatesView": {
+        "example": {
+          "standard": 1500
+        },
+        "properties": {
+          "standard": {
+            "description": "The standard rate in **basis points**. 1500 is 15% (Saudi Arabia), 500\nis 5% (the UAE).\n\nZero-rated and exempt are 0% by definition and not configurable — a\njurisdiction that taxed an exempt supply would not call it exempt.\n\nApplies to invoices issued **from now on**. Every document already issued\ncarries the rate it was issued under, so changing this cannot restate a\nfiled return.",
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "standard"
+        ],
+        "type": "object"
+      },
       "Recorded": {
         "description": "Something recorded against a document, which is not a document itself.\n\nA payment carries no statutory number: the invoice it settles is the numbered\nthing, and a receipt references that.",
         "properties": {
@@ -1559,6 +1658,43 @@
         },
         "required": [
           "id"
+        ],
+        "type": "object"
+      },
+      "ReturnView": {
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/components/schemas/SideView",
+            "description": "What was paid on purchases, and the reclaimable part of it. Empty when\nthe tenant has no purchases module."
+          },
+          "output": {
+            "$ref": "#/components/schemas/SideView",
+            "description": "What was charged on sales, net of credit notes with a tax point in this\nperiod. Empty when the tenant has no sales module."
+          },
+          "payable": {
+            "description": "**The number that gets paid, or reclaimed.** Output tax less input tax;\nnegative means ZATCA owes the business.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "until": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "until",
+          "currency",
+          "output",
+          "input",
+          "payable"
         ],
         "type": "object"
       },
@@ -1779,43 +1915,6 @@
           "difference",
           "postings",
           "balances"
-        ],
-        "type": "object"
-      },
-      "VatReturnView": {
-        "properties": {
-          "currency": {
-            "type": "string"
-          },
-          "from": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "input": {
-            "$ref": "#/components/schemas/SideView",
-            "description": "What was paid on purchases, and the reclaimable part of it. Empty when\nthe tenant has no purchases module."
-          },
-          "output": {
-            "$ref": "#/components/schemas/SideView",
-            "description": "What was charged on sales, net of credit notes with a tax point in this\nperiod. Empty when the tenant has no sales module."
-          },
-          "payable": {
-            "description": "**The number that gets paid, or reclaimed.** Output tax minus input tax.\nNegative means ZATCA owes the business.",
-            "format": "int64",
-            "type": "integer"
-          },
-          "until": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "from",
-          "until",
-          "currency",
-          "output",
-          "input",
-          "payable"
         ],
         "type": "object"
       }
@@ -3863,6 +3962,196 @@
           }
         }
       ]
+    },
+    "/v1/tenants/{slug}/ledger/vat-rates": {
+      "get": {
+        "operationId": "vat_rates",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RatesView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "What this business charges VAT at.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "**Not retrospective.** Every invoice already issued carries the rate it was\nissued under, because the rate went into the event as a value (L5). Changing\nthis changes the next invoice and nothing before it — which is what stops a\nrate change silently restating a return that has been filed.\n\nponytail: a country module would set this at signup rather than leaving it to\na settings screen. Until there is one, the shipped default is Saudi Arabia's\nand this is how anyone else corrects it.",
+        "operationId": "set_vat_rates",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RatesView"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Set. Applies to the next invoice, not to past ones."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A negative rate, or one over 100%"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Set what this business charges VAT at.",
+        "tags": [
+          "ledger"
+        ]
+      }
     },
     "/v1/tenants/{slug}/members": {
       "get": {
@@ -6221,9 +6510,259 @@
         ]
       }
     },
-    "/v1/tenants/{slug}/vat-return": {
+    "/v1/tenants/{slug}/tax_sa/returns": {
       "get": {
-        "description": "Each document is reported in the period of **its own tax point** — an invoice\non its issue date, a credit note on its credit date, a bill on the date the\nsupplier stated. Re-running a filed period gives the number that was filed.\n\nponytail: this is the arithmetic, not the submission. ZATCA clearance needs a\ncertificate and an outbox handler, and it will send what this computes.",
+        "operationId": "filed_returns",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FiledView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Every return this business has filed.",
+        "tags": [
+          "tax_sa"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Filing the same period twice is a **conflict**, not a no-op: a second filing\nis an amendment, which is a different document with its own rules.",
+        "operationId": "file_return",
+        "parameters": [
+          {
+            "description": "The tenant's name in URLs.",
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewFiling"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FiledView"
+                }
+              }
+            },
+            "description": "Filed. The numbers are recorded as they stood."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unknown currency, or a period that ends before it starts"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The period was already filed — correcting it is an amendment"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Record that a period was filed, with the numbers that went.",
+        "tags": [
+          "tax_sa"
+        ]
+      }
+    },
+    "/v1/tenants/{slug}/tax_sa/vat-return": {
+      "get": {
+        "description": "Each document is reported in the period of **its own tax point** — an invoice\non its issue date, a credit note on its credit date, a bill on the date the\nsupplier stated. Re-running a filed period gives the number that was filed.\n\nA tenant with only one of sales and purchases gets zeroes for the other side\nrather than a 404: a business that has not enabled purchases genuinely\nreclaimed nothing, and that is a return they can file.",
         "operationId": "vat_return",
         "parameters": [
           {
@@ -6278,7 +6817,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/VatReturnView"
+                  "$ref": "#/components/schemas/ReturnView"
                 }
               }
             },
@@ -6322,7 +6861,7 @@
                 }
               }
             },
-            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+            "description": "No such tenant, not yours, or the tax_sa module is not enabled here"
           },
           "500": {
             "content": {
@@ -6345,9 +6884,9 @@
             "description": "Not serving right now rather than broken. Retryable."
           }
         },
-        "summary": "The VAT return for a period: what was charged, what was paid, and the\ndifference.",
+        "summary": "The VAT return for a period: what was charged, what was paid, the difference.",
         "tags": [
-          "tax"
+          "tax_sa"
         ]
       },
       "parameters": [
@@ -6409,8 +6948,8 @@
       "name": "purchases"
     },
     {
-      "description": "What a business declares, composed from every module that contributes.",
-      "name": "tax"
+      "description": "Saudi Arabia: the VAT return, and what has been filed.",
+      "name": "tax_sa"
     },
     {
       "description": "Liveness and this document.",

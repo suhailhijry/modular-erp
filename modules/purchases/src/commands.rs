@@ -484,7 +484,7 @@ mod tests {
             account: code("5000"),
             net: money(net),
             category,
-            rate_bp: category.rate_now(),
+            rate_bp: ledger::Rates::saudi_arabia().of(category),
             tax: money(tax),
         }
     }

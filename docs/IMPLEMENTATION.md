@@ -1831,3 +1831,107 @@ rebuilds is the fourth and is its own increment — see the note at the end.
   name — one more place a module can be left out, and leaving one out means a
   change to its read models could never be deployed. Same shape and same reason
   as `every_module_has_a_projection_job`.
+
+## The rate is the tenant's, not the build's
+
+- **A business outside Saudi Arabia could not issue a correct invoice.**
+  `VatCategory::rate_now()` returned `1_500` — 15% since July 2020 — from the
+  *accounting kernel*. A fact about one country, in the code every country would
+  use, on the write path. The UAE charges 5% and there was no way to say so.
+
+  Moving `VatCategory` into `ledger` last time was right; moving the **rate**
+  with it was not. `ledger` keeps the shape — that a line has a treatment and a
+  rate — and has no opinion about the number.
+
+- **Rates are configuration, and a country module is what will seed them.** This
+  is the answer to "where does a country module put its rates" without a sibling
+  dependency: it writes data, and `sales` reads data. The shipped default is
+  Saudi Arabia's, with a `ponytail:` note saying it belongs to `tax_sa` the
+  moment there is a second country — and that the seam is already here, because
+  seeding a config key is all that module has to do.
+
+- **Resolved in the command's transaction, not by the handler.** The API used to
+  stamp `Vat::current(category)` onto each line before calling the command. That
+  put a database-backed decision outside the transaction that writes it, so a
+  rate changed in between would leave an invoice carrying one that was never
+  current — the exact argument `resolve_accounts` already makes about posting
+  accounts.
+
+  The fix separates two shapes that were one: `DraftLine` is what a client sends
+  (a treatment), `InvoiceLine` is what was issued (a treatment *and* the rate it
+  was issued under). The second goes in the event, so L5 holds and a rate change
+  cannot restate a filed return — asserted by issuing at 15%, changing to 5%,
+  issuing again, and checking both the invoices and a shadow replay.
+
+- **One positive rate, deliberately.** KSA and the UAE each have exactly one, so
+  `Rates { standard }` is the whole of it. A jurisdiction with reduced rates
+  needs a *category* per rate rather than a second field — two lines at different
+  positive rates are not the same classification — and that is a `VatCategory`
+  change, noted rather than guessed at.
+
+- **The rate is validated where it is set**, between 0 and 10000 basis points. A
+  negative one would credit VAT payable on every sale; one over 100% would charge
+  more tax than the supply.
+
+## `tax_sa` — the first module that stands on two
+
+- **A country is a module, and this is the first one.** Saudi Arabia has ZATCA
+  and 15%; the UAE has Peppol PINT AE and 5%. The rate, the return's shape, the
+  clearance protocol and the fields an invoice must print all change at the
+  border. `ledger` owns that a line *has* a treatment and a rate; `tax_sa` owns
+  what the number is, and seeds it when a tenant enables the module.
+
+- **The VAT return moved out of `spa-api`, where I had put domain that does not
+  belong there.** I composed it in the API two increments ago and wrote that
+  cross-module composition belongs in the composition root. The core/module model
+  says otherwise, and the test it gives settles it: *can a tenant disable it?* A
+  business with neither sales nor purchases had a VAT return endpoint.
+
+  It is composed in a module that **declares both** now:
+  `tax_sa → {sales, purchases} → ledger`. Nothing reaches sideways, and it is
+  still not a cross-group read — each module's own read function is called and
+  the answers are netted in Rust, exactly as before. What changed is who owns it.
+
+- **`requires` was wrong, and a test said so.** I gave it
+  `requiring(&["sales", "purchases"])`, which reads sensibly and forces a
+  business that only sells to enable a purchases module they do not use in order
+  to declare tax they do owe. `requires` is an AND list and the rule that
+  actually describes this is "at least one of" — which it cannot express.
+
+  So it requires nothing. The **crate** depends on both; the **entitlement**
+  depends on neither, and each side reports zero when the tenant has not enabled
+  it. That is not a fallback: a business that has not enabled purchases genuinely
+  reclaimed nothing.
+
+- **A filing is recorded, not inferred.** Every other guarantee here makes
+  re-running a period give the number that was filed — documents on their own tax
+  point, closed periods refusing back-dated writes. Those are properties of the
+  *arithmetic*. `tax_sa.return.filed` puts the numbers that went to ZATCA in the
+  log with the date they went, so "does the system still agree with what we
+  filed?" is a comparison rather than an argument — and it survives a rebuild
+  because it is an event rather than a derivation, which
+  `a_filing_replays_to_exactly_what_it_recorded` checks.
+
+  Filing a period twice is a **conflict**, not a no-op: the second one is an
+  amendment, which is a different document with its own rules.
+
+- **`ModuleId` accepts what the database refuses.** `tax-sa` constructed fine,
+  passed every test that does not touch the control plane, and failed at the
+  moment a tenant enabled it — `entitlement.module_id` is `^[a-z][a-z0-9_]{0,47}$`
+  and the type allows `.` and `-`. A terrible place to find that out.
+
+  Everything is `tax_sa` now, one spelling from crate to URL, and
+  `every_module_id_satisfies_the_entitlement_constraint` catches the next one at
+  build time. The honest fix is for `ModuleId` to carry the narrower rule so the
+  type refuses what the schema will; that is a `spa-types` change with no
+  consumer asking for it yet.
+
+- **Seeding rides on the only hook a module has.** The rate is an `INSERT … ON
+  CONFLICT DO NOTHING` inside the schema install, which is idempotent so a
+  rebuild re-running it is harmless — and `DO NOTHING` is what stops enabling a
+  country module stamping over a rate a tenant corrected, which
+  `re_installing_does_not_overwrite_a_rate_the_tenant_set` pins. A module wants a
+  `seed` step distinct from its DDL; noted rather than invented.
+
+- **The demo files a return.** A tax module nobody has filed with demonstrates an
+  arithmetic exercise rather than the thing being bought.

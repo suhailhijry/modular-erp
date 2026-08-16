@@ -159,6 +159,14 @@ fn module_jobs() -> Vec<Arc<dyn spa_worker::Job>> {
             )
             .for_module(purchases::module_id()),
         ),
+        Arc::new(
+            ProjectionJob::<tax_sa::TaxSa>::new(
+                tax_sa::projections(),
+                Arc::new(tax_sa::upcasters().clone()),
+                200,
+            )
+            .for_module(tax_sa::module_id()),
+        ),
     ]
 }
 

@@ -15,6 +15,7 @@ spa-eventlog = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }
 purchases = { workspace = true }
+tax_sa = { workspace = true }
 spa-projection = { workspace = true }
 spa-i18n = { workspace = true }
 spa-types = { workspace = true }
@@ -37,6 +38,7 @@ spa-eventlog = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }
 purchases = { workspace = true }
+tax_sa = { workspace = true }
 spa-projection = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

@@ -69,6 +69,9 @@ pub struct Seeded {
     pub payments: usize,
     /// Supplier bills — the input-tax side of the return.
     pub bills: usize,
+    /// VAT returns filed. A tax module nobody has filed with shows a
+    /// calculation rather than a business.
+    pub filed: usize,
     pub journal_entries: usize,
 }
 
@@ -165,6 +168,11 @@ pub async fn seed(
     // somebody deciding whether this can file for them.
     let bills = seed_bills(&app, slug, &token).await?;
 
+    // Drive the projections before filing: a return is computed from the read
+    // models, and filing one that has not caught up would record zeroes.
+    project(&state.control, tenant).await?;
+    let filed = seed_filing(&app, slug, &token).await?;
+
     let colleague = seed_colleague(&app, slug, &token, password).await?;
 
     // Drive the projections, so the demo has something to show the moment it
@@ -204,6 +212,7 @@ pub async fn seed(
         credited,
         payments,
         bills,
+        filed,
         journal_entries,
     })
 }
@@ -214,6 +223,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
     advance::<sales::Sales>(&db, &sales::projections(), sales::upcasters()).await?;
     advance::<purchases::Purchases>(&db, &purchases::projections(), purchases::upcasters()).await?;
+    advance::<tax_sa::TaxSa>(&db, &tax_sa::projections(), tax_sa::upcasters()).await?;
     Ok(())
 }
 
@@ -367,6 +377,28 @@ async fn seed_opening_balances(
     }
 
     Ok(entries.len())
+}
+
+/// The first quarter, filed.
+///
+/// A demo of a tax module in which nothing has been declared shows an
+/// arithmetic exercise. This is the thing a prospective customer is actually
+/// buying.
+async fn seed_filing(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    post(
+        app,
+        &format!("/v1/tenants/{slug}/tax_sa/returns"),
+        Some(token),
+        &serde_json::json!({
+            "from": "2026-01-01T00:00:00Z",
+            "until": "2026-04-01T00:00:00Z",
+            "currency": "SAR",
+            "filed_on": "2026-04-28T00:00:00Z"
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+    Ok(1)
 }
 
 /// Four supplier bills across two suppliers, so the return has an input side.

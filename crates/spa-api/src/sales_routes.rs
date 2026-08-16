@@ -8,7 +8,7 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use sales::{Customer, Draft, InvoiceLine, Receipt, SalesError, Vat, VatCategory};
+use sales::{Customer, Draft, DraftLine, Receipt, SalesError, VatCategory};
 use serde::{Deserialize, Serialize};
 use spa_control::CommandError;
 use spa_eventlog::ExecuteError;
@@ -315,10 +315,10 @@ async fn issue_invoice(
                 locale,
             )
         })?;
-        lines.push(InvoiceLine {
+        lines.push(DraftLine {
             description: line.description,
             net: spa_types::Money::from_minor(line.net, currency),
-            vat: Vat::current(category),
+            category,
         });
     }
 

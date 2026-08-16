@@ -55,7 +55,22 @@ pub struct InvoiceLine {
     pub description: String,
     /// Excluding tax. Negative is allowed: a discount is a line.
     pub net: Money,
+    /// The treatment **and the rate that applied when it was issued**. Written
+    /// once and never recomputed, so a rate change cannot restate a filed
+    /// return (architecture L5).
     pub vat: Vat,
+}
+
+/// A line as a client sends it: what is being charged for, and how it is
+/// treated. **Not what it is taxed at** — that is the tenant's configured rate,
+/// resolved in the command's own transaction, because a rate that changed
+/// between the request and the write would stamp an invoice with one that was
+/// never current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftLine {
+    pub description: String,
+    pub net: Money,
+    pub category: ledger::VatCategory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,7 +262,7 @@ mod tests {
 
     fn issued(gross_net: i64) -> InvoiceEvent {
         let currency = sar();
-        let vat = Vat::current(VatCategory::Standard);
+        let vat = Vat::shipped(VatCategory::Standard);
         let net = Money::from_minor(gross_net, currency);
         InvoiceEvent::Issued {
             number: Some("INV-00001".to_owned()),

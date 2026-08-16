@@ -22,6 +22,7 @@ spa-demo = { path = "crates/spa-demo" }
 ledger = { path = "modules/ledger" }
 sales = { path = "modules/sales" }
 purchases = { path = "modules/purchases" }
+tax_sa = { path = "modules/tax_sa" }
 
 # Error handling
 anyhow = "1.0"

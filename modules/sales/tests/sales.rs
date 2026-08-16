@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use ledger::{AccountKind, Ledger, account_balances, open_account, trial_balance};
 use sales::{
-    Customer, Draft, InvoiceLine, Receipt, Sales, SalesError, Vat, VatCategory, issue_invoice,
+    Customer, Draft, DraftLine, Receipt, Sales, SalesError, VatCategory, issue_invoice,
     record_payment,
 };
 use spa_control::{
@@ -46,15 +46,15 @@ fn riyals(major: i64) -> Money {
     money(major * 100)
 }
 
-fn line(description: &str, net: Money, category: VatCategory) -> InvoiceLine {
-    InvoiceLine {
+fn line(description: &str, net: Money, category: VatCategory) -> DraftLine {
+    DraftLine {
         description: description.to_owned(),
         net,
-        vat: Vat::current(category),
+        category,
     }
 }
 
-fn draft(lines: Vec<InvoiceLine>) -> Draft {
+fn draft(lines: Vec<DraftLine>) -> Draft {
     Draft {
         customer: Customer::new("Rawabi Trading").with_vat_number("310000000000003"),
         issued_on: when(),
@@ -234,7 +234,7 @@ impl Fixture {
     }
 }
 
-async fn issue(fixture: &Fixture, id: &str, lines: Vec<InvoiceLine>) -> Outcome {
+async fn issue(fixture: &Fixture, id: &str, lines: Vec<DraftLine>) -> Outcome {
     issue_numbered(fixture, id, lines)
         .await
         .map(|numbered| numbered.committed)
@@ -244,7 +244,7 @@ async fn issue(fixture: &Fixture, id: &str, lines: Vec<InvoiceLine>) -> Outcome 
 async fn issue_numbered(
     fixture: &Fixture,
     id: &str,
-    lines: Vec<InvoiceLine>,
+    lines: Vec<DraftLine>,
 ) -> Result<sales::Numbered, CommandError<SalesError>> {
     issue_invoice(&fixture.db, &code(id), &draft(lines), &Metadata::default()).await
 }
@@ -1316,7 +1316,7 @@ fn on(day: &str) -> Timestamp {
 }
 
 /// Issues an invoice on a given date, so a return has periods to separate.
-async fn issue_on(fixture: &Fixture, id: &str, day: &str, lines: Vec<InvoiceLine>) -> Outcome {
+async fn issue_on(fixture: &Fixture, id: &str, day: &str, lines: Vec<DraftLine>) -> Outcome {
     let issued = issue_invoice(
         &fixture.db,
         &code(id),
@@ -2225,6 +2225,132 @@ async fn a_payment_cannot_be_dated_into_a_closed_period() {
     pay(&fixture, "KEY-1", "wire-2", riyals(100))
         .await
         .expect_err("`when()` is 2023, which is also closed");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// The rate is the tenant's, not the build's
+// ---------------------------------------------------------------------------
+
+/// **A business outside Saudi Arabia can issue a correct invoice.**
+///
+/// The rate used to be `VatCategory::rate_now()` returning 1500 from the
+/// accounting kernel, so a tenant in the UAE — 5% — could not. It is
+/// configuration now, resolved in the command's own transaction.
+#[tokio::test]
+async fn an_invoice_carries_the_rate_the_tenant_configured() {
+    let fixture = Fixture::new().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    spa_eventlog::configuration::set(
+        &mut conn,
+        ledger::Rates::KEY,
+        &ledger::Rates { standard: 500 },
+        Some("the-accountant"),
+    )
+    .await
+    .expect("sets");
+    drop(conn);
+
+    issue(
+        &fixture,
+        "KEY-1",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let invoice = sales::invoice(&mut conn, "KEY-1")
+        .await
+        .expect("reads")
+        .expect("is there");
+    drop(conn);
+
+    assert_eq!(invoice.summary.tax, riyals(50), "5% of 1,000, not 15%");
+    assert_eq!(invoice.summary.gross, riyals(1_050));
+    assert_eq!(
+        invoice.lines[0].basis_points, 500,
+        "and the line carries the rate it was issued under"
+    );
+
+    // The ledger agrees, which is what makes the invoice and the books one
+    // document rather than two numbers that happen to match.
+    assert_eq!(fixture.balance("2100").await, riyals(-50));
+
+    fixture.cleanup().await;
+}
+
+/// **Changing the rate does not restate what was already issued.**
+///
+/// The rate goes into the event as a value (L5). If it were read back at
+/// projection time, raising the rate would silently change every invoice a
+/// business has ever filed a return against.
+#[tokio::test]
+async fn changing_the_rate_leaves_earlier_invoices_alone() {
+    let fixture = Fixture::new().await;
+
+    issue(
+        &fixture,
+        "KEY-15",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues at the shipped 15%");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    spa_eventlog::configuration::set(
+        &mut conn,
+        ledger::Rates::KEY,
+        &ledger::Rates { standard: 500 },
+        Some("the-accountant"),
+    )
+    .await
+    .expect("sets");
+    drop(conn);
+
+    issue(
+        &fixture,
+        "KEY-5",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues at 5%");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let old = sales::invoice(&mut conn, "KEY-15")
+        .await
+        .expect("reads")
+        .expect("is there");
+    let new = sales::invoice(&mut conn, "KEY-5")
+        .await
+        .expect("reads")
+        .expect("is there");
+    drop(conn);
+
+    assert_eq!(
+        old.summary.tax,
+        riyals(150),
+        "the earlier invoice was restated"
+    );
+    assert_eq!(new.summary.tax, riyals(50));
+
+    // And a rebuild reproduces both, because both rates are in the log.
+    let pool = fixture.tenant_pool().await;
+    let owned = sales::projections();
+    let refs: Vec<&dyn Projection<Group = Sales>> = owned.iter().map(AsRef::as_ref).collect();
+    let report = replay_shadow::<Sales>(&pool, &refs, sales::upcasters(), 100)
+        .await
+        .expect("replays");
+    pool.close().await;
+    assert!(
+        report.is_reproducible(),
+        "a rebuild renumbered the rates: {:?}",
+        report.differences()
+    );
 
     fixture.cleanup().await;
 }

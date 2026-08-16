@@ -37,6 +37,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(reverse_entry))
         .routes(routes!(trial_balance))
         .routes(routes!(books, close_books))
+        .routes(routes!(vat_rates, set_vat_rates))
         // Unauthenticated on purpose: a signup form needs to show the choices
         // before anyone has an account. It is product information, not data.
         .routes(routes!(list_charts))
@@ -609,6 +610,120 @@ fn config_problem(error: &spa_eventlog::ConfigError, locale: Locale) -> Problem 
         locale,
         &crate::catalog::CATALOG,
     )
+}
+
+// ---------------------------------------------------------------------------
+// What the business charges
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({ "standard": 1500 }))]
+struct RatesView {
+    /// The standard rate in **basis points**. 1500 is 15% (Saudi Arabia), 500
+    /// is 5% (the UAE).
+    ///
+    /// Zero-rated and exempt are 0% by definition and not configurable — a
+    /// jurisdiction that taxed an exempt supply would not call it exempt.
+    ///
+    /// Applies to invoices issued **from now on**. Every document already issued
+    /// carries the rate it was issued under, so changing this cannot restate a
+    /// filed return.
+    standard: i32,
+}
+
+/// What this business charges VAT at.
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{slug}/ledger/vat-rates",
+    tag = "ledger",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    responses(
+        (status = OK, body = RatesView),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn vat_rates(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<RatesView>, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
+
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    let rates = ledger::Rates::resolve(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    drop(conn);
+
+    Ok(Json(RatesView {
+        standard: rates.standard,
+    }))
+}
+
+/// Set what this business charges VAT at.
+///
+/// **Not retrospective.** Every invoice already issued carries the rate it was
+/// issued under, because the rate went into the event as a value (L5). Changing
+/// this changes the next invoice and nothing before it — which is what stops a
+/// rate change silently restating a return that has been filed.
+///
+/// ponytail: a country module would set this at signup rather than leaving it to
+/// a settings screen. Until there is one, the shipped default is Saudi Arabia's
+/// and this is how anyone else corrects it.
+#[utoipa::path(
+    put,
+    path = "/v1/tenants/{slug}/ledger/vat-rates",
+    tag = "ledger",
+    params(("slug" = String, Path, description = "The tenant's name in URLs.")),
+    request_body = RatesView,
+    responses(
+        (status = NO_CONTENT, description = "Set. Applies to the next invoice, not to past ones."),
+        (status = BAD_REQUEST, description = "A negative rate, or one over 100%", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn set_vat_rates(
+    tenant: Allowed<ManageAccounts>,
+    Language(locale): Language,
+    Json(body): Json<RatesView>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant, &ledger::module_id(), locale)?;
+
+    // A negative rate would credit VAT payable on every sale; one over 100%
+    // would charge more tax than the supply. Neither is a rate anywhere.
+    if !(0..=10_000).contains(&body.standard) {
+        return Err(bad_request(
+            crate::messages::UNUSABLE_VAT_RATE,
+            "rate",
+            &body.standard.to_string(),
+            locale,
+        ));
+    }
+
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+    spa_eventlog::configuration::set(
+        &mut conn,
+        ledger::Rates::KEY,
+        &ledger::Rates {
+            standard: body.standard,
+        },
+        Some(&tenant.session.identity.to_string()),
+    )
+    .await
+    .map_err(|e| config_problem(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------

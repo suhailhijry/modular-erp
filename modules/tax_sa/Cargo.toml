@@ -1,38 +1,34 @@
 [package]
-name = "spa-demo"
+name = "tax_sa"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "A tenant with every module enabled and filled with plausible data."
+description = "Saudi Arabia: VAT rates, the return, and what has been filed."
 
 [lints]
 workspace = true
 
 [dependencies]
-# The third composition root, after `bin/api` and `bin/worker` — and the only
-# one that has to know *every* module, because "every module enabled" is what it
-# is for.
+# **The first module that stands on two.** A return nets what was charged
+# against what was paid, and those live in two modules — so the thing that nets
+# them is a module above both rather than a third sibling reaching sideways.
 ledger = { workspace = true }
 sales = { workspace = true }
 purchases = { workspace = true }
-tax_sa = { workspace = true }
-spa-api = { workspace = true }
+
 spa-control = { workspace = true }
 spa-eventlog = { workspace = true }
+spa-i18n = { workspace = true }
 spa-projection = { workspace = true }
-spa-types = { workspace = true }
-
-axum = { workspace = true }
+spa-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tower = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 spa-testkit = { workspace = true }
+chrono = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tower = { workspace = true }

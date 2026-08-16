@@ -225,6 +225,12 @@ async fn rebuild(
                 owned.iter().map(AsRef::as_ref).collect();
             rebuild_swap::<purchases::Purchases>(&pool, sql, &refs, upcasters, 500).await?
         }
+        "tax_sa" => {
+            let owned = tax_sa::projections();
+            let refs: Vec<&dyn Projection<Group = tax_sa::TaxSa>> =
+                owned.iter().map(AsRef::as_ref).collect();
+            rebuild_swap::<tax_sa::TaxSa>(&pool, sql, &refs, upcasters, 500).await?
+        }
         other => return Err(format!("{other} has no rebuild in bin/migrator").into()),
     };
 
@@ -302,7 +308,7 @@ mod tests {
     /// in `bin/worker`.
     #[test]
     fn every_module_can_be_rebuilt() {
-        const REBUILDABLE: &[&str] = &["ledger", "sales", "purchases"];
+        const REBUILDABLE: &[&str] = &["ledger", "sales", "purchases", "tax_sa"];
 
         for (name, setup) in spa_api::modules() {
             assert!(

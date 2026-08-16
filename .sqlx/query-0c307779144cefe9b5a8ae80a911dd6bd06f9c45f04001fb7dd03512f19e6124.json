@@ -1,0 +1,124 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", period_from as \"period_from!\", period_until as \"period_until!\",\n                  currency as \"currency!\", output_tax as \"output_tax!\",\n                  input_tax as \"input_tax!\", payable as \"payable!\",\n                  filed_on as \"filed_on!\", reference\n             FROM proj_tax_sa.filed_return\n            ORDER BY period_from DESC, id\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.filed_return",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "period_from!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.filed_return",
+            "name": "period_from"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "period_until!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.filed_return",
+            "name": "period_until"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.filed_return",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "output_tax!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.filed_return",
+            "name": "output_tax"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "input_tax!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.filed_return",
+            "name": "input_tax"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "payable!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.filed_return",
+            "name": "payable"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "filed_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.filed_return",
+            "name": "filed_on"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.filed_return",
+            "name": "reference"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "0c307779144cefe9b5a8ae80a911dd6bd06f9c45f04001fb7dd03512f19e6124"
+}

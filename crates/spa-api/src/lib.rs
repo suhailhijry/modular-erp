@@ -38,6 +38,7 @@ mod routes;
 mod sales_routes;
 mod signup;
 mod state;
+mod tax_sa_routes;
 mod wire;
 
 pub use catalog::CATALOG;

@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn issuing_debits_the_customer_and_splits_revenue_from_tax() {
-        let standard = Vat::current(VatCategory::Standard);
+        let standard = Vat::shipped(VatCategory::Standard);
         let totals = total([(standard, money(10_000))], sar()).unwrap();
         let entry = entry_for_issue(&totals, &PostingAccounts::conventional()).unwrap();
 
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn a_zero_rated_invoice_posts_two_lines_not_a_zero_tax_line() {
-        let zero = Vat::current(VatCategory::Zero);
+        let zero = Vat::shipped(VatCategory::Zero);
         let totals = total([(zero, money(10_000))], sar()).unwrap();
         let entry = entry_for_issue(&totals, &PostingAccounts::conventional()).unwrap();
 
@@ -223,8 +223,8 @@ mod tests {
     #[test]
     fn a_discount_that_cancels_the_sale_still_balances() {
         // Net zero overall but tax on one band only: +100 standard, -100 exempt.
-        let standard = Vat::current(VatCategory::Standard);
-        let exempt = Vat::current(VatCategory::Exempt);
+        let standard = Vat::shipped(VatCategory::Standard);
+        let exempt = Vat::shipped(VatCategory::Exempt);
         let totals = total([(standard, money(10_000)), (exempt, money(-10_000))], sar()).unwrap();
 
         assert_eq!(totals.net, money(0));

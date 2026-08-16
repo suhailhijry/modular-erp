@@ -38,11 +38,19 @@ impl Vat {
     /// The treatment at today's statutory rate. The only constructor an issuing
     /// command should use.
     #[must_use]
-    pub const fn current(category: VatCategory) -> Self {
+    pub const fn at(rates: ledger::Rates, category: VatCategory) -> Self {
         Self {
             category,
-            basis_points: category.rate_now(),
+            basis_points: rates.of(category),
         }
+    }
+
+    /// The rate this build ships, for tests and for anything that has no tenant
+    /// to ask. **Never on a write path** — an invoice is stamped with the rate
+    /// its tenant had configured, resolved in the command's own transaction.
+    #[must_use]
+    pub const fn shipped(category: VatCategory) -> Self {
+        Self::at(ledger::Rates::saudi_arabia(), category)
     }
 
     /// Tax on an amount, rounded to the currency's minor unit.
@@ -188,14 +196,14 @@ mod tests {
 
     #[test]
     fn fifteen_percent_of_a_round_amount_is_exact() {
-        let vat = Vat::current(VatCategory::Standard);
+        let vat = Vat::shipped(VatCategory::Standard);
         assert_eq!(vat.basis_points, 1_500);
         assert_eq!(vat.on(money(10_000)).unwrap(), money(1_500));
     }
 
     #[test]
     fn halves_round_away_from_zero_in_both_directions() {
-        let vat = Vat::current(VatCategory::Standard);
+        let vat = Vat::shipped(VatCategory::Standard);
         // 0.10 × 15% = 0.015 — exactly half a halala.
         assert_eq!(vat.on(money(10)).unwrap(), money(2));
         assert_eq!(vat.on(money(-10)).unwrap(), money(-2));
@@ -206,7 +214,7 @@ mod tests {
         // The reason rounding is symmetric. With half-up, +0.015 rounds to 2 and
         // -0.015 rounds to -1, and an invoice plus its exact credit note leaves a
         // stray halala in VAT payable forever.
-        let vat = Vat::current(VatCategory::Standard);
+        let vat = Vat::shipped(VatCategory::Standard);
         for minor in [1, 7, 10, 33, 3_333, 999_999] {
             let up = vat.on(money(minor)).unwrap();
             let down = vat.on(money(-minor)).unwrap();
@@ -221,14 +229,14 @@ mod tests {
     #[test]
     fn exempt_and_zero_rated_are_both_untaxed_and_still_distinguishable() {
         assert_eq!(
-            Vat::current(VatCategory::Zero)
+            Vat::shipped(VatCategory::Zero)
                 .on(money(9_999))
                 .unwrap()
                 .minor(),
             0
         );
         assert_eq!(
-            Vat::current(VatCategory::Exempt)
+            Vat::shipped(VatCategory::Exempt)
                 .on(money(9_999))
                 .unwrap()
                 .minor(),
@@ -237,8 +245,8 @@ mod tests {
 
         let totals = total(
             [
-                (Vat::current(VatCategory::Zero), money(1_000)),
-                (Vat::current(VatCategory::Exempt), money(2_000)),
+                (Vat::shipped(VatCategory::Zero), money(1_000)),
+                (Vat::shipped(VatCategory::Exempt), money(2_000)),
             ],
             sar(),
         )
@@ -256,7 +264,7 @@ mod tests {
         // Three lines of 33.33 at 15%. Per line: 4.9995 → 5.00 each → 15.00.
         // Per band: 99.99 → 14.9985 → 15.00. They agree here, and the point of
         // the test is the third case below, where they do not.
-        let standard = Vat::current(VatCategory::Standard);
+        let standard = Vat::shipped(VatCategory::Standard);
         let per_line: i64 = (0..3)
             .map(|_| standard.on(money(3_333)).unwrap().minor())
             .sum();
@@ -276,8 +284,8 @@ mod tests {
 
     #[test]
     fn line_order_does_not_change_the_event() {
-        let a = Vat::current(VatCategory::Standard);
-        let z = Vat::current(VatCategory::Zero);
+        let a = Vat::shipped(VatCategory::Standard);
+        let z = Vat::shipped(VatCategory::Zero);
 
         let one = total([(a, money(100)), (z, money(200)), (a, money(300))], sar()).unwrap();
         let two = total([(z, money(200)), (a, money(300)), (a, money(100))], sar()).unwrap();
@@ -300,7 +308,7 @@ mod tests {
         // decoding a stored event can, and that is exactly where "it was valid
         // when we wrote it" stops being a guarantee.
         assert!(
-            Vat::current(VatCategory::Standard)
+            Vat::shipped(VatCategory::Standard)
                 .on(money(i64::MAX))
                 .is_ok()
         );

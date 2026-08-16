@@ -42,22 +42,6 @@ impl VatCategory {
     /// Every category, for a picker and for tests that must cover all of them.
     pub const ALL: [Self; 3] = [Self::Standard, Self::Zero, Self::Exempt];
 
-    /// The rate this category carries **today**, in basis points.
-    ///
-    /// Called once, when a document is issued. Everything afterwards reads the
-    /// rate stored on the line.
-    #[must_use]
-    pub const fn rate_now(self) -> i32 {
-        match self {
-            // ponytail: a constant, not configuration. The rate is national and
-            // changes by royal decree roughly once a decade; when it next moves,
-            // this becomes a date-keyed table and old documents are unaffected
-            // because they carry their own rate.
-            Self::Standard => 1_500,
-            Self::Zero | Self::Exempt => 0,
-        }
-    }
-
     /// Whether input tax on a purchase in this category can be reclaimed.
     ///
     /// The whole reason `Zero` and `Exempt` are separate variants, expressed as
@@ -111,5 +95,82 @@ mod tests {
         assert!(VatCategory::Standard.input_is_reclaimable());
         assert!(VatCategory::Zero.input_is_reclaimable());
         assert!(!VatCategory::Exempt.input_is_reclaimable());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What the rates actually are
+// ---------------------------------------------------------------------------
+
+/// The rates a business charges, as its jurisdiction sets them.
+///
+/// # Why this is configuration and not a constant
+///
+/// It used to be `VatCategory::rate_now()`, returning 1500 — Saudi Arabia's 15%
+/// since July 2020 — from the accounting kernel. That is a fact about one
+/// country living in the code every country would use, and a business in the UAE
+/// (5%) could not issue a correct invoice at all.
+///
+/// So the rate is a value a tenant holds, and a country module is what seeds it.
+/// `ledger` keeps the *shape* — that a line has a treatment and a rate — and has
+/// no opinion about the number.
+///
+/// # Why the shipped default is Saudi Arabia's
+///
+/// ponytail: because it is the only market this build has been written for, and
+/// a tenant who never opens the settings has to get *something*. It belongs to a
+/// `tax_sa` module the moment there is a second country, and the seam is already
+/// here: that module sets this key at signup and this default goes away.
+///
+/// # One positive rate
+///
+/// ponytail: `standard` is the only configurable rate, because KSA and the UAE
+/// each have exactly one. A jurisdiction with reduced rates needs a *category*
+/// per rate rather than a second number here — `VatCategory` is what a line is
+/// classified as, and two lines at different positive rates are not the same
+/// classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Rates {
+    /// The standard rate, in basis points. 1500 is 15%.
+    pub standard: i32,
+}
+
+impl Rates {
+    /// Where a tenant's choice is stored.
+    pub const KEY: &'static str = "ledger.vat_rates";
+
+    /// 15%, since July 2020.
+    #[must_use]
+    pub const fn saudi_arabia() -> Self {
+        Self { standard: 1_500 }
+    }
+
+    /// The rate a category carries under these.
+    ///
+    /// Zero-rated and exempt are both 0% by definition and not by configuration
+    /// — a jurisdiction that taxed an exempt supply would not call it exempt.
+    #[must_use]
+    pub const fn of(self, category: VatCategory) -> i32 {
+        match category {
+            VatCategory::Standard => self.standard,
+            VatCategory::Zero | VatCategory::Exempt => 0,
+        }
+    }
+
+    /// What this tenant has configured, or what ships.
+    ///
+    /// **Read inside the command's transaction**, for the same reason
+    /// `sales::PostingAccounts` is: a rate that changed between the read and the
+    /// write would leave an invoice stamped with one that was never current.
+    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, spa_eventlog::ConfigError> {
+        Ok(spa_eventlog::configuration::get::<Self>(conn, Self::KEY)
+            .await?
+            .map_or_else(Self::saudi_arabia, |configured| configured.value))
+    }
+}
+
+impl Default for Rates {
+    fn default() -> Self {
+        Self::saudi_arabia()
     }
 }

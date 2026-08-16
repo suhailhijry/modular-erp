@@ -337,6 +337,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — This endpoint takes `Content-Type: application/json`.
 - **ar** — يقبل هذا المسار `Content-Type: application/json` فقط.
 
+### `request.unusable_vat_rate`
+
+- **en** — {rate} is not a usable VAT rate. Give it in basis points, between 0 and 10000 — 1500 is 15%.
+- **ar** — {rate} ليست نسبة ضريبة صالحة. أدخلها بنقاط الأساس بين 0 و10000 — القيمة 1500 تعني 15%.
+
 
 ## `sales`
 
@@ -402,4 +407,22 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — The system is busy right now. Please try again in a moment.
 - **ar** — النظام مشغول حالياً. يُرجى المحاولة مرة أخرى بعد قليل.
+
+
+## `tax_sa`
+
+### `tax_sa.already_filed`
+
+- **en** — The period {period} was filed on {on}. Correcting a filed return is an amendment, not a second filing.
+- **ar** — قُدِّم إقرار الفترة {period} بتاريخ {on}. تصحيح إقرار مُقدَّم يكون بتعديل وليس بإقرار ثانٍ.
+
+### `tax_sa.empty_period`
+
+- **en** — A period must end after it starts. `until` is exclusive.
+- **ar** — يجب أن تنتهي الفترة بعد بدايتها. تاريخ الانتهاء غير شامل.
+
+### `tax_sa.invalid_period`
+
+- **en** — {period} cannot be used as a period identifier.
+- **ar** — لا يمكن استخدام {period} كمعرّف فترة.
 

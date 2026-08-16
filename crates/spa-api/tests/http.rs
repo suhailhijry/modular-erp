@@ -174,6 +174,13 @@ impl Fixture {
     async fn enable_both_sides(&self, tenant: TenantId) {
         self.enable_sales(tenant).await;
         self.enable_module(tenant, purchases::setup()).await;
+        self.enable_module(tenant, tax_sa::setup()).await;
+    }
+
+    /// The return without the input side, which is most small businesses.
+    async fn enable_selling_only(&self, tenant: TenantId) {
+        self.enable_sales(tenant).await;
+        self.enable_module(tenant, tax_sa::setup()).await;
     }
 
     /// Drives one group's projections, standing in for the worker.
@@ -1237,13 +1244,13 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("trial_balance", ALL_ROLES),
     ("list_invoices", ALL_ROLES),
     ("get_invoice", ALL_ROLES),
-    ("vat_return", ALL_ROLES),
     ("posting_accounts", ALL_ROLES),
     ("books", ALL_ROLES),
+    ("vat_rates", ALL_ROLES),
+    ("vat_return", ALL_ROLES),
+    ("filed_returns", ALL_ROLES),
     ("list_bills", ALL_ROLES),
     ("get_bill", ALL_ROLES),
-    // The whole return: what was charged, what was paid, and the difference.
-    ("vat_return", ALL_ROLES),
     // Recording what happened. A clerk does this and nothing structural.
     ("post_entry", &["owner", "accountant", "clerk"]),
     ("reverse_entry", &["owner", "accountant", "clerk"]),
@@ -1260,6 +1267,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Declaring the numbers final is the accountant's call, and not
     // something a clerk posting entries should be able to do to them.
     ("close_books", &["owner", "accountant"]),
+    ("set_vat_rates", &["owner", "accountant"]),
+    // Filing is a declaration to a tax authority, not a bookkeeping entry.
+    ("file_return", &["owner", "accountant"]),
     // Changing the tenant: who has access, and what it pays for. The owner
     // alone, including against an accountant — somebody who keeps the books
     // should not be able to decide who else can see them.
@@ -1313,6 +1323,18 @@ async fn every_role_against_every_endpoint() {
 
     let endpoints = role_scoped_operations();
 
+    // No operation named twice. A duplicate is harmless today — the lookup
+    // takes the first — and it means two rows claiming different permissions
+    // for one route would silently disagree, with whichever came first winning.
+    let mut named: Vec<&str> = PERMISSIONS.iter().map(|(id, _)| *id).collect();
+    named.sort_unstable();
+    let unique = {
+        let mut seen = named.clone();
+        seen.dedup();
+        seen
+    };
+    assert_eq!(named, unique, "an operation appears twice in the table");
+
     // The table and the router describe the same set, in both directions.
     let served: std::collections::BTreeSet<&str> =
         endpoints.iter().map(|(id, _, _)| id.as_str()).collect();
@@ -1326,8 +1348,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        33,
-        "expected thirty-three role-scoped operations"
+        37,
+        "expected thirty-seven role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -3806,7 +3828,7 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
     let tenant = fixture.provision("acme").await;
     fixture.join(user, tenant).await;
-    fixture.enable_sales(tenant).await;
+    fixture.enable_selling_only(tenant).await;
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
     fixture.install_chart(&token, "acme", "services").await;
 
@@ -3842,7 +3864,7 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     let (status, filed, _) = fixture
         .send(
             bearer(Request::get(format!(
-                "/v1/tenants/acme/vat-return?{period}"
+                "/v1/tenants/acme/tax_sa/vat-return?{period}"
             )))
             .body(Body::empty())
             .unwrap(),
@@ -3869,7 +3891,7 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     let (status, body, _) = fixture
         .send(
             bearer(Request::get(
-                "/v1/tenants/acme/vat-return\
+                "/v1/tenants/acme/tax_sa/vat-return\
                  ?from=2026-04-01T00:00:00Z&until=2026-01-01T00:00:00Z&currency=SAR",
             ))
             .body(Body::empty())
@@ -3884,9 +3906,11 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     // missing `from` is the same shape as every other failure.
     let (status, body, content_type) = fixture
         .send(
-            bearer(Request::get("/v1/tenants/acme/vat-return?currency=SAR"))
-                .body(Body::empty())
-                .unwrap(),
+            bearer(Request::get(
+                "/v1/tenants/acme/tax_sa/vat-return?currency=SAR",
+            ))
+            .body(Body::empty())
+            .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -4481,7 +4505,7 @@ async fn a_tenant_files_output_tax_less_input_tax() {
     let (status, filed, _) = fixture
         .send(
             bearer(Request::get(
-                "/v1/tenants/acme/vat-return\
+                "/v1/tenants/acme/tax_sa/vat-return\
                  ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
             ))
             .body(Body::empty())
@@ -4506,7 +4530,7 @@ async fn a_tenant_files_output_tax_less_input_tax() {
     let (status, empty, _) = fixture
         .send(
             bearer(Request::get(
-                "/v1/tenants/acme/vat-return\
+                "/v1/tenants/acme/tax_sa/vat-return\
                  ?from=2026-07-01T00:00:00Z&until=2026-10-01T00:00:00Z&currency=SAR",
             ))
             .body(Body::empty())
@@ -4528,7 +4552,7 @@ async fn a_tenant_files_output_tax_less_input_tax() {
 async fn a_return_for_a_tenant_with_one_side_reports_the_other_as_nothing() {
     let mut fixture = Fixture::new().await;
     let tenant = fixture.provision("acme").await;
-    fixture.enable_sales(tenant).await;
+    fixture.enable_selling_only(tenant).await;
 
     let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
     fixture.join(owner, tenant).await;
@@ -4565,7 +4589,7 @@ async fn a_return_for_a_tenant_with_one_side_reports_the_other_as_nothing() {
     let (status, filed, _) = fixture
         .send(
             bearer(Request::get(
-                "/v1/tenants/acme/vat-return\
+                "/v1/tenants/acme/tax_sa/vat-return\
                  ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
             ))
             .body(Body::empty())

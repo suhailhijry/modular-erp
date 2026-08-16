@@ -43,8 +43,12 @@ prepare:
     # `proj_sales.invoice`, which is what lets a rebuild aim it at a staging
     # schema. So the schema has to be created and pointed at here too, the same
     # way `install_schema` does it.
+    #
+    # The schema is guessed from the crate directory, hyphens to underscores.
+    # `a_modules_schema_is_named_after_its_crate` in `crates/spa-api/src/modules.rs`
+    # is what stops that guess drifting from what the modules declare.
     for f in modules/*/schema/*.sql; do \
-      m=$(basename $(dirname $(dirname "$f"))); \
+      m=$(basename $(dirname $(dirname "$f")) | tr '-' '_'); \
       psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 \
         -c "CREATE SCHEMA IF NOT EXISTS proj_$m" \
         -c "SET search_path TO proj_$m, public" -f "$f"; \

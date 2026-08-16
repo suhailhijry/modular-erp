@@ -15,6 +15,7 @@ static PARTS: &[&StaticCatalog] = &[
     &ledger::CATALOG,
     &sales::CATALOG,
     &purchases::CATALOG,
+    &tax_sa::CATALOG,
 ];
 
 /// The catalog the API renders from.

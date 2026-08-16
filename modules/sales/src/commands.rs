@@ -21,9 +21,9 @@ use spa_control::{CommandError, TenantDb};
 use spa_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
 use spa_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
 
-use crate::invoice::{Customer, Invoice, InvoiceEvent, InvoiceLine};
+use crate::invoice::{Customer, DraftLine, Invoice, InvoiceEvent, InvoiceLine};
 use crate::posting::{PostingAccounts, entry_for_issue, entry_for_payment};
-use crate::vat::{TaxError, Totals};
+use crate::vat::TaxError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SalesError {
@@ -126,7 +126,10 @@ pub struct Draft {
     pub issued_on: Timestamp,
     pub due_on: Option<Timestamp>,
     pub currency: CurrencyCode,
-    pub lines: Vec<InvoiceLine>,
+    /// What is being charged for and how each line is treated. The **rate**
+    /// comes from the tenant's configuration, resolved in the transaction that
+    /// writes the invoice.
+    pub lines: Vec<DraftLine>,
     pub note: String,
 }
 
@@ -158,17 +161,12 @@ pub async fn issue_invoice(
         return Err(rejected(SalesError::NothingToInvoice));
     }
 
-    // Everything that can be decided without the database is decided here, once
-    // — not inside the retry loop, and not inside the transaction.
-    let totals = crate::vat::total(draft.lines.iter().map(|l| (l.vat, l.net)), draft.currency)
-        .map_err(|e| rejected(SalesError::Tax(e)))?;
-
     let entry_id = derived_id("si", &[id.as_str()])?;
     let memo = format!("Invoice {id} · {}", draft.customer.name);
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
-        match issue_in(&mut tx, id, &entry_id, draft, &totals, &memo, metadata).await {
+        match issue_in(&mut tx, id, &entry_id, draft, &memo, metadata).await {
             Ok(numbered) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
                 return Ok(numbered);
@@ -193,10 +191,31 @@ async fn issue_in(
     id: &AggregateId,
     entry_id: &AggregateId,
     draft: &Draft,
-    totals: &Totals,
     memo: &str,
     metadata: &Metadata,
 ) -> Result<Numbered, ExecuteError<SalesError>> {
+    // **The rate, in this transaction too.** It used to be a constant the API
+    // handler stamped onto each line before the command ran; it is now the
+    // tenant's, and reading it here is what stops an invoice carrying a rate
+    // that was never current — the same argument as the accounts below.
+    let rates = ledger::Rates::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(SalesError::Config(e)))?;
+
+    let lines: Vec<InvoiceLine> = draft
+        .lines
+        .iter()
+        .map(|line| InvoiceLine {
+            description: line.description.clone(),
+            net: line.net,
+            vat: crate::vat::Vat::at(rates, line.category),
+        })
+        .collect();
+
+    let totals = crate::vat::total(lines.iter().map(|l| (l.vat, l.net)), draft.currency)
+        .map_err(|e| ExecuteError::Rejected(SalesError::Tax(e)))?;
+    let totals = &totals;
+
     // Resolved **in this transaction**, so what the invoice was posted to and
     // what the tenant had configured cannot disagree — and the generation goes
     // into the metadata, which is how "what was configured when this was
@@ -239,7 +258,7 @@ async fn issue_in(
                 issued_on: draft.issued_on,
                 due_on: draft.due_on,
                 currency: draft.currency,
-                lines: draft.lines.clone(),
+                lines: lines.clone(),
                 totals: totals.clone(),
                 note: draft.note.trim().to_owned(),
             }))

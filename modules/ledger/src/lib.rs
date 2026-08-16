@@ -44,7 +44,7 @@ pub use projections::{
     AccountBalance, Accounts, Ledger, Postings, TrialBalance, account_balances, imbalances,
     projections, trial_balance,
 };
-pub use vat::VatCategory;
+pub use vat::{Rates, VatCategory};
 
 use spa_i18n::StaticCatalog;
 use spa_types::{DomainName, EventName, SchemaVersion};

@@ -48,7 +48,7 @@ fn line(account: &str, net: Money, category: VatCategory, tax: Money) -> BillLin
         account: code(account),
         net,
         category,
-        rate_bp: category.rate_now(),
+        rate_bp: ledger::Rates::saudi_arabia().of(category),
         tax,
     }
 }

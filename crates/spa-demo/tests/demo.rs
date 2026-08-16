@@ -234,7 +234,7 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
     // The whole return: charged, reclaimed, and the difference.
     let filed = demo
         .get(
-            "/v1/tenants/demo-shape/vat-return\
+            "/v1/tenants/demo-shape/tax_sa/vat-return\
              ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
         )
         .await;
@@ -268,6 +268,37 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
         .filter_map(|a| a["balance"].as_i64())
         .sum();
     assert!(expenses > 0, "the business has costs");
+
+    demo.cleanup().await;
+}
+
+/// **A quarter, declared.**
+///
+/// A tax module nobody has filed with demonstrates an arithmetic exercise rather
+/// than the thing being bought. This is also what proves the module reached the
+/// demo at all: filing goes through the public API and reads its own write back.
+#[tokio::test]
+async fn the_demo_has_filed_a_vat_return() {
+    let demo = Demo::build("demo-tax").await;
+
+    let returns = demo.get("/v1/tenants/demo-tax/tax_sa/returns").await;
+    let returns = returns.as_array().expect("a list");
+    assert_eq!(returns.len(), demo.seeded.filed, "the demo filed nothing");
+
+    let filed = &returns[0];
+    assert_eq!(filed["period"], "SAR.2026-01-01.2026-04-01");
+    assert_eq!(
+        filed["payable"].as_i64(),
+        Some(
+            filed["output_tax"].as_i64().unwrap_or_default()
+                - filed["input_tax"].as_i64().unwrap_or_default()
+        ),
+        "what was filed does not add up"
+    );
+    assert!(
+        filed["output_tax"].as_i64().is_some_and(|t| t > 0),
+        "a filing with no output tax is not a demo of a business"
+    );
 
     demo.cleanup().await;
 }
