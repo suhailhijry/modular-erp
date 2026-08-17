@@ -2478,3 +2478,76 @@ came out of running them, and neither was deducible from the specification.
 - **Confirmed against ZATCA.** A discounted invoice built and signed by this
   code is accepted by the sandbox with no warnings — the ninth document in
   `modules/tax_sa/tests/sandbox.rs` to be.
+
+## Wiring, erasure, and paging
+
+- **The ZATCA sweeps had no caller.** Signing, submission, the Fatoora client —
+  all of it worked in tests and none of it ran in production: an invoice was
+  issued, a document was built and chained, and then nothing happened to it ever
+  again. They are worker jobs now, registered only when `SEALING_KEY` is set,
+  because they read a tenant's private key and a job that runs and finds it can
+  do nothing is quieter than one that was never registered.
+
+  They go in `bin/worker.rs` — the composition root, beside `TrialBalance` — for
+  the reason that file already gives: the kernel must not know what a ZATCA
+  document is, and a module must not depend on the worker.
+
+  `zatca_jobs()` is a function rather than two `with_job` calls for the same
+  reason `module_jobs()` is: a test can look at what a deployment would run.
+  `no_module_job_runs_for_tenants_that_declined_it` covers them, and it matters
+  more here than for a projection — a submit job with no `module()` opens a
+  connection to a tax authority for every tenant on the platform.
+
+- **A five-year certificate is a deadline nobody has a reminder for.** Renewal
+  needs a human — the taxpayer reads an OTP off the Fatoora portal — so nothing
+  here can do it. What it can do is stop the lapse being a surprise:
+  `CertificateExpiry` reports sixty days out. It parses the date the certificate
+  states, in OpenSSL's format, where the day has a **leading space** for single
+  digits — a `%d` parse would work for three weeks in four and report an
+  unreadable certificate on the ninth of the month.
+
+- **An identity that had ever acted could not be deleted at all.**
+  `audit_entry`'s trigger refuses UPDATE, and its own foreign keys declare
+  `ON DELETE SET NULL` — which is an UPDATE. The clause was unreachable from the
+  day it was written and nothing noticed, because nothing had ever tried.
+
+  Under Saudi PDPL that is a right that cannot be honoured, and "our schema will
+  not let us" is not a lawful ground for refusing. The trigger now permits
+  **exactly one** shape of update: one that nulls an actor and changes nothing
+  else. The trail keeps what it is for and loses only the link to a person —
+  which is the shape it has always had for a system-initiated action.
+
+  What is deliberately absent is an endpoint. **Who may erase whom** is a policy
+  question, and answering it in passing while fixing a schema bug would be
+  answering it badly.
+
+- **Lists silently truncated at 200.** A tenant with 201 invoices saw 200 and was
+  told nothing; the response was indistinguishable from a complete one. Keyset
+  paging on the columns each list is ordered by, an opaque cursor, and `next`
+  absent meaning **the list ended**.
+
+  Keyset rather than `OFFSET` because offset is wrong under concurrent writes:
+  an invoice issued while somebody pages shifts every later row by one, so a row
+  can be skipped or seen twice. The test pages five invoices two at a time, some
+  sharing a tax point so the cursor's second part is what separates them, and
+  asserts nothing was lost or repeated. Ignoring the cursor makes it fail with
+  `INV-00005 came back twice`.
+
+  A cursor this build cannot read is **refused**, not ignored — silently
+  starting over would hand a caller the first page again and read as the list
+  restarting.
+
+- **`ModuleId` accepted what the database refused.** `tax-sa` constructed fine
+  and failed at the moment a tenant enabled it, because
+  `entitlement.module_id` is `^[a-z][a-z0-9_]{0,47}$`. The type carries that
+  rule now, so a module id that cannot be stored is one that cannot be built.
+
+- **The crash-test flake was mine.** `just clean-databases` drops with `FORCE`,
+  and I ran it while a background suite was still going: a test's database
+  vanished mid-run, its outbox came back empty, and two fault-injection tests
+  failed an assertion about something else entirely. It took an afternoon to
+  find because the failure names the wrong thing.
+
+  The recipe refuses now when anything is connected to a test database. The
+  hazard is real for anyone running the suite in one terminal and cleaning up in
+  another.

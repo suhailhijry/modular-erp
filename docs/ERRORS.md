@@ -262,6 +262,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — A period must end after it starts. `until` is exclusive.
 - **ar** — يجب أن تنتهي الفترة بعد بدايتها. تاريخ الانتهاء غير شامل.
 
+### `request.invalid_cursor`
+
+- **en** — {after} is not a page cursor from this API. Pass back the `next` value from a previous response, or leave it out to start from the beginning.
+- **ar** — {after} ليس مؤشر صفحة من هذه الواجهة. أعد إرسال قيمة `next` من الاستجابة السابقة، أو اتركه فارغًا للبدء من الأول.
+
 ### `request.invalid_id`
 
 - **en** — {id} cannot be used as an identifier.

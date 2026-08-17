@@ -830,12 +830,23 @@ pub async fn standing(conn: &mut PgConnection, now: Timestamp) -> Result<Standin
     })
 }
 
-/// Every document, most recent first.
-pub async fn documents(conn: &mut PgConnection, limit: i64) -> Result<Vec<Stored>, sqlx::Error> {
+/// Every document, most recent first, one page at a time.
+///
+/// Keyset on `(issued_at, id)`. A busy shop issues thousands a month, so this
+/// is the list here most likely to outgrow one response.
+pub async fn documents(
+    conn: &mut PgConnection,
+    limit: i64,
+    after: Option<&spa_types::Cursor>,
+) -> Result<spa_types::Page<Stored>, sqlx::Error> {
+    let (issued_at, id) = resume(after)?;
     let numbers = sqlx::query_scalar!(
         r#"SELECT id as "id!" FROM proj_tax_sa.zatca_document
+            WHERE $2::timestamptz IS NULL OR (issued_at, id) < ($2, $3)
             ORDER BY issued_at DESC, id DESC LIMIT $1"#,
         limit,
+        issued_at,
+        id,
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -846,5 +857,27 @@ pub async fn documents(conn: &mut PgConnection, limit: i64) -> Result<Vec<Stored
             found.push(stored);
         }
     }
-    Ok(found)
+
+    Ok(spa_types::Page::of(found, limit, |document| {
+        spa_types::Cursor::over(&[&document.issued_at.to_rfc3339(), &document.number])
+    }))
+}
+
+/// The `(issued_at, id)` a cursor resumes after. A cursor this build cannot
+/// read is refused, not ignored.
+fn resume(
+    after: Option<&spa_types::Cursor>,
+) -> Result<(Option<Timestamp>, Option<String>), sqlx::Error> {
+    let Some(cursor) = after else {
+        return Ok((None, None));
+    };
+    let malformed = || sqlx::Error::Decode(Box::new(spa_types::NotACursor));
+
+    let issued_at = cursor
+        .part(0)
+        .ok_or_else(malformed)?
+        .parse::<Timestamp>()
+        .map_err(|_| malformed())?;
+    let id = cursor.part(1).ok_or_else(malformed)?.to_owned();
+    Ok((Some(issued_at), Some(id)))
 }

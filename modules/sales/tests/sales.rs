@@ -673,9 +673,10 @@ async fn the_vat_account_holds_exactly_what_the_invoices_charged() {
     fixture.project().await;
 
     let mut conn = fixture.db.acquire().await.expect("connection");
-    let charged: i64 = sales::invoices(&mut conn, 100)
+    let charged: i64 = sales::invoices(&mut conn, 100, None)
         .await
         .expect("reads")
+        .items
         .iter()
         .map(|i| i.tax.minor())
         .sum();
@@ -1592,9 +1593,10 @@ async fn invoices_are_numbered_in_an_unbroken_sequence() {
     // And the read model agrees, which is the copy anybody actually looks at.
     fixture.project().await;
     let mut conn = fixture.db.acquire().await.expect("connection");
-    let mut projected: Vec<String> = sales::invoices(&mut conn, 100)
+    let mut projected: Vec<String> = sales::invoices(&mut conn, 100, None)
         .await
         .expect("reads")
+        .items
         .into_iter()
         .map(|i| i.number)
         .collect();
@@ -1824,9 +1826,10 @@ async fn a_replay_reproduces_the_numbers_it_issued_under() {
     fixture.project().await;
 
     let mut conn = fixture.db.acquire().await.expect("connection");
-    let before: Vec<(String, String)> = sales::invoices(&mut conn, 100)
+    let before: Vec<(String, String)> = sales::invoices(&mut conn, 100, None)
         .await
         .expect("reads")
+        .items
         .into_iter()
         .map(|i| (i.id, i.number))
         .collect();
@@ -2072,9 +2075,10 @@ async fn an_invoice_cannot_be_dated_into_a_closed_period() {
     fixture.project().await;
     let mut conn = fixture.db.acquire().await.expect("connection");
     assert!(
-        sales::invoices(&mut conn, 100)
+        sales::invoices(&mut conn, 100, None)
             .await
             .expect("reads")
+            .items
             .is_empty(),
         "a refused invoice left a row behind"
     );

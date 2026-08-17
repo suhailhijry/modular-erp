@@ -779,3 +779,136 @@ async fn two_tenants_cannot_share_a_database() {
 
     fixture.cleanup().await;
 }
+
+/// **A person can be erased, and the trail of what they did survives.**
+///
+/// The right this implements is Saudi Arabia's PDPL right to destruction. What
+/// it must not do is destroy the audit trail with them: the entries stay,
+/// saying what was done and when, attributed to nobody — which is the shape an
+/// entry has always had for a system-initiated action.
+#[tokio::test]
+async fn erasing_a_person_keeps_what_the_platform_did() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.member_of(tenant).await;
+
+    // Something they did, so the trail has their name on it.
+    fixture
+        .control
+        .suspend_identity(user, "policy violation", Actor::identity(user))
+        .await
+        .expect("suspends");
+
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_entry")
+        .fetch_one(fixture.control.pool())
+        .await
+        .expect("reads");
+    let theirs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_entry WHERE actor_identity_id = $1")
+            .bind(user.as_uuid())
+            .fetch_one(fixture.control.pool())
+            .await
+            .expect("reads");
+    assert!(
+        theirs > 0,
+        "the trail should name them before they are erased"
+    );
+
+    fixture
+        .control
+        .erase_identity(user, Actor::system())
+        .await
+        .expect("erases");
+
+    // **They are gone.**
+    assert!(
+        fixture
+            .control
+            .identity(user)
+            .await
+            .expect("reads")
+            .is_none()
+    );
+    assert!(matches!(
+        fixture.control.enter(user, tenant, Lane::Interactive).await,
+        Err(spa_control::AccessError::NoSuchIdentity)
+    ));
+
+    // **And the trail is not.** One entry more than before — the erasure
+    // itself — and none of them still names them.
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_entry")
+        .fetch_one(fixture.control.pool())
+        .await
+        .expect("reads");
+    assert_eq!(after, before + 1, "an audit entry was destroyed");
+
+    let still_named: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_entry WHERE actor_identity_id = $1")
+            .bind(user.as_uuid())
+            .fetch_one(fixture.control.pool())
+            .await
+            .expect("reads");
+    assert_eq!(still_named, 0, "the person is still named in the trail");
+
+    // The erasure is visible as having happened.
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_entry WHERE action = 'identity.erased'")
+            .fetch_one(fixture.control.pool())
+            .await
+            .expect("reads");
+    assert_eq!(recorded, 1);
+
+    fixture.cleanup().await;
+}
+
+/// The trigger permits **only** the update that erasure needs.
+///
+/// Widening it to "any update" would make the audit trail a table anybody can
+/// rewrite, which is the thing it exists not to be.
+#[tokio::test]
+async fn the_audit_trail_is_still_append_only_for_everything_else() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let user = fixture.member_of(tenant).await;
+    fixture
+        .control
+        .suspend_identity(user, "policy violation", Actor::identity(user))
+        .await
+        .expect("suspends");
+
+    let pool = fixture.control.pool();
+
+    // Rewriting what was done.
+    assert!(
+        sqlx::query(
+            "UPDATE audit_entry SET action = 'something.else' WHERE action = 'identity.suspended'"
+        )
+        .execute(pool)
+        .await
+        .is_err(),
+        "an audit entry's action was rewritten"
+    );
+
+    // Blaming somebody else — nulling is allowed, reassigning is not.
+    let other = fixture.member_of(tenant).await;
+    assert!(
+        sqlx::query("UPDATE audit_entry SET actor_identity_id = $1 WHERE actor_identity_id = $2")
+            .bind(other.as_uuid())
+            .bind(user.as_uuid())
+            .execute(pool)
+            .await
+            .is_err(),
+        "one person's actions were attributed to another"
+    );
+
+    // Deleting one outright.
+    assert!(
+        sqlx::query("DELETE FROM audit_entry WHERE action = 'identity.suspended'")
+            .execute(pool)
+            .await
+            .is_err(),
+        "an audit entry was deleted"
+    );
+
+    fixture.cleanup().await;
+}

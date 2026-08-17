@@ -3,7 +3,7 @@
 use ledger::VatCategory;
 use spa_eventlog::Envelope;
 use spa_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
-use spa_types::{CurrencyCode, Money, Timestamp};
+use spa_types::{CurrencyCode, Cursor, Money, Page, Timestamp};
 use sqlx::PgConnection;
 
 use crate::bill::BillEvent;
@@ -200,11 +200,16 @@ pub struct BillDetail {
     pub payments: Vec<PaymentRow>,
 }
 
-/// Bills, most recently billed first.
+/// Bills, most recently billed first, one page at a time.
 ///
-/// ponytail: no cursor, same as `sales::invoices`. A tenant with a list long
-/// enough to need one is the signal to build it.
-pub async fn bills(conn: &mut PgConnection, limit: i64) -> Result<Vec<BillSummary>, sqlx::Error> {
+/// Keyset on `(billed_on, id)`, the same shape as `sales::invoices` and for the
+/// same reasons.
+pub async fn bills(
+    conn: &mut PgConnection,
+    limit: i64,
+    after: Option<&Cursor>,
+) -> Result<Page<BillSummary>, sqlx::Error> {
+    let (billed_on, id) = resume(after)?;
     let rows = sqlx::query!(
         r#"SELECT id as "id!", supplier as "supplier!", supplier_vat,
                   reference as "reference!",
@@ -214,9 +219,12 @@ pub async fn bills(conn: &mut PgConnection, limit: i64) -> Result<Vec<BillSummar
                   paid as "paid!", outstanding as "outstanding!",
                   payments as "payments!", note as "note!"
              FROM proj_purchases.bill_status
-            ORDER BY billed_on DESC, id
+            WHERE $2::timestamptz IS NULL OR (billed_on, id) < ($2, $3)
+            ORDER BY billed_on DESC, id DESC
             LIMIT $1"#,
         limit,
+        billed_on,
+        id,
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -240,7 +248,29 @@ pub async fn bills(conn: &mut PgConnection, limit: i64) -> Result<Vec<BillSummar
                 note: row.note,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, sqlx::Error>>()
+        .map(|items| {
+            Page::of(items, limit, |bill| {
+                Cursor::over(&[&bill.billed_on.to_rfc3339(), &bill.id])
+            })
+        })
+}
+
+/// The `(billed_on, id)` a cursor resumes after, or `(None, None)` for the
+/// first page. A cursor this build cannot read is refused, not ignored.
+fn resume(after: Option<&Cursor>) -> Result<(Option<Timestamp>, Option<String>), sqlx::Error> {
+    let Some(cursor) = after else {
+        return Ok((None, None));
+    };
+    let malformed = || sqlx::Error::Decode(Box::new(spa_types::NotACursor));
+
+    let billed_on = cursor
+        .part(0)
+        .ok_or_else(malformed)?
+        .parse::<Timestamp>()
+        .map_err(|_| malformed())?;
+    let id = cursor.part(1).ok_or_else(malformed)?.to_owned();
+    Ok((Some(billed_on), Some(id)))
 }
 
 /// One bill with its lines and payments. `None` if there is no such bill — or if

@@ -531,9 +531,10 @@ async fn a_failed_posting_leaves_no_bill_behind() {
     fixture.project().await;
     let mut conn = fixture.db.acquire().await.expect("connection");
     assert!(
-        purchases::bills(&mut conn, 100)
+        purchases::bills(&mut conn, 100, None)
             .await
             .expect("reads")
+            .items
             .is_empty(),
         "a bill exists that has no accounting behind it"
     );

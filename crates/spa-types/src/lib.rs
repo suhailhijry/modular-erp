@@ -27,6 +27,7 @@ mod ids;
 mod macros;
 mod money;
 mod non_empty;
+mod page;
 
 pub use error::{
     Empty, IdParseError, InvalidCurrency, InvalidString, InvalidStringReason, MoneyError,
@@ -38,6 +39,7 @@ pub use ids::{
 };
 pub use money::{CurrencyCode, Money};
 pub use non_empty::NonEmpty;
+pub use page::{Cursor, NotACursor, Page};
 
 /// The timestamp type used throughout. Always UTC — local time is a display
 /// concern, applied at query time, never stored.

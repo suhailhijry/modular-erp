@@ -1854,6 +1854,7 @@ name = "spa-worker"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ledger",
  "purchases",
  "sales",

@@ -144,7 +144,7 @@ async fn every_module_is_enabled_and_answering() {
         "the ledger has a chart"
     );
 
-    let invoices = demo.get("/v1/sales/invoices").await;
+    let invoices = demo.get("/v1/sales/invoices").await["items"].clone();
     assert_eq!(
         invoices.as_array().expect("a list").len(),
         demo.seeded.invoices,
@@ -159,7 +159,7 @@ async fn every_module_is_enabled_and_answering() {
 async fn the_demo_shows_a_business_rather_than_a_row() {
     let demo = Demo::build("demo-shape").await;
 
-    let invoices = demo.get("/v1/sales/invoices").await;
+    let invoices = demo.get("/v1/sales/invoices").await["items"].clone();
     let invoices = invoices.as_array().expect("a list");
 
     let settled = invoices.iter().filter(|i| i["outstanding"] == 0).count();
@@ -214,7 +214,7 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
     // This also covers the demo's own projection list: a module the demo signs
     // up for and never advances has empty read models, and reads as "the demo is
     // broken" rather than "somebody forgot a line".
-    let bills = demo.get("/v1/purchases/bills").await;
+    let bills = demo.get("/v1/purchases/bills").await["items"].clone();
     let bills = bills.as_array().expect("a list");
     assert_eq!(
         bills.len(),
@@ -384,7 +384,10 @@ async fn the_demo_passes_every_invariant() {
     // before it issues anything, so nothing should be `unregistered` — and a
     // gap in the chain is the failure that would be invisible until a tax
     // authority found it.
-    let documents = tax_sa::documents(&mut conn, 500).await.expect("reads");
+    let documents = tax_sa::documents(&mut conn, 500, None)
+        .await
+        .expect("reads")
+        .items;
     assert_eq!(
         documents.len(),
         demo.seeded.invoices + demo.seeded.credited,

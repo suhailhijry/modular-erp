@@ -2267,7 +2267,7 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
                 .unwrap(),
         )
         .await;
-    let invoices = invoices.as_array().expect("a list");
+    let invoices = invoices["items"].as_array().expect("a list");
     assert_eq!(invoices.len(), 1);
     assert_eq!(invoices[0]["outstanding"], 0);
     assert_eq!(invoices[0]["paid"], 165_000);
@@ -2503,7 +2503,7 @@ async fn a_tenant_can_turn_a_module_on_after_signing_up() {
                 .unwrap(),
         )
         .await;
-    assert_eq!(invoices.as_array().expect("a list").len(), 1);
+    assert_eq!(invoices["items"].as_array().expect("a list").len(), 1);
 
     fixture.cleanup().await;
 }
@@ -2594,7 +2594,7 @@ async fn turning_a_module_off_hides_it_without_losing_anything() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        invoices.as_array().expect("a list").len(),
+        invoices["items"].as_array().expect("a list").len(),
         1,
         "the data was hidden, never deleted"
     );
@@ -3898,7 +3898,7 @@ async fn an_invoice_can_be_credited_and_stops_being_owed() {
                 .unwrap(),
         )
         .await;
-    let invoice = &invoices.as_array().expect("a list")[0];
+    let invoice = &invoices["items"].as_array().expect("a list")[0];
     assert_eq!(invoice["gross"], 11_500, "the document is still there");
     assert_eq!(
         invoice["outstanding"], 0,
@@ -4909,7 +4909,7 @@ async fn zatca_documents_say_which_obligation_they_fall_under() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{documents}");
-    let documents = documents.as_array().expect("a list");
+    let documents = documents["items"].as_array().expect("a list");
     assert_eq!(documents.len(), 2);
 
     let business = documents
@@ -5352,6 +5352,109 @@ async fn no_sealing_key_refuses_rather_than_storing_one_in_the_clear() {
     drop(conn);
     drop(db);
     assert_eq!(secrets, 0);
+
+    fixture.cleanup().await;
+}
+
+/// **Paging returns every row, and says when it has run out.**
+///
+/// Before this, a list took a limit and returned that many — a tenant with more
+/// invoices than fit saw a prefix and a response that looked complete. This
+/// walks the cursors to the end and counts.
+#[tokio::test]
+async fn a_list_longer_than_one_page_can_be_read_to_the_end() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
+    // Five invoices, some sharing a tax point so the cursor's second part is
+    // what separates them — the case a timestamp-only cursor would skip.
+    for n in 1..=5 {
+        let day = if n <= 2 { 10 } else { 11 };
+        let (status, body, _) = fixture
+            .send(
+                bearer(Request::post("/v1/sales/invoices"))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": format!("inv-{n}"),
+                            "customer": { "name": "زبون" },
+                            "issued_on": format!("2026-02-{day:02}T00:00:00Z"),
+                            "currency": "SAR",
+                            "lines": [
+                                { "description": "خدمة", "net": 1_000 * n, "vat": "standard" }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    fixture.project_sales(tenant).await;
+
+    // Walk it two at a time.
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
+    for _ in 0..10 {
+        let path = match &after {
+            Some(cursor) => format!("/v1/sales/invoices?limit=2&after={cursor}"),
+            None => "/v1/sales/invoices?limit=2".to_owned(),
+        };
+        let (status, body, _) = fixture
+            .send(bearer(Request::get(&path)).body(Body::empty()).unwrap())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        for invoice in body["items"].as_array().expect("items") {
+            let number = invoice["number"].as_str().expect("a number").to_owned();
+            assert!(!seen.contains(&number), "{number} came back twice");
+            seen.push(number);
+        }
+
+        match body["next"].as_str() {
+            Some(cursor) => after = Some(cursor.to_owned()),
+            // **Absent means the list ended**, which is the statement the old
+            // shape could not make.
+            None => break,
+        }
+    }
+
+    assert_eq!(seen.len(), 5, "paging lost or repeated rows: {seen:?}");
+
+    // Newest first, and the two sharing a tax point are both there.
+    assert_eq!(
+        seen,
+        vec![
+            "INV-00005".to_owned(),
+            "INV-00004".to_owned(),
+            "INV-00003".to_owned(),
+            "INV-00002".to_owned(),
+            "INV-00001".to_owned()
+        ]
+    );
+
+    // A cursor from somewhere else is refused rather than silently starting
+    // over, which would look like the list restarting.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/sales/invoices?after=not-a-cursor"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.invalid_cursor");
 
     fixture.cleanup().await;
 }

@@ -2049,6 +2049,344 @@
         ],
         "type": "object"
       },
+      "Paged_BillView": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "billed_on": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "currency": {
+                  "type": "string"
+                },
+                "due_on": {
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "gross": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "net": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "note": {
+                  "type": "string"
+                },
+                "outstanding": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "paid": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "payments": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "reference": {
+                  "description": "The supplier's own invoice number.",
+                  "type": "string"
+                },
+                "supplier": {
+                  "type": "string"
+                },
+                "supplier_vat": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tax": {
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "supplier",
+                "reference",
+                "billed_on",
+                "currency",
+                "net",
+                "tax",
+                "gross",
+                "paid",
+                "outstanding",
+                "payments",
+                "note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Paged_DocumentView": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "currency": {
+                  "type": "string"
+                },
+                "gross": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "icv": {
+                  "description": "Where it sits in the hash chain. Absent on a document issued before the\nbusiness registered, which has no place in it.",
+                  "format": "int64",
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "invoice_hash": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "issued_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "kind": {
+                  "description": "`standard` — cleared before the buyer gets it — or `simplified`,\nreported within 24 hours.",
+                  "type": "string"
+                },
+                "net": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "number": {
+                  "description": "The statutory number, which is the document's identity.",
+                  "type": "string"
+                },
+                "previous_hash": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "qr": {
+                  "description": "The base64 TLV block that goes on the printed document. Five fields\nbefore the document is signed, nine after — the last four are the stamp.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "remarks": {
+                  "description": "Warnings on an accepted document, errors on a refused one.",
+                  "items": {
+                    "$ref": "#/components/schemas/RemarkView"
+                  },
+                  "type": "array"
+                },
+                "settled_at": {
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "signature": {
+                  "description": "`ds:SignatureValue`, once it has been signed.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "signed_at": {
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "description": "The invoice it was built from.",
+                  "type": "string"
+                },
+                "status": {
+                  "description": "`unregistered`, `pending`, `cleared`, `reported` or `refused`.",
+                  "type": "string"
+                },
+                "tax": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "type_code": {
+                  "description": "388 invoice, 381 credit note, 383 debit note.",
+                  "format": "int32",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "number",
+                "source",
+                "kind",
+                "type_code",
+                "status",
+                "issued_at",
+                "currency",
+                "net",
+                "tax",
+                "gross",
+                "remarks"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Paged_InvoiceView": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "cancelled_on": {
+                  "description": "Set once a credit note has cancelled it. A cancelled invoice owes\nnothing, and `outstanding` says so too.",
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "credit_note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "currency": {
+                  "type": "string"
+                },
+                "customer": {
+                  "type": "string"
+                },
+                "customer_vat": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "due_on": {
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "gross": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "id": {
+                  "description": "The key the client sent when issuing, and what addresses this invoice.",
+                  "type": "string"
+                },
+                "issued_on": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "net": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "note": {
+                  "type": "string"
+                },
+                "number": {
+                  "description": "The statutory number. Sequential, gapless, and what the document prints.",
+                  "type": "string"
+                },
+                "outstanding": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "paid": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "payment_count": {
+                  "description": "How many payments have been recorded. The payments themselves are on\n`GET /v1/sales/invoices/{invoice}`.\n\nNot `payments`: the detail view flattens this one and adds the list, and\ntwo shapes under one name on the same resource is a client generator's\nworst afternoon.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "tax": {
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "number",
+                "customer",
+                "issued_on",
+                "currency",
+                "net",
+                "tax",
+                "gross",
+                "paid",
+                "outstanding",
+                "payment_count",
+                "note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "PaymentView": {
         "properties": {
           "account": {
@@ -5446,14 +5784,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/BillView"
-                  },
-                  "type": "array"
+                  "$ref": "#/components/schemas/Paged_BillView"
                 }
               }
             },
-            "description": "Done."
+            "description": "One page. `next` is absent when the list ended."
           },
           "400": {
             "content": {
@@ -5977,14 +6312,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/InvoiceView"
-                  },
-                  "type": "array"
+                  "$ref": "#/components/schemas/Paged_InvoiceView"
                 }
               }
             },
-            "description": "Done."
+            "description": "One page. `next` is absent when the list ended."
           },
           "400": {
             "content": {
@@ -7863,14 +8195,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/DocumentView"
-                  },
-                  "type": "array"
+                  "$ref": "#/components/schemas/Paged_DocumentView"
                 }
               }
             },
-            "description": "Done."
+            "description": "One page. `next` is absent when the list ended."
           },
           "400": {
             "content": {

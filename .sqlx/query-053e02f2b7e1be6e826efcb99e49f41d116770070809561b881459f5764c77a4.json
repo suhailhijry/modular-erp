@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", supplier as \"supplier!\", supplier_vat,\n                  reference as \"reference!\",\n                  billed_on as \"billed_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\"\n             FROM proj_purchases.bill_status\n            ORDER BY billed_on DESC, id\n            LIMIT $1",
+  "query": "SELECT id as \"id!\", number as \"number!\", customer as \"customer!\", customer_vat,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\",\n                  cancelled_on, credit_note\n             FROM proj_sales.invoice_status\n            WHERE $2::timestamptz IS NULL OR (issued_on, id) < ($2, $3)\n            ORDER BY issued_on DESC, id DESC\n            LIMIT $1",
   "describe": {
     "columns": [
       {
@@ -9,52 +9,52 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "id"
           }
         }
       },
       {
         "ordinal": 1,
-        "name": "supplier!",
+        "name": "number!",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
-            "name": "supplier"
+            "table": "proj_sales.invoice_status",
+            "name": "number"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "supplier_vat",
+        "name": "customer!",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
-            "name": "supplier_vat"
+            "table": "proj_sales.invoice_status",
+            "name": "customer"
           }
         }
       },
       {
         "ordinal": 3,
-        "name": "reference!",
+        "name": "customer_vat",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
-            "name": "reference"
+            "table": "proj_sales.invoice_status",
+            "name": "customer_vat"
           }
         }
       },
       {
         "ordinal": 4,
-        "name": "billed_on!",
+        "name": "issued_on!",
         "type_info": "Timestamptz",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
-            "name": "billed_on"
+            "table": "proj_sales.invoice_status",
+            "name": "issued_on"
           }
         }
       },
@@ -64,7 +64,7 @@
         "type_info": "Timestamptz",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "due_on"
           }
         }
@@ -75,7 +75,7 @@
         "type_info": "Bpchar",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "currency"
           }
         }
@@ -86,7 +86,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "net"
           }
         }
@@ -97,7 +97,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "tax"
           }
         }
@@ -108,7 +108,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "gross"
           }
         }
@@ -119,7 +119,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "paid"
           }
         }
@@ -130,7 +130,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "outstanding"
           }
         }
@@ -141,7 +141,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "payments"
           }
         }
@@ -152,15 +152,39 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_purchases.bill_status",
+            "table": "proj_sales.invoice_status",
             "name": "note"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "cancelled_on",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "cancelled_on"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "credit_note",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "credit_note"
           }
         }
       }
     ],
     "parameters": {
       "Left": [
-        "Int8"
+        "Int8",
+        "Timestamptz",
+        "Text"
       ]
     },
     "nullable": [
@@ -177,8 +201,10 @@
       true,
       true,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "d98178970ea38720e64a139f14c404d5ae19e47fb18840966ae14a9dccb4ca69"
+  "hash": "053e02f2b7e1be6e826efcb99e49f41d116770070809561b881459f5764c77a4"
 }

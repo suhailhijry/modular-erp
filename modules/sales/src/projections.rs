@@ -2,7 +2,7 @@
 
 use spa_eventlog::Envelope;
 use spa_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
-use spa_types::{CurrencyCode, Money, Timestamp};
+use spa_types::{CurrencyCode, Cursor, Money, Page, Timestamp};
 use sqlx::PgConnection;
 
 use crate::invoice::InvoiceEvent;
@@ -306,15 +306,20 @@ pub struct InvoiceDetail {
     pub payments: Vec<PaymentRow>,
 }
 
-/// Invoices, newest first.
+/// Invoices, newest first, one page at a time.
 ///
-/// ponytail: no cursor. A tenant with more invoices than fit in one response is
-/// a tenant worth building paging for, and the `issued_on DESC` index is what it
-/// would page on.
+/// # Keyset, on the columns it is ordered by
+///
+/// `(issued_on, id)` descending, and the cursor is the last row's pair. It
+/// reads one index range whatever page it is on, and an invoice issued while
+/// somebody pages cannot displace a row they have not seen yet — which
+/// `OFFSET` could not promise.
 pub async fn invoices(
     conn: &mut PgConnection,
     limit: i64,
-) -> Result<Vec<InvoiceSummary>, sqlx::Error> {
+    after: Option<&Cursor>,
+) -> Result<Page<InvoiceSummary>, sqlx::Error> {
+    let (issued_on, id) = resume(after)?;
     let rows = sqlx::query!(
         r#"SELECT id as "id!", number as "number!", customer as "customer!", customer_vat,
                   issued_on as "issued_on!", due_on,
@@ -324,9 +329,12 @@ pub async fn invoices(
                   payments as "payments!", note as "note!",
                   cancelled_on, credit_note
              FROM proj_sales.invoice_status
-            ORDER BY issued_on DESC, id
+            WHERE $2::timestamptz IS NULL OR (issued_on, id) < ($2, $3)
+            ORDER BY issued_on DESC, id DESC
             LIMIT $1"#,
         limit,
+        issued_on,
+        id,
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -352,7 +360,33 @@ pub async fn invoices(
                 credit_note: row.credit_note,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, sqlx::Error>>()
+        .map(|items| {
+            Page::of(items, limit, |invoice| {
+                Cursor::over(&[&invoice.issued_on.to_rfc3339(), &invoice.id])
+            })
+        })
+}
+
+/// The `(issued_on, id)` a cursor resumes after, or `(None, None)` for the
+/// first page.
+///
+/// A cursor this build cannot read is **refused**, not ignored: silently
+/// starting from the top would hand a caller the first page again and look like
+/// the list restarting.
+fn resume(after: Option<&Cursor>) -> Result<(Option<Timestamp>, Option<String>), sqlx::Error> {
+    let Some(cursor) = after else {
+        return Ok((None, None));
+    };
+    let malformed = || sqlx::Error::Decode(Box::new(spa_types::NotACursor));
+
+    let issued_on = cursor
+        .part(0)
+        .ok_or_else(malformed)?
+        .parse::<Timestamp>()
+        .map_err(|_| malformed())?;
+    let id = cursor.part(1).ok_or_else(malformed)?.to_owned();
+    Ok((Some(issued_on), Some(id)))
 }
 
 /// One invoice with its lines, tax bands and payments. `None` if there is no

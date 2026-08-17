@@ -725,7 +725,10 @@ async fn a_rebuild_reproduces_every_document_exactly() {
 
     let before: Vec<_> = {
         let mut conn = fixture.db.acquire().await.expect("connection");
-        let all = tax_sa::documents(&mut conn, 100).await.expect("reads");
+        let all = tax_sa::documents(&mut conn, 100, None)
+            .await
+            .expect("reads")
+            .items;
         drop(conn);
         all
     };

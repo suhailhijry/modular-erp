@@ -668,6 +668,58 @@ impl ControlPlane {
         .await
     }
 
+    /// **Erases a person**, keeping what the platform did.
+    ///
+    /// # What goes and what stays
+    ///
+    /// The identity row goes, and with it every authenticator, session and
+    /// membership — those cascade. What stays is the audit trail, with this
+    /// person's name removed from it: the entries they produced remain, saying
+    /// what was done and when, attributed to nobody. That is the same shape an
+    /// entry has always had for a system-initiated action.
+    ///
+    /// Business records are untouched, and deliberately. An invoice naming a
+    /// customer is a legal document a tax authority requires to be kept for
+    /// six years; erasing a *user account* is a different act from destroying
+    /// the books, and conflating them would put the business in breach to keep
+    /// one person happy.
+    ///
+    /// # Why this could not be done before
+    ///
+    /// `audit_entry`'s trigger refused the `ON DELETE SET NULL` its own foreign
+    /// keys declared, so `DELETE FROM identity` failed for anybody who had ever
+    /// acted. See `migrations/control/0007_erasure.sql`.
+    ///
+    /// # What is deliberately not here
+    ///
+    /// An HTTP endpoint. **Who may erase whom** is a policy question — a
+    /// tenant owner erasing a colleague is not the same act as a person erasing
+    /// themselves, and neither is platform staff erasing a customer — and
+    /// answering it in passing while fixing a schema bug would be answering it
+    /// badly.
+    pub async fn erase_identity(&self, id: IdentityId, actor: Actor) -> Result<(), AccessError> {
+        // **Recorded first.** After the delete there is no identity to name in
+        // the entry, and an erasure nobody can see having happened is the one
+        // kind this must not be.
+        self.record(
+            actor,
+            "identity.erased",
+            "identity",
+            &id.to_string(),
+            serde_json::json!({}),
+        )
+        .await?;
+
+        sqlx::query!("DELETE FROM identity WHERE id = $1", id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+
+        // This node stops honouring them at once; others converge within
+        // `ENTRY_CACHE_TTL`, the same window as a suspension.
+        self.identities.invalidate(&id);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Clusters
     // -----------------------------------------------------------------------

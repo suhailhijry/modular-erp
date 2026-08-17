@@ -92,11 +92,37 @@ validated_string! {
     validate = ascii_identifier
 }
 
+/// A module's identifier, which is narrower than an identifier.
+///
+/// # Why this is not `ascii_identifier`
+///
+/// It was, and the type accepted `tax-sa` — which constructed fine, passed
+/// every test that does not touch the control plane, and failed at the moment a
+/// tenant enabled it: `entitlement.module_id` is `^[a-z][a-z0-9_]{0,47}$` and
+/// the database refused what the type had allowed. A terrible place to find out.
+///
+/// So the type carries the rule the schema enforces: lower case, starting with
+/// a letter, and `_` as the only separator. A module id that cannot be stored
+/// is now one that cannot be built.
+fn module_identifier(value: &str) -> Result<(), InvalidStringReason> {
+    for (index, ch) in value.char_indices() {
+        let allowed = if index == 0 {
+            ch.is_ascii_lowercase()
+        } else {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'
+        };
+        if !allowed {
+            return Err(InvalidStringReason::ForbiddenChar { ch, index });
+        }
+    }
+    Ok(())
+}
+
 validated_string! {
-    /// A module's identifier — `ledger`, `invoicing`.
+    /// A module's identifier — `ledger`, `sales`, `tax_sa`.
     ModuleId,
     max_len = 48,
-    validate = ascii_identifier
+    validate = module_identifier
 }
 
 validated_string! {
@@ -134,6 +160,24 @@ impl fmt::Display for StreamId {
 
 #[cfg(test)]
 mod tests {
+    /// **The type refuses what the database would.**
+    ///
+    /// `tax-sa` once constructed fine and failed at the moment a tenant enabled
+    /// it, because `entitlement.module_id` is `^[a-z][a-z0-9_]{0,47}$`. Every
+    /// character this accepts, that pattern accepts.
+    #[test]
+    fn a_module_id_is_what_the_schema_will_store() {
+        for good in ["ledger", "sales", "tax_sa", "a", "m2m", "a_b_c"] {
+            assert!(ModuleId::new(good).is_ok(), "{good} was refused");
+        }
+        for bad in [
+            "tax-sa", // the one that got through
+            "tax.sa", "TaxSa", "Ledger", "2fast", "_leading", "", "tax sa",
+        ] {
+            assert!(ModuleId::new(bad).is_err(), "{bad:?} was accepted");
+        }
+    }
+
     use super::*;
     use crate::error::NegativeCounter;
     use core::str::FromStr;

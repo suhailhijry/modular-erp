@@ -14,7 +14,8 @@ use spa_control::{ClusterRegistry, ControlPlane, PoolConfig, TenantPools};
 use spa_eventlog::{Dispatcher, RetryPolicy};
 use spa_types::ModuleId;
 use spa_worker::{
-    Finding, HealthJob, Invariant, OutboxJob, ProjectionJob, Worker, WorkerConfig, shutdown_signal,
+    Activity, Finding, HealthJob, Invariant, OutboxJob, ProjectionJob, Worker, WorkerConfig,
+    shutdown_signal,
 };
 
 #[tokio::main]
@@ -68,10 +69,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             HealthJob::every(Duration::from_mins(5))
                 .with(Arc::new(TrialBalance))
                 .with(Arc::new(NoOverpaidInvoice))
-                .with(Arc::new(NoOverpaidBill)),
+                .with(Arc::new(NoOverpaidBill))
+                .with(Arc::new(CertificateExpiry)),
         ));
     for job in module_jobs() {
         worker = worker.with_job(job);
+    }
+
+    // **The ZATCA sweeps, and only with a sealing key.** They read a tenant's
+    // private key to sign with, so without one there is nothing to read and the
+    // jobs are not registered at all — which is louder than a job that runs and
+    // finds it can do nothing.
+    if let Ok(configured) = std::env::var("SEALING_KEY") {
+        let sealing = spa_eventlog::SealingKey::parse(&configured)?;
+        tracing::info!(
+            key = sealing.id(),
+            "sealing key loaded; ZATCA sweeps enabled"
+        );
+        for job in zatca_jobs(&sealing) {
+            worker = worker.with_job(job);
+        }
+    } else {
+        tracing::warn!(
+            "SEALING_KEY is not set; invoices will be built and chained but never \
+             signed or sent to ZATCA"
+        );
     }
 
     let shutdown = worker.run(shutdown_signal()).await;
@@ -123,6 +145,255 @@ impl Invariant for TrialBalance {
             })
             .collect())
     }
+}
+
+/// How long before a certificate expires the platform starts saying so.
+///
+/// Sixty days, because renewing needs a **human**: the taxpayer logs in to the
+/// Fatoora portal and reads an OTP off a screen. Nothing here can do that, so
+/// the only thing that stops a lapse is telling somebody early enough to act.
+const EXPIRY_WARNING: chrono::TimeDelta = chrono::TimeDelta::days(60);
+
+/// **A ZATCA certificate that is running out.**
+///
+/// When it lapses, every invoice stops being clearable — and the first anyone
+/// would know is a customer waiting for one. A five-year certificate is exactly
+/// the kind of deadline nobody has a reminder for.
+struct CertificateExpiry;
+
+#[async_trait::async_trait]
+impl Invariant for CertificateExpiry {
+    fn name(&self) -> &'static str {
+        "zatca_certificate_expiry"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(tax_sa::module_id())
+    }
+
+    async fn check(
+        &self,
+        db: &spa_control::TenantDb,
+    ) -> Result<Vec<Finding>, spa_worker::BoxError> {
+        let mut conn = db.acquire().await?;
+        let loaded = spa_eventlog::load::<tax_sa::Onboarding>(
+            &mut conn,
+            &tax_sa::onboarding_id(),
+            tax_sa::upcasters(),
+        )
+        .await?;
+        drop(conn);
+
+        // Never onboarded: nothing to expire, and not a finding.
+        let Some(not_after) = loaded.aggregate.not_after.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let Some(expires) = certificate_time(not_after) else {
+            return Ok(vec![Finding::new(
+                "zatca_certificate_expiry",
+                format!("the certificate's expiry date cannot be read: {not_after:?}"),
+            )]);
+        };
+
+        let left = expires - chrono::Utc::now();
+        if left > EXPIRY_WARNING {
+            return Ok(Vec::new());
+        }
+
+        Ok(vec![Finding::new(
+            "zatca_certificate_expiry",
+            if left.num_seconds() <= 0 {
+                format!(
+                    "the ZATCA certificate expired on {not_after}; no invoice can be cleared \
+                     or reported until it is renewed"
+                )
+            } else {
+                format!(
+                    "the ZATCA certificate expires in {} days ({not_after}); renewing needs \
+                     an OTP from the taxpayer's Fatoora portal",
+                    left.num_days()
+                )
+            },
+        )])
+    }
+}
+
+/// OpenSSL's `Aug 16 20:28:41 2031 GMT`, as an instant.
+///
+/// Parsed from what the certificate says rather than from a field this system
+/// chose, because the certificate is the authority on when it stops working.
+fn certificate_time(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    // `%e` is the day with a leading space for single digits, which is what
+    // OpenSSL prints and what a `%d` parse would reject on the ninth of a month.
+    chrono::NaiveDateTime::parse_from_str(text.trim(), "%b %e %H:%M:%S %Y GMT")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// How many documents one sweep handles for one tenant.
+///
+/// Small on purpose: a visit is meant to be short so the worker gets round
+/// every tenant, and a clearance call is a network round trip in front of a
+/// person. What is not swept this visit is swept the next.
+const ZATCA_BATCH: i64 = 20;
+
+/// Anything a worker writes is the platform's doing, not a person's.
+fn by_the_platform() -> spa_eventlog::Metadata {
+    spa_eventlog::Metadata::default()
+}
+
+/// **Signs the ZATCA documents that have been built and not yet signed.**
+///
+/// Separate from submitting because they fail for different reasons, and a
+/// document needs this one even when ZATCA is unreachable: a simplified
+/// invoice's QR carries the cryptographic stamp, and that receipt goes to the
+/// customer at the till.
+struct SignZatcaDocuments {
+    sealing: spa_eventlog::SealingKey,
+}
+
+#[async_trait::async_trait]
+impl spa_worker::Job for SignZatcaDocuments {
+    fn name(&self) -> &'static str {
+        "tax_sa.sign"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(tax_sa::module_id())
+    }
+
+    async fn tick(&self, db: &spa_control::TenantDb) -> Result<Activity, spa_worker::BoxError> {
+        let signed = tax_sa::sign_pending(
+            db,
+            &self.sealing,
+            chrono::Utc::now(),
+            ZATCA_BATCH,
+            &by_the_platform(),
+        )
+        .await?;
+
+        // Not an error: a tenant that has not finished onboarding is in a
+        // normal state, and the standing report is where that shows.
+        if signed.waiting_for_a_certificate > 0 {
+            tracing::debug!(
+                tenant = %db.tenant(),
+                waiting = signed.waiting_for_a_certificate,
+                "documents are built and there is no certificate to sign them with"
+            );
+        }
+        if signed.signed > 0 {
+            tracing::info!(tenant = %db.tenant(), signed = signed.signed, "signed");
+        }
+
+        Ok(if signed.signed > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
+
+/// **Sends signed documents to ZATCA and records what it said.**
+///
+/// Standard invoices are cleared, simplified ones reported, and the sweep stops
+/// on the first call that is not answered — every document after it would fail
+/// the same way, and none of them is what is wrong.
+struct SubmitToZatca {
+    sealing: spa_eventlog::SealingKey,
+}
+
+#[async_trait::async_trait]
+impl spa_worker::Job for SubmitToZatca {
+    fn name(&self) -> &'static str {
+        "tax_sa.submit"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(tax_sa::module_id())
+    }
+
+    async fn tick(&self, db: &spa_control::TenantDb) -> Result<Activity, spa_worker::BoxError> {
+        // Nothing to authenticate with, or nowhere to send it: a tenant part
+        // way through onboarding, which is not a failure.
+        let Some(credentials) = tax_sa::zatca::onboarding::production(db, &self.sealing).await?
+        else {
+            return Ok(Activity::Idle);
+        };
+        let Some(environment) = zatca_environment(db).await? else {
+            return Ok(Activity::Idle);
+        };
+
+        let client = tax_sa::zatca::http::Fatoora::new(environment)?.with_credentials(credentials);
+        let swept = tax_sa::submit_pending(
+            db,
+            &client,
+            chrono::Utc::now(),
+            ZATCA_BATCH,
+            &by_the_platform(),
+        )
+        .await?;
+
+        // **Loudly.** A tenant whose documents are not reaching ZATCA has 24
+        // hours on every simplified invoice, and nothing else in the system
+        // will say so.
+        if let Some(stopped) = &swept.stopped {
+            tracing::warn!(
+                tenant = %db.tenant(),
+                error = %stopped,
+                accepted = swept.accepted,
+                "the ZATCA sweep stopped early; the rest stay pending"
+            );
+        }
+        if swept.did_something() {
+            tracing::info!(
+                tenant = %db.tenant(),
+                accepted = swept.accepted,
+                refused = swept.refused,
+                "submitted to ZATCA"
+            );
+        }
+
+        Ok(if swept.did_something() {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
+
+/// **The sweeps that talk to ZATCA**, in one list.
+///
+/// A function rather than two `with_job` calls in `main` for the same reason
+/// [`module_jobs`] is one: a test can look at what a deployment would run, and
+/// a job that runs for tenants who never bought the module is caught here
+/// rather than on a bill.
+fn zatca_jobs(sealing: &spa_eventlog::SealingKey) -> Vec<Arc<dyn spa_worker::Job>> {
+    vec![
+        Arc::new(SignZatcaDocuments {
+            sealing: sealing.clone(),
+        }),
+        Arc::new(SubmitToZatca {
+            sealing: sealing.clone(),
+        }),
+    ]
+}
+
+/// Which ZATCA a tenant onboarded into, from the log.
+///
+/// `None` when they have not onboarded at all, which is most tenants most of
+/// the time and is why this is not an error.
+async fn zatca_environment(
+    db: &spa_control::TenantDb,
+) -> Result<Option<tax_sa::zatca::csr::Environment>, spa_worker::BoxError> {
+    let mut conn = db.acquire().await?;
+    let loaded = spa_eventlog::load::<tax_sa::Onboarding>(
+        &mut conn,
+        &tax_sa::onboarding_id(),
+        tax_sa::upcasters(),
+    )
+    .await?;
+    drop(conn);
+    Ok(loaded.aggregate.environment)
 }
 
 /// **Every module's projections, in one list.**
@@ -249,7 +520,7 @@ impl Invariant for NoOverpaidInvoice {
 
 #[cfg(test)]
 mod tests {
-    use super::module_jobs;
+    use super::{certificate_time, module_jobs, zatca_jobs};
     use std::collections::BTreeSet;
 
     /// **Every module this build offers has a projection job here.**
@@ -291,14 +562,53 @@ mod tests {
     /// ones that declined it — which is the other half of what "modular" has to
     /// mean, and a `for_module` somebody forgot looks identical until the bill
     /// arrives.
+    ///
+    /// **The ZATCA sweeps are in here too**, because they are the ones that
+    /// would cost real money: a submit job with no `module()` opens a
+    /// connection to a tax authority for every tenant on the platform.
     #[test]
     fn no_module_job_runs_for_tenants_that_declined_it() {
-        for job in module_jobs() {
+        let sealing = spa_eventlog::SealingKey::new("test", &[0u8; 32]).expect("32 bytes");
+        for job in module_jobs().into_iter().chain(zatca_jobs(&sealing)) {
             assert!(
                 job.module().is_some(),
                 "{} runs for every tenant, including the ones that did not buy it",
                 job.name()
             );
         }
+    }
+
+    /// **A document is signed before it is sent**, and both halves have to be
+    /// registered for either to matter.
+    ///
+    /// Everything ZATCA-related was written before there was anything to run
+    /// it: for several increments the whole path worked in tests and was
+    /// unreachable in production. This is the check that says it is wired in.
+    #[test]
+    fn a_deployment_with_a_sealing_key_both_signs_and_submits() {
+        let sealing = spa_eventlog::SealingKey::new("test", &[0u8; 32]).expect("32 bytes");
+        let names: Vec<&str> = zatca_jobs(&sealing).iter().map(|job| job.name()).collect();
+
+        assert!(names.contains(&"tax_sa.sign"), "{names:?}");
+        assert!(names.contains(&"tax_sa.submit"), "{names:?}");
+        assert!(
+            zatca_jobs(&sealing)
+                .iter()
+                .all(|job| job.module() == Some(tax_sa::module_id()))
+        );
+    }
+
+    /// OpenSSL prints a single-digit day with a **leading space**, which a
+    /// `%d` parse rejects — so this would work for three weeks in four and
+    /// report an unreadable certificate on the ninth of the month.
+    #[test]
+    fn a_certificates_expiry_is_read_the_way_openssl_prints_it() {
+        let parsed = certificate_time("Aug 16 20:28:41 2031 GMT").expect("a date");
+        assert_eq!(parsed.to_rfc3339(), "2031-08-16T20:28:41+00:00");
+
+        let single_digit = certificate_time("Sep  9 01:02:03 2031 GMT").expect("a date");
+        assert_eq!(single_digit.to_rfc3339(), "2031-09-09T01:02:03+00:00");
+
+        assert!(certificate_time("whenever").is_none());
     }
 }

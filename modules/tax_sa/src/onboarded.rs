@@ -81,6 +81,10 @@ pub struct Onboarding {
     /// The serial of the certificate currently in force, for telling a repeat
     /// caller that nothing changed.
     pub serial: Option<String>,
+    /// When it stops working, **as the certificate states it**. Text rather
+    /// than an instant because the certificate is the authority and a parse is
+    /// a second opinion about it — see the worker's `CertificateExpiry`.
+    pub not_after: Option<String>,
     pub issued_at: Option<Timestamp>,
 }
 
@@ -97,6 +101,7 @@ impl Aggregate for Onboarding {
                 stage,
                 environment,
                 serial,
+                not_after,
                 at,
                 ..
             } => {
@@ -108,6 +113,7 @@ impl Aggregate for Onboarding {
                 }
                 self.environment = Some(*environment);
                 self.serial = Some(serial.clone());
+                self.not_after = Some(not_after.clone());
                 self.issued_at = Some(*at);
             }
         }

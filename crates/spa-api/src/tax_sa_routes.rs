@@ -812,7 +812,7 @@ struct AsOf {
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
     responses(
-        (status = OK, body = Vec<DocumentView>),
+        (status = OK, description = "One page. `next` is absent when the list ended.", body = crate::wire::Paged<DocumentView>),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -823,23 +823,26 @@ async fn zatca_documents(
     tenant: Allowed<Read>,
     Language(locale): Language,
     consistency: Consistency,
-) -> Result<Json<Vec<DocumentView>>, Problem> {
+    Query(page): Query<crate::wire::After>,
+) -> Result<Json<crate::wire::Paged<DocumentView>>, Problem> {
     require_module(&tenant, &tax_sa::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, tax_sa::GROUP_NAME, locale)
         .await?;
+    let after = page.cursor(locale)?;
+    let limit = page.limit(DOCUMENTS, DOCUMENTS);
 
     let mut conn = tenant
         .db
         .read()
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let found = tax_sa::documents(&mut conn, DOCUMENTS)
+    let found = tax_sa::documents(&mut conn, limit, after.as_ref())
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
     drop(conn);
 
-    Ok(Json(found.into_iter().map(document_view).collect()))
+    Ok(Json(crate::wire::Paged::of(found, document_view)))
 }
 
 /// One document, with the UBL that was hashed and the stamp that came back.

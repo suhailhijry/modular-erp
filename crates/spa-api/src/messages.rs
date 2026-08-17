@@ -50,6 +50,7 @@ pub const MALFORMED_BODY: MessageCode = MessageCode::new("request.malformed_body
 pub const UNSUPPORTED_MEDIA_TYPE: MessageCode = MessageCode::new("request.unsupported_media_type");
 /// 400. The query string is missing something, or carries something unreadable.
 pub const INVALID_QUERY: MessageCode = MessageCode::new("request.invalid_query");
+pub const INVALID_CURSOR: MessageCode = MessageCode::new("request.invalid_cursor");
 
 pub static CODES: &[MessageCode] = &[
     UNKNOWN_CURRENCY,
@@ -84,6 +85,7 @@ pub static CODES: &[MessageCode] = &[
     MALFORMED_BODY,
     UNSUPPORTED_MEDIA_TYPE,
     INVALID_QUERY,
+    INVALID_CURSOR,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -285,6 +287,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Locale::Arabic,
         Template::Simple(
             "رفضت هيئة الزكاة والضريبة والجمارك {failed} من أصل {submitted} من مستندات الفحص التي أنشأها النظام، فتعذّر التفعيل. الخلل في النظام وليس في طلبك: {reason}",
+        ),
+    ),
+    (
+        INVALID_CURSOR,
+        Locale::English,
+        Template::Simple(
+            "{after} is not a page cursor from this API. Pass back the `next` value from a previous response, or leave it out to start from the beginning.",
+        ),
+    ),
+    (
+        INVALID_CURSOR,
+        Locale::Arabic,
+        Template::Simple(
+            "{after} ليس مؤشر صفحة من هذه الواجهة. أعد إرسال قيمة `next` من الاستجابة السابقة، أو اتركه فارغًا للبدء من الأول.",
         ),
     ),
     (

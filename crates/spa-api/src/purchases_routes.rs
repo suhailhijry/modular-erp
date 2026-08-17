@@ -25,7 +25,9 @@ use crate::error::ApiError;
 use crate::extract::{Allowed, Language, PostEntries, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
-use crate::wire::{Amount, Json, bad_request, metadata, parse_id, require_module};
+use crate::wire::{
+    After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module,
+};
 
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -362,7 +364,7 @@ async fn pay_bill(
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
-        (status = OK, body = Vec<BillView>),
+        (status = OK, description = "One page. `next` is absent when the list ended.", body = Paged<BillView>),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -373,23 +375,26 @@ async fn list_bills(
     tenant: Allowed<Read>,
     Language(locale): Language,
     consistency: Consistency,
-) -> Result<Json<Vec<BillView>>, Problem> {
+    Query(page): Query<After>,
+) -> Result<Json<Paged<BillView>>, Problem> {
     require_module(&tenant, &purchases::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, purchases::GROUP_NAME, locale)
         .await?;
 
+    let after = page.cursor(locale)?;
+    let limit = page.limit(PAGE, PAGE);
     let mut conn = tenant
         .db
         .read()
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
 
-    let bills = purchases::bills(&mut conn, PAGE)
+    let bills = purchases::bills(&mut conn, limit, after.as_ref())
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
 
-    Ok(Json(bills.into_iter().map(view).collect()))
+    Ok(Json(Paged::of(bills, view)))
 }
 
 /// One bill, with its lines and its payments.

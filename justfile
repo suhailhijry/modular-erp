@@ -111,6 +111,24 @@ openapi:
 # `audit_entry is append-only`. TRUNCATE fires no row trigger, which is the only
 # way past it and is what this recipe means anyway.
 clean-databases:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # **Refuse while a test run is in progress.**
+    #
+    # `WITH (FORCE)` terminates whatever is connected, which is what makes this
+    # recipe able to clear databases a panicking test leaked — and what makes it
+    # able to pull a database out from under a *running* one. That failure is
+    # ugly: the test does not error, it sees an empty table and fails an
+    # assertion somewhere unrelated, which is an afternoon of looking in the
+    # wrong place. It has already cost one.
+    busy=$(psql "{{admin_url}}" -tAc "
+        SELECT count(*) FROM pg_stat_activity
+         WHERE datname LIKE 'spa_test_%' OR datname LIKE 'spa_tmpl_%'")
+    if [ "${busy:-0}" -gt 0 ]; then
+        echo "refusing: ${busy} connection(s) to test databases — a test run is in progress." >&2
+        echo "wait for it to finish, or drop them by hand if you are sure." >&2
+        exit 1
+    fi
     psql "{{admin_url}}" -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'spa_test_%' OR datname LIKE 'spa_tmpl_%' OR datname LIKE 'spa_tenant_%'" \
       | xargs -r -I{} psql "{{admin_url}}" -q -c 'DROP DATABASE IF EXISTS "{}" WITH (FORCE)'
     psql "{{base_url}}" -q -c "DELETE FROM tenant WHERE database_name NOT IN (SELECT datname FROM pg_database)" 2>/dev/null || true

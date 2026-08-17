@@ -178,3 +178,86 @@ pub(crate) fn require_module(
     )
     .into_problem(locale))
 }
+
+// ---------------------------------------------------------------------------
+// Paging
+// ---------------------------------------------------------------------------
+
+/// One page of a list, and where the next one starts.
+///
+/// # Why every list is shaped like this
+///
+/// Because the alternative was a bare array that stopped at 200 and said
+/// nothing. A tenant with 201 invoices saw 200 and had no way to tell — the
+/// response looked exactly like a complete one, which is the worst shape a bug
+/// can have.
+///
+/// `next` absent means **the list ended**. Present means pass it back as
+/// `?after=` to continue.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct Paged<T> {
+    pub(crate) items: Vec<T>,
+    /// Pass back as `?after=` for the next page. Absent when there are no more.
+    ///
+    /// Opaque: what is in it is the query's business, and a client that parsed
+    /// one would break the day a list is ordered differently.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next: Option<String>,
+}
+
+impl<T> Paged<T> {
+    /// Renders a page, mapping each row to its wire shape.
+    pub(crate) fn of<R>(page: spa_types::Page<R>, view: impl Fn(R) -> T) -> Self {
+        Self {
+            next: page.next.map(|cursor| cursor.to_string()),
+            items: page.items.into_iter().map(view).collect(),
+        }
+    }
+}
+
+/// How much of a list to return, and where to resume it.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct After {
+    #[serde(default)]
+    pub(crate) after: Option<String>,
+    /// How many rows. Absent takes the default; anything above the maximum is
+    /// **clamped rather than refused**, because a caller asking for more than
+    /// the server will give wants as much as it will give.
+    #[serde(default)]
+    pub(crate) limit: Option<i64>,
+}
+
+impl After {
+    /// The page size, within what this API will serve.
+    ///
+    /// A limit below one is a request for nothing, which is never what anybody
+    /// means — it comes from an uninitialised variable — so it takes the
+    /// default too.
+    #[must_use]
+    pub(crate) fn limit(&self, default: i64, max: i64) -> i64 {
+        match self.limit {
+            Some(asked) if asked >= 1 => asked.min(max),
+            _ => default,
+        }
+    }
+
+    /// The cursor, or a 400 naming the parameter.
+    ///
+    /// A cursor this build cannot read is **refused**, not ignored: silently
+    /// starting from the top would hand a caller the first page again and look
+    /// like the list restarting.
+    pub(crate) fn cursor(
+        &self,
+        locale: spa_i18n::Locale,
+    ) -> Result<Option<spa_types::Cursor>, Problem> {
+        self.after
+            .as_deref()
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                spa_types::Cursor::decode(text).map_err(|_| {
+                    bad_request(crate::messages::INVALID_CURSOR, "after", text, locale)
+                })
+            })
+            .transpose()
+    }
+}

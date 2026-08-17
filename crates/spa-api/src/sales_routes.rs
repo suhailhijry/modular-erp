@@ -23,7 +23,9 @@ use crate::error::ApiError;
 use crate::extract::{Allowed, Language, ManageAccounts, PostEntries, Read};
 use crate::problem::Problem;
 use crate::state::AppState;
-use crate::wire::{Amount, Json, bad_request, metadata, parse_id, require_module};
+use crate::wire::{
+    After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module,
+};
 
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -561,7 +563,7 @@ async fn credit_note(
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
-        (status = OK, body = Vec<InvoiceView>),
+        (status = OK, description = "One page. `next` is absent when the list ended.", body = Paged<InvoiceView>),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -572,11 +574,14 @@ async fn list_invoices(
     tenant: Allowed<Read>,
     Language(locale): Language,
     consistency: Consistency,
-) -> Result<Json<Vec<InvoiceView>>, Problem> {
+    Query(page): Query<After>,
+) -> Result<Json<Paged<InvoiceView>>, Problem> {
     require_module(&tenant, &sales::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, sales::GROUP_NAME, locale)
         .await?;
+    let after = page.cursor(locale)?;
+    let limit = page.limit(PAGE, PAGE);
 
     let mut conn = tenant
         .db
@@ -584,11 +589,11 @@ async fn list_invoices(
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
 
-    let invoices = sales::invoices(&mut conn, PAGE)
+    let invoices = sales::invoices(&mut conn, limit, after.as_ref())
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
 
-    Ok(Json(invoices.into_iter().map(view).collect()))
+    Ok(Json(Paged::of(invoices, view)))
 }
 
 /// One invoice, with its lines, its tax breakdown and its payments.
