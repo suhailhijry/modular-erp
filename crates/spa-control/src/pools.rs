@@ -145,6 +145,92 @@ pub struct PoolConfig {
     pub acquire_timeout: Duration,
     /// Pool objects retained. Exceeding this evicts the least recently used.
     pub max_cached_pools: usize,
+    /// How many prepared statements sqlx caches per connection. **Zero disables
+    /// preparation**, which is what a transaction pooler needs.
+    ///
+    /// # Why this is configuration and not a constant
+    ///
+    /// sqlx prepares by default and caches the handle on the connection. A
+    /// transaction pooler hands out a *different* backend for each transaction,
+    /// so a cached handle refers to a statement the new backend never parsed.
+    ///
+    /// Poolers answer this differently — Supavisor parses SQL and broadcasts
+    /// `PREPARE` across its pool; `PgBouncer` 1.21+ tracks protocol-level prepared
+    /// statements up to a configured limit — and both of those are the pooler's
+    /// business, not this crate's. What this crate owes a deployment is a knob
+    /// it can turn without a rebuild, so that "we put a pooler in front" is a
+    /// variable rather than a patch.
+    ///
+    /// Non-zero by default, because there is no pooler by default and
+    /// preparation is worth real throughput.
+    pub statement_cache_capacity: usize,
+}
+
+impl PoolConfig {
+    /// The budgets this deployment was given, or the defaults.
+    ///
+    /// # Why these are configuration and not constants
+    ///
+    /// They were compiled in, and the sum of them is a claim about a database
+    /// this crate has never seen. Four processes each holding a private
+    /// 400-permit budget against a 200-connection server is not a bug anybody
+    /// wrote — it is what happens when a per-process number is chosen once and a
+    /// deployment later runs four of them.
+    ///
+    /// **What to set them against changes the moment a pooler goes in front.**
+    /// Without one, the sum across every process must fit the server's
+    /// `max_connections`. With one, the server-side number belongs to the pooler
+    /// and these become client connections, which are cheap — Supavisor served
+    /// 250,000 of them over 400 to the database.
+    ///
+    /// [`Self::demand`] and `report_budget` are what make the number visible
+    /// rather than implied.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let default = Self::default();
+        let read = |name: &str, fallback: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<usize>().ok())
+                .unwrap_or(fallback)
+        };
+        Self {
+            interactive_operations: read("POOL_INTERACTIVE", default.interactive_operations),
+            client_operations: read("POOL_CLIENT", default.client_operations),
+            background_operations: read("POOL_BACKGROUND", default.background_operations),
+            max_connections_per_tenant: u32::try_from(read(
+                "POOL_PER_TENANT",
+                default.max_connections_per_tenant as usize,
+            ))
+            .unwrap_or(default.max_connections_per_tenant)
+            .max(1),
+            statement_cache_capacity: read(
+                "POOL_STATEMENT_CACHE",
+                default.statement_cache_capacity,
+            ),
+            ..default
+        }
+    }
+
+    /// The most connections **one process** can hold open at once.
+    ///
+    /// Two ceilings, and the smaller wins:
+    ///
+    /// - a connection can only be *executing* while it holds a lane permit, so
+    ///   the sum of the lane budgets is one bound;
+    /// - a connection belongs to a tenant's pool, so `active_tenants ×
+    ///   max_connections_per_tenant` is the other.
+    ///
+    /// Measured: 300 concurrent requests against **one** tenant held 8
+    /// connections across two API replicas, because the second bound was 4 per
+    /// process and the first never came near.
+    #[must_use]
+    pub fn demand(&self, active_tenants: usize) -> usize {
+        let by_lane =
+            self.interactive_operations + self.client_operations + self.background_operations;
+        let by_pool = active_tenants.saturating_mul(self.max_connections_per_tenant as usize);
+        by_lane.min(by_pool)
+    }
 }
 
 impl Default for PoolConfig {
@@ -169,6 +255,7 @@ impl Default for PoolConfig {
             idle_timeout: Duration::from_secs(10),
             acquire_timeout: Duration::from_secs(3),
             max_cached_pools: 1024,
+            statement_cache_capacity: 100,
         }
     }
 }
@@ -215,6 +302,12 @@ struct Cluster {
     /// Falls back to the primary when absent, so `read()` is always callable and
     /// adding replicas later is a configuration change rather than a code change.
     replica: Option<PgConnectOptions>,
+    /// A route that is **guaranteed not to be a transaction pooler**.
+    ///
+    /// See [`Role::Direct`]. Falls back to the primary when absent, which is
+    /// correct for every deployment that has no pooler — the primary *is*
+    /// direct then.
+    direct: Option<PgConnectOptions>,
 }
 
 /// The tenant → physical location map.
@@ -244,6 +337,7 @@ impl ClusterRegistry {
             Cluster {
                 primary,
                 replica: None,
+                direct: None,
             },
         );
         Ok(self)
@@ -271,6 +365,29 @@ impl ClusterRegistry {
         Ok(self)
     }
 
+    /// Adds a route that is guaranteed not to be a transaction pooler.
+    ///
+    /// Only needed when the primary URL *is* one. See [`Role::Direct`].
+    pub fn with_direct(mut self, name: &str, url: &str) -> Result<Self, sqlx::Error> {
+        let direct: PgConnectOptions = url.parse()?;
+        let cluster = self.clusters.get_mut(name).ok_or_else(|| {
+            sqlx::Error::Configuration(
+                format!("no cluster named `{name}` to attach a direct route to").into(),
+            )
+        })?;
+        cluster.direct = Some(direct);
+        Ok(self)
+    }
+
+    /// The connection options for a cluster's **direct** route, for callers that
+    /// open their own connection rather than going through a pool.
+    ///
+    /// Provisioning is the only one: `CREATE DATABASE` cannot run inside a
+    /// transaction, so it cannot run through a transaction pooler either.
+    pub fn direct_options(&self, cluster: &str) -> Result<PgConnectOptions, PoolError> {
+        self.options_for(cluster, "postgres", Role::Direct)
+    }
+
     /// The clusters this deployment can reach, from the environment.
     ///
     /// `PRIMARY_CLUSTER_URL` is required and `PRIMARY_REPLICA_URL` is not. Read
@@ -285,6 +402,7 @@ impl ClusterRegistry {
         Self::from_urls(
             std::env::var("PRIMARY_CLUSTER_URL").ok().as_deref(),
             std::env::var("PRIMARY_REPLICA_URL").ok().as_deref(),
+            std::env::var("PRIMARY_DIRECT_URL").ok().as_deref(),
         )
     }
 
@@ -294,7 +412,11 @@ impl ClusterRegistry {
     /// be tested without `set_var`. Editing the process environment from a test
     /// needs `unsafe`, which this workspace denies, and races every other test
     /// in the same binary regardless.
-    fn from_urls(primary: Option<&str>, replica: Option<&str>) -> Result<Self, sqlx::Error> {
+    fn from_urls(
+        primary: Option<&str>,
+        replica: Option<&str>,
+        direct: Option<&str>,
+    ) -> Result<Self, sqlx::Error> {
         let primary = primary
             .filter(|url| !url.trim().is_empty())
             .ok_or_else(|| {
@@ -308,14 +430,26 @@ impl ClusterRegistry {
         // variable and leaves it empty is the normal way to say "no replica
         // here", and treating `""` as a URL fails at parse with a message about
         // nothing.
-        match replica.filter(|url| !url.trim().is_empty()) {
+        let registry = match replica.filter(|url| !url.trim().is_empty()) {
             Some(url) => {
                 tracing::info!("read replica configured for cluster `primary`");
-                registry.with_replica("primary", url)
+                registry.with_replica("primary", url)?
             }
             // Not a warning. A single-node deployment is a supported shape, and
             // `read()` falls back to the primary — which is why it is always
             // safe to call and why adding a replica later is configuration.
+            None => registry,
+        };
+
+        match direct.filter(|url| !url.trim().is_empty()) {
+            Some(url) => {
+                tracing::info!(
+                    "direct route configured for cluster `primary`; provisioning \
+                     and schema installs will bypass the pooler"
+                );
+                registry.with_direct("primary", url)
+            }
+            // No pooler in front, so the primary is already direct.
             None => Ok(registry),
         }
     }
@@ -333,6 +467,7 @@ impl ClusterRegistry {
         let base = match role {
             Role::Read => entry.replica.as_ref().unwrap_or(&entry.primary),
             Role::Write => &entry.primary,
+            Role::Direct => entry.direct.as_ref().unwrap_or(&entry.primary),
         };
         Ok(base.clone().database(database))
     }
@@ -344,10 +479,37 @@ impl ClusterRegistry {
     }
 }
 
+/// Which route to a cluster an operation needs.
+///
+/// # Why `Direct` exists
+///
+/// A transaction pooler — `PgBouncer`, Supavisor — hands a client a *different*
+/// server connection for each transaction. That is what lets 400 server
+/// connections serve 250,000 clients, and it means **session state does not
+/// survive between transactions**.
+///
+/// Most of this system is already fine with that: the projection hot path sets
+/// `SET LOCAL search_path`, which is transaction-scoped, and there is no
+/// `LISTEN`, no session advisory lock and no temp table anywhere in it.
+///
+/// What is *not* fine is provisioning. `CREATE DATABASE` cannot run inside a
+/// transaction at all, and installing a module's schema is a sequence — set the
+/// search path, run the DDL, set it back — whose steps depend on running on the
+/// same backend. Through a transaction pooler those steps can land on three
+/// different ones, and the DDL creates its tables in whatever schema the third
+/// one happened to have.
+///
+/// So those paths ask for `Direct` and are handed a route configured never to be
+/// pooled. Supabase ships exactly this shape: every project gets a pooler
+/// connection string *and* a direct one.
+///
+/// **When no pooler is configured, `Direct` is the primary** — which is why
+/// adopting one later is a variable rather than a rewrite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Role {
     Write,
     Read,
+    Direct,
 }
 
 #[derive(Debug)]
@@ -402,12 +564,87 @@ impl TenantPools {
         self.budget.try_acquire(lane)
     }
 
-    /// Connect options for a cluster, with no database chosen.
+    /// Says at start-up what this process could demand and what the server
+    /// allows, because neither number was written down anywhere before.
     ///
-    /// For provisioning, which needs a connection to `postgres` before the
-    /// tenant's database exists. Not a pool: these are one-shot.
-    pub(crate) fn cluster_options(&self, cluster: &str) -> Result<PgConnectOptions, PoolError> {
-        self.clusters.options_for(cluster, "postgres", Role::Write)
+    /// Deliberately a **log line and not a refusal**. One process cannot know
+    /// how many siblings a deployment runs, so it cannot compute the fleet's
+    /// total — and refusing to start on a number it had to guess would be worse
+    /// than the silence it replaces. What it can do is state its own share and
+    /// the server's limit next to each other, so the arithmetic is somebody's
+    /// job rather than nobody's.
+    ///
+    /// When a pooler is in front, `max_connections` read here is the pooler's
+    /// client limit, not Postgres's — which is the right number to compare
+    /// against anyway.
+    pub async fn report_budget(&self, cluster: &str) {
+        let ceiling = self.config.demand(usize::MAX);
+        let options = match self.maintenance_options(cluster) {
+            Ok(options) => options,
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot reach {cluster} to report its connection budget");
+                return;
+            }
+        };
+
+        let allowed: Option<i64> = match sqlx::PgPool::connect_with(options).await {
+            Ok(pool) => {
+                let value =
+                    sqlx::query_scalar::<_, String>("SELECT current_setting('max_connections')")
+                        .fetch_one(&pool)
+                        .await
+                        .ok()
+                        .and_then(|raw| raw.parse().ok());
+                pool.close().await;
+                value
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot reach {cluster} to report its connection budget");
+                None
+            }
+        };
+
+        match allowed {
+            Some(max) if i64::try_from(ceiling).unwrap_or(i64::MAX) > max => tracing::warn!(
+                cluster,
+                this_process_at_most = ceiling,
+                server_max_connections = max,
+                per_tenant = self.config.max_connections_per_tenant,
+                "this process alone can demand more connections than the server \
+                 allows. Every other process draws from the same limit, so size \
+                 POOL_INTERACTIVE / POOL_CLIENT / POOL_BACKGROUND against it, or \
+                 put a pooler in front."
+            ),
+            Some(max) => tracing::info!(
+                cluster,
+                this_process_at_most = ceiling,
+                server_max_connections = max,
+                per_tenant = self.config.max_connections_per_tenant,
+                "connection budget"
+            ),
+            None => tracing::info!(
+                cluster,
+                this_process_at_most = ceiling,
+                per_tenant = self.config.max_connections_per_tenant,
+                "connection budget; the server's limit could not be read"
+            ),
+        }
+    }
+
+    /// Connect options for a cluster's **direct** route, with no database chosen.
+    ///
+    /// For provisioning and fleet migration, which need a connection to
+    /// `postgres` before the tenant's database exists. Not a pool: these are
+    /// one-shot.
+    ///
+    /// [`Role::Direct`] and not `Write`, and it is the single line that makes
+    /// every DDL path in this system pooler-safe. `CREATE DATABASE` cannot run
+    /// inside a transaction, and installing a module's schema is a sequence
+    /// whose steps share a `search_path` — neither survives a transaction
+    /// pooler handing out a different backend per statement. With no pooler
+    /// configured this is the primary, so nothing changes until something does.
+    pub(crate) fn maintenance_options(&self, cluster: &str) -> Result<PgConnectOptions, PoolError> {
+        self.clusters.options_for(cluster, "postgres", Role::Direct)
     }
 
     /// Closes and forgets a tenant's pools.
@@ -437,7 +674,10 @@ impl TenantPools {
             return Ok(entry.pool.clone());
         }
 
-        let options = self.clusters.options_for(cluster, database, role)?;
+        let options = self
+            .clusters
+            .options_for(cluster, database, role)?
+            .statement_cache_capacity(self.config.statement_cache_capacity);
         let pool = PgPoolOptions::new()
             // Zero minimum is the whole point: an idle tenant costs nothing, and
             // with thousands of tenants most are idle at any instant.
@@ -732,27 +972,105 @@ mod tests {
         let url = Some("postgres://postgres@localhost/postgres");
 
         assert!(
-            !ClusterRegistry::from_urls(url, None)
+            !ClusterRegistry::from_urls(url, None, None)
                 .expect("a primary is enough")
                 .has_replica("primary"),
             "a replica appeared from nowhere"
         );
         assert!(
-            ClusterRegistry::from_urls(url, url)
+            ClusterRegistry::from_urls(url, url, None)
                 .expect("primary and replica")
                 .has_replica("primary"),
             "PRIMARY_REPLICA_URL was read and then not used"
         );
         assert!(
-            !ClusterRegistry::from_urls(url, Some("   "))
+            !ClusterRegistry::from_urls(url, Some("   "), None)
                 .expect("blank is not an error")
                 .has_replica("primary"),
             "a blank variable is how a compose file says `no replica`"
         );
         assert!(
-            ClusterRegistry::from_urls(None, url).is_err(),
+            ClusterRegistry::from_urls(None, url, None).is_err(),
             "a replica with no primary is a deployment that cannot write"
         );
+    }
+
+    /// **`Direct` falls back to the primary, which is what makes a pooler a
+    /// configuration change rather than a rewrite.**
+    ///
+    /// Provisioning and schema installs ask for `Direct` unconditionally. On a
+    /// deployment with no pooler that has to be the primary, or every one of
+    /// them breaks the day this is merged; on a deployment with one it has to be
+    /// the bypass, or `CREATE DATABASE` and `SET search_path` sequences land on
+    /// a transaction pooler that cannot serve them.
+    #[test]
+    fn direct_is_the_primary_until_a_pooler_says_otherwise() {
+        let pooled = "postgres://postgres@pooler:6543/postgres";
+        let straight = "postgres://postgres@primary:5432/postgres";
+
+        let none = ClusterRegistry::from_urls(Some(pooled), None, None).expect("primary only");
+        assert_eq!(
+            none.options_for("primary", "d", Role::Direct)
+                .expect("options")
+                .get_port(),
+            6543,
+            "with no direct route configured, direct must be the primary"
+        );
+
+        let split = ClusterRegistry::from_urls(Some(pooled), None, Some(straight)).expect("both");
+        assert_eq!(
+            split
+                .options_for("primary", "d", Role::Direct)
+                .expect("options")
+                .get_port(),
+            5432,
+            "provisioning would have gone through the pooler"
+        );
+        assert_eq!(
+            split
+                .options_for("primary", "d", Role::Write)
+                .expect("options")
+                .get_port(),
+            6543,
+            "ordinary writes must still go through the pooler"
+        );
+    }
+
+    #[test]
+    fn a_direct_route_for_a_cluster_that_does_not_exist_is_an_error() {
+        assert!(
+            registry()
+                .with_direct("primry", "postgres://postgres@localhost/postgres")
+                .is_err()
+        );
+    }
+
+    /// **The two ceilings, and which one binds.**
+    ///
+    /// This is the arithmetic nothing in the system stated before, and getting
+    /// it backwards is how a 400-permit budget went unnoticed against a
+    /// 200-connection server.
+    #[test]
+    fn demand_is_the_smaller_of_the_lane_budget_and_the_pool_cap() {
+        let config = PoolConfig::default(); // 100 + 240 + 60 = 400, 4 per tenant
+
+        // Few tenants: the per-tenant pool binds, and this is the measured case
+        // — 300 concurrent requests against one tenant held 4 per process.
+        assert_eq!(config.demand(1), 4);
+        assert_eq!(config.demand(10), 40);
+
+        // Many tenants: the lane budget binds, and it is the number that has to
+        // fit `max_connections` across every process in the deployment.
+        assert_eq!(config.demand(100), 400);
+        assert_eq!(config.demand(usize::MAX), 400, "and it never exceeds it");
+
+        // A deployment behind a pooler turns preparation off; nothing else about
+        // the arithmetic changes.
+        let pooled = PoolConfig {
+            statement_cache_capacity: 0,
+            ..PoolConfig::default()
+        };
+        assert_eq!(pooled.demand(100), config.demand(100));
     }
 
     #[tokio::test]

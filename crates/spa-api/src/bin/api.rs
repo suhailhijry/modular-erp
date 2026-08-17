@@ -48,12 +48,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // request, and a cache invalidation reaches every node rather than only
     // this one. Without `REDIS_URL` both fall back to what this system did
     // before — see `spa_control::shared`.
-    let mut control = ControlPlane::new(pool, TenantPools::new(clusters, PoolConfig::default()));
+    let mut control = ControlPlane::new(pool, TenantPools::new(clusters, PoolConfig::from_env()));
     if let Some(shared) = spa_control::shared::Shared::from_env().await? {
         control = control.sharing(shared);
     }
     let control = Arc::new(control);
     let _invalidations = spa_control::shared::apply_invalidations_in_background(&control);
+
+    // States what this process could demand against what the server allows.
+    // Nothing wrote either number down before, which is how four processes each
+    // holding a 400-permit budget against a 200-connection server went unnoticed.
+    control.pools().report_budget("primary").await;
 
     // **The key module secrets are sealed under.** Optional, and its absence is
     // not a degraded mode: without it, anything that would store a tenant's

@@ -45,7 +45,7 @@ pub use fleet::{EventVersions, FleetPlan, TenantSchema};
 pub use invitations::{
     Accepted, INVITATION_LIFETIME, Invitation, InvitationError, PendingInvitation,
 };
-pub use leases::WorkSchedule;
+pub use leases::{Claimed, WorkSchedule};
 pub use members::{Member, MemberError};
 pub use model::{
     Actor, EnabledModules, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant,
@@ -225,6 +225,12 @@ impl ControlPlane {
     #[must_use]
     pub const fn shared(&self) -> Option<&crate::shared::Shared> {
         self.shared.as_ref()
+    }
+
+    /// The tenant pools, for a composition root that wants to report on them.
+    #[must_use]
+    pub fn pools(&self) -> &TenantPools {
+        &self.tenants
     }
 
     /// `(hits, misses)` on the entry path since start.
@@ -441,7 +447,7 @@ impl ControlPlane {
         owner: &str,
         limit: i64,
         schedule: WorkSchedule,
-    ) -> Result<Vec<Tenant>, AccessError> {
+    ) -> Result<Vec<Claimed>, AccessError> {
         let lease_millis = i64::try_from(schedule.lease.as_millis()).unwrap_or(i64::MAX);
 
         let rows = sqlx::query!(
@@ -462,7 +468,7 @@ impl ControlPlane {
                     FOR UPDATE SKIP LOCKED
              )
             RETURNING id as "id: TenantId", slug, display_name, status, cluster,
-                      database_name, demo_expires_at, created_at
+                      database_name, demo_expires_at, created_at, idle_visits
             "#,
             owner,
             limit,
@@ -473,6 +479,7 @@ impl ControlPlane {
 
         rows.into_iter()
             .map(|row| {
+                let idle_visits = row.idle_visits;
                 tenant_from_row(
                     row.id,
                     row.slug,
@@ -483,6 +490,10 @@ impl ControlPlane {
                     row.demo_expires_at,
                     row.created_at,
                 )
+                .map(|tenant| Claimed {
+                    tenant,
+                    idle_visits,
+                })
             })
             .collect()
     }
@@ -492,20 +503,31 @@ impl ControlPlane {
     /// `after` is zero when the visit did work — there is more to do and it
     /// should be looked at again immediately — and
     /// [`WorkSchedule::next_idle_delay`] when it did not.
+    /// `worked` decides whether the tenant's idle streak continues or resets,
+    /// and the streak is what the next delay is computed from. Written in the
+    /// same statement as `next_visit_at`, because a count that disagreed with
+    /// the schedule it produced would be worse than no count at all.
     pub async fn schedule_next_visit(
         &self,
         tenant_id: TenantId,
         after: Duration,
+        worked: bool,
     ) -> Result<(), AccessError> {
         let millis = i64::try_from(after.as_millis()).unwrap_or(i64::MAX);
         sqlx::query!(
             "UPDATE tenant
                 SET next_visit_at      = now() + ($2::BIGINT * INTERVAL '1 millisecond'),
                     worker_lease_owner = NULL,
-                    worker_lease_until = NULL
+                    worker_lease_until = NULL,
+                    idle_visits        = CASE WHEN $3 THEN 0
+                                              -- Saturating, so a tenant left
+                                              -- alone for years does not
+                                              -- overflow the column.
+                                              ELSE least(idle_visits + 1, 1000) END
               WHERE id = $1",
             tenant_id.as_uuid(),
             millis,
+            worked,
         )
         .execute(&self.pool)
         .await?;

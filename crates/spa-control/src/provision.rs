@@ -289,7 +289,7 @@ impl ControlPlane {
 
             let built: Result<(), AccessError> = 'build: {
                 // --- the database ------------------------------------------------
-                let admin = match self.tenants.cluster_options(&tenant.cluster) {
+                let admin = match self.tenants.maintenance_options(&tenant.cluster) {
                     Ok(options) => options.database("postgres"),
                     Err(e) => break 'build Err(e.into()),
                 };
@@ -323,7 +323,7 @@ impl ControlPlane {
                 }
 
                 // --- the tenant schema -------------------------------------------
-                let tenant_options = match self.tenants.cluster_options(&tenant.cluster) {
+                let tenant_options = match self.tenants.maintenance_options(&tenant.cluster) {
                     Ok(options) => options.database(&tenant.database_name),
                     Err(e) => break 'build Err(e.into()),
                 };
@@ -432,7 +432,7 @@ impl ControlPlane {
 
         let options = self
             .tenants
-            .cluster_options(&tenant.cluster)?
+            .maintenance_options(&tenant.cluster)?
             .database(&tenant.database_name);
 
         let module = setup.module.clone();
@@ -485,7 +485,7 @@ impl ControlPlane {
 
         let options = self
             .tenants
-            .cluster_options(&tenant.cluster)?
+            .maintenance_options(&tenant.cluster)?
             .database(&tenant.database_name);
 
         let conn = Box::pin(PgConnection::connect_with(&options)).await?;
@@ -523,7 +523,7 @@ impl ControlPlane {
 
         let options = self
             .tenants
-            .cluster_options(&tenant.cluster)?
+            .maintenance_options(&tenant.cluster)?
             .database(&tenant.database_name);
 
         Ok(sqlx::postgres::PgPoolOptions::new()
@@ -611,7 +611,7 @@ impl ControlPlane {
 
         let options = self
             .tenants
-            .cluster_options(&tenant.cluster)?
+            .maintenance_options(&tenant.cluster)?
             .database("postgres");
         let maintenance = PgConnection::connect_with(&options)
             .await

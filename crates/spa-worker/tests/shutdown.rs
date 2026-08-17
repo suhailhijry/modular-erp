@@ -275,6 +275,7 @@ impl Fixture {
             WorkerConfig {
                 name: name.to_owned(),
                 schedule: WorkSchedule {
+                    max_idle_interval: WorkSchedule::default().max_idle_interval,
                     lease: Duration::from_secs(30),
                     // No jitter: a test that has to guess how long to wait for a
                     // revisit is a flaky test.
@@ -571,6 +572,7 @@ async fn a_failing_job_stalls_one_tenant_without_taking_the_worker_down() {
         WorkerConfig {
             name: "stubborn".to_owned(),
             schedule: WorkSchedule {
+                max_idle_interval: WorkSchedule::default().max_idle_interval,
                 lease: Duration::from_secs(30),
                 idle_interval: Duration::from_millis(10),
                 jitter: Duration::ZERO,

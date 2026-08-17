@@ -81,12 +81,36 @@ PUBLIC_DOMAIN          # tenants are subdomains of this; defaults to `localhost`
 BIND                   # the API's address; defaults to 0.0.0.0:8080
 SEALING_KEY            # <id>:<64 hex chars> — see below
 PRIMARY_REPLICA_URL    # reads that tolerate lag; blank or unset means no replica
+PRIMARY_DIRECT_URL     # the route that bypasses a connection pooler — see below
 REDIS_URL              # the shared session cache and invalidation — see below
 SMTP_URL               # the relay; without it nothing sends mail — see below
 SMTP_FROM              # e.g. "SPA <noreply@spa.com>"; required when SMTP_URL is set
 WORKER_NAME            # for logs; defaults to $HOSTNAME
 RUST_LOG               # e.g. info,spa_worker=debug
 ```
+
+**`PRIMARY_DIRECT_URL` is only needed once there is a pooler.** Leave it unset
+or blank and it *is* the primary, which is right for every deployment that talks
+to Postgres directly.
+
+It exists because a transaction pooler — Supavisor, PgBouncer — hands out a
+different backend for each transaction. `CREATE DATABASE` cannot run inside a
+transaction, and installing a module's schema is a sequence whose steps share a
+`search_path`; neither survives that. So provisioning, fleet migration and
+schema rebuilds ask for this route and everything else goes through the pooler:
+
+```bash
+PRIMARY_CLUSTER_URL="postgres://user:pass@pooler:6543/postgres"   # request traffic
+PRIMARY_DIRECT_URL="postgres://user:pass@primary:5432/postgres"   # DDL only
+```
+
+Set `POOL_STATEMENT_CACHE=0` alongside it unless the pooler is configured to
+handle prepared statements — sqlx prepares by default, and a cached handle
+refers to a statement the next backend never parsed.
+
+`crates/spa-control/tests/pooler.rs` is what keeps this true: it fails the build
+if a session-scoped `SET`, a session advisory lock, or a `LISTEN` appears
+anywhere outside the DDL paths.
 
 **`REDIS_URL` is what makes more than one API process correct.**
 

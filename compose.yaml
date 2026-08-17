@@ -35,7 +35,28 @@ x-app: &app
     # Reads that tolerate lag go here. Empty is a supported deployment and means
     # "no replica" — see `ClusterRegistry::from_env`.
     PRIMARY_REPLICA_URL: postgres://postgres:postgres@pg-standby:5432/postgres
+    # **The route that must never be a transaction pooler.** Blank here because
+    # this stack has none, and then it *is* the primary. The day a Supavisor or
+    # a PgBouncer goes in front, `PRIMARY_CLUSTER_URL` points at it and this
+    # points past it — and provisioning, migrations and schema installs keep
+    # working, because they ask for this one. See `Role::Direct`.
+    PRIMARY_DIRECT_URL: ""
     REDIS_URL: redis://redis:6379/
+    # **Lane budgets sized against this stack's 200 connections.**
+    #
+    # Compiled defaults are 100/240/60 = 400 per process, which four processes
+    # turn into 1,600 against a 200-connection server. Nothing failed, because
+    # the per-tenant pool cap hid it — but `report_budget` says so at start-up
+    # now, and a demo that ships with its own warning in the log teaches the
+    # wrong lesson.
+    #
+    # 48 goes to the control pools (2 api x 16 + 2 workers x 8), leaving 152.
+    # Split four ways is 38; 30 apiece with room to spare.
+    POOL_INTERACTIVE: "10"
+    POOL_CLIENT: "16"
+    POOL_BACKGROUND: "4"
+    # Set to 0 the day a transaction pooler goes in front. See PRIMARY_DIRECT_URL.
+    POOL_STATEMENT_CACHE: "100"
     PUBLIC_DOMAIN: localhost
     RUST_LOG: ${RUST_LOG:-info}
     # Both processes must agree, or the worker cannot read what the API sealed.
@@ -77,9 +98,22 @@ services:
       # corruption and is a configuration default.
       - -c
       - wal_keep_size=256MB
-      # A tenant per database, and each of the two workers plus two API replicas
-      # holds a pool per active tenant. See `spa_control::pools` for the
-      # arithmetic; 200 is comfortable for a demo and nowhere near a fleet.
+      # **What 200 actually buys, measured on this stack.**
+      #
+      #   control plane   2 api x 16 + 2 workers x 8            = 48 ceiling
+      #   per tenant      max_connections_per_tenant (4)
+      #                     x however many of the 4 processes touch it
+      #
+      # So (200 - 48) / 16 is about **9 concurrently-active tenants** if every
+      # one of them saturates every process. Observed here at moderate load:
+      # 9 active tenants held 35 tenant connections and 48 control ones, 84 of
+      # 200 — because a tenant nobody is hammering does not open four per
+      # process.
+      #
+      # The number that does *not* enter this is request rate. 300 concurrent
+      # requests against one tenant held 8 connections, because a permit is
+      # taken per database operation rather than per request. That is the whole
+      # design, and `tests/soak.rs` is where it is measured properly.
       - -c
       - max_connections=200
     volumes:

@@ -182,7 +182,7 @@ impl Worker {
                 continue;
             }
 
-            for tenant in claimed {
+            for claim in claimed {
                 // Taken before spawning, so the claim loop blocks when every
                 // slot is busy instead of queueing an unbounded number of
                 // tasks — which would make `concurrency` a lie and the
@@ -197,7 +197,11 @@ impl Worker {
                     jobs: Arc::clone(&self.jobs),
                     max_ticks: self.config.max_ticks_per_visit,
                     schedule: self.config.schedule,
-                    tenant: tenant.id,
+                    tenant: claim.tenant.id,
+                    // How many consecutive visits have already found nothing.
+                    // The backoff is computed from it, which is what makes a
+                    // dormant tenant nearly free — see `WorkSchedule`.
+                    idle_visits: claim.idle_visits,
                     cancel: cancel.clone(),
                 };
                 let failures = Arc::clone(&failures);
@@ -299,6 +303,7 @@ struct Visit {
     max_ticks: usize,
     schedule: WorkSchedule,
     tenant: TenantId,
+    idle_visits: i32,
     cancel: CancellationToken,
 }
 
@@ -395,10 +400,14 @@ impl Visit {
         let delay = if worked || self.cancel.is_cancelled() {
             Duration::ZERO
         } else {
-            self.schedule.next_idle_delay(self.tenant)
+            self.schedule.next_idle_delay(self.tenant, self.idle_visits)
         };
 
-        if let Err(e) = self.control.schedule_next_visit(self.tenant, delay).await {
+        if let Err(e) = self
+            .control
+            .schedule_next_visit(self.tenant, delay, worked)
+            .await
+        {
             // The lease lapses on its own, so this costs latency, not
             // correctness.
             tracing::warn!(

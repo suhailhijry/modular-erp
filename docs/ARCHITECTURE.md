@@ -71,6 +71,92 @@ Pools are therefore `min_connections(0)` with a short idle timeout — that is w
 drains connections from tenants that have gone quiet — and workers lease *tenants
 with pending work* rather than running a loop per tenant.
 
+#### 1.1.0 Review: is database-per-tenant still the right call?
+
+Revisited deliberately, because it is the decision everything else rests on and
+because "connections scale with tenants" is the first objection anyone raises.
+Measured on the compose stack rather than argued:
+
+| | measured |
+|---|---|
+| 300 concurrent requests, **1** tenant | **8** connections |
+| 9 active tenants under load | 35 tenant + 48 control = **84** of 200 |
+| one connection, simple `SELECT` | **12,441** queries/s |
+
+Request rate does not enter it, because a permit is taken per database
+*operation*. A connection is not a throughput bottleneck at any scale here; it is
+a forked backend process, and therefore a memory cost.
+
+**A connection cannot be reused across tenants.** Not a design choice — the
+database name travels in the protocol's `StartupMessage` and there is no message
+to change it afterwards. `\c` in psql opens a new backend (observable: the
+`pg_backend_pid()` changes). Every pooler inherits this, PgBouncer and Supavisor
+included; their pools are per `(database, user)` too.
+
+The alternatives, costed against this codebase — 71 catalog objects per tenant,
+58 module queries written with no tenant predicate:
+
+| | database/tenant | schema/tenant | shared schema |
+|---|---|---|---|
+| catalog objects @ 5k | 355k over ~8 instances | 355k in **one** `pg_class` | 71 |
+| connections | active tenants × pool | one pool per instance | one pool |
+| fleet migration | 5,000 databases | 5,000 schemas | **one** |
+| restore one tenant | `pg_dump -d` | `pg_dump -n` | realistically no |
+| a cross-tenant leak needs | *unrepresentable* | a `search_path` bug | a forgotten `WHERE` |
+| module queries to rewrite | 0 | 0 | **58** |
+
+Schema-per-tenant does not reduce the catalog, it **concentrates** it; what it
+buys is one pool per instance. Shared schema drops `TenantDb`'s guarantee from
+"cannot be written" to "we remembered the predicate", which is a change in kind.
+
+**Kept.** The evidence that settles it is external: Supabase gives each project
+its **own database** and reaches millions of them — not by abandoning isolation
+but by putting a pooler fleet outside the application, pausing dormant tenants,
+and orchestrating many modest instances. That is the same model as D1 plus three
+things around it, and it is a better map for this system than any of the rows
+above.
+
+What follows from that, in cost order, none of which is a data-model change:
+
+1. **Size the lane budgets against `max_connections`.** Four processes each hold
+   their own 400-permit budget with no knowledge of the others; the per-tenant
+   pool cap is currently what hides it. This is the gap a pooler would close.
+2. **Parallelise `survey_fleet` / `migrate_fleet`.** Sequential today, and its own
+   comment concedes "a few thousand tenants is a few minutes".
+3. **Pause dormant tenants.** `min_connections(0)` and `next_visit_at` throttle a
+   quiet tenant; nothing stops or archives one. This is the answer to cost per
+   tenant at the low end, and it is far smaller than a rewrite.
+
+#### 1.1.0.1 Standards set now, so a pooler is configuration
+
+Adopting Supavisor or PgBouncer later should be variables, not a rewrite. Four
+things make that true, and they are in the build already:
+
+1. **Two routes per cluster, `Write` and `Direct`.** A transaction pooler hands
+   out a different backend per transaction, and `CREATE DATABASE` cannot run in
+   one at all. So provisioning, fleet migration and schema rebuilds ask for
+   `Role::Direct` — `PRIMARY_DIRECT_URL`, which **falls back to the primary**
+   when unset. Supabase ships exactly this shape: a pooler connection string and
+   a direct one.
+2. **`SET LOCAL`, never `SET`, outside a DDL path.** The projection hot path was
+   already transaction-scoped. `crates/spa-control/tests/pooler.rs` walks every
+   `.rs` and `.sql` in the workspace and fails the build on a session-scoped
+   `SET`, a session advisory lock, or a `LISTEN` outside the paths that are
+   allowed one.
+3. **The statement cache is a knob.** sqlx prepares by default and caches per
+   connection; a transaction pooler invalidates that. `POOL_STATEMENT_CACHE=0`
+   turns it off without a rebuild.
+4. **Lane budgets are deployment config.** They were compiled constants, which
+   is how four processes came to hold 400 permits each against a
+   200-connection server. `POOL_INTERACTIVE`/`POOL_CLIENT`/`POOL_BACKGROUND`,
+   and `report_budget` states the arithmetic at start-up against what the server
+   actually allows. Behind a pooler the number to compare against becomes the
+   pooler's client limit — which is the point of having one.
+
+Nothing here assumes a pooler will be adopted. Every one of them is a
+correctness or clarity improvement on its own, and the day one goes in front it
+is a handful of environment variables.
+
 #### 1.1.1 Lanes
 
 A permit is taken **per database operation**, never per request. At 10,000 req/s

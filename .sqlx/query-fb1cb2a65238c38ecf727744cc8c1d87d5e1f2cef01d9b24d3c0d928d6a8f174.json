@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE tenant\n               SET worker_lease_owner = $1,\n                   worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond')\n             WHERE id IN (\n                 SELECT id\n                   FROM tenant\n                  WHERE status = 'active'\n                    AND next_visit_at <= now()\n                    AND (worker_lease_until IS NULL\n                         OR worker_lease_until <= now()\n                         OR worker_lease_owner = $1)\n                  ORDER BY next_visit_at\n                  LIMIT $2\n                    FOR UPDATE SKIP LOCKED\n             )\n            RETURNING id as \"id: TenantId\", slug, display_name, status, cluster,\n                      database_name, demo_expires_at, created_at\n            ",
+  "query": "\n            UPDATE tenant\n               SET worker_lease_owner = $1,\n                   worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond')\n             WHERE id IN (\n                 SELECT id\n                   FROM tenant\n                  WHERE status = 'active'\n                    AND next_visit_at <= now()\n                    AND (worker_lease_until IS NULL\n                         OR worker_lease_until <= now()\n                         OR worker_lease_owner = $1)\n                  ORDER BY next_visit_at\n                  LIMIT $2\n                    FOR UPDATE SKIP LOCKED\n             )\n            RETURNING id as \"id: TenantId\", slug, display_name, status, cluster,\n                      database_name, demo_expires_at, created_at, idle_visits\n            ",
   "describe": {
     "columns": [
       {
@@ -90,6 +90,17 @@
             "name": "created_at"
           }
         }
+      },
+      {
+        "ordinal": 8,
+        "name": "idle_visits",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "idle_visits"
+          }
+        }
       }
     ],
     "parameters": {
@@ -107,8 +118,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "7b2ba0c3f2badbb7755431b12ae2141f10d6a5ff3f9735f471af58f8d74cbf17"
+  "hash": "fb1cb2a65238c38ecf727744cc8c1d87d5e1f2cef01d9b24d3c0d928d6a8f174"
 }

@@ -20,6 +20,7 @@ static CONTROL: Schema = Schema::migrations("control", &spa_control::MIGRATIONS)
 /// No jitter: a test that has to guess how long a revisit takes is a flaky test.
 fn schedule() -> WorkSchedule {
     WorkSchedule {
+        max_idle_interval: WorkSchedule::default().max_idle_interval,
         lease: Duration::from_secs(30),
         idle_interval: Duration::from_secs(30),
         jitter: Duration::ZERO,
@@ -109,7 +110,7 @@ async fn a_claimed_tenant_is_not_claimable_by_another_worker() {
         .await
         .expect("claims");
     assert_eq!(first.len(), 1);
-    assert_eq!(first[0].id, tenant);
+    assert_eq!(first[0].tenant.id, tenant);
     assert_eq!(
         fixture.lease_owner(tenant).await.as_deref(),
         Some("worker-a")
@@ -145,7 +146,7 @@ async fn re_claiming_your_own_tenant_renews_it() {
         .await
         .expect("claims");
     assert_eq!(again.len(), 1);
-    assert_eq!(again[0].id, tenant);
+    assert_eq!(again[0].tenant.id, tenant);
 }
 
 #[tokio::test]
@@ -190,7 +191,7 @@ async fn a_tenant_that_had_nothing_to_do_is_not_visited_again_at_once() {
         .expect("claims");
     fixture
         .control
-        .schedule_next_visit(tenant, Duration::from_secs(30))
+        .schedule_next_visit(tenant, Duration::from_secs(30), false)
         .await
         .expect("defers");
 
@@ -222,7 +223,7 @@ async fn a_tenant_that_did_work_is_due_again_immediately() {
         .expect("claims");
     fixture
         .control
-        .schedule_next_visit(tenant, Duration::ZERO)
+        .schedule_next_visit(tenant, Duration::ZERO, true)
         .await
         .expect("reschedules");
 
@@ -242,7 +243,7 @@ async fn requesting_a_visit_makes_a_deferred_tenant_due() {
 
     fixture
         .control
-        .schedule_next_visit(tenant, Duration::from_hours(1))
+        .schedule_next_visit(tenant, Duration::from_hours(1), false)
         .await
         .expect("defers");
     assert!(
@@ -284,7 +285,7 @@ async fn releasing_leases_hands_tenants_over_without_making_them_due() {
         .expect("claims");
     fixture
         .control
-        .schedule_next_visit(tenant, Duration::from_secs(30))
+        .schedule_next_visit(tenant, Duration::from_secs(30), false)
         .await
         .expect("defers");
     // Claim again so there is a lease to release.
@@ -336,9 +337,9 @@ async fn only_active_tenants_are_visited() {
         .expect("claims");
 
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].id, active);
+    assert_eq!(claimed[0].tenant.id, active);
     assert_ne!(
-        claimed[0].id, provisioning.id,
+        claimed[0].tenant.id, provisioning.id,
         "a tenant whose database is not built yet must not be opened"
     );
 }
@@ -384,7 +385,11 @@ async fn two_workers_claiming_at_once_get_disjoint_sets() {
     let left = left.expect("claims");
     let right = right.expect("claims");
 
-    let mut all: Vec<TenantId> = left.iter().chain(right.iter()).map(|t| t.id).collect();
+    let mut all: Vec<TenantId> = left
+        .iter()
+        .chain(right.iter())
+        .map(|c| c.tenant.id)
+        .collect();
     let total = all.len();
     all.sort_unstable();
     all.dedup();
@@ -414,5 +419,125 @@ async fn maintenance_entry_refuses_a_tenant_with_no_database_yet() {
             })
         ),
         "opening a tenant before its schema exists would fail confusingly later"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dormancy
+// ---------------------------------------------------------------------------
+
+/// **A tenant that has nothing to do stops being asked so often.**
+///
+/// `next_visit_at` throttled a quiet tenant to a fixed thirty seconds and never
+/// backed off, so five thousand tenants cost about 167 visits a second for ever
+/// whether any of them was doing anything or not. Each of those opens a
+/// connection, runs every enabled module's projection query, and writes a row
+/// back — the largest standing cost this platform has, spent entirely on
+/// tenants doing nothing.
+#[tokio::test]
+async fn consecutive_idle_visits_push_the_next_one_further_out() {
+    let fixture = Fixture::new().await;
+    let tenant = fixture.tenant("quiet").await;
+    let schedule = WorkSchedule {
+        idle_interval: std::time::Duration::from_secs(30),
+        jitter: std::time::Duration::ZERO,
+        ..WorkSchedule::default()
+    };
+
+    // Four visits that find nothing, each rescheduling from the streak the
+    // previous one left behind.
+    let mut streaks = Vec::new();
+    for _ in 0..4 {
+        let claimed = fixture
+            .control
+            .claim_tenants("w", 10, schedule)
+            .await
+            .expect("claims");
+        let claim = claimed
+            .iter()
+            .find(|c| c.tenant.id == tenant)
+            .expect("the tenant is due");
+        streaks.push(claim.idle_visits);
+
+        let delay = schedule.next_idle_delay(tenant, claim.idle_visits);
+        fixture
+            .control
+            .schedule_next_visit(tenant, std::time::Duration::ZERO, false)
+            .await
+            .expect("reschedules");
+        assert!(delay >= schedule.idle_interval);
+    }
+
+    assert_eq!(
+        streaks,
+        vec![0, 1, 2, 3],
+        "the idle streak did not accumulate, so the backoff can never happen"
+    );
+
+    // **A visit that worked resets it.** Without this a tenant that goes busy
+    // after a quiet week would still be looked at every six hours.
+    fixture
+        .control
+        .schedule_next_visit(tenant, std::time::Duration::ZERO, true)
+        .await
+        .expect("reschedules");
+    let claimed = fixture
+        .control
+        .claim_tenants("w", 10, schedule)
+        .await
+        .expect("claims");
+    assert_eq!(
+        claimed
+            .iter()
+            .find(|c| c.tenant.id == tenant)
+            .expect("due")
+            .idle_visits,
+        0,
+        "a tenant that did work is still treated as dormant"
+    );
+}
+
+/// **Waking is what makes the backoff invisible.**
+///
+/// A dormant tenant is due in hours. A write calls `request_visit`, which pulls
+/// it back to now — so somebody who returns after a month waits a claim cycle,
+/// not six hours. Without this the backoff would be a latency bug rather than a
+/// saving.
+#[tokio::test]
+async fn a_request_wakes_a_dormant_tenant_immediately() {
+    let fixture = Fixture::new().await;
+    let tenant = fixture.tenant("dormant").await;
+
+    // As six hours of silence would leave it.
+    fixture
+        .control
+        .schedule_next_visit(tenant, std::time::Duration::from_hours(6), false)
+        .await
+        .expect("reschedules");
+
+    let before = fixture
+        .control
+        .claim_tenants("w", 10, WorkSchedule::default())
+        .await
+        .expect("claims");
+    assert!(
+        !before.iter().any(|c| c.tenant.id == tenant),
+        "a dormant tenant must not be claimed on its own"
+    );
+
+    fixture
+        .control
+        .request_visit(tenant)
+        .await
+        .expect("asks for a visit");
+
+    let after = fixture
+        .control
+        .claim_tenants("w", 10, WorkSchedule::default())
+        .await
+        .expect("claims");
+    assert!(
+        after.iter().any(|c| c.tenant.id == tenant),
+        "a dormant tenant that received a request was not woken"
     );
 }

@@ -89,6 +89,7 @@ async fn connections_track_operations_not_requests() {
                 idle_timeout: Duration::from_secs(5),
                 acquire_timeout: Duration::from_secs(2),
                 max_cached_pools: 1024,
+                ..PoolConfig::default()
             },
         ),
     ));

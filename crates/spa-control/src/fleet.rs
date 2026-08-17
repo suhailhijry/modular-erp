@@ -88,9 +88,10 @@ impl ControlPlane {
 
     /// Reads every tenant's schema version without changing anything.
     ///
-    /// ponytail: sequential, one connection at a time. A few thousand tenants
-    /// is a few minutes, which is fine for a deploy step and not fine for a
-    /// health check on a timer — parallelise it when something wants it often.
+    /// Walks tenants `FLEET_CONCURRENCY` at a time (default 16). It used to be
+    /// one at a time, which its own comment conceded was "a few minutes" for a
+    /// few thousand tenants — fine for a deploy step, not fine for either of the
+    /// pre-deploy gates somebody is waiting on.
     pub async fn survey_fleet(&self) -> Result<FleetPlan, AccessError> {
         self.walk_fleet(false).await
     }
@@ -105,12 +106,25 @@ impl ControlPlane {
     }
 
     async fn walk_fleet(&self, apply: bool) -> Result<FleetPlan, AccessError> {
+        use futures_util::StreamExt as _;
+
         let latest = Self::latest_tenant_migration();
         let tenants = self.tenants_with_databases().await?;
+        let total = tenants.len();
+        let concurrency = fleet_concurrency();
+        let started = std::time::Instant::now();
         let mut plan = FleetPlan::default();
 
-        for tenant in tenants {
-            match self.visit(&tenant, latest, apply).await {
+        // **Bounded, not unbounded.** Each visit opens one connection on the
+        // *direct* route — the one that bypasses any pooler — so concurrency
+        // here is real backends on the server, and `buffer_unordered` is what
+        // keeps it a number somebody chose rather than the tenant count.
+        let mut visits = futures_util::stream::iter(tenants.iter())
+            .map(|tenant| async move { (tenant, self.visit(tenant, latest, apply).await) })
+            .buffer_unordered(concurrency);
+
+        while let Some((tenant, outcome)) = visits.next().await {
+            match outcome {
                 Ok(schema) if schema.is_current(latest) => plan.current.push(schema),
                 Ok(schema) => plan.behind.push(schema),
                 // Collected, not returned: one unreachable cluster must not
@@ -126,8 +140,19 @@ impl ControlPlane {
                 }
             }
         }
+        drop(visits);
+
+        // Completion order is arbitrary once the walk is concurrent, and a
+        // report a person reads — or a test that names the first behind tenant —
+        // should not depend on which database answered first.
+        plan.current.sort_by(|a, b| a.slug.cmp(&b.slug));
+        plan.behind.sort_by(|a, b| a.slug.cmp(&b.slug));
+        plan.failed.sort_by_key(|failure| failure.0);
 
         tracing::info!(
+            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            concurrency,
+            total,
             total = plan.total(),
             current = plan.current.len(),
             behind = plan.behind.len(),
@@ -153,7 +178,7 @@ impl ControlPlane {
     ) -> Result<TenantSchema, AccessError> {
         let options = self
             .tenants
-            .cluster_options(&tenant.cluster)?
+            .maintenance_options(&tenant.cluster)?
             .database(&tenant.database_name);
 
         let mut conn = PgConnection::connect_with(&options)
@@ -357,7 +382,7 @@ impl ControlPlane {
     ) -> Result<Vec<(String, i64)>, AccessError> {
         let options = self
             .tenants
-            .cluster_options(&tenant.cluster)?
+            .maintenance_options(&tenant.cluster)?
             .database(&tenant.database_name);
 
         let mut conn = Box::pin(PgConnection::connect_with(&options)).await?;
@@ -376,4 +401,19 @@ impl ControlPlane {
             .map(|row| (row.event_name, row.version))
             .collect())
     }
+}
+
+/// How many tenants the fleet walk visits at once.
+///
+/// Each one holds a direct connection for the length of its migration, so this
+/// is a straight load on the server — and on the route that bypasses any pooler,
+/// which is exactly the route with the smallest budget. Sixteen is comfortable
+/// against a 200-connection server and leaves room for the deployment that is
+/// still serving traffic while this runs.
+fn fleet_concurrency() -> usize {
+    std::env::var("FLEET_CONCURRENCY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(16)
 }

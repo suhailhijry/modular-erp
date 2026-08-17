@@ -2111,7 +2111,7 @@ async fn a_write_marks_the_tenant_as_needing_a_visit() {
     // Push the tenant far into the future, as an idle one would be.
     fixture
         .control
-        .schedule_next_visit(tenant, std::time::Duration::from_hours(1))
+        .schedule_next_visit(tenant, std::time::Duration::from_hours(1), false)
         .await
         .expect("defers");
     assert!(

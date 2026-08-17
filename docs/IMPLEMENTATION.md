@@ -3155,3 +3155,113 @@ that writes is one you cannot run against production before deciding to deploy.
 - `PATCH /v1/members/{id}` publishes
   `{"what":"membership","which":{"identity":…,"tenant":…}}` on `spa:invalidate`,
   and both replicas answer with the new role immediately afterwards.
+
+## Standards for a pooler, and three costs it made visible
+
+Read Supavisor's two write-ups first, on the principle that setting standards now
+is cheaper than a rewrite later. The load-bearing facts: **transaction mode** is
+the mode, 400 direct connections served 250,000 clients, one node holds the
+direct connections per database while others relay, reads spread across the
+cluster and writes go to the primary, and prepared statements work by parsing SQL
+and broadcasting `PREPARE` across the pool.
+
+The audit that followed was the most useful hour of it. Transaction pooling
+forbids session state surviving between transactions, so:
+
+| hazard | found |
+|---|---|
+| `SET search_path` at session scope | **12 sites, every one DDL or install** |
+| session advisory locks | only `spa-testkit` |
+| `LISTEN`/`NOTIFY` | none — D4 banned it years ago |
+| temp tables, `WITH HOLD` cursors | none |
+
+The projection hot path already used `SET LOCAL`, deliberately and with a comment
+saying why. So the codebase was one decision away from pooler-ready, and the
+decision is the one Supabase ships: **two connection strings per cluster.**
+
+- **`Role::Direct`, and `PRIMARY_DIRECT_URL` behind it.** Provisioning, fleet
+  migration and schema rebuilds ask for it; everything else goes through the
+  primary, which may be a pooler. **It falls back to the primary when unset**,
+  which is what makes this a variable rather than a flag day — nothing changes
+  for a deployment that never adopts one.
+
+  `maintenance_options` is the one line that did it, because every DDL path in
+  the system already went through that function.
+
+- **The rule is a test, not a comment.** `tests/pooler.rs` walks every `.rs` and
+  `.sql` in the workspace and fails on a session-scoped `SET`, a session advisory
+  lock, or a `LISTEN` outside an allow-list of DDL files. Changing the projection
+  runner back to plain `SET` fails it; adding a `pg_notify` anywhere fails it.
+
+  Its first run found **itself** — the file names every pattern it hunts for.
+  Which at least proved the walk reaches that far.
+
+- **`POOL_STATEMENT_CACHE`.** sqlx prepares by default and caches per connection.
+  Poolers answer this differently and both answers are the pooler's business; what
+  this crate owes a deployment is a knob it can turn without a rebuild.
+
+### And three things the same audit exposed
+
+**Lane budgets were compiled constants.** 100 + 240 + 60 = 400 per process, and
+four processes make 1,600 against a 200-connection server. Nothing had ever
+failed, because the per-tenant pool cap hid it. They read from the environment
+now, and `report_budget` states the arithmetic at start-up — which promptly
+warned on the compose stack, exactly as intended, until the stack was sized:
+`this_process_at_most: 30, server_max_connections: 200`.
+
+**The fleet walk was sequential**, and its own comment conceded it. Bounded
+concurrency now, `FLEET_CONCURRENCY` (16). Measured over 40 tenants:
+
+| concurrency | elapsed |
+|---|---|
+| 1 | 225 ms |
+| 4 | 67 ms |
+| 16 | 64 ms |
+| 32 | 36 ms |
+
+Bounded and not unbounded because each visit opens a connection on the **direct**
+route — the one that bypasses any pooler, and therefore the one with the smallest
+budget.
+
+**A quiet tenant was visited for ever at a fixed thirty seconds.** Five thousand
+tenants is 167 visits a second, in perpetuity, almost all finding nothing — and
+each one opens a connection, runs every enabled module's projection query, and
+writes a row back. It was the largest standing cost the platform had, spent
+entirely on tenants doing nothing.
+
+Consecutive idle visits now back off exponentially to a six-hour cap:
+
+```text
+100 active + 4,900 dormant  ≈  3.5 visits/s   (was 167)
+```
+
+Three details that are not obvious:
+
+- **Waking was already built.** `request_visit` pulls `next_visit_at` back to
+  now and every write calls it, so a dormant tenant that receives a request is
+  current within a claim cycle. Without that the backoff would be a latency bug
+  rather than a saving, which is what `a_request_wakes_a_dormant_tenant_immediately`
+  is for.
+- **Jitter has to scale with the interval.** Ten seconds of spread across a
+  six-hour interval leaves five thousand tenants landing in the same ten-second
+  window every six hours — a thundering herd with a long fuse, and one that only
+  shows up in production.
+- **The streak is not on `Tenant`.** How many times a scheduler looked and found
+  nothing is the scheduler's business; a domain model carrying it invites code
+  that reads it for something else. `Claimed { tenant, idle_visits }` instead.
+
+### Two more gaps found by running it
+
+**`migrator` never registered a cluster.** Only `spa_demo::bootstrap` ever called
+`register_cluster`, so a fresh compose stack had migrations applied, an empty
+`cluster` table, and every signup failing with a 500 that said
+`no cluster has capacity (0 at their limit)` — which names a capacity problem and
+is a missing row. Same shape as the control migrations, found the same way: bring
+it up clean and post a signup. It declares `primary` now, with a capacity that
+says in the log that it is a placeholder to be sized from measurement.
+
+**A falsification that did not falsify.** Editing `leases.rs` by pattern found
+nothing, because `cargo fmt` had split the line across three; the test passed and
+`git checkout` reported "Updated 0 paths", which is the tell. Worth knowing: a
+scripted edit that reports success and a `git checkout` that reports no change
+are contradictory, and the second one is right.

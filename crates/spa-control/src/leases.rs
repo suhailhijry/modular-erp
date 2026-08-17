@@ -35,6 +35,19 @@ use std::time::Duration;
 
 use spa_types::TenantId;
 
+/// A tenant a worker has taken, and how long it has been quiet.
+///
+/// The streak is deliberately **not** on [`Tenant`](crate::Tenant): how many
+/// times a scheduler has looked at something and found nothing is the
+/// scheduler's business, and a domain model that carried it would invite code
+/// that read it for some other purpose.
+#[derive(Debug, Clone)]
+pub struct Claimed {
+    pub tenant: crate::Tenant,
+    /// Consecutive visits that found nothing, **before** this one.
+    pub idle_visits: i32,
+}
+
 /// How eagerly a worker revisits tenants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkSchedule {
@@ -45,6 +58,18 @@ pub struct WorkSchedule {
     /// Up to this much is added at random to `idle_interval`, so tenants
     /// claimed together do not stay synchronized.
     pub jitter: Duration,
+    /// The ceiling the idle interval backs off to.
+    ///
+    /// **This is what makes a dormant tenant nearly free.** Without it the
+    /// interval is a constant, so five thousand tenants cost 167 visits a second
+    /// for ever whether or not any of them is doing anything. With it, a tenant
+    /// that has been quiet for a day is asked a handful of times a day.
+    ///
+    /// Bounded rather than unbounded, because a tenant is never *certainly*
+    /// finished: a scheduled effect, a lapsed lease, an outbox row a previous
+    /// worker died holding. Something has to come back and look eventually, and
+    /// the cap is how often eventually is.
+    pub max_idle_interval: Duration,
 }
 
 impl Default for WorkSchedule {
@@ -55,6 +80,10 @@ impl Default for WorkSchedule {
             lease: Duration::from_secs(30),
             idle_interval: Duration::from_secs(30),
             jitter: Duration::from_secs(10),
+            // Six hours. Long enough that the standing cost of a dormant fleet
+            // rounds to nothing, short enough that anything a visit is the only
+            // cure for is fixed the same working day.
+            max_idle_interval: Duration::from_hours(6),
         }
     }
 }
@@ -65,16 +94,42 @@ impl WorkSchedule {
     /// Jitter comes from the tenant's own id rather than a random source, so the
     /// spread is stable per tenant and this stays a pure function — a worker
     /// restart does not reshuffle everything, and the value is testable.
+    /// `idle_visits` is how many consecutive visits have found nothing, so a
+    /// tenant that just worked passes 0 and is back on the base interval at
+    /// once. Doubling from there, capped at [`Self::max_idle_interval`].
     #[must_use]
-    pub fn next_idle_delay(&self, tenant: TenantId) -> Duration {
+    pub fn next_idle_delay(&self, tenant: TenantId, idle_visits: i32) -> Duration {
+        // Saturating rather than wrapping: a tenant idle for a month has a large
+        // count, and `1 << 40` is not a duration anybody meant.
+        let doublings = u32::try_from(idle_visits.max(0))
+            .unwrap_or(u32::MAX)
+            .min(24);
+        let backed_off = self
+            .idle_interval
+            .saturating_mul(1_u32.checked_shl(doublings).unwrap_or(u32::MAX))
+            .min(self.max_idle_interval);
+
         if self.jitter.is_zero() {
-            return self.idle_interval;
+            return backed_off;
         }
+
         // The low bits of a v7 UUID are random — the timestamp lives in the high
         // ones — so a modulus over the whole value spreads evenly.
-        let window = self.jitter.as_millis().max(1);
+        //
+        // Jitter scales with the interval it spreads. A fixed ten seconds across
+        // a six-hour interval leaves five thousand tenants landing in the same
+        // ten-second window every six hours, which is a thundering herd with a
+        // long fuse.
+        let window = self
+            .jitter
+            .saturating_mul(
+                u32::try_from(backed_off.as_secs().max(1) / self.idle_interval.as_secs().max(1))
+                    .unwrap_or(1),
+            )
+            .as_millis()
+            .max(1);
         let spread = tenant.as_uuid().as_u128() % window;
-        self.idle_interval + Duration::from_millis(u64::try_from(spread).unwrap_or(0))
+        backed_off + Duration::from_millis(u64::try_from(spread).unwrap_or(0))
     }
 }
 
@@ -91,7 +146,7 @@ mod tests {
         };
 
         let delays: Vec<Duration> = (0..64)
-            .map(|_| schedule.next_idle_delay(TenantId::new()))
+            .map(|_| schedule.next_idle_delay(TenantId::new(), 0))
             .collect();
 
         assert!(
@@ -116,8 +171,8 @@ mod tests {
         let schedule = WorkSchedule::default();
         let tenant = TenantId::new();
         assert_eq!(
-            schedule.next_idle_delay(tenant),
-            schedule.next_idle_delay(tenant),
+            schedule.next_idle_delay(tenant, 0),
+            schedule.next_idle_delay(tenant, 0),
             "jitter is derived from the id, so a restart does not reshuffle"
         );
     }
@@ -130,8 +185,84 @@ mod tests {
             ..WorkSchedule::default()
         };
         assert_eq!(
-            schedule.next_idle_delay(TenantId::new()),
+            schedule.next_idle_delay(TenantId::new(), 0),
             Duration::from_millis(5)
+        );
+    }
+
+    /// **A tenant that has nothing to do stops being asked so often.**
+    ///
+    /// The interval was a constant, so five thousand tenants cost 167 visits a
+    /// second for ever whether any of them was doing anything or not. Every one
+    /// of those opens a connection, runs each enabled module's projection query,
+    /// and writes a row back.
+    #[test]
+    fn a_quiet_tenant_backs_off_and_a_busy_one_does_not() {
+        let schedule = WorkSchedule {
+            idle_interval: Duration::from_secs(30),
+            jitter: Duration::ZERO,
+            max_idle_interval: Duration::from_hours(6),
+            ..WorkSchedule::default()
+        };
+        let tenant = TenantId::new();
+        let at = |idle| schedule.next_idle_delay(tenant, idle);
+
+        // A tenant that just worked is back on the base interval at once, which
+        // is what makes the backoff invisible to anybody using the system.
+        assert_eq!(at(0), Duration::from_secs(30));
+        assert_eq!(at(1), Duration::from_mins(1));
+        assert_eq!(at(2), Duration::from_mins(2));
+
+        // And it stops somewhere. A tenant is never *certainly* finished — a
+        // lapsed lease, an outbox row a dead worker was holding — so something
+        // has to come back eventually.
+        assert_eq!(at(20), Duration::from_hours(6));
+        assert_eq!(
+            at(1_000),
+            Duration::from_hours(6),
+            "and never grows past it"
+        );
+        assert_eq!(
+            at(i32::MAX),
+            Duration::from_hours(6),
+            "including absurd counts"
+        );
+
+        // A negative count would be corrupt data; treat it as fresh rather than
+        // panicking on a subtraction nobody meant.
+        assert_eq!(at(-5), Duration::from_secs(30));
+    }
+
+    /// **Jitter has to scale with the interval it spreads.**
+    ///
+    /// Ten seconds of spread across a six-hour interval leaves five thousand
+    /// tenants landing in the same ten-second window every six hours — a
+    /// thundering herd with a long fuse, and one that only appears in
+    /// production.
+    #[test]
+    fn the_spread_grows_with_the_interval() {
+        let schedule = WorkSchedule {
+            idle_interval: Duration::from_secs(30),
+            jitter: Duration::from_secs(10),
+            max_idle_interval: Duration::from_hours(6),
+            ..WorkSchedule::default()
+        };
+
+        let spread = |idle| {
+            let delays: Vec<Duration> = (0..256)
+                .map(|_| schedule.next_idle_delay(TenantId::new(), idle))
+                .collect();
+            let low = delays.iter().min().copied().unwrap_or_default();
+            let high = delays.iter().max().copied().unwrap_or_default();
+            high.saturating_sub(low)
+        };
+
+        let fresh = spread(0);
+        let dormant = spread(20);
+        assert!(
+            dormant > fresh * 10,
+            "a six-hour interval spread over {dormant:?} is barely wider than \
+             the thirty-second one's {fresh:?}; the herd re-forms"
         );
     }
 }

@@ -84,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // this document calls the deploy step.
     if mode.is_empty() {
         control.migrate().await?;
+        register_primary(&control).await?;
     }
 
     if mode == "versions" {
@@ -306,6 +307,65 @@ async fn unreadable_events(
     }
 
     Ok(findings)
+}
+
+/// How many tenants and databases the primary cluster is declared to hold.
+///
+/// **A placeholder, not a measurement.** D13 says capacity is sized from
+/// observation, and nothing here has observed anything. It exists so that a
+/// fresh deployment can accept its first signup instead of answering
+/// `no cluster has capacity (0 at their limit)` — which is what it did, and
+/// which tells an operator nothing about what to do next.
+const PLACEHOLDER_CAPACITY: i32 = 10_000;
+
+/// Declares the primary cluster if the control plane has never heard of it.
+///
+/// # Why this is here
+///
+/// It was nowhere. `register_cluster` was called only by `spa_demo::bootstrap`,
+/// so a deployment that never built a demo tenant had migrations applied, an
+/// empty `cluster` table, and every signup failing with a 500 that named a
+/// capacity problem rather than a missing row. Found by bringing the compose
+/// stack up clean and posting a signup.
+///
+/// Declarative and idempotent, like `register_cluster` itself — re-running the
+/// deploy step re-declares the same configuration.
+///
+/// The **variable names** are stored, never the credentials (D13). What is
+/// recorded is "this cluster's DSN comes from `PRIMARY_CLUSTER_URL`", so a
+/// control-plane backup carries no passwords.
+async fn register_primary(
+    control: &ControlPlane,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let capacity = std::env::var("PRIMARY_CLUSTER_CAPACITY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i32>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(PLACEHOLDER_CAPACITY);
+
+    let replica_variable = std::env::var("PRIMARY_REPLICA_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .map(|_| "PRIMARY_REPLICA_URL");
+
+    control
+        .register_cluster(
+            "primary",
+            "PRIMARY_CLUSTER_URL",
+            replica_variable,
+            capacity,
+            capacity,
+            spa_control::Actor::system(),
+        )
+        .await?;
+
+    tracing::info!(
+        capacity,
+        replica = replica_variable.is_some(),
+        "cluster `primary` declared. The capacity is a placeholder — size it \
+         from measurement and set PRIMARY_CLUSTER_CAPACITY (architecture D13)."
+    );
+    Ok(())
 }
 
 #[cfg(test)]
