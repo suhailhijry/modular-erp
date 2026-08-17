@@ -14,6 +14,12 @@ workspace = true
 # ponytail: the architecture says modules depend on `spa-kernel`, which does not
 # exist yet; when it does it re-exports `TenantDb` and this line changes to it.
 # Nothing here touches `ControlPlane`, so the isolation property already holds.
+# The module ships its own routes; `spa-web` is what they are built from.
+spa-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
 spa-control = { workspace = true }
 spa-eventlog = { workspace = true }
 spa-i18n = { workspace = true }

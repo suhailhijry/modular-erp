@@ -10,13 +10,13 @@ description = "The HTTP surface: authentication, problem+json, and the route to 
 workspace = true
 
 [dependencies]
+spa-web = { workspace = true }
 spa-control = { workspace = true }
 spa-eventlog = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }
 purchases = { workspace = true }
 tax_sa = { workspace = true }
-spa-projection = { workspace = true }
 spa-i18n = { workspace = true }
 spa-types = { workspace = true }
 uuid = { workspace = true }

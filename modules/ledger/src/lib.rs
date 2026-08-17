@@ -25,6 +25,7 @@ mod account;
 mod charts;
 mod commands;
 mod entry;
+pub mod http;
 mod lines;
 pub mod messages;
 pub mod period;

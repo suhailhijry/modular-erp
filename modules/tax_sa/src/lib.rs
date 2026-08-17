@@ -50,6 +50,7 @@ mod clearance;
 mod commands;
 mod documents;
 mod filing;
+pub mod http;
 pub mod messages;
 mod onboarded;
 mod projections;
@@ -77,15 +78,25 @@ use spa_types::{DomainName, EventName, SchemaVersion};
 /// This module's messages, in every supported language.
 pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
 
-/// Creates this module's read models, and seeds the Saudi rate.
+/// Creates this module's read models, then seeds the Saudi rate.
+///
+/// The same two steps in the same order as `ControlPlane::install_module`, and
+/// **read from [`setup`]** rather than restated — a helper that installed a
+/// different thing from the one production installs would make every test that
+/// used it a test of something else.
 pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    let setup = setup();
+
     sqlx::raw_sql(
         "CREATE SCHEMA IF NOT EXISTS proj_tax_sa; SET search_path TO proj_tax_sa, public;",
     )
     .execute(&mut *conn)
     .await?;
 
-    sqlx::raw_sql(include_str!("../schema/install.sql"))
+    sqlx::raw_sql(sqlx::AssertSqlSafe(setup.install_sql.to_owned()))
+        .execute(&mut *conn)
+        .await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(setup.seed_sql.to_owned()))
         .execute(&mut *conn)
         .await?;
 
@@ -131,6 +142,9 @@ pub fn setup() -> spa_control::ModuleSetup {
         GROUPS,
         upcasters,
     )
+    // The Saudi VAT rate. `ledger` owns the shape of a rate and has no opinion
+    // about the number; this is where the number comes from.
+    .seeding(include_str!("../schema/seed.sql"))
 }
 
 /// This module's entitlement name.

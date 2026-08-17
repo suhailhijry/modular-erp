@@ -1,20 +1,20 @@
 //! Who else has access to a tenant.
 
-use crate::wire::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use spa_control::{Actor, MemberError, Role};
 use spa_i18n::{Locale, Localize};
 use spa_types::{IdentityId, Timestamp};
+use spa_web::Json;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::error::ApiError;
-use crate::extract::{Allowed, Language, ManageTenant, Read};
-use crate::problem::Problem;
-use crate::state::AppState;
+use spa_web::ApiError;
+use spa_web::AppState;
+use spa_web::Problem;
+use spa_web::{Allowed, Language, ManageTenant, Read};
 
 /// Shortest password an owner may set for a colleague.
 ///
@@ -102,7 +102,7 @@ async fn list_members(
         .control
         .members(tenant.db.tenant())
         .await
-        .map_err(|e| ApiError::Access(e).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
 
     Ok(Json(
         members
@@ -344,21 +344,21 @@ fn actor(tenant: &Allowed<ManageTenant>) -> Actor {
 fn parse_role(raw: &str, locale: Locale) -> Result<Role, Problem> {
     raw.parse::<Role>().map_err(|_| {
         ApiError::BadRequest(
-            spa_i18n::Message::new(crate::messages::UNKNOWN_ROLE)
+            spa_i18n::Message::new(spa_web::messages::UNKNOWN_ROLE)
                 .with("role", spa_i18n::MessageArg::text(raw.to_owned())),
         )
-        .into_problem(locale)
+        .into_problem(locale, &crate::CATALOG)
     })
 }
 
 fn too_short(locale: Locale) -> Problem {
     ApiError::BadRequest(
-        spa_i18n::Message::new(crate::messages::PASSWORD_TOO_SHORT).with(
+        spa_i18n::Message::new(spa_web::messages::PASSWORD_TOO_SHORT).with(
             "n",
             spa_i18n::MessageArg::Count(i64::try_from(MIN_PASSWORD).unwrap_or(i64::MAX)),
         ),
     )
-    .into_problem(locale)
+    .into_problem(locale, &crate::CATALOG)
 }
 
 fn member_problem(error: &MemberError, locale: Locale) -> Problem {

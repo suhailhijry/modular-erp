@@ -970,6 +970,7 @@ name = "ledger"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "proptest",
  "serde",
@@ -980,9 +981,13 @@ dependencies = [
  "spa-projection",
  "spa-testkit",
  "spa-types",
+ "spa-web",
  "sqlx",
  "thiserror",
  "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
 ]
 
 [[package]]
@@ -1275,6 +1280,7 @@ name = "purchases"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "ledger",
  "serde",
@@ -1285,9 +1291,13 @@ dependencies = [
  "spa-projection",
  "spa-testkit",
  "spa-types",
+ "spa-web",
  "sqlx",
  "thiserror",
  "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
 ]
 
 [[package]]
@@ -1491,6 +1501,7 @@ name = "sales"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "chrono",
  "ledger",
  "proptest",
@@ -1502,9 +1513,13 @@ dependencies = [
  "spa-projection",
  "spa-testkit",
  "spa-types",
+ "spa-web",
  "sqlx",
  "thiserror",
  "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
 ]
 
 [[package]]
@@ -1719,6 +1734,7 @@ dependencies = [
  "spa-projection",
  "spa-testkit",
  "spa-types",
+ "spa-web",
  "sqlx",
  "tax_sa",
  "thiserror",
@@ -1846,6 +1862,26 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "spa-web"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "serde",
+ "serde_json",
+ "spa-control",
+ "spa-eventlog",
+ "spa-i18n",
+ "spa-projection",
+ "spa-types",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
  "uuid",
 ]
 
@@ -2134,6 +2170,7 @@ name = "tax_sa"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64",
  "chrono",
  "hex",
@@ -2151,9 +2188,13 @@ dependencies = [
  "spa-projection",
  "spa-testkit",
  "spa-types",
+ "spa-web",
  "sqlx",
  "thiserror",
  "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
  "uuid",
 ]
 

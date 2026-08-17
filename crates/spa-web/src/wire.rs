@@ -1,8 +1,8 @@
 //! Shapes and helpers every module's routes need.
 //!
-//! Extracted when the second module arrived and wanted all four of them. With
-//! one module they lived in `ledger_routes`, which was the right place for them
-//! then.
+//! Extracted when the second module arrived and wanted all four of them, and
+//! moved down here when the routes moved *up* into the modules — a module that
+//! cannot name `Json` or `require_module` cannot ship its own HTTP surface.
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, FromRequestParts, Request};
@@ -33,7 +33,7 @@ use crate::problem::Problem;
 /// not parse, 422 for JSON that parses into the wrong shape, 415 for a body with
 /// no `Content-Type` — all correct, and only the body was wrong.
 #[derive(Debug)]
-pub(crate) struct Json<T>(pub(crate) T);
+pub struct Json<T>(pub T);
 
 impl<T, S> FromRequest<S> for Json<T>
 where
@@ -57,7 +57,7 @@ where
                     rejection.status(),
                     &Message::new(code).with("reason", MessageArg::text(rejection.body_text())),
                     locale,
-                    &crate::catalog::CATALOG,
+                    &crate::CATALOG,
                 ))
             }
         }
@@ -73,7 +73,7 @@ impl<T: serde::Serialize> IntoResponse for Json<T> {
 /// `axum::extract::Query`, refusing in this API's shape. Same argument as
 /// [`Json`].
 #[derive(Debug)]
-pub(crate) struct Query<T>(pub(crate) T);
+pub struct Query<T>(pub T);
 
 impl<T, S> FromRequestParts<S> for Query<T>
 where
@@ -91,7 +91,7 @@ where
                 &Message::new(crate::messages::INVALID_QUERY)
                     .with("reason", MessageArg::text(rejection.body_text())),
                 locale,
-                &crate::catalog::CATALOG,
+                &crate::CATALOG,
             )),
         }
     }
@@ -113,15 +113,15 @@ fn spoken_in(headers: &axum::http::HeaderMap) -> Locale {
 /// many decimal places the currency has.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[schema(example = json!({ "minor": 1050, "currency": "SAR" }))]
-pub(crate) struct Amount {
+pub struct Amount {
     /// The amount in the currency's smallest unit. 1050 is 10.50 SAR.
-    pub(crate) minor: i64,
+    pub minor: i64,
     /// ISO 4217, upper case.
-    pub(crate) currency: String,
+    pub currency: String,
 }
 
 impl Amount {
-    pub(crate) fn parse(&self, locale: Locale) -> Result<Money, Problem> {
+    pub fn parse(&self, locale: Locale) -> Result<Money, Problem> {
         let currency = CurrencyCode::new(&self.currency).map_err(|_| {
             bad_request(
                 crate::messages::UNKNOWN_CURRENCY,
@@ -138,20 +138,20 @@ impl Amount {
 ///
 /// Generic over the capability, because every write is behind a different one
 /// and they all deref to the same `Tenant`.
-pub(crate) fn metadata<C: Capability>(tenant: &Allowed<C>) -> Metadata {
+pub fn metadata<C: Capability>(tenant: &Allowed<C>) -> Metadata {
     Metadata {
         actor: Some(tenant.session.identity.to_string()),
         ..Metadata::default()
     }
 }
 
-pub(crate) fn parse_id(raw: &str, locale: Locale) -> Result<AggregateId, Problem> {
+pub fn parse_id(raw: &str, locale: Locale) -> Result<AggregateId, Problem> {
     AggregateId::new(raw).map_err(|_| bad_request(crate::messages::INVALID_ID, "id", raw, locale))
 }
 
-pub(crate) fn bad_request(code: MessageCode, arg: &str, value: &str, locale: Locale) -> Problem {
+pub fn bad_request(code: MessageCode, arg: &str, value: &str, locale: Locale) -> Problem {
     ApiError::BadRequest(Message::new(code).with(arg, MessageArg::text(value.to_owned())))
-        .into_problem(locale)
+        .into_problem(locale, &crate::CATALOG)
 }
 
 /// Refuses a route belonging to a module the tenant did not enable.
@@ -164,11 +164,7 @@ pub(crate) fn bad_request(code: MessageCode, arg: &str, value: &str, locale: Loc
 /// architecture's `ModuleEnabled<M>` token would make a disabled module's
 /// handler unconstructable instead — worth building when a module has enough
 /// routes that remembering the call becomes the weak link.
-pub(crate) fn require_module(
-    tenant: &Tenant,
-    module: &ModuleId,
-    locale: Locale,
-) -> Result<(), Problem> {
+pub fn require_module(tenant: &Tenant, module: &ModuleId, locale: Locale) -> Result<(), Problem> {
     if tenant.db.has_module(module) {
         return Ok(());
     }
@@ -176,7 +172,7 @@ pub(crate) fn require_module(
         Message::new(crate::messages::MODULE_NOT_ENABLED)
             .with("module", MessageArg::text(module.as_str().to_owned())),
     )
-    .into_problem(locale))
+    .into_problem(locale, &crate::CATALOG))
 }
 
 // ---------------------------------------------------------------------------
@@ -195,19 +191,19 @@ pub(crate) fn require_module(
 /// `next` absent means **the list ended**. Present means pass it back as
 /// `?after=` to continue.
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
-pub(crate) struct Paged<T> {
-    pub(crate) items: Vec<T>,
+pub struct Paged<T> {
+    pub items: Vec<T>,
     /// Pass back as `?after=` for the next page. Absent when there are no more.
     ///
     /// Opaque: what is in it is the query's business, and a client that parsed
     /// one would break the day a list is ordered differently.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) next: Option<String>,
+    pub next: Option<String>,
 }
 
 impl<T> Paged<T> {
     /// Renders a page, mapping each row to its wire shape.
-    pub(crate) fn of<R>(page: spa_types::Page<R>, view: impl Fn(R) -> T) -> Self {
+    pub fn of<R>(page: spa_types::Page<R>, view: impl Fn(R) -> T) -> Self {
         Self {
             next: page.next.map(|cursor| cursor.to_string()),
             items: page.items.into_iter().map(view).collect(),
@@ -217,14 +213,14 @@ impl<T> Paged<T> {
 
 /// How much of a list to return, and where to resume it.
 #[derive(Debug, serde::Deserialize)]
-pub(crate) struct After {
+pub struct After {
     #[serde(default)]
-    pub(crate) after: Option<String>,
+    pub after: Option<String>,
     /// How many rows. Absent takes the default; anything above the maximum is
     /// **clamped rather than refused**, because a caller asking for more than
     /// the server will give wants as much as it will give.
     #[serde(default)]
-    pub(crate) limit: Option<i64>,
+    pub limit: Option<i64>,
 }
 
 impl After {
@@ -234,7 +230,7 @@ impl After {
     /// means — it comes from an uninitialised variable — so it takes the
     /// default too.
     #[must_use]
-    pub(crate) fn limit(&self, default: i64, max: i64) -> i64 {
+    pub fn limit(&self, default: i64, max: i64) -> i64 {
         match self.limit {
             Some(asked) if asked >= 1 => asked.min(max),
             _ => default,
@@ -246,10 +242,7 @@ impl After {
     /// A cursor this build cannot read is **refused**, not ignored: silently
     /// starting from the top would hand a caller the first page again and look
     /// like the list restarting.
-    pub(crate) fn cursor(
-        &self,
-        locale: spa_i18n::Locale,
-    ) -> Result<Option<spa_types::Cursor>, Problem> {
+    pub fn cursor(&self, locale: spa_i18n::Locale) -> Result<Option<spa_types::Cursor>, Problem> {
         self.after
             .as_deref()
             .filter(|text| !text.is_empty())

@@ -44,6 +44,7 @@
 
 mod bill;
 mod commands;
+pub mod http;
 pub mod messages;
 mod posting;
 mod projections;

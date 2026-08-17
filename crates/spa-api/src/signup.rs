@@ -9,21 +9,21 @@
 //! Thin is also what makes it compile. See `spa-control/src/provision.rs` on why
 //! a chain of `async fn`s here cannot be proven `Send`.
 
-use crate::wire::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use spa_control::ModuleSetup;
 use spa_i18n::Locale;
 use spa_types::Timestamp;
+use spa_web::Json;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::error::ApiError;
-use crate::extract::Language;
-use crate::problem::Problem;
-use crate::state::AppState;
+use spa_web::ApiError;
+use spa_web::AppState;
+use spa_web::Language;
+use spa_web::Problem;
 
 /// The shortest password we will store.
 ///
@@ -95,12 +95,12 @@ async fn sign_up(
 ) -> Result<(StatusCode, Json<SignedUp>), Problem> {
     if body.password.chars().count() < MIN_PASSWORD {
         return Err(ApiError::BadRequest(
-            spa_i18n::Message::new(crate::messages::PASSWORD_TOO_SHORT).with(
+            spa_i18n::Message::new(spa_web::messages::PASSWORD_TOO_SHORT).with(
                 "n",
                 spa_i18n::MessageArg::Count(i64::try_from(MIN_PASSWORD).unwrap_or(i64::MAX)),
             ),
         )
-        .into_problem(locale));
+        .into_problem(locale, &crate::CATALOG));
     }
 
     let modules = parse_modules(&body.modules, locale)?;
@@ -110,7 +110,7 @@ async fn sign_up(
         .control
         .sign_up(body.email, body.password, body.slug, body.company, modules)
         .await
-        .map_err(|e| ApiError::Access(e).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
 
     Ok((
         StatusCode::CREATED,

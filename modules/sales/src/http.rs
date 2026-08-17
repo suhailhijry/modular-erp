@@ -1,14 +1,11 @@
 //! The sales module's HTTP surface.
 //!
-//! Translation only, like `ledger_routes` — everything that matters lives in the
-//! module. What the two files now have in common is a `Module` trait's whole
-//! content: a name, an install description, a set of projection groups, a
-//! router, and a mapping from the module's rejections onto statuses. That is
-//! Phase 4's to build, and it is now a description rather than a guess.
+//! Translation only, like every module's — see [`ledger::http`] for why these
+//! live in the module rather than in the composition root.
 
+use crate::{Customer, Draft, DraftLine, Receipt, SalesError, VatCategory};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use sales::{Customer, Draft, DraftLine, Receipt, SalesError, VatCategory};
 use serde::{Deserialize, Serialize};
 use spa_control::CommandError;
 use spa_eventlog::ExecuteError;
@@ -18,16 +15,14 @@ use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::consistency::{Consistency, nudge};
-use crate::error::ApiError;
-use crate::extract::{Allowed, Language, ManageAccounts, PostEntries, Read};
-use crate::problem::Problem;
-use crate::state::AppState;
-use crate::wire::{
-    After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module,
-};
+use spa_web::ApiError;
+use spa_web::AppState;
+use spa_web::Problem;
+use spa_web::{After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module};
+use spa_web::{Allowed, Language, ManageAccounts, PostEntries, Read};
+use spa_web::{Consistency, nudge};
 
-pub(crate) fn routes() -> OpenApiRouter<AppState> {
+pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_invoices, issue_invoice))
         .routes(routes!(get_invoice))
@@ -39,9 +34,25 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(posting_accounts, set_posting_accounts))
 }
 
-/// How many invoices a list returns. ponytail: no cursor until a tenant has a
-/// list long enough to need one — see `sales::invoices`.
+/// How many invoices a page returns when the caller does not say, and the most
+/// it will give when they ask for more. Paged from there — see [`spa_web::After`].
 const PAGE: i64 = 200;
+
+/// **What this module's routes can answer with.**
+///
+/// Its own failures, the failures of the modules it is built on, and everything
+/// any route can produce — the request-level messages, the control plane's and
+/// the event log's, which [`spa_web::CATALOG`] already unions.
+///
+/// That list is exhaustive by construction: a route can only surface a message
+/// from a crate this one depends on. Leaving one out is not a compile error and
+/// not a test failure — it is a client receiving `ledger.does_not_balance` as
+/// the bare code with no sentence in it, which is how this was found.
+///
+/// A module cannot name its siblings and has no reason to. The complete catalog
+/// is `spa_api::CATALOG`, and `docs/ERRORS.md` comes from that.
+static CATALOG: spa_i18n::Composite =
+    spa_i18n::Composite::new(&[&crate::CATALOG, &ledger::CATALOG, &spa_web::CATALOG]);
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -289,7 +300,7 @@ struct PaymentView {
     account: String,
 }
 
-fn view(summary: sales::InvoiceSummary) -> InvoiceView {
+fn view(summary: crate::InvoiceSummary) -> InvoiceView {
     InvoiceView {
         id: summary.id,
         number: summary.number,
@@ -345,12 +356,12 @@ async fn issue_invoice(
     Language(locale): Language,
     Json(body): Json<NewInvoice>,
 ) -> Result<(StatusCode, Json<Issued>), Problem> {
-    require_module(&tenant, &sales::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let id = parse_id(&body.id, locale)?;
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
-            crate::messages::UNKNOWN_CURRENCY,
+            spa_web::messages::UNKNOWN_CURRENCY,
             "currency",
             &body.currency,
             locale,
@@ -361,7 +372,7 @@ async fn issue_invoice(
     for line in body.lines {
         let category: VatCategory = line.vat.parse().map_err(|_| {
             bad_request(
-                crate::messages::UNKNOWN_VAT_CATEGORY,
+                spa_web::messages::UNKNOWN_VAT_CATEGORY,
                 "vat",
                 &line.vat,
                 locale,
@@ -378,13 +389,13 @@ async fn issue_invoice(
     for discount in body.discounts {
         let category: VatCategory = discount.vat.parse().map_err(|_| {
             bad_request(
-                crate::messages::UNKNOWN_VAT_CATEGORY,
+                spa_web::messages::UNKNOWN_VAT_CATEGORY,
                 "vat",
                 &discount.vat,
                 locale,
             )
         })?;
-        discounts.push(sales::DraftDiscount {
+        discounts.push(crate::DraftDiscount {
             reason: discount.reason.trim().to_owned(),
             amount: spa_types::Money::from_minor(discount.amount, currency),
             category,
@@ -396,7 +407,7 @@ async fn issue_invoice(
         customer = customer.with_vat_number(number);
     }
     if let Some(address) = body.customer.address {
-        customer = customer.at(sales::Address {
+        customer = customer.at(crate::Address {
             street: address.street.trim().to_owned(),
             city: address.city.trim().to_owned(),
             country: address.country.trim().to_uppercase(),
@@ -416,7 +427,7 @@ async fn issue_invoice(
         note: body.note,
     };
 
-    let committed = sales::issue_invoice(&tenant.db, &id, &draft, &metadata(&tenant))
+    let committed = crate::issue_invoice(&tenant.db, &id, &draft, &metadata(&tenant))
         .await
         .map_err(|e| sales_problem(&e, locale))?;
 
@@ -464,13 +475,13 @@ async fn record_payment(
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewPayment>,
 ) -> Result<Json<Recorded>, Problem> {
-    require_module(&tenant, &sales::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let raw = params.get("invoice").map_or("", String::as_str);
     let invoice = parse_id(raw, locale)?;
     let account = parse_id(&body.account, locale)?;
 
-    let committed = sales::record_payment(
+    let committed = crate::record_payment(
         &tenant.db,
         &invoice,
         &Receipt {
@@ -526,12 +537,12 @@ async fn credit_note(
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewCreditNote>,
 ) -> Result<Json<Issued>, Problem> {
-    require_module(&tenant, &sales::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let raw = params.get("invoice").map_or("", String::as_str);
     let invoice = parse_id(raw, locale)?;
 
-    let committed = sales::cancel_invoice(
+    let committed = crate::cancel_invoice(
         &tenant.db,
         &invoice,
         &body.id,
@@ -553,7 +564,7 @@ async fn credit_note(
 
 /// Invoices, most recently issued first.
 ///
-/// ponytail: the most recent 200, with no cursor. See `sales::invoices`.
+/// Paged. `next` absent means the list ended; pass it back as `?after=`.
 #[utoipa::path(
     get,
     path = "/v1/sales/invoices",
@@ -576,9 +587,9 @@ async fn list_invoices(
     consistency: Consistency,
     Query(page): Query<After>,
 ) -> Result<Json<Paged<InvoiceView>>, Problem> {
-    require_module(&tenant, &sales::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, sales::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
     let after = page.cursor(locale)?;
     let limit = page.limit(PAGE, PAGE);
@@ -587,11 +598,11 @@ async fn list_invoices(
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
-    let invoices = sales::invoices(&mut conn, limit, after.as_ref())
+    let invoices = crate::invoices(&mut conn, limit, after.as_ref())
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
     Ok(Json(Paged::of(invoices, view)))
 }
@@ -620,9 +631,9 @@ async fn get_invoice(
     consistency: Consistency,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<Json<InvoiceDetailView>, Problem> {
-    require_module(&tenant, &sales::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, sales::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
 
     let id = params.get("invoice").map_or("", String::as_str);
@@ -631,19 +642,19 @@ async fn get_invoice(
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
-    let detail = sales::invoice(&mut conn, id)
+    let detail = crate::invoice(&mut conn, id)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
     let detail = detail.ok_or_else(|| {
         ApiError::NotFound(
-            spa_i18n::Message::new(crate::messages::NO_SUCH_INVOICE)
+            spa_i18n::Message::new(spa_web::messages::NO_SUCH_INVOICE)
                 .with("invoice", spa_i18n::MessageArg::text(id.to_owned())),
         )
-        .into_problem(locale)
+        .into_problem(locale, &CATALOG)
     })?;
 
     Ok(Json(InvoiceDetailView {
@@ -726,24 +737,24 @@ async fn posting_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<ConfiguredAccounts>, Problem> {
-    require_module(&tenant, &sales::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let mut conn = tenant
         .db
         .acquire()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
-    let stored = spa_eventlog::configuration::get::<sales::PostingAccounts>(
+    let stored = spa_eventlog::configuration::get::<crate::PostingAccounts>(
         &mut conn,
-        sales::PostingAccounts::KEY,
+        crate::PostingAccounts::KEY,
     )
     .await
     .map_err(|e| config_problem(&e, locale))?;
     drop(conn);
 
     let configured = stored.is_some();
-    let accounts = stored.map_or_else(sales::PostingAccounts::conventional, |c| c.value);
+    let accounts = stored.map_or_else(crate::PostingAccounts::conventional, |c| c.value);
 
     Ok(Json(ConfiguredAccounts {
         accounts: AccountsView {
@@ -787,9 +798,9 @@ async fn set_posting_accounts(
     Language(locale): Language,
     Json(body): Json<AccountsView>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &sales::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
-    let accounts = sales::PostingAccounts {
+    let accounts = crate::PostingAccounts {
         receivable: parse_id(&body.receivable, locale)?,
         revenue: parse_id(&body.revenue, locale)?,
         output_vat: parse_id(&body.output_vat, locale)?,
@@ -799,7 +810,7 @@ async fn set_posting_accounts(
         .db
         .acquire()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
     // Checked against the tenant's own chart before storing. The alternative is
     // a configuration that looks fine and refuses every invoice, discovered by
@@ -819,7 +830,8 @@ async fn set_posting_accounts(
         let usable = ledger::accepts_postings(&mut conn, code)
             .await
             .map_err(|e| {
-                ApiError::Access(sqlx::Error::Decode(Box::new(e)).into()).into_problem(locale)
+                ApiError::Access(sqlx::Error::Decode(Box::new(e)).into())
+                    .into_problem(locale, &CATALOG)
             })?;
 
         if !usable {
@@ -827,13 +839,13 @@ async fn set_posting_accounts(
                 spa_i18n::Message::new(ledger::messages::NO_SUCH_ACCOUNT)
                     .with("code", spa_i18n::MessageArg::text(code.as_str().to_owned())),
             )
-            .into_problem(locale));
+            .into_problem(locale, &CATALOG));
         }
     }
 
     spa_eventlog::configuration::set(
         &mut conn,
-        sales::PostingAccounts::KEY,
+        crate::PostingAccounts::KEY,
         &accounts,
         Some(&tenant.session.identity.to_string()),
     )
@@ -849,7 +861,7 @@ fn config_problem(error: &spa_eventlog::ConfigError, locale: Locale) -> Problem 
         StatusCode::INTERNAL_SERVER_ERROR,
         &error.message(),
         locale,
-        &crate::catalog::CATALOG,
+        &CATALOG,
     )
 }
 
@@ -857,9 +869,9 @@ fn config_problem(error: &spa_eventlog::ConfigError, locale: Locale) -> Problem 
 
 /// Maps a command failure onto a status.
 ///
-/// Same shape as `ledger_routes::ledger_problem`, and deliberately still its own
-/// function: the interesting part is which rejection is a 409 and which is a
-/// 422, and that is exactly the part a shared helper could not decide.
+/// Same shape as [`ledger::http`]'s, and deliberately still its own function:
+/// the interesting part is which rejection is a 409 and which is a 422, and that
+/// is exactly the part a shared helper could not decide.
 fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
     let (status, message) = match error {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
@@ -899,5 +911,5 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
         }
     };
 
-    Problem::new(status, &message, locale, &crate::catalog::CATALOG)
+    Problem::new(status, &message, locale, &CATALOG)
 }

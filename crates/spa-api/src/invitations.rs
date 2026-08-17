@@ -15,22 +15,22 @@
 //! router refused to start — which was the right answer: they were two different
 //! resources sharing a name, and only the tenant segment had been hiding it.
 
-use crate::wire::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use spa_control::{Actor, InvitationError, Role};
 use spa_i18n::{Locale, Localize};
 use spa_types::Timestamp;
+use spa_web::Json;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::error::ApiError;
-use crate::extract::{Allowed, Language, ManageTenant};
-use crate::problem::Problem;
-use crate::state::AppState;
-use crate::wire::bad_request;
+use spa_web::ApiError;
+use spa_web::AppState;
+use spa_web::Problem;
+use spa_web::bad_request;
+use spa_web::{Allowed, Language, ManageTenant};
 
 /// Matches signup. A password chosen through an invitation is the same kind of
 /// password as one chosen at signup, so the rule is the same one.
@@ -152,7 +152,7 @@ async fn invite(
     let role: Role = body
         .role
         .parse()
-        .map_err(|_| bad_request(crate::messages::UNKNOWN_ROLE, "role", &body.role, locale))?;
+        .map_err(|_| bad_request(spa_web::messages::UNKNOWN_ROLE, "role", &body.role, locale))?;
 
     let (invitation, token) = state
         .control
@@ -200,7 +200,7 @@ async fn list_invitations(
         .control
         .invitations(tenant.db.tenant())
         .await
-        .map_err(|e| ApiError::Access(e).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
 
     Ok(Json(
         invitations
@@ -242,7 +242,7 @@ async fn revoke_invitation(
     let raw = params.get("invitation").map_or("", String::as_str);
     let id: uuid::Uuid = raw
         .parse()
-        .map_err(|_| bad_request(crate::messages::INVALID_ID, "id", raw, locale))?;
+        .map_err(|_| bad_request(spa_web::messages::INVALID_ID, "id", raw, locale))?;
 
     state
         .control
@@ -252,7 +252,7 @@ async fn revoke_invitation(
             Actor::identity(tenant.session.identity),
         )
         .await
-        .map_err(|e| ApiError::Access(e).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -324,12 +324,12 @@ async fn accept_invitation(
     // answer whether or not the invitation was real.
     if body.password.chars().count() < MIN_PASSWORD {
         return Err(ApiError::BadRequest(
-            spa_i18n::Message::new(crate::messages::PASSWORD_TOO_SHORT).with(
+            spa_i18n::Message::new(spa_web::messages::PASSWORD_TOO_SHORT).with(
                 "n",
                 spa_i18n::MessageArg::Count(i64::try_from(MIN_PASSWORD).unwrap_or(i64::MAX)),
             ),
         )
-        .into_problem(locale));
+        .into_problem(locale, &crate::CATALOG));
     }
 
     let accepted = state

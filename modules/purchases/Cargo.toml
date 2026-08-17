@@ -15,6 +15,12 @@ workspace = true
 # lives here, in the module they both stand on.
 ledger = { workspace = true }
 
+# The module ships its own routes; `spa-web` is what they are built from.
+spa-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
 spa-control = { workspace = true }
 spa-eventlog = { workspace = true }
 spa-i18n = { workspace = true }

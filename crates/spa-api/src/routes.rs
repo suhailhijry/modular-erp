@@ -21,17 +21,17 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
-use crate::wire::Json;
 use serde::{Deserialize, Serialize};
+use spa_web::Json;
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::error::ApiError;
-use crate::extract::{Allowed, Authenticated, Language, Read};
-use crate::problem::Problem;
-use crate::state::AppState;
+use spa_web::ApiError;
+use spa_web::AppState;
+use spa_web::Problem;
+use spa_web::{Allowed, Authenticated, Language, Read};
 
 /// Everything the router serves, as a description.
 ///
@@ -314,10 +314,9 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(crate::members::routes())
         .merge(crate::invitations::routes())
         .merge(crate::modules::routes())
-        .merge(crate::ledger_routes::routes())
-        .merge(crate::sales_routes::routes())
-        .merge(crate::purchases_routes::routes())
-        .merge(crate::tax_sa_routes::routes())
+        // Every module's own routes, from the one list that also says what to
+        // install. See `crate::modules::REGISTERED`.
+        .merge(crate::modules::mounted())
 }
 
 /// The router and the document, from the one description of both.
@@ -418,7 +417,7 @@ async fn log_in(
         .control
         .log_in(&credentials.handle, &credentials.password)
         .await
-        .map_err(|e| ApiError::Auth(e).into_problem(locale))?;
+        .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
 
     Ok((
         StatusCode::CREATED,
@@ -448,7 +447,7 @@ async fn log_out(
         .control
         .log_out(&auth.token)
         .await
-        .map_err(|e| ApiError::Auth(e).into_problem(locale))?;
+        .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

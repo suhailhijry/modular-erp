@@ -2551,3 +2551,93 @@ came out of running them, and neither was deducible from the specification.
   The recipe refuses now when anything is connected to a test database. The
   hazard is real for anyone running the suite in one terminal and cleaning up in
   another.
+
+## Modules ship their own routes
+
+Four files — `ledger_routes.rs`, `sales_routes.rs`, `purchases_routes.rs`,
+`tax_sa_routes.rs`, about 3,900 lines — lived in `spa-api`. So a module's HTTP
+surface was written by something the module could not see, adding an endpoint
+meant editing two crates, and "read the sales module" meant reading two
+directories. They are `modules/*/src/http.rs` now, next to the aggregates and
+read models they serve.
+
+- **What was actually in the way was the furniture.** Extractors, problem+json,
+  the JSON and query rejections, paging, the request-level messages — all in
+  `spa-api`, which names every module, so a module reaching for `Json` or
+  `require_module` would have closed a cycle. Those moved *down* into a new
+  crate, `spa-web`, below the modules. What is left in `spa-api` is the core's
+  own routes — sessions, the tenant, members, invitations, signup, module
+  management — and the composition.
+
+  The split falls where the architecture already said it did: `spa-web` holds no
+  business domain (D11) and cannot be given one without becoming a module.
+
+- **One list, two views.** `modules::REGISTERED` carries each module's
+  `ModuleSetup` *and* its router. `available()` is the first view — what the
+  control plane, the worker and the migrator read — and `mounted()` is the
+  second. A module cannot be added to the platform and have its routes
+  forgotten, because there is nowhere to add it that does not also mount them.
+
+- **Authorization reads the path, and the path list moved.** `Allowed<C>` decides
+  which role applies by taking the module out of `/v1/{module}/…`, and it used to
+  check that segment against the *build's* module list — which is above
+  `spa-web` now. It checks the **tenant's** list instead, which is the better
+  answer: a segment naming a module the tenant does not have is judged on the
+  tenant-wide role, exactly as `/v1/members` is, and the handler's own
+  `require_module` then answers 404. A request for a module they do not have
+  cannot reach data by any route, and the reply does not confirm what they are
+  not paying for.
+
+  What the old check bought — "no module's routes are silently judged
+  tenant-wide" — is now `every_modules_routes_live_under_its_own_name`, which
+  walks each module's own OpenAPI paths. Pointing one route at `/v1/posting-accounts`
+  fails it. `no_two_modules_claim_the_same_path` turns a startup panic into a
+  build failure with both module names in it.
+
+- **The catalog had to be split, and getting it wrong was silent.** A module
+  renders its failures through a composite of its own catalog, its dependencies',
+  and `spa_web::CATALOG`; `spa_api::CATALOG` is the complete union and is still
+  what `docs/ERRORS.md` comes from.
+
+  `ApiError::into_problem` rendered through a fixed catalog, which was fine while
+  every caller was in one crate. After the move, `POST /v1/ledger/entries` with
+  an unbalanced entry answered `"detail": "ledger.does_not_balance"` — the bare
+  code, no sentence. `an_unbalanced_entry_is_refused_with_the_difference` caught
+  it.
+
+  `into_problem` takes the catalog now, and **there is no `IntoResponse for
+  ApiError`**: it could not name one, so `?` on an `ApiError` in a handler would
+  have taken the same wrong turn just as quietly. Nothing was using it.
+
+- **`docs/openapi.json` is byte-identical** across the move but for one
+  description, which was a stale comment about paging that does not exist any
+  more. Nothing a client can see changed.
+
+## A module seeds separately from its DDL
+
+The Saudi VAT rate rode on `tax_sa`'s schema install, because that was the only
+hook a module had. It worked — the insert is `ON CONFLICT DO NOTHING`, so
+re-running it is harmless — and it made two different things look like one: a
+tenant's *data* written by a step named "install schema".
+
+`just prepare` was already somewhere that mattered. It installs every module's
+DDL into a throwaway type-check database, where a `configuration` row is noise;
+it globbed `schema/*.sql` and would have picked up a seed file too. It runs
+`install.sql` only now, which is a distinction the recipe can only make because
+the two are separate files.
+
+`ModuleSetup::seeding(sql)`, run after the install and under the same
+`search_path` — so a seed can write both the module's own tables and the
+tenant's `public` ones, which is what the rate does.
+
+`a_modules_seed_runs_when_a_tenant_gets_the_module` proves the ordering by
+inserting into a table the DDL creates: run it first and it fails on a missing
+relation. `a_rebuild_seeds_again_without_overwriting_the_tenants_own_value`
+covers the other half — a refresh drops the module's schema, so its seed has to
+run again, and the tenant's `configuration` is *not* dropped, so it meets a row
+it already wrote. Skipping the seed step fails both.
+
+The existing `enabling_the_module_seeds_the_saudi_rate` did **not** catch it: it
+calls `tax_sa::install()`, a test helper that had its own copy of the two
+statements. That helper reads `setup()` now, so it installs what production
+installs.

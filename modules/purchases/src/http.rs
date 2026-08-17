@@ -1,16 +1,17 @@
 //! The purchases module's HTTP surface.
 //!
-//! Translation only, like `ledger_routes` and `sales_routes`. The third one of
-//! these confirms what the second suggested: a module's route layer is a name, a
-//! set of wire shapes, a module gate, and a rejection-to-status mapping — and
-//! the only part that resists being shared is the mapping, because *which
-//! rejection is a 409 and which is a 422* is exactly the part a shared helper
-//! could not decide.
+//! Translation only, like every module's — see [`ledger::http`] for why these
+//! live in the module rather than in the composition root.
+//!
+//! What the three of them have in common is a set of wire shapes, a module gate,
+//! and a rejection-to-status mapping; the only part that resists being shared is
+//! the mapping, because *which rejection is a 409 and which is a 422* is exactly
+//! the part a shared helper could not decide.
 
+use crate::{Draft, Payment, PurchaseError, Supplier};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use ledger::VatCategory;
-use purchases::{Draft, Payment, PurchaseError, Supplier};
 use serde::{Deserialize, Serialize};
 use spa_control::CommandError;
 use spa_eventlog::ExecuteError;
@@ -20,24 +21,39 @@ use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::consistency::{Consistency, nudge};
-use crate::error::ApiError;
-use crate::extract::{Allowed, Language, PostEntries, Read};
-use crate::problem::Problem;
-use crate::state::AppState;
-use crate::wire::{
-    After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module,
-};
+use spa_web::ApiError;
+use spa_web::AppState;
+use spa_web::Problem;
+use spa_web::{After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module};
+use spa_web::{Allowed, Language, PostEntries, Read};
+use spa_web::{Consistency, nudge};
 
-pub(crate) fn routes() -> OpenApiRouter<AppState> {
+pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_bills, record_bill))
         .routes(routes!(get_bill))
         .routes(routes!(pay_bill))
 }
 
-/// How many bills a list returns. ponytail: no cursor, same as sales.
+/// How many bills a page returns by default, and the most it will give. Same
+/// shape as sales.
 const PAGE: i64 = 200;
+
+/// **What this module's routes can answer with.**
+///
+/// Its own failures, the failures of the modules it is built on, and everything
+/// any route can produce — the request-level messages, the control plane's and
+/// the event log's, which [`spa_web::CATALOG`] already unions.
+///
+/// That list is exhaustive by construction: a route can only surface a message
+/// from a crate this one depends on. Leaving one out is not a compile error and
+/// not a test failure — it is a client receiving `ledger.does_not_balance` as
+/// the bare code with no sentence in it, which is how this was found.
+///
+/// A module cannot name its siblings and has no reason to. The complete catalog
+/// is `spa_api::CATALOG`, and `docs/ERRORS.md` comes from that.
+static CATALOG: spa_i18n::Composite =
+    spa_i18n::Composite::new(&[&crate::CATALOG, &ledger::CATALOG, &spa_web::CATALOG]);
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -186,7 +202,7 @@ struct BillPaymentView {
     account: String,
 }
 
-fn view(summary: purchases::BillSummary) -> BillView {
+fn view(summary: crate::BillSummary) -> BillView {
     BillView {
         id: summary.id,
         supplier: summary.supplier,
@@ -236,12 +252,12 @@ async fn record_bill(
     Language(locale): Language,
     Json(body): Json<NewBill>,
 ) -> Result<(StatusCode, Json<Recorded>), Problem> {
-    require_module(&tenant, &purchases::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let id = parse_id(&body.id, locale)?;
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
-            crate::messages::UNKNOWN_CURRENCY,
+            spa_web::messages::UNKNOWN_CURRENCY,
             "currency",
             &body.currency,
             locale,
@@ -252,13 +268,13 @@ async fn record_bill(
     for line in body.lines {
         let category: VatCategory = line.vat.parse().map_err(|_| {
             bad_request(
-                crate::messages::UNKNOWN_VAT_CATEGORY,
+                spa_web::messages::UNKNOWN_VAT_CATEGORY,
                 "vat",
                 &line.vat,
                 locale,
             )
         })?;
-        lines.push(purchases::BillLine {
+        lines.push(crate::BillLine {
             description: line.description,
             account: parse_id(&line.account, locale)?,
             net: spa_types::Money::from_minor(line.net, currency),
@@ -283,7 +299,7 @@ async fn record_bill(
         note: body.note,
     };
 
-    let committed = purchases::record_bill(&tenant.db, &id, &draft, &metadata(&tenant))
+    let committed = crate::record_bill(&tenant.db, &id, &draft, &metadata(&tenant))
         .await
         .map_err(|e| purchase_problem(&e, locale))?;
 
@@ -326,13 +342,13 @@ async fn pay_bill(
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewBillPayment>,
 ) -> Result<Json<Recorded>, Problem> {
-    require_module(&tenant, &purchases::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let raw = params.get("bill").map_or("", String::as_str);
     let bill = parse_id(raw, locale)?;
     let account = parse_id(&body.account, locale)?;
 
-    let committed = purchases::pay_bill(
+    let committed = crate::pay_bill(
         &tenant.db,
         &bill,
         &Payment {
@@ -377,9 +393,9 @@ async fn list_bills(
     consistency: Consistency,
     Query(page): Query<After>,
 ) -> Result<Json<Paged<BillView>>, Problem> {
-    require_module(&tenant, &purchases::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, purchases::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
 
     let after = page.cursor(locale)?;
@@ -388,11 +404,11 @@ async fn list_bills(
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
-    let bills = purchases::bills(&mut conn, limit, after.as_ref())
+    let bills = crate::bills(&mut conn, limit, after.as_ref())
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
     Ok(Json(Paged::of(bills, view)))
 }
@@ -421,9 +437,9 @@ async fn get_bill(
     consistency: Consistency,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<Json<BillDetailView>, Problem> {
-    require_module(&tenant, &purchases::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, purchases::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
 
     let id = params.get("bill").map_or("", String::as_str);
@@ -432,18 +448,18 @@ async fn get_bill(
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let detail = purchases::bill(&mut conn, id)
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let detail = crate::bill(&mut conn, id)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
     let detail = detail.ok_or_else(|| {
         ApiError::NotFound(
-            spa_i18n::Message::new(crate::messages::NO_SUCH_BILL)
+            spa_i18n::Message::new(spa_web::messages::NO_SUCH_BILL)
                 .with("bill", spa_i18n::MessageArg::text(id.to_owned())),
         )
-        .into_problem(locale)
+        .into_problem(locale, &CATALOG)
     })?;
 
     Ok(Json(BillDetailView {
@@ -516,5 +532,5 @@ fn purchase_problem(error: &CommandError<PurchaseError>, locale: Locale) -> Prob
         }
     };
 
-    Problem::new(status, &message, locale, &crate::catalog::CATALOG)
+    Problem::new(status, &message, locale, &CATALOG)
 }

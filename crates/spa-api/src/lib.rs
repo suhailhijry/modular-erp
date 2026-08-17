@@ -1,9 +1,25 @@
-//! The HTTP surface.
+//! The HTTP surface, and the one place that composes it.
+//!
+//! # What is here and what is not
+//!
+//! **Here:** the core's own routes — sessions, the tenant, members,
+//! invitations, signing up, and turning modules on and off. A tenant cannot
+//! disable any of it, which is what makes it core.
+//!
+//! **In the modules:** everything else. `sales::http::routes()` is a router the
+//! sales crate owns, next to the aggregates and the read models it serves;
+//! [`modules`] mounts it. Four route files used to live in this crate, which
+//! meant a module's HTTP surface was written by the composition root and a
+//! module could not be read in one place.
+//!
+//! **In [`spa_web`]:** what those routers are built *from* — extractors,
+//! problem+json, the JSON and query rejections, paging. Below the modules,
+//! because a module has to be able to name it.
 //!
 //! # What a handler cannot do
 //!
 //! Reach the wrong tenant. A handler that touches tenant data takes
-//! [`extract::Tenant`], whose only constructor is `ControlPlane::enter` — so
+//! [`spa_web::Tenant`], whose only constructor is `ControlPlane::enter` — so
 //! "did we check the membership?" is answered by the signature rather than by
 //! reading the body.
 //!
@@ -19,41 +35,20 @@
 //!
 //! # What is not here yet
 //!
-//! `Idempotency-Key`, `ETag`/`If-Match`, and cursors. Writes are already
-//! idempotent on a client-chosen id, which is most of what the first buys; the
-//! other two need a list long enough and a conflict real enough to shape them.
+//! `Idempotency-Key` and `ETag`/`If-Match`. Writes are already idempotent on a
+//! client-chosen id, which is most of what the first buys; the other needs a
+//! conflict real enough to shape it.
 
 mod catalog;
-mod consistency;
-mod error;
-mod extract;
 mod invitations;
-mod ledger_routes;
 mod members;
-pub mod messages;
 mod modules;
-mod problem;
-mod purchases_routes;
 mod routes;
-mod sales_routes;
 mod signup;
-mod state;
-mod tax_sa_routes;
-mod wire;
 
 pub use catalog::CATALOG;
 
-use spa_i18n::StaticCatalog;
-
-/// This crate's own messages — about the request, not the domain.
-pub static REQUEST_CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
-pub use consistency::Consistency;
-pub use error::ApiError;
-pub use extract::{
-    Allowed, Authenticated, Capability, Language, ManageAccounts, ManageTenant, PostEntries, Read,
-    Tenant,
-};
 pub use modules::available as modules;
-pub use problem::Problem;
 pub use routes::{openapi, router};
-pub use state::AppState;
+/// Re-exported so a caller wiring up a server needs one crate, not two.
+pub use spa_web::{AppState, Problem};

@@ -31,6 +31,7 @@
 //! Every one of them is additive.
 
 mod commands;
+pub mod http;
 mod invoice;
 pub mod messages;
 mod posting;

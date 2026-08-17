@@ -6284,7 +6284,7 @@
     },
     "/v1/sales/invoices": {
       "get": {
-        "description": "ponytail: the most recent 200, with no cursor. See `sales::invoices`.",
+        "description": "Paged. `next` absent means the list ended; pass it back as `?after=`.",
         "operationId": "list_invoices",
         "parameters": [
           {

@@ -95,13 +95,15 @@ impl Consistency {
         let deadline = tokio::time::Instant::now() + MAX_WAIT;
         loop {
             let reached = {
-                let mut conn = db
-                    .read()
-                    .await
-                    .map_err(|e| crate::error::ApiError::Access(e.into()).into_problem(locale))?;
+                let mut conn = db.read().await.map_err(|e| {
+                    crate::error::ApiError::Access(e.into()).into_problem(locale, &crate::CATALOG)
+                })?;
                 spa_projection::checkpoint_of(&mut conn, group)
                     .await
-                    .map_err(|e| crate::error::ApiError::Access(e.into()).into_problem(locale))?
+                    .map_err(|e| {
+                        crate::error::ApiError::Access(e.into())
+                            .into_problem(locale, &crate::CATALOG)
+                    })?
             };
 
             if reached >= wanted {
@@ -118,7 +120,7 @@ impl Consistency {
                         spa_i18n::MessageArg::Int(wanted.get() - reached.get()),
                     ),
                     locale,
-                    &crate::catalog::CATALOG,
+                    &crate::CATALOG,
                 ));
             }
             tokio::time::sleep(POLL).await;
@@ -138,7 +140,7 @@ impl Consistency {
 /// ponytail: one control-plane round trip per write. If write rate ever makes
 /// that hot, batch the ids in this process and flush on a timer — the call site
 /// does not change.
-pub(crate) async fn nudge(state: &AppState, tenant: spa_types::TenantId) {
+pub async fn nudge(state: &AppState, tenant: spa_types::TenantId) {
     if let Err(e) = state.control.request_visit(tenant).await {
         // Not fatal: the write is committed, and the tenant is visited on its
         // normal schedule regardless. Only the latency is lost.

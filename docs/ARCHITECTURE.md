@@ -670,16 +670,25 @@ crates/                                                        ← core: what a 
   spa-control     eventlog     identities, tenants, entitlements, clusters, TenantDb, fleet
   spa-worker      control,projection  Job trait, tenant visit loop, cancellation and drain,
                                bin/worker, bin/migrator, bin/reaper
-  spa-api         control,modules  routing, problem+json, OpenAPI, composition root
+  spa-web         control      extractors, problem+json, paging, request messages —
+                               what a module's routes are built from
+  spa-api         web,modules  the core's own routes, the module list, composition root
   spa-demo        api          the seeded tenant, and bin/demo
   spa-testkit     all          template-DB fixtures, fault injection, differ
 modules/                                                       ← what a tenant chooses
-  ledger          core         accounts, journal entries, fiscal periods, VAT treatment,
-                               charts, the trial-balance invariant
+  ledger          core,web     accounts, journal entries, fiscal periods, VAT treatment,
+                               charts, the trial-balance invariant, its own routes
   sales           ledger       invoices, credit notes, payments received
   purchases       ledger       bills, payments made, input tax
   tax_sa          sales,purchases  the Saudi rate, the VAT return, ZATCA
 ```
+
+**A module ships its own routes.** `sales::http::routes()` is a router the sales
+crate owns, and `spa-api` mounts it — which is why `spa-web` exists and sits
+*below* the modules: an extractor a module cannot name is one it cannot use, and
+a module reaching up into `spa-api` for one would close a cycle, because
+`spa-api` names every module. What stays in the composition root is the decision
+about what is mounted, not the writing of it.
 
 **Core is what a tenant cannot disable**; a module is what they choose. Direction
 is the enforcement, and it points one way: modules depend on core, and may depend

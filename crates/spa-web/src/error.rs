@@ -6,11 +6,9 @@
 //! end up disagreeing about whether a conflict is a 409 or a 422.
 
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use spa_control::{AccessError, AuthError};
-use spa_i18n::{Locale, Localize, Message};
+use spa_i18n::{Catalog, Locale, Localize, Message};
 
-use crate::catalog::CATALOG;
 use crate::problem::Problem;
 
 #[derive(Debug, thiserror::Error)]
@@ -87,25 +85,28 @@ impl ApiError {
     }
 
     /// Renders as problem+json in the caller's language.
+    ///
+    /// # Why the catalog is an argument
+    ///
+    /// Because [`Self::BadRequest`] and [`Self::NotFound`] carry a message the
+    /// *caller* chose, and only the caller knows which catalog can render it.
+    /// This used to render through a fixed one, which was fine while every
+    /// caller lived in the same crate — and the moment modules started shipping
+    /// their own routes, `ledger.does_not_balance` came back to a client as the
+    /// bare code with no sentence in it.
+    ///
+    /// So the caller passes the catalog it renders everything else through, and
+    /// a message it can name is a message it can render. There is deliberately
+    /// no `IntoResponse for ApiError`: it could not name a catalog, so `?` on
+    /// one in a handler would have silently taken this same wrong turn.
     #[must_use]
-    pub fn into_problem(self, locale: Locale) -> Problem {
+    pub fn into_problem(self, locale: Locale, catalog: &dyn Catalog) -> Problem {
         let status = self.status();
         if status.is_server_error() {
             // The only place the internal `Display` text is recorded. It never
             // reaches the response — a 500 tells a user nothing but "ours".
             tracing::error!(error = %self, "request failed");
         }
-        Problem::new(status, &self.message(), locale, &CATALOG)
-    }
-}
-
-impl IntoResponse for ApiError {
-    /// Falls back to the default locale.
-    ///
-    /// Handlers that know the caller's language call
-    /// [`into_problem`](ApiError::into_problem) instead; this exists so `?` in a
-    /// handler is never a compile error, not so it is the normal path.
-    fn into_response(self) -> Response {
-        self.into_problem(Locale::DEFAULT).into_response()
+        Problem::new(status, &self.message(), locale, catalog)
     }
 }

@@ -2,52 +2,37 @@
 //!
 //! Codes are globally unique by their `domain.` prefix, so "first catalog that
 //! has it" is unambiguous. A module's catalog is added here when the module is;
-//! forgetting to is caught by [`Catalog::codes`] disagreeing with what the
-//! module claims, not by a user seeing a bare code.
+//! forgetting to is caught by `codes()` disagreeing with what the module claims,
+//! not by a user seeing a bare code.
+//!
+//! # Why this is not the only composite
+//!
+//! It is the *complete* one, and it can only exist here — this is the only crate
+//! that names every module. A module renders its own failures through a smaller
+//! composite of its catalog and [`spa_web::CATALOG`], because it cannot name its
+//! siblings and has no reason to. This one is what `docs/ERRORS.md` is generated
+//! from and what the completeness audit runs against, so a code missing from any
+//! part is still a failing build.
 
-use spa_i18n::{Catalog, Locale, MessageCode, StaticCatalog, Template};
+use spa_i18n::Composite;
 
 /// Ordered by nothing in particular — lookups are by code, which is unique.
-static PARTS: &[&StaticCatalog] = &[
-    &crate::REQUEST_CATALOG,
-    &spa_control::CATALOG,
-    &spa_eventlog::CATALOG,
+///
+/// `spa_web::CATALOG` is itself a composite, and carries the request-level, the
+/// control plane's and the event log's. What is added here is what only this
+/// crate can name: every module.
+pub static CATALOG: Composite = Composite::new(&[
+    &spa_web::CATALOG,
     &ledger::CATALOG,
     &sales::CATALOG,
     &purchases::CATALOG,
     &tax_sa::CATALOG,
-];
-
-/// The catalog the API renders from.
-pub static CATALOG: Catalogs = Catalogs;
-
-#[derive(Debug)]
-pub struct Catalogs;
-
-impl Catalog for Catalogs {
-    fn template(&self, locale: Locale, code: &MessageCode) -> Option<Template> {
-        PARTS.iter().find_map(|c| c.template(locale, code))
-    }
-
-    fn codes(&self) -> &'static [MessageCode] {
-        // Concatenated once and leaked. The alternative — returning an empty
-        // slice — would make every completeness audit silently pass.
-        static ALL: std::sync::OnceLock<&'static [MessageCode]> = std::sync::OnceLock::new();
-        ALL.get_or_init(|| {
-            Box::leak(
-                PARTS
-                    .iter()
-                    .flat_map(|c| c.codes().iter().cloned())
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            )
-        })
-    }
-}
+]);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spa_i18n::Catalog;
 
     #[test]
     fn every_crates_messages_render_through_the_composite() {
@@ -57,7 +42,7 @@ mod tests {
     #[test]
     fn no_two_crates_claim_the_same_code() {
         // A duplicate would make "first catalog that has it" depend on the order
-        // of `PARTS`, which is exactly the kind of thing nobody notices until
+        // of the parts, which is exactly the kind of thing nobody notices until
         // one of them is translated differently.
         let mut codes: Vec<_> = CATALOG.codes().to_vec();
         let before = codes.len();

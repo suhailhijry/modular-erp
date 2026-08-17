@@ -1,15 +1,14 @@
 //! The Saudi tax module's HTTP surface.
 //!
-//! Translation only, like every other module's. What is different is where the
-//! *domain* went: the return used to be netted here, in the composition root,
-//! and it is computed in `tax_sa::vat_return` now. This file asks which modules
-//! the tenant has, calls the module, and renders.
+//! Translation only, like every module's — see [`ledger::http`] for why these
+//! live in the module rather than in the composition root.
 //!
-//! ponytail: still in `spa-api`, like `ledger_routes` and the rest. Under the
-//! core/module split a module ships its own routes and core mounts them — which
-//! is the restructure this file is waiting for rather than an argument against
-//! it.
+//! What is different here is where the *domain* went: the return used to be
+//! netted in the composition root, and it is computed in [`crate::vat_return`]
+//! now. This file asks which modules the tenant has, calls the module, and
+//! renders.
 
+use crate::{Sides, TaxError};
 use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::Utc;
@@ -18,19 +17,18 @@ use spa_control::CommandError;
 use spa_eventlog::ExecuteError;
 use spa_i18n::{Locale, Localize};
 use spa_types::{CurrencyCode, Timestamp};
-use tax_sa::{Sides, TaxError};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::consistency::{Consistency, nudge};
-use crate::error::ApiError;
-use crate::extract::{Allowed, Language, ManageAccounts, ManageTenant, Read};
-use crate::problem::Problem;
-use crate::state::AppState;
-use crate::wire::{Json, Query, bad_request, metadata, require_module};
+use spa_web::ApiError;
+use spa_web::AppState;
+use spa_web::Problem;
+use spa_web::{Allowed, Language, ManageAccounts, ManageTenant, Read};
+use spa_web::{Consistency, nudge};
+use spa_web::{Json, Query, bad_request, metadata, require_module};
 
-pub(crate) fn routes() -> OpenApiRouter<AppState> {
+pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(vat_return))
         .routes(routes!(filed_returns, file_return))
@@ -45,6 +43,27 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
 
 /// How many filed returns a list gives back. A business files four a year.
 const PAGE: i64 = 200;
+
+/// **What this module's routes can answer with.**
+///
+/// Its own failures, the failures of the modules it is built on, and everything
+/// any route can produce — the request-level messages, the control plane's and
+/// the event log's, which [`spa_web::CATALOG`] already unions.
+///
+/// That list is exhaustive by construction: a route can only surface a message
+/// from a crate this one depends on. Leaving one out is not a compile error and
+/// not a test failure — it is a client receiving `ledger.does_not_balance` as
+/// the bare code with no sentence in it, which is how this was found.
+///
+/// A module cannot name its siblings and has no reason to. The complete catalog
+/// is `spa_api::CATALOG`, and `docs/ERRORS.md` comes from that.
+static CATALOG: spa_i18n::Composite = spa_i18n::Composite::new(&[
+    &crate::CATALOG,
+    &sales::CATALOG,
+    &purchases::CATALOG,
+    &ledger::CATALOG,
+    &spa_web::CATALOG,
+]);
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -173,7 +192,7 @@ async fn vat_return(
     consistency: Consistency,
     Query(period): Query<Period>,
 ) -> Result<Json<ReturnView>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     let (currency, from, until) = period_of(&period.currency, period.from, period.until, locale)?;
 
     let sides = sides_of(&tenant);
@@ -194,10 +213,10 @@ async fn vat_return(
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let declared = tax_sa::vat_return(&mut conn, sides, currency, from, until)
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let declared = crate::vat_return(&mut conn, sides, currency, from, until)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
     Ok(Json(view(&declared)))
@@ -229,10 +248,10 @@ async fn file_return(
     Language(locale): Language,
     Json(body): Json<NewFiling>,
 ) -> Result<(StatusCode, Json<FiledView>), Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     let (currency, from, until) = period_of(&body.currency, body.from, body.until, locale)?;
 
-    let filed = tax_sa::file_return(
+    let filed = crate::file_return(
         &tenant.db,
         sides_of(&tenant),
         currency,
@@ -246,7 +265,7 @@ async fn file_return(
 
     nudge(&state, tenant.db.tenant()).await;
 
-    let period = tax_sa::period_id(currency, from, until)
+    let period = crate::period_id(currency, from, until)
         .map(|id| id.as_str().to_owned())
         .unwrap_or_default();
 
@@ -287,19 +306,19 @@ async fn filed_returns(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<Vec<FiledView>>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, tax_sa::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
 
     let mut conn = tenant
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let returns = tax_sa::filed(&mut conn, PAGE)
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let returns = crate::filed(&mut conn, PAGE)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
     Ok(Json(
@@ -322,7 +341,7 @@ async fn filed_returns(
 // ---------------------------------------------------------------------------
 
 /// Which sides of the return this tenant contributes to.
-fn sides_of<C: crate::extract::Capability>(tenant: &Allowed<C>) -> Sides {
+fn sides_of<C: spa_web::Capability>(tenant: &Allowed<C>) -> Sides {
     Sides {
         sells: tenant.db.has_module(&sales::module_id()),
         buys: tenant.db.has_module(&purchases::module_id()),
@@ -337,7 +356,7 @@ fn period_of(
 ) -> Result<(CurrencyCode, Timestamp, Timestamp), Problem> {
     let parsed = CurrencyCode::new(currency).map_err(|_| {
         bad_request(
-            crate::messages::UNKNOWN_CURRENCY,
+            spa_web::messages::UNKNOWN_CURRENCY,
             "currency",
             currency,
             locale,
@@ -345,7 +364,7 @@ fn period_of(
     })?;
     if until <= from {
         return Err(bad_request(
-            crate::messages::EMPTY_PERIOD,
+            spa_web::messages::EMPTY_PERIOD,
             "period",
             &from.to_rfc3339(),
             locale,
@@ -354,8 +373,8 @@ fn period_of(
     Ok((parsed, from, until))
 }
 
-fn view(declared: &tax_sa::Return) -> ReturnView {
-    let side = |s: &tax_sa::Side| SideView {
+fn view(declared: &crate::Return) -> ReturnView {
+    let side = |s: &crate::Side| SideView {
         bands: s
             .bands
             .iter()
@@ -413,7 +432,7 @@ fn tax_problem(error: &CommandError<TaxError>, locale: Locale) -> Problem {
         }
     };
 
-    Problem::new(status, &message, locale, &crate::catalog::CATALOG)
+    Problem::new(status, &message, locale, &CATALOG)
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +582,7 @@ struct FullDocumentView {
     stamped_xml: Option<String>,
 }
 
-fn document_view(stored: tax_sa::Stored) -> DocumentView {
+fn document_view(stored: crate::Stored) -> DocumentView {
     DocumentView {
         number: stored.number,
         source: stored.source,
@@ -625,27 +644,27 @@ async fn register(
     Language(locale): Language,
     Json(body): Json<RegistrationBody>,
 ) -> Result<Json<RegistrationBody>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let scheme = body
         .scheme
-        .parse::<tax_sa::taxpayer::IdScheme>()
+        .parse::<crate::taxpayer::IdScheme>()
         .map_err(|_| {
             bad_request(
-                crate::messages::UNKNOWN_ID_SCHEME,
+                spa_web::messages::UNKNOWN_ID_SCHEME,
                 "scheme",
                 &body.scheme,
                 locale,
             )
         })?;
 
-    let registration = tax_sa::Registration {
+    let registration = crate::Registration {
         vat_number: body.vat_number.trim().to_owned(),
         name: body.name.trim().to_owned(),
         name_latin: body.name_latin.clone().filter(|n| !n.trim().is_empty()),
         scheme,
         identifier: body.identifier.trim().to_owned(),
-        address: tax_sa::taxpayer::Address {
+        address: crate::taxpayer::Address {
             street: body.address.street.trim().to_owned(),
             building: body.address.building.trim().to_owned(),
             additional: body
@@ -665,7 +684,7 @@ async fn register(
     // only honest answer when nobody said otherwise.
     let effective_from = body.effective_from.unwrap_or_else(Utc::now);
 
-    tax_sa::register_taxpayer(&tenant.db, registration, effective_from, &metadata(&tenant))
+    crate::register_taxpayer(&tenant.db, registration, effective_from, &metadata(&tenant))
         .await
         .map_err(|e| tax_problem(&e, locale))?;
 
@@ -699,24 +718,24 @@ async fn registration(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<RegistrationBody>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, tax_sa::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
 
     let mut conn = tenant
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let found = tax_sa::registered(&mut conn)
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let found = crate::registered(&mut conn)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
     let registration = found.ok_or_else(|| {
-        ApiError::NotFound(spa_i18n::Message::new(tax_sa::messages::NOT_REGISTERED))
-            .into_problem(locale)
+        ApiError::NotFound(spa_i18n::Message::new(crate::messages::NOT_REGISTERED))
+            .into_problem(locale, &CATALOG)
     })?;
 
     Ok(Json(RegistrationBody {
@@ -767,19 +786,19 @@ async fn zatca_standing(
     consistency: Consistency,
     Query(query): Query<AsOf>,
 ) -> Result<Json<StandingView>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, tax_sa::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
 
     let mut conn = tenant
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let standing = tax_sa::standing(&mut conn, query.as_of.unwrap_or_else(Utc::now))
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let standing = crate::standing(&mut conn, query.as_of.unwrap_or_else(Utc::now))
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
     Ok(Json(StandingView {
@@ -812,7 +831,7 @@ struct AsOf {
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
     responses(
-        (status = OK, description = "One page. `next` is absent when the list ended.", body = crate::wire::Paged<DocumentView>),
+        (status = OK, description = "One page. `next` is absent when the list ended.", body = spa_web::Paged<DocumentView>),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -823,11 +842,11 @@ async fn zatca_documents(
     tenant: Allowed<Read>,
     Language(locale): Language,
     consistency: Consistency,
-    Query(page): Query<crate::wire::After>,
-) -> Result<Json<crate::wire::Paged<DocumentView>>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    Query(page): Query<spa_web::After>,
+) -> Result<Json<spa_web::Paged<DocumentView>>, Problem> {
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, tax_sa::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
     let after = page.cursor(locale)?;
     let limit = page.limit(DOCUMENTS, DOCUMENTS);
@@ -836,13 +855,13 @@ async fn zatca_documents(
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let found = tax_sa::documents(&mut conn, limit, after.as_ref())
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let found = crate::documents(&mut conn, limit, after.as_ref())
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
-    Ok(Json(crate::wire::Paged::of(found, document_view)))
+    Ok(Json(spa_web::Paged::of(found, document_view)))
 }
 
 /// One document, with the UBL that was hashed and the stamp that came back.
@@ -869,27 +888,27 @@ async fn zatca_document(
     consistency: Consistency,
     axum::extract::Path(number): axum::extract::Path<String>,
 ) -> Result<Json<FullDocumentView>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, tax_sa::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
 
     let mut conn = tenant
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let found = tax_sa::document(&mut conn, &number)
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let found = crate::document(&mut conn, &number)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
     let stored = found.ok_or_else(|| {
         ApiError::NotFound(
-            spa_i18n::Message::new(tax_sa::messages::NO_SUCH_DOCUMENT)
+            spa_i18n::Message::new(crate::messages::NO_SUCH_DOCUMENT)
                 .with("document", spa_i18n::MessageArg::text(number.clone())),
         )
-        .into_problem(locale)
+        .into_problem(locale, &CATALOG)
     })?;
 
     let xml = stored.xml.clone();
@@ -1034,12 +1053,12 @@ async fn begin_onboarding(
     Language(locale): Language,
     Json(body): Json<OnboardingRequest>,
 ) -> Result<(StatusCode, Json<CsrView>), Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     let sealing = sealing(&state, locale)?;
     let environment = environment_of(&body.environment, locale)?;
     let unit = unit_for(&tenant, &body, locale).await?;
 
-    let csr = tax_sa::zatca::onboarding::begin(&tenant.db, sealing, &unit, environment)
+    let csr = crate::zatca::onboarding::begin(&tenant.db, sealing, &unit, environment)
         .await
         .map_err(|e| onboarding_problem(&e, locale))?;
 
@@ -1082,29 +1101,29 @@ async fn accept_certificate(
     Language(locale): Language,
     Json(body): Json<CertificateBody>,
 ) -> Result<Json<CertificateView>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     let sealing = sealing(&state, locale)?;
     let environment = environment_of(&body.environment, locale)?;
 
     let issued_for = body
         .stage
-        .parse::<tax_sa::zatca::onboarding::Stage>()
+        .parse::<crate::zatca::onboarding::Stage>()
         .map_err(|_| {
             bad_request(
-                crate::messages::UNKNOWN_ONBOARDING_STAGE,
+                spa_web::messages::UNKNOWN_ONBOARDING_STAGE,
                 "stage",
                 &body.stage,
                 locale,
             )
         })?;
 
-    let csid = tax_sa::zatca::onboarding::Csid {
+    let csid = crate::zatca::onboarding::Csid {
         token: body.token.trim().to_owned(),
         secret: body.secret.trim().to_owned(),
         request_id: body.request_id.trim().to_owned(),
     };
 
-    let issued = tax_sa::zatca::onboarding::accept_certificate(
+    let issued = crate::zatca::onboarding::accept_certificate(
         &tenant.db,
         sealing,
         issued_for,
@@ -1151,9 +1170,9 @@ async fn onboarding_status(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<OnboardingView>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
-    let reached = tax_sa::zatca::onboarding::reached(&tenant.db)
+    let reached = crate::zatca::onboarding::reached(&tenant.db)
         .await
         .map_err(|e| onboarding_problem(&e, locale))?;
 
@@ -1161,11 +1180,11 @@ async fn onboarding_status(
         .db
         .acquire()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let loaded = spa_eventlog::load::<tax_sa::Onboarding>(
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let loaded = spa_eventlog::load::<crate::Onboarding>(
         &mut conn,
-        &tax_sa::onboarding_id(),
-        tax_sa::upcasters(),
+        &crate::onboarding_id(),
+        crate::upcasters(),
     )
     .await
     .map_err(|e| {
@@ -1176,21 +1195,21 @@ async fn onboarding_status(
             StatusCode::INTERNAL_SERVER_ERROR,
             &spa_i18n::Message::new(spa_control::messages::INTERNAL),
             locale,
-            &crate::catalog::CATALOG,
+            &CATALOG,
         )
     })?;
     drop(conn);
 
     Ok(Json(OnboardingView {
-        live: reached.contains(&tax_sa::zatca::onboarding::Stage::Production),
+        live: reached.contains(&crate::zatca::onboarding::Stage::Production),
         reached: reached
             .into_iter()
-            .map(tax_sa::zatca::onboarding::Stage::as_str)
+            .map(crate::zatca::onboarding::Stage::as_str)
             .collect(),
         environment: loaded
             .aggregate
             .environment
-            .map(tax_sa::zatca::csr::Environment::as_str),
+            .map(crate::zatca::csr::Environment::as_str),
         serial: loaded.aggregate.serial,
         issued_at: loaded.aggregate.issued_at,
     }))
@@ -1206,23 +1225,23 @@ async fn unit_for(
     tenant: &Allowed<ManageTenant>,
     body: &OnboardingRequest,
     locale: Locale,
-) -> Result<tax_sa::zatca::csr::Unit, Problem> {
+) -> Result<crate::zatca::csr::Unit, Problem> {
     let mut conn = tenant
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let registration = tax_sa::registered(&mut conn)
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let registration = crate::registered(&mut conn)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
     let registration = registration.ok_or_else(|| {
-        ApiError::NotFound(spa_i18n::Message::new(tax_sa::messages::NOT_REGISTERED))
-            .into_problem(locale)
+        ApiError::NotFound(spa_i18n::Message::new(crate::messages::NOT_REGISTERED))
+            .into_problem(locale, &CATALOG)
     })?;
 
-    Ok(tax_sa::zatca::csr::Unit {
+    Ok(crate::zatca::csr::Unit {
         vat_number: registration.vat_number,
         organization: registration.name,
         branch: body.branch.trim().to_owned(),
@@ -1239,7 +1258,7 @@ async fn unit_for(
             registration.address.postal_code
         ),
         industry: body.industry.trim().to_owned(),
-        issues: tax_sa::zatca::csr::Issues {
+        issues: crate::zatca::csr::Issues {
             standard: body.issues_standard,
             simplified: body.issues_simplified,
         },
@@ -1249,10 +1268,10 @@ async fn unit_for(
 /// What this software calls itself to ZATCA. Registered once, per solution.
 const SOLUTION: &str = "Spa";
 
-fn environment_of(value: &str, locale: Locale) -> Result<tax_sa::zatca::csr::Environment, Problem> {
+fn environment_of(value: &str, locale: Locale) -> Result<crate::zatca::csr::Environment, Problem> {
     value.parse().map_err(|_| {
         bad_request(
-            crate::messages::UNKNOWN_ZATCA_ENVIRONMENT,
+            spa_web::messages::UNKNOWN_ZATCA_ENVIRONMENT,
             "environment",
             value,
             locale,
@@ -1267,37 +1286,37 @@ fn environment_of(value: &str, locale: Locale) -> Result<tax_sa::zatca::csr::Env
 /// is exactly the "log a warning and continue" this system does not do (L6).
 fn sealing(state: &AppState, locale: Locale) -> Result<&spa_eventlog::SealingKey, Problem> {
     state.sealing.as_ref().ok_or_else(|| {
-        crate::problem::Problem::new(
+        spa_web::Problem::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            &spa_i18n::Message::new(crate::messages::NO_SEALING_KEY),
+            &spa_i18n::Message::new(spa_web::messages::NO_SEALING_KEY),
             locale,
-            &crate::catalog::CATALOG,
+            &CATALOG,
         )
     })
 }
 
-fn onboarding_problem(error: &tax_sa::zatca::onboarding::OnboardError, locale: Locale) -> Problem {
-    use tax_sa::zatca::onboarding::OnboardError;
+fn onboarding_problem(error: &crate::zatca::onboarding::OnboardError, locale: Locale) -> Problem {
+    use crate::zatca::onboarding::OnboardError;
 
     let (status, message) = match error {
         // The caller's, and each one names what to fix.
         OnboardError::Csr(reason) => (
             StatusCode::BAD_REQUEST,
-            spa_i18n::Message::new(crate::messages::UNUSABLE_UNIT)
+            spa_i18n::Message::new(spa_web::messages::UNUSABLE_UNIT)
                 .with("reason", spa_i18n::MessageArg::text(reason.to_string())),
         ),
         OnboardError::Certificate(reason) => (
             StatusCode::BAD_REQUEST,
-            spa_i18n::Message::new(crate::messages::UNREADABLE_CERTIFICATE)
+            spa_i18n::Message::new(spa_web::messages::UNREADABLE_CERTIFICATE)
                 .with("reason", spa_i18n::MessageArg::text(reason.clone())),
         ),
         OnboardError::KeyMismatch => (
             StatusCode::BAD_REQUEST,
-            spa_i18n::Message::new(crate::messages::CERTIFICATE_KEY_MISMATCH),
+            spa_i18n::Message::new(spa_web::messages::CERTIFICATE_KEY_MISMATCH),
         ),
         OnboardError::NotYet(what) => (
             StatusCode::NOT_FOUND,
-            spa_i18n::Message::new(crate::messages::ONBOARDING_NOT_YET)
+            spa_i18n::Message::new(spa_web::messages::ONBOARDING_NOT_YET)
                 .with("stage", spa_i18n::MessageArg::text((*what).to_owned())),
         ),
         // ZATCA's.
@@ -1306,7 +1325,7 @@ fn onboarding_problem(error: &tax_sa::zatca::onboarding::OnboardError, locale: L
             detail,
         } => (
             StatusCode::BAD_GATEWAY,
-            spa_i18n::Message::new(crate::messages::CSID_NOT_ISSUED)
+            spa_i18n::Message::new(spa_web::messages::CSID_NOT_ISSUED)
                 .with(
                     "disposition",
                     spa_i18n::MessageArg::text(disposition.clone()),
@@ -1318,7 +1337,7 @@ fn onboarding_problem(error: &tax_sa::zatca::onboarding::OnboardError, locale: L
         // talked to a tax authority.
         OnboardError::Unanswered { step, source } => (
             StatusCode::BAD_GATEWAY,
-            spa_i18n::Message::new(crate::messages::ZATCA_UNREACHABLE)
+            spa_i18n::Message::new(spa_web::messages::ZATCA_UNREACHABLE)
                 .with("step", spa_i18n::MessageArg::text((*step).to_owned()))
                 .with("reason", spa_i18n::MessageArg::text(source.to_string())),
         ),
@@ -1332,7 +1351,7 @@ fn onboarding_problem(error: &tax_sa::zatca::onboarding::OnboardError, locale: L
         }
     };
 
-    Problem::new(status, &message, locale, &crate::catalog::CATALOG)
+    Problem::new(status, &message, locale, &CATALOG)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1409,42 +1428,42 @@ async fn activate(
     Language(locale): Language,
     Json(body): Json<ActivationRequest>,
 ) -> Result<Json<ActivationView>, Problem> {
-    require_module(&tenant, &tax_sa::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     let sealing = sealing(&state, locale)?;
     let environment = environment_of(&body.environment, locale)?;
 
     let otp = body
         .otp
-        .parse::<tax_sa::zatca::onboarding::Otp>()
+        .parse::<crate::zatca::onboarding::Otp>()
         .map_err(|_| {
             // The value itself never reaches the message: an OTP in a log is a
             // certificate somebody else can obtain for an hour.
-            bad_request(crate::messages::NOT_AN_OTP, "otp", "", locale)
+            bad_request(spa_web::messages::NOT_AN_OTP, "otp", "", locale)
         })?;
 
     let registration = registered_unit(&tenant, locale).await?;
-    let unit = tax_sa::zatca::csr::Unit {
+    let unit = crate::zatca::csr::Unit {
         branch: body.branch.trim().to_owned(),
         common_name: body.common_name.trim().to_owned(),
         serial: body.serial.trim().to_owned(),
         industry: body.industry.trim().to_owned(),
-        issues: tax_sa::zatca::csr::Issues {
+        issues: crate::zatca::csr::Issues {
             standard: body.issues_standard,
             simplified: body.issues_simplified,
         },
         ..unit_from(&registration)
     };
 
-    let fatoora = tax_sa::zatca::http::Fatoora::new(environment).map_err(|source| {
+    let fatoora = crate::zatca::http::Fatoora::new(environment).map_err(|source| {
         onboarding_problem(
-            &tax_sa::zatca::onboarding::OnboardError::Unanswered {
+            &crate::zatca::onboarding::OnboardError::Unanswered {
                 step: "building a client",
                 source,
             },
             locale,
         )
     })?;
-    let onboarder = tax_sa::zatca::onboarding::Onboarder::new(&tenant.db, sealing, &fatoora);
+    let onboarder = crate::zatca::onboarding::Onboarder::new(&tenant.db, sealing, &fatoora);
     let now = Utc::now();
 
     let compliance = onboarder
@@ -1480,7 +1499,7 @@ async fn activate(
 
         return Err(Problem::new(
             StatusCode::BAD_GATEWAY,
-            &spa_i18n::Message::new(crate::messages::COMPLIANCE_REFUSED)
+            &spa_i18n::Message::new(spa_web::messages::COMPLIANCE_REFUSED)
                 .with(
                     "failed",
                     spa_i18n::MessageArg::Count(
@@ -1495,7 +1514,7 @@ async fn activate(
                 )
                 .with("reason", spa_i18n::MessageArg::text(reason)),
             locale,
-            &crate::catalog::CATALOG,
+            &CATALOG,
         ));
     }
 
@@ -1514,7 +1533,7 @@ async fn activate(
     }))
 }
 
-fn certificate_view(issued: tax_sa::zatca::onboarding::Issued) -> CertificateView {
+fn certificate_view(issued: crate::zatca::onboarding::Issued) -> CertificateView {
     CertificateView {
         stage: issued.stage.as_str(),
         environment: issued.environment.as_str(),
@@ -1527,23 +1546,23 @@ fn certificate_view(issued: tax_sa::zatca::onboarding::Issued) -> CertificateVie
 }
 
 /// The tenant's ZATCA registration, or a 404 that says to make one first.
-async fn registered_unit<C: crate::extract::Capability>(
+async fn registered_unit<C: spa_web::Capability>(
     tenant: &Allowed<C>,
     locale: Locale,
-) -> Result<tax_sa::Registration, Problem> {
+) -> Result<crate::Registration, Problem> {
     let mut conn = tenant
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let found = tax_sa::registered(&mut conn)
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let found = crate::registered(&mut conn)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
     found.ok_or_else(|| {
-        ApiError::NotFound(spa_i18n::Message::new(tax_sa::messages::NOT_REGISTERED))
-            .into_problem(locale)
+        ApiError::NotFound(spa_i18n::Message::new(crate::messages::NOT_REGISTERED))
+            .into_problem(locale, &CATALOG)
     })
 }
 
@@ -1552,8 +1571,8 @@ async fn registered_unit<C: crate::extract::Capability>(
 /// The VAT number and the legal name are **not** in any request body: they are
 /// what this business already registered, and a second endpoint restating them
 /// is how a certificate ends up naming a different business from the invoices.
-fn unit_from(registration: &tax_sa::Registration) -> tax_sa::zatca::csr::Unit {
-    tax_sa::zatca::csr::Unit {
+fn unit_from(registration: &crate::Registration) -> crate::zatca::csr::Unit {
+    crate::zatca::csr::Unit {
         vat_number: registration.vat_number.clone(),
         organization: registration.name.clone(),
         branch: String::new(),
@@ -1568,6 +1587,6 @@ fn unit_from(registration: &tax_sa::Registration) -> tax_sa::zatca::csr::Unit {
             registration.address.postal_code
         ),
         industry: String::new(),
-        issues: tax_sa::zatca::csr::Issues::both(),
+        issues: crate::zatca::csr::Issues::both(),
     }
 }

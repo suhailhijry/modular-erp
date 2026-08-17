@@ -53,14 +53,14 @@ impl FromRequestParts<AppState> for Authenticated {
             .unwrap_or(Language(Locale::DEFAULT));
 
         let token = bearer(parts).ok_or_else(|| {
-            ApiError::Auth(spa_control::AuthError::NoSession).into_problem(locale)
+            ApiError::Auth(spa_control::AuthError::NoSession).into_problem(locale, &crate::CATALOG)
         })?;
 
         let session = state
             .control
             .session(&token)
             .await
-            .map_err(|e| ApiError::Auth(e).into_problem(locale))?;
+            .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
 
         Ok(Self { session, token })
     }
@@ -98,16 +98,17 @@ impl FromRequestParts<AppState> for Tenant {
             .control
             .tenant_by_slug(&slug)
             .await
-            .map_err(|e| ApiError::Access(e).into_problem(locale))?
+            .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?
             .ok_or_else(|| {
-                ApiError::Access(spa_control::AccessError::NoSuchTenant).into_problem(locale)
+                ApiError::Access(spa_control::AccessError::NoSuchTenant)
+                    .into_problem(locale, &crate::CATALOG)
             })?;
 
         let db = state
             .control
             .enter(auth.session.identity, tenant.id, Lane::Interactive)
             .await
-            .map_err(|e| ApiError::Access(e).into_problem(locale))?;
+            .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
 
         Ok(Self {
             db,
@@ -163,7 +164,7 @@ fn not_found(locale: Locale) -> Problem {
         StatusCode::NOT_FOUND,
         &spa_i18n::Message::new(spa_control::messages::ACCESS_DENIED),
         locale,
-        &crate::catalog::CATALOG,
+        &crate::CATALOG,
     )
 }
 
@@ -263,21 +264,32 @@ impl<C: Capability> std::ops::Deref for Allowed<C> {
 ///
 /// `module_paths_are_what_they_look_like` pins the mapping, so a route that
 /// moves changes a test rather than changing permissions quietly.
-fn module_of(path: &str) -> Option<ModuleId> {
+///
+/// # Why the tenant's own modules are the list
+///
+/// It used to be the *build's* list, read from `spa_api::modules()` — which is
+/// above this crate now that a module ships its own routes, and cannot be
+/// reached from here without closing a dependency cycle.
+///
+/// The tenant's list is the better answer anyway, and gives the same one where
+/// it matters: a segment that is not a module the tenant has is judged on the
+/// **tenant-wide** role, exactly as `/v1/members` is, and then the handler's own
+/// `require_module` answers 404. So a request for a module the tenant does not
+/// have cannot reach data by any route, and the reply says the honest thing —
+/// that route does not exist here — rather than "forbidden", which would confirm
+/// what they are not paying for.
+fn module_of(path: &str, enabled: &spa_control::EnabledModules) -> Option<ModuleId> {
     // /v1/{module}/...
     let mut segments = path.split('/').filter(|s| !s.is_empty());
     if segments.next()? != "v1" {
         return None;
     }
-    let candidate = segments.next()?;
+    let candidate = ModuleId::new(segments.next()?).ok()?;
 
-    // Only names this build actually offers. An unknown segment is a route that
-    // does not exist, and treating it as a module would let a request opt out of
-    // its tenant-wide role by inventing a path.
-    crate::modules::available()
-        .into_iter()
-        .find(|(name, _)| *name == candidate)
-        .map(|(_, setup)| setup.module)
+    // An unknown segment is a route that does not exist, and treating it as a
+    // module would let a request opt out of its tenant-wide role by inventing a
+    // path.
+    enabled.contains(&candidate).then_some(candidate)
 }
 
 impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
@@ -288,7 +300,7 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
             .await
             .unwrap_or(Language(Locale::DEFAULT));
         let tenant = Tenant::from_request_parts(parts, state).await?;
-        let module = module_of(parts.uri.path());
+        let module = module_of(parts.uri.path(), tenant.db.modules());
 
         if !tenant.db.allows_in(C::CAPABILITY, module.as_ref()) {
             // 403, not 404. The caller has already proved they are a member, so
@@ -301,7 +313,7 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
                     spa_i18n::MessageArg::text(C::CAPABILITY.as_str()),
                 ),
                 locale,
-                &crate::catalog::CATALOG,
+                &crate::CATALOG,
             ));
         }
 
@@ -322,7 +334,13 @@ mod tests {
     /// quietly, which is the whole price of deriving the module from the path.
     #[test]
     fn module_paths_are_what_they_look_like() {
-        let module = |path: &str| module_of(path).map(|m| m.as_str().to_owned());
+        let enabled = spa_control::EnabledModules::new(
+            ["ledger", "sales", "purchases", "tax_sa"]
+                .into_iter()
+                .map(|name| ModuleId::new(name).expect("a module id"))
+                .collect(),
+        );
+        let module = |path: &str| module_of(path, &enabled).map(|m| m.as_str().to_owned());
 
         // Every module's routes, scoped to it.
         assert_eq!(module("/v1/sales/invoices").as_deref(), Some("sales"));
@@ -352,6 +370,17 @@ mod tests {
         for outside in ["/v1/health", "/v1/sessions", "/v1/signups", "/"] {
             assert_eq!(module(outside), None, "{outside}");
         }
+
+        // **A module the tenant does not have is not a module here.** The
+        // request is judged on the tenant-wide role and the handler answers 404,
+        // which is the reply that does not confirm what they are not paying for.
+        let without =
+            spa_control::EnabledModules::new(vec![ModuleId::new("ledger").expect("a module id")]);
+        assert_eq!(module_of("/v1/sales/invoices", &without), None);
+        assert_eq!(
+            module_of("/v1/ledger/accounts", &without).map(|m| m.as_str().to_owned()),
+            Some("ledger".to_owned())
+        );
     }
 
     fn host(value: &str) -> Parts {
@@ -430,22 +459,10 @@ mod tests {
     /// fell back to a role they were deliberately not given there.
     #[test]
     fn an_invented_module_segment_is_not_a_module() {
-        assert_eq!(module_of("/v1/nonsense/x"), None);
-        assert_eq!(module_of("/v1/Sales/invoices"), None);
-        assert_eq!(module_of("/v1/../sales/invoices"), None);
-    }
-
-    /// Every module this build offers is reachable as a path segment, so no
-    /// module's routes are silently judged tenant-wide.
-    #[test]
-    fn every_module_is_addressable_by_its_own_name() {
-        for (name, setup) in crate::modules::available() {
-            let path = format!("/v1/{name}/anything");
-            assert_eq!(
-                module_of(&path).as_ref(),
-                Some(&setup.module),
-                "{name} routes are not scoped to {name}"
-            );
-        }
+        let enabled =
+            spa_control::EnabledModules::new(vec![ModuleId::new("sales").expect("a module id")]);
+        assert_eq!(module_of("/v1/nonsense/x", &enabled), None);
+        assert_eq!(module_of("/v1/Sales/invoices", &enabled), None);
+        assert_eq!(module_of("/v1/../sales/invoices", &enabled), None);
     }
 }

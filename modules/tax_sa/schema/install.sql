@@ -32,32 +32,6 @@ CREATE TABLE IF NOT EXISTS filed_return (
 CREATE INDEX IF NOT EXISTS filed_return_by_period_idx
     ON filed_return (currency, period_from DESC);
 
--- **The Saudi rate, seeded when the module is enabled.**
---
--- This is the whole reason a country is a module: `ledger` owns the shape of a
--- rate and has no opinion about the number, and this is where the number comes
--- from. 15% since July 2020.
---
--- `DO NOTHING`, so enabling this never overwrites a rate a tenant set. A
--- business that corrected it keeps their correction.
---
--- ponytail: seeding data from the schema install is riding on the only hook a
--- module has. A module wants a `seed` step distinct from its DDL — this insert
--- is idempotent so a rebuild re-running it is harmless, which is what makes the
--- shortcut safe rather than merely convenient.
---
--- `configuration` lives in the tenant's `public` schema, which is on the
--- `search_path` this runs under; everything above is schema-relative and lands
--- in `proj_tax_sa`.
-INSERT INTO public.configuration (key, value, version, set_by)
-VALUES (
-    'ledger.vat_rates',
-    '{"standard":1500}'::jsonb,
-    nextval('public.configuration_version'),
-    'module:tax_sa'
-)
-ON CONFLICT (key) DO NOTHING;
-
 -- ---------------------------------------------------------------------------
 -- ZATCA
 -- ---------------------------------------------------------------------------

@@ -68,7 +68,30 @@ use crate::{AccessError, ControlPlane, PlacementPolicy, TenantStatus};
 pub struct ModuleSetup {
     pub module: ModuleId,
     /// Idempotent DDL. Run with `raw_sql`, so it may hold several statements.
+    ///
+    /// **Structure only.** Data a module needs in order to work goes in
+    /// [`Self::seed_sql`], which runs after this.
     pub install_sql: &'static str,
+    /// The data a module cannot work without, if it has any.
+    ///
+    /// # Why this is separate from the DDL
+    ///
+    /// The Saudi rate used to ride on `tax_sa`'s schema install, because that
+    /// was the only hook a module had. It worked — the insert is idempotent, so
+    /// re-running it was harmless — and it made two different things look like
+    /// one. A tenant's *data* was being written by something named "install
+    /// schema", which is the sort of thing that is fine until somebody makes the
+    /// reasonable-looking change of running the DDL somewhere the data must not
+    /// go.
+    ///
+    /// `just prepare` is already that somewhere: it installs every module's DDL
+    /// into a throwaway type-check database, where a `configuration` row is
+    /// noise at best.
+    ///
+    /// Run **after** the install, under the same `search_path`, so it can write
+    /// both the module's own tables and the tenant's `public` ones. Idempotent,
+    /// like the DDL, because a rebuild runs both again.
+    pub seed_sql: &'static str,
     /// The projection groups this module owns, as `(name, schema)`.
     pub groups: &'static [(&'static str, &'static str)],
     /// Every event shape this module can read, and the version it writes.
@@ -115,11 +138,19 @@ impl ModuleSetup {
         Self {
             module,
             install_sql,
+            seed_sql: "",
             groups,
             upcasters,
             requires: &[],
             deprecated: None,
         }
+    }
+
+    /// The data this module cannot work without. See [`Self::seed_sql`].
+    #[must_use]
+    pub const fn seeding(mut self, sql: &'static str) -> Self {
+        self.seed_sql = sql;
+        self
     }
 
     /// Marks a module as no longer offered, and says why.
@@ -849,6 +880,15 @@ fn install_schema(
         conn = run_ddl(conn, setup.install_sql.to_owned())
             .await
             .map_err(AccessError::Database)?;
+
+        // **The data the module cannot work without**, after the structure that
+        // holds it and under the same `search_path`. Separate from the DDL
+        // because they are separate things — see `ModuleSetup::seed_sql`.
+        if !setup.seed_sql.is_empty() {
+            conn = run_ddl(conn, setup.seed_sql.to_owned())
+                .await
+                .map_err(AccessError::Database)?;
+        }
 
         // Back, so the connection is handed on the way it was found.
         conn = run_ddl(conn, "SET search_path TO public".to_owned())

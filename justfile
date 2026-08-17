@@ -47,7 +47,11 @@ prepare:
     # The schema is guessed from the crate directory, hyphens to underscores.
     # `a_modules_schema_is_named_after_its_crate` in `crates/spa-api/src/modules.rs`
     # is what stops that guess drifting from what the modules declare.
-    for f in modules/*/schema/*.sql; do \
+    #
+    # `install.sql` only, deliberately: a module's `seed.sql` writes a tenant's
+    # data, and this database has no tenant. That distinction is the whole
+    # reason `ModuleSetup::seed_sql` is separate from `install_sql`.
+    for f in modules/*/schema/install.sql; do \
       m=$(basename $(dirname $(dirname "$f")) | tr '-' '_'); \
       psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 \
         -c "CREATE SCHEMA IF NOT EXISTS proj_$m" \

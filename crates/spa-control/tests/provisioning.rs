@@ -621,6 +621,129 @@ async fn refreshing_a_module_rebuilds_its_schema_and_rewinds_its_checkpoint() {
     fixture.cleanup_tenant(&tenant).await;
 }
 
+/// The toy module with data it cannot work without.
+///
+/// The insert names a table `install_sql` creates, so it can only succeed if the
+/// seed runs **after** the install — which is the ordering, tested rather than
+/// commented.
+fn toy_module_seeded() -> ModuleSetup {
+    toy_module().seeding(
+        "INSERT INTO proj_toy.thing (id) VALUES (42) ON CONFLICT (id) DO NOTHING;
+         INSERT INTO public.configuration (key, value, version, set_by)
+         VALUES ('toy.rate', '{\"standard\":1500}'::jsonb,
+                 nextval('public.configuration_version'), 'module:toy')
+         ON CONFLICT (key) DO NOTHING;",
+    )
+}
+
+/// **A module's seed runs, and it runs after its DDL.**
+///
+/// The Saudi VAT rate used to ride on `tax_sa`'s schema install, because that
+/// was the only hook a module had. Splitting them meant `install_schema` grew a
+/// second step — and a second step is a step that can be forgotten, dropped by a
+/// refactor, or quietly skipped for an empty seed that was not actually empty.
+///
+/// It writes both a module table and the tenant's `public.configuration`, which
+/// is what the Saudi rate does and the reason the seed runs under the module's
+/// `search_path` rather than at `public`.
+#[tokio::test]
+async fn a_modules_seed_runs_when_a_tenant_gets_the_module() {
+    let fixture = Fixture::new().await;
+    let tenant = fixture
+        .control
+        .sign_up(
+            "owner@seeded.test".to_owned(),
+            "correct horse battery staple".to_owned(),
+            "seeded".to_owned(),
+            "Seeded".to_owned(),
+            vec![toy_module_seeded()],
+        )
+        .await
+        .expect("signs up")
+        .tenant;
+
+    let mut conn = fixture.tenant_connection(&tenant).await;
+    let thing: i64 = sqlx::query_scalar("SELECT count(*) FROM proj_toy.thing WHERE id = 42")
+        .fetch_one(&mut conn)
+        .await
+        .expect("counts");
+    let setting: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM configuration WHERE key = 'toy.rate'")
+            .fetch_one(&mut conn)
+            .await
+            .expect("counts");
+    drop(conn);
+
+    assert_eq!(thing, 1, "the seed did not run, or ran before the DDL");
+    assert_eq!(
+        setting, 1,
+        "the seed ran somewhere `public.configuration` was not reachable"
+    );
+
+    fixture.cleanup_tenant(&tenant).await;
+}
+
+/// **A rebuild seeds again, and does not overwrite what the tenant changed.**
+///
+/// `refresh_module` drops the module's schema and installs it from scratch, so
+/// its seed has to run again or the module comes back missing the data it cannot
+/// work without. The tenant's `public.configuration` is *not* dropped, so the
+/// same seed meets a row it already wrote — which is why every seed is written
+/// `ON CONFLICT DO NOTHING`, and why a business that corrected the Saudi rate
+/// keeps their correction.
+#[tokio::test]
+async fn a_rebuild_seeds_again_without_overwriting_the_tenants_own_value() {
+    let fixture = Fixture::new().await;
+    let tenant = fixture
+        .control
+        .sign_up(
+            "owner@reseeded.test".to_owned(),
+            "correct horse battery staple".to_owned(),
+            "reseeded".to_owned(),
+            "Reseeded".to_owned(),
+            vec![toy_module_seeded()],
+        )
+        .await
+        .expect("signs up")
+        .tenant;
+
+    // The tenant disagrees with the module about the number.
+    let mut conn = fixture.tenant_connection(&tenant).await;
+    sqlx::query(
+        "UPDATE configuration SET value = '{\"standard\":500}'::jsonb WHERE key = 'toy.rate'",
+    )
+    .execute(&mut conn)
+    .await
+    .expect("corrects the rate");
+    drop(conn);
+
+    fixture
+        .control
+        .refresh_module(tenant.id, toy_module_seeded())
+        .await
+        .expect("refreshes");
+
+    let mut conn = fixture.tenant_connection(&tenant).await;
+    let thing: i64 = sqlx::query_scalar("SELECT count(*) FROM proj_toy.thing WHERE id = 42")
+        .fetch_one(&mut conn)
+        .await
+        .expect("counts");
+    let rate: serde_json::Value =
+        sqlx::query_scalar("SELECT value FROM configuration WHERE key = 'toy.rate'")
+            .fetch_one(&mut conn)
+            .await
+            .expect("reads");
+    drop(conn);
+
+    assert_eq!(thing, 1, "the rebuild left the module without its own data");
+    assert_eq!(
+        rate["standard"], 500,
+        "the rebuild stamped over a value the tenant set"
+    );
+
+    fixture.cleanup_tenant(&tenant).await;
+}
+
 /// A tenant with the toy module installed at its original shape.
 async fn tenant_with_toy(fixture: &Fixture, slug: &str) -> spa_control::Tenant {
     fixture

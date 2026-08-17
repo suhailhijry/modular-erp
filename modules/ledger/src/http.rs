@@ -1,19 +1,23 @@
-//! The ledger module's HTTP surface.
+//! The ledger's HTTP surface.
 //!
-//! # Why this is here and not in the module
+//! Translation only: the aggregates, the invariant and the read models are the
+//! module; this turns a request into a call and a result into JSON.
 //!
-//! ponytail: with one module, a route layer in the API is 80 lines; a `Module`
-//! trait that mounts routers is a trait with one implementation. When a second
-//! module arrives, whatever these two have in common *is* the trait — and it
-//! will be a description rather than a guess.
+//! # Why it is in the module and not in `spa-api`
 //!
-//! What the module does own is everything that matters: the aggregates, the
-//! invariant, and the read models. This file only translates.
+//! Because a module you cannot read in one place is not a module. This file used
+//! to live in the composition root, which meant the ledger's routes were written
+//! by something the ledger could not see, and adding an endpoint meant editing
+//! two crates. What made that necessary was the extractors — and those are in
+//! [`spa_web`] now, below every module, so a module can name them.
+//!
+//! `spa-api` still decides what is *mounted*, which is the part that belongs to
+//! the composition root.
 
+use crate::{AccountKind, BalancedLines, Line};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use ledger::{AccountKind, BalancedLines, Line};
 use serde::{Deserialize, Serialize};
 use spa_control::CommandError;
 use spa_eventlog::ExecuteError;
@@ -23,14 +27,14 @@ use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::consistency::{Consistency, nudge};
-use crate::error::ApiError;
-use crate::extract::{Allowed, Language, ManageAccounts, PostEntries, Read};
-use crate::problem::Problem;
-use crate::state::AppState;
-use crate::wire::{Amount, Json, bad_request, metadata, parse_id, require_module};
+use spa_web::ApiError;
+use spa_web::AppState;
+use spa_web::Problem;
+use spa_web::{Allowed, Language, ManageAccounts, PostEntries, Read};
+use spa_web::{Amount, Json, bad_request, metadata, parse_id, require_module};
+use spa_web::{Consistency, nudge};
 
-pub(crate) fn routes() -> OpenApiRouter<AppState> {
+pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_accounts, open_account))
         .routes(routes!(post_entry))
@@ -43,6 +47,22 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_charts))
         .routes(routes!(install_chart))
 }
+
+/// **What this module's routes can answer with.**
+///
+/// Its own failures, the failures of the modules it is built on, and everything
+/// any route can produce — the request-level messages, the control plane's and
+/// the event log's, which [`spa_web::CATALOG`] already unions.
+///
+/// That list is exhaustive by construction: a route can only surface a message
+/// from a crate this one depends on. Leaving one out is not a compile error and
+/// not a test failure — it is a client receiving `ledger.does_not_balance` as
+/// the bare code with no sentence in it, which is how this was found.
+///
+/// A module cannot name its siblings and has no reason to. The complete catalog
+/// is `spa_api::CATALOG`, and `docs/ERRORS.md` comes from that.
+static CATALOG: spa_i18n::Composite =
+    spa_i18n::Composite::new(&[&crate::CATALOG, &spa_web::CATALOG]);
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -157,20 +177,20 @@ async fn list_accounts(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<Vec<AccountView>>, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, ledger::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
 
     let mut conn = tenant
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
-    let accounts = ledger::account_balances(&mut conn)
+    let accounts = crate::account_balances(&mut conn)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
     Ok(Json(
         accounts
@@ -211,11 +231,11 @@ async fn open_account(
     Language(locale): Language,
     Json(body): Json<NewAccount>,
 ) -> Result<impl IntoResponse, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     let code = parse_id(&body.code, locale)?;
     let kind: AccountKind = body.kind.parse().map_err(|_| {
         bad_request(
-            crate::messages::UNKNOWN_ACCOUNT_KIND,
+            spa_web::messages::UNKNOWN_ACCOUNT_KIND,
             "kind",
             &body.kind,
             locale,
@@ -223,14 +243,14 @@ async fn open_account(
     })?;
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
-            crate::messages::UNKNOWN_CURRENCY,
+            spa_web::messages::UNKNOWN_CURRENCY,
             "currency",
             &body.currency,
             locale,
         )
     })?;
 
-    ledger::open_account(
+    crate::open_account(
         &tenant.db,
         &code,
         &body.name,
@@ -273,7 +293,7 @@ async fn post_entry(
     Language(locale): Language,
     Json(body): Json<NewEntry>,
 ) -> Result<Json<EntryPosted>, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     let id = parse_id(&body.id, locale)?;
 
     let mut lines = Vec::with_capacity(body.lines.len());
@@ -287,10 +307,10 @@ async fn post_entry(
     // The type refuses an unbalanced set, so this is where a client's mistake
     // becomes a 400 with the difference in it.
     let balanced = BalancedLines::new(lines)
-        .map_err(|e| ApiError::BadRequest(e.message()).into_problem(locale))?;
+        .map_err(|e| ApiError::BadRequest(e.message()).into_problem(locale, &CATALOG))?;
     let line_count = balanced.len();
 
-    let committed = ledger::post_entry(
+    let committed = crate::post_entry(
         &tenant.db,
         &id,
         body.occurred_on,
@@ -362,12 +382,12 @@ async fn reverse_entry(
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewReversal>,
 ) -> Result<Json<EntryPosted>, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let original = parse_id(params.get("entry").map_or("", String::as_str), locale)?;
     let reversal = parse_id(&body.id, locale)?;
 
-    let committed = ledger::reverse_entry(
+    let committed = crate::reverse_entry(
         &tenant.db,
         &original,
         &reversal,
@@ -415,20 +435,20 @@ async fn trial_balance(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<Vec<TrialBalanceView>>, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
     consistency
-        .wait_for(&tenant.db, ledger::GROUP_NAME, locale)
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
 
     let mut conn = tenant
         .db
         .read()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
-    let rows = ledger::trial_balance(&mut conn)
+    let rows = crate::trial_balance(&mut conn)
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
     Ok(Json(
         rows.into_iter()
@@ -451,21 +471,21 @@ async fn trial_balance(
 /// The rejections are the client's fault and say why; everything else routes
 /// through [`ApiError`], which already knows that a conflict is a 409 and an
 /// exhausted lane is a 503.
-fn ledger_problem(error: &CommandError<ledger::LedgerError>, locale: Locale) -> Problem {
+fn ledger_problem(error: &CommandError<crate::LedgerError>, locale: Locale) -> Problem {
     let (status, message) = match error {
         // The client's fault, and the message says which part.
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
                 // Both mean "look at what is there now and decide again": a
                 // code somebody else took, and an entry somebody else undid.
-                ledger::LedgerError::AccountExists(_)
-                | ledger::LedgerError::AlreadyReversed { .. } => StatusCode::CONFLICT,
+                crate::LedgerError::AccountExists(_)
+                | crate::LedgerError::AlreadyReversed { .. } => StatusCode::CONFLICT,
                 // Well-formed, but refers to something that is not there — or
                 // to a period nobody may write into any more.
-                ledger::LedgerError::NoSuchAccount(_)
-                | ledger::LedgerError::AccountClosed(_)
-                | ledger::LedgerError::NoSuchEntry(_)
-                | ledger::LedgerError::PeriodClosed { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+                crate::LedgerError::NoSuchAccount(_)
+                | crate::LedgerError::AccountClosed(_)
+                | crate::LedgerError::NoSuchEntry(_)
+                | crate::LedgerError::PeriodClosed { .. } => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::BAD_REQUEST,
             },
             rejection.message(),
@@ -493,7 +513,7 @@ fn ledger_problem(error: &CommandError<ledger::LedgerError>, locale: Locale) -> 
         }
     };
 
-    Problem::new(status, &message, locale, &crate::catalog::CATALOG)
+    Problem::new(status, &message, locale, &CATALOG)
 }
 
 // ---------------------------------------------------------------------------
@@ -535,14 +555,14 @@ async fn books(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<BooksView>, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let mut conn = tenant
         .db
         .acquire()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let books = ledger::period::books(&mut conn)
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let books = crate::period::books(&mut conn)
         .await
         .map_err(|e| config_problem(&e, locale))?;
     drop(conn);
@@ -584,14 +604,14 @@ async fn close_books(
     Language(locale): Language,
     Json(body): Json<BooksView>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let mut conn = tenant
         .db
         .acquire()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    ledger::period::close(
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    crate::period::close(
         &mut conn,
         body.closed_before,
         Some(&tenant.session.identity.to_string()),
@@ -608,7 +628,7 @@ fn config_problem(error: &spa_eventlog::ConfigError, locale: Locale) -> Problem 
         StatusCode::INTERNAL_SERVER_ERROR,
         &error.message(),
         locale,
-        &crate::catalog::CATALOG,
+        &CATALOG,
     )
 }
 
@@ -648,14 +668,14 @@ async fn vat_rates(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<RatesView>, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     let mut conn = tenant
         .db
         .acquire()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
-    let rates = ledger::Rates::resolve(&mut conn)
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let rates = crate::Rates::resolve(&mut conn)
         .await
         .map_err(|e| config_problem(&e, locale))?;
     drop(conn);
@@ -694,13 +714,13 @@ async fn set_vat_rates(
     Language(locale): Language,
     Json(body): Json<RatesView>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
+    require_module(&tenant, &crate::module_id(), locale)?;
 
     // A negative rate would credit VAT payable on every sale; one over 100%
     // would charge more tax than the supply. Neither is a rate anywhere.
     if !(0..=10_000).contains(&body.standard) {
         return Err(bad_request(
-            crate::messages::UNUSABLE_VAT_RATE,
+            spa_web::messages::UNUSABLE_VAT_RATE,
             "rate",
             &body.standard.to_string(),
             locale,
@@ -711,11 +731,11 @@ async fn set_vat_rates(
         .db
         .acquire()
         .await
-        .map_err(|e| ApiError::Access(e.into()).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     spa_eventlog::configuration::set(
         &mut conn,
-        ledger::Rates::KEY,
-        &ledger::Rates {
+        crate::Rates::KEY,
+        &crate::Rates {
             standard: body.standard,
         },
         Some(&tenant.session.identity.to_string()),
@@ -763,7 +783,7 @@ struct ChartAccountView {
 )]
 async fn list_charts(Language(locale): Language) -> Json<Vec<ChartView>> {
     Json(
-        ledger::CHARTS
+        crate::CHARTS
             .iter()
             .map(|c| ChartView {
                 id: c.id,
@@ -825,10 +845,10 @@ async fn install_chart(
     Language(locale): Language,
     Json(body): Json<InstallChart>,
 ) -> Result<Json<ChartInstalled>, Problem> {
-    require_module(&tenant, &ledger::module_id(), locale)?;
-    let chart = ledger::chart(&body.template).ok_or_else(|| {
+    require_module(&tenant, &crate::module_id(), locale)?;
+    let chart = crate::chart(&body.template).ok_or_else(|| {
         bad_request(
-            crate::messages::UNKNOWN_CHART,
+            spa_web::messages::UNKNOWN_CHART,
             "chart",
             &body.template,
             locale,
@@ -836,14 +856,14 @@ async fn install_chart(
     })?;
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
-            crate::messages::UNKNOWN_CURRENCY,
+            spa_web::messages::UNKNOWN_CURRENCY,
             "currency",
             &body.currency,
             locale,
         )
     })?;
 
-    let installed = ledger::install_chart(&tenant.db, chart, currency, locale, &metadata(&tenant))
+    let installed = crate::install_chart(&tenant.db, chart, currency, locale, &metadata(&tenant))
         .await
         .map_err(|e| ledger_problem(&e, locale))?;
 

@@ -1,31 +1,34 @@
 //! Which modules exist, and turning them on and off.
 //!
-//! # Why this is not a `Module` trait
+//! # Why this is a list and not a `Module` trait
 //!
-//! A trait would also have to carry the routes and the worker's jobs, and
-//! neither can cross this boundary — a module must not depend on `spa-api` or
-//! `spa-worker`. So each composition root still lists what it composes, and only
-//! the *set* is shared. [`available`] is that set.
+//! Because half of what a trait would carry cannot cross this boundary. A
+//! module ships its **routes** — those are in the module now — but its worker
+//! jobs are registered in `bin/worker.rs`, and a module cannot depend on
+//! `spa-worker` any more than `spa-worker` can be made to know what a ZATCA
+//! document is. A trait with two of its three methods implemented somewhere else
+//! is a trait that describes nothing.
 //!
-//! What a module does describe for itself is [`ModuleSetup`]: its install SQL,
-//! its projection groups, and what it needs underneath it. The three places that
-//! ask about dependencies — signing up, enabling later, and refusing to disable
-//! — all read the same field, so they cannot drift.
+//! So each composition root lists what it composes, and [`REGISTERED`] is this
+//! one's list. It carries both views a caller needs — the [`ModuleSetup`] the
+//! control plane installs from, and the router the server mounts — from **one**
+//! entry per module. That is the property that matters: a module cannot be added
+//! to the platform and have its routes forgotten, because there is nowhere to
+//! add it that does not also mount them.
 
-use crate::wire::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use spa_control::{Actor, ModuleSetup};
 use spa_i18n::{Locale, Message, MessageArg};
+use spa_web::ApiError;
+use spa_web::AppState;
+use spa_web::Json;
+use spa_web::Problem;
+use spa_web::{Allowed, Language, ManageTenant, Read};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
-
-use crate::error::ApiError;
-use crate::extract::{Allowed, Language, ManageTenant, Read};
-use crate::problem::Problem;
-use crate::state::AppState;
 
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -36,20 +39,66 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(catalogue))
 }
 
+/// A module, as the platform holds it: what to install, and what to serve.
+struct Registered {
+    name: &'static str,
+    setup: fn() -> ModuleSetup,
+    /// The module's own router. A function pointer rather than a value because
+    /// [`REGISTERED`] is a `const` and building a router allocates.
+    http: fn() -> OpenApiRouter<AppState>,
+}
+
+/// **The list.** Every module this build offers, in the order they are mounted.
+///
+/// Several things read it and they must not disagree: signup, this file, the
+/// worker's job registry, the migrator's fleet check, and the demo tenant, which
+/// enables *all* of it. "The demo has every module enabled" is a requirement
+/// nothing could check while the set was a `match` arm.
+const REGISTERED: &[Registered] = &[
+    Registered {
+        name: "ledger",
+        setup: ledger::setup,
+        http: ledger::http::routes,
+    },
+    Registered {
+        name: "sales",
+        setup: sales::setup,
+        http: sales::http::routes,
+    },
+    Registered {
+        name: "purchases",
+        setup: purchases::setup,
+        http: purchases::http::routes,
+    },
+    Registered {
+        name: "tax_sa",
+        setup: tax_sa::setup,
+        http: tax_sa::http::routes,
+    },
+];
+
 /// Every module this build offers, as `(name, setup)`.
 ///
-/// The list, in one place — because several things need it and they must not
-/// disagree: signup, this file, and the demo tenant, which enables *all* of it.
-/// "The demo has every module enabled" is a requirement nothing could check
-/// while the set was a `match` arm.
+/// What the control plane, the worker and the migrator all read. The router half
+/// is [`mounted`], from the same entries.
 #[must_use]
 pub fn available() -> Vec<(&'static str, ModuleSetup)> {
-    vec![
-        ("ledger", ledger::setup()),
-        ("sales", sales::setup()),
-        ("purchases", purchases::setup()),
-        ("tax_sa", tax_sa::setup()),
-    ]
+    REGISTERED
+        .iter()
+        .map(|module| (module.name, (module.setup)()))
+        .collect()
+}
+
+/// Every module's routes, merged.
+///
+/// Each module owns its HTTP surface — `sales::http` sits next to the aggregates
+/// and read models it serves — and this is the only thing that mounts them.
+pub(crate) fn mounted() -> OpenApiRouter<AppState> {
+    REGISTERED
+        .iter()
+        .fold(OpenApiRouter::new(), |router, module| {
+            router.merge((module.http)())
+        })
 }
 
 /// Looks a module up by the name a client sent.
@@ -60,10 +109,10 @@ pub(crate) fn find(name: &str, locale: Locale) -> Result<ModuleSetup, Problem> {
         .map(|(_, setup)| setup)
         .ok_or_else(|| {
             ApiError::BadRequest(
-                Message::new(crate::messages::UNKNOWN_MODULE)
+                Message::new(spa_web::messages::UNKNOWN_MODULE)
                     .with("module", MessageArg::text(name.to_owned())),
             )
-            .into_problem(locale)
+            .into_problem(locale, &crate::CATALOG)
         })
 }
 
@@ -78,11 +127,11 @@ pub(crate) fn check_offered(setup: &ModuleSetup, locale: Locale) -> Result<(), P
         return Ok(());
     };
     Err(ApiError::BadRequest(
-        Message::new(crate::messages::MODULE_DEPRECATED)
+        Message::new(spa_web::messages::MODULE_DEPRECATED)
             .with("module", MessageArg::text(setup.module.as_str().to_owned()))
             .with("why", MessageArg::text(why.to_owned())),
     )
-    .into_problem(locale))
+    .into_problem(locale, &crate::CATALOG))
 }
 
 /// Refuses a module whose dependencies are not in `present`.
@@ -100,11 +149,11 @@ pub(crate) fn check_requirements(
             continue;
         }
         return Err(ApiError::BadRequest(
-            Message::new(crate::messages::MODULE_REQUIRES)
+            Message::new(spa_web::messages::MODULE_REQUIRES)
                 .with("module", MessageArg::text(setup.module.as_str().to_owned()))
                 .with("required", MessageArg::text((*required).to_owned())),
         )
-        .into_problem(locale));
+        .into_problem(locale, &crate::CATALOG));
     }
     Ok(())
 }
@@ -253,7 +302,7 @@ async fn enable_module(
             Actor::identity(tenant.session.identity),
         )
         .await
-        .map_err(|e| ApiError::Access(e).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -299,11 +348,11 @@ async fn disable_module(
     // cannot post, which is a worse outcome than an error.
     if let Some(dependent) = dependent_on(name, tenant.db.modules()) {
         return Err(ApiError::BadRequest(
-            Message::new(crate::messages::MODULE_IN_USE)
+            Message::new(spa_web::messages::MODULE_IN_USE)
                 .with("module", MessageArg::text(name.to_owned()))
                 .with("dependent", MessageArg::text(dependent)),
         )
-        .into_problem(locale));
+        .into_problem(locale, &crate::CATALOG));
     }
 
     state
@@ -314,7 +363,7 @@ async fn disable_module(
             Actor::identity(tenant.session.identity),
         )
         .await
-        .map_err(|e| ApiError::Access(e).into_problem(locale))?;
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -331,6 +380,50 @@ fn dependent_on(name: &str, enabled: &spa_control::EnabledModules) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The URL namespace is the module namespace, and authorization rests on
+    /// it.**
+    ///
+    /// `spa_web`'s `Allowed<C>` extractor reads the module out of the path — so
+    /// a module that mounted a route outside its own name would have that route
+    /// judged on the *tenant-wide* role instead of the module-scoped one, which
+    /// is the more permissive answer, arrived at silently.
+    ///
+    /// Now that a module writes its own `#[utoipa::path]` attributes, nothing in
+    /// the composition root sees them go by. This is what does.
+    #[test]
+    fn every_modules_routes_live_under_its_own_name() {
+        for module in REGISTERED {
+            let paths = (module.http)().to_openapi().paths.paths;
+            assert!(!paths.is_empty(), "{} mounted nothing", module.name);
+            for path in paths.keys() {
+                assert!(
+                    path.starts_with(&format!("/v1/{}/", module.name)),
+                    "{} serves `{path}`, which `Allowed<C>` will judge on the \
+                     tenant-wide role rather than on {}'s",
+                    module.name,
+                    module.name
+                );
+            }
+        }
+    }
+
+    /// No two modules claim the same path.
+    ///
+    /// `merge` panics on a collision at startup, which is the right failure —
+    /// but at startup, in production, on the pod that just rolled out. Here it
+    /// is a build failure with both names in it.
+    #[test]
+    fn no_two_modules_claim_the_same_path() {
+        let mut seen: std::collections::BTreeMap<String, &str> = std::collections::BTreeMap::new();
+        for module in REGISTERED {
+            for path in (module.http)().to_openapi().paths.paths.keys() {
+                if let Some(other) = seen.insert(path.clone(), module.name) {
+                    panic!("{} and {} both serve `{path}`", other, module.name);
+                }
+            }
+        }
+    }
 
     #[test]
     fn every_requirement_names_a_module_that_exists() {

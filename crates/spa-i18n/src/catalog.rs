@@ -80,7 +80,10 @@ impl Template {
 }
 
 /// Renders messages into a language.
-pub trait Catalog {
+///
+/// `Send + Sync` because every catalog in this system is a `static` shared by
+/// every request, and because [`Composite`] holds its parts as trait objects.
+pub trait Catalog: Send + Sync {
     /// The template for a code, or `None` if this catalog has no translation.
     fn template(&self, locale: Locale, code: &MessageCode) -> Option<Template>;
 
@@ -229,6 +232,71 @@ impl Catalog for StaticCatalog {
 
     fn codes(&self) -> &'static [MessageCode] {
         self.codes
+    }
+}
+
+/// Several catalogs behind one lookup.
+///
+/// A crate renders messages from itself and from everything it is built on —
+/// a module's route answers with its own failures, the control plane's, and the
+/// request-level ones — and there is no single catalog that holds all three.
+/// This is that union, and it is `const`, so it can be a `static`.
+///
+/// "First part that has the code" is unambiguous because codes are globally
+/// unique by their `domain.` prefix. A duplicate would make the answer depend on
+/// the order of the parts, which is what `no_two_crates_claim_the_same_code`
+/// exists to catch.
+///
+/// Parts are `&dyn Catalog` so a composite can hold another one. Each layer of
+/// the build then names only what it can see — `spa-web` unions the request and
+/// kernel catalogs, a module adds its own to that, `spa-api` adds every
+/// module's — and no layer has to repeat the layer below it.
+pub struct Composite {
+    parts: &'static [&'static dyn Catalog],
+    codes: std::sync::OnceLock<&'static [MessageCode]>,
+}
+
+impl Composite {
+    #[must_use]
+    pub const fn new(parts: &'static [&'static dyn Catalog]) -> Self {
+        Self {
+            parts,
+            codes: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Composite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // How many, not which: a part is `dyn Catalog`, and the flattened code
+        // list is a cache nobody debugging this wants printed.
+        f.debug_struct("Composite")
+            .field("parts", &self.parts.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Catalog for Composite {
+    fn template(&self, locale: Locale, code: &MessageCode) -> Option<Template> {
+        self.parts.iter().find_map(|c| c.template(locale, code))
+    }
+
+    /// Concatenated once and leaked.
+    ///
+    /// The signature wants `&'static`, and the parts cannot be flattened at
+    /// compile time. The alternative — returning an empty slice — would make
+    /// every completeness audit silently pass, which is worse than one leak of a
+    /// few hundred codes per process.
+    fn codes(&self) -> &'static [MessageCode] {
+        self.codes.get_or_init(|| {
+            Box::leak(
+                self.parts
+                    .iter()
+                    .flat_map(|c| c.codes().iter().cloned())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
+        })
     }
 }
 
