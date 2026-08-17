@@ -3000,3 +3000,158 @@ Email is the first handler. Invitations are the first producer.
   the *index*, and a test appended but never staged is not in the index — so
   reverting a deliberate falsification deleted the test along with it. Second
   time this session. The habit is now `git add -A` before falsifying anything.
+
+## Containers, a standby, and the cache that had nobody to talk to
+
+Three things that turned out to be one thing: **every one of them was a seam
+written for a second instance, in a system that had only ever run one.**
+
+### The replica routing was reachable only from a unit test
+
+`TenantDb::read` has routed to a replica since Phase 1 — "adding replicas later
+is a configuration change, not a code change" — and `ClusterRegistry::with_replica`
+has existed just as long. **No binary ever called it.** Five composition roots,
+each registering a primary and stopping there, so the entire read path was
+exercised by one unit test and nothing else.
+
+`ClusterRegistry::from_env` now reads `PRIMARY_CLUSTER_URL` and
+`PRIMARY_REPLICA_URL`, and all five binaries use it. Two things came out of
+writing it:
+
+- **`with_replica` on an unknown cluster was a silent no-op.** `with_replica("primry", …)`
+  returned `Ok` with the replica dropped: every read would go to the primary, the
+  deploy would look correct, and the only symptom would be a primary carrying
+  twice the load somebody sized it for. It is an error now, and the error names
+  what was not found.
+- **Blank is absent.** A compose file that declares the variable and leaves it
+  empty is the ordinary way to say "no replica here"; treating `""` as a URL
+  fails at parse with a message about nothing.
+
+`from_urls` is `from_env` with the environment already read, so the decision is
+testable without `set_var` — which this workspace could not do anyway, because
+it denies `unsafe`, and which races every other test in the same binary
+regardless.
+
+### Redis is not a second cache. It is agreement between nodes.
+
+The obvious reading of "cache the hot paths with Redis" is wrong here, and the
+existing code says why: the entry-path cache answers from process memory at a
+99.9% hit rate, and moving it to Redis would replace a memory read with a network
+round trip. It stays exactly where it is.
+
+What Redis buys is the two things a per-process cache structurally cannot do.
+
+**Sessions.** `ControlPlane::session` runs on every authenticated request and was
+the one hot lookup with no cache at all — deliberately, for a reason `cache.rs`
+states plainly: *a stale membership for five seconds is survivable, a stale
+logout is not*. So the busiest query in the system went to the control database
+every time, the database that cannot be sharded. A **shared** cache resolves the
+objection, because a logout deletes the entry for every node at once.
+
+**Invalidation.** The entry caches invalidate locally on write. `cache.rs` named
+the fix when it was written — "out-of-band invalidation, which is a Phase 3
+decision" — and this is it. Every `invalidate` in the crate now goes through one
+`forget`, which drops the key locally and publishes what changed; every node
+applies what it receives.
+
+The failure policy is the part worth arguing about, and it is: **every path
+degrades to exactly the behaviour of the build before this existed.** A session
+read falls through to Postgres. A write is skipped. An invalidation that cannot
+be published still happened locally, so other nodes fall back to the TTL window
+that was always documented. That is not L6 being bent — L6 is about not degrading
+a *guarantee*, and none of these was a guarantee without a documented bound.
+
+The one exception is stated where it lives: a logout that cannot reach Redis
+leaves that token usable until the cached entry expires. `SESSION_TTL` is one
+minute, and it is the blast radius of that failure rather than a performance
+knob.
+
+Two smaller findings:
+
+- **serde cannot internally tag a newtype variant wrapping a string**, and half
+  the `Invalidate` variants are exactly that. Adjacent tagging
+  (`{"what":…,"which":…}`) instead. The shape matters more than it looks: during
+  a rolling deploy two builds are live, and a message an old node cannot read has
+  to be a loud failure rather than a silently ignored one — silently ignored is a
+  node serving stale authorization with nothing in the log to say so.
+- **The subscriber holds a `Weak`.** A background task with a strong
+  `Arc<ControlPlane>` would keep the pools open through shutdown and the drain
+  would never finish.
+
+The tests run **two `ControlPlane`s over one control database**, which is what two
+API replicas are. Reverting `forget` to a local `invalidate` fails
+`a_role_change_on_one_node_reaches_the_others`; dropping the Redis delete from
+`log_out` fails `a_logout_on_one_node_ends_the_session_on_the_other`.
+
+One test of mine was wrong before the code was: I demoted with `grant_membership`,
+which **deliberately refuses to change a live member's role** because doing so
+would be a way around the last-owner guard. The database was right and my
+assertion was not.
+
+### The compose file is the point, not the Dockerfile
+
+One image with five binaries, because five images are five things to keep at one
+version and "the worker is a deploy behind the API" is a failure this system has
+a pre-deploy gate for. No `ENTRYPOINT`, so `docker run spa worker` puts the
+worker at PID 1 and SIGTERM reaches it directly — which the graceful shutdown and
+the lease-releasing drain are both written against.
+
+Cache mounts rather than the usual dummy-sources-then-real-sources trick. That
+trick works by making cargo believe the dependency layer is current, and it fails
+quietly: a stale `libspa_control.rlib` built from an empty `lib.rs` links cleanly
+and contains none of the code.
+
+What the stack runs is deliberately not one of everything — two API replicas, two
+workers, and a streaming standby — because one of anything tests none of what the
+last two sections were about.
+
+### What running it actually found
+
+Four bugs, none of which any test could have caught, because every one of them
+was about a second instance or a real service:
+
+- **Postgres 18's image moved the data directory.** Mounting the old
+  `/var/lib/postgresql/data` makes it refuse to start with a long message about
+  finding data in an unused volume. The mount is `/var/lib/postgresql` and the
+  cluster lives in a version subdirectory, so `pg_upgrade --link` can cross
+  versions without a mount boundary in the way.
+- **`pg_basebackup` was refused: `no pg_hba.conf entry for replication`.** The
+  image writes a `pg_hba.conf` for ordinary connections and not for replication
+  ones. There is no environment variable for it and it is not an `ALTER SYSTEM`
+  setting, so it goes in `/docker-entrypoint-initdb.d`. Scoped to private
+  ranges, not `all`.
+- **`smtp://…?tls=none` is not a thing.** lettre refuses it at start-up; plain
+  SMTP is `smtp://host:port` with no `tls` parameter at all. This was in the
+  compose file *and* in `docs/RUNNING.md`, written from memory and wrong in
+  both. A four-line probe over `Smtp::new` settled which forms are accepted.
+- **Two API replicas cannot both publish one host port.** The one that lost the
+  race exited with a networking error. That is why there is an nginx in front:
+  without it two replicas is a fiction, because every request would land on
+  whichever container won. It also has to pass `Host` through unchanged — the
+  tenant *is* the subdomain, and nginx rewrites `Host` to the upstream name by
+  default, which would turn every tenant-scoped request into a 404.
+
+And one gap in the product rather than the packaging: **`migrator` never applied
+the control-plane migrations.** Nothing but `spa_demo::bootstrap` ever called
+`ControlPlane::migrate`, so a fresh deployment could only get its control schema
+by building a demo tenant first — backwards for the thing this document calls
+the deploy step. It applies them now, in the apply mode only: `check` and
+`versions` are the pre-deploy gates and are look-only by contract, and a gate
+that writes is one you cannot run against production before deciding to deploy.
+
+### Verified against the running stack, not asserted
+
+- `pg_stat_replication` on the primary reports `walreceiver | streaming | async`;
+  `pg_is_in_recovery()` on the standby is `t`.
+- The demo builds through the containers: 6 invoices, 4 bills, a filed VAT
+  return, 7 ZATCA documents chained.
+- A session created through the proxy is a `spa:session:…` key in Redis; logging
+  out once makes **every** subsequent request 401 regardless of which replica
+  answers.
+- Inviting somebody in Arabic puts a message in Mailpit with the subject
+  correctly RFC 2047 encoded and the bidi isolation marks around the Latin part
+  of the company name — and the link in that body, pasted back at
+  `GET /v1/join/…`, returns the invitation.
+- `PATCH /v1/members/{id}` publishes
+  `{"what":"membership","which":{"identity":…,"tenant":…}}` on `spa:invalidate`,
+  and both replicas answer with the new role immediately afterwards.

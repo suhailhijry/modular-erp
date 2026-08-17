@@ -60,12 +60,26 @@ openssl = "0.10"
 # Arabic body needs quoted-printable or base64 with the right charset, and
 # getting either subtly wrong produces mail that renders as mojibake in exactly
 # the clients this market uses.
+# Shared state across API replicas: the session cache, and the invalidation
+# broadcast that lets one node's write reach another node's cache before the TTL
+# does. `connection-manager` for automatic reconnection — Redis being briefly
+# unreachable must degrade to today's behaviour, not to an outage.
+#
+# `tokio-native-tls-comp` rather than the rustls variant, so `rediss://` uses the
+# OpenSSL this build already links. Same call as reqwest and lettre.
+redis = { version = "1.6", default-features = false, features = [
+    "tokio-comp", "connection-manager", "tokio-native-tls-comp",
+] }
+
 lettre = { version = "0.11", default-features = false, features = [
     "smtp-transport", "native-tls", "tokio1", "tokio1-native-tls", "builder",
 ] }
 
 # Async
 async-trait = "0.1"
+# Stream adapters. Already in the lock through sqlx; named here for the Redis
+# pub/sub stream in `spa_control::shared`.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }

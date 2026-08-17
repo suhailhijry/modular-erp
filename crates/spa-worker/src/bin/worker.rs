@@ -31,22 +31,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let control_url = std::env::var("CONTROL_DATABASE_URL")
         .map_err(|_| "CONTROL_DATABASE_URL is not set; the worker has nothing to connect to")?;
 
-    // Tenant clusters are named in the control plane's `cluster` table, and
-    // their credentials come from environment variables named there — never
-    // from the table itself (architecture D13).
-    let primary_url = std::env::var("PRIMARY_CLUSTER_URL")
-        .map_err(|_| "PRIMARY_CLUSTER_URL is not set; no tenant database is reachable")?;
-
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(8)
         .connect(&control_url)
         .await?;
 
-    let clusters = ClusterRegistry::new().with_url("primary", &primary_url)?;
-    let control = Arc::new(ControlPlane::new(
-        pool,
-        TenantPools::new(clusters, PoolConfig::default()),
-    ));
+    // Primary and, if this deployment has one, its read replica.
+    let clusters = ClusterRegistry::from_env()?;
+    // **Shared state, when this deployment runs more than one of these.**
+    //
+    // Sessions read from Redis instead of the control database on every
+    // request, and a cache invalidation reaches every node rather than only
+    // this one. Without `REDIS_URL` both fall back to what this system did
+    // before — see `spa_control::shared`.
+    let mut control = ControlPlane::new(pool, TenantPools::new(clusters, PoolConfig::default()));
+    if let Some(shared) = spa_control::shared::Shared::from_env().await? {
+        control = control.sharing(shared);
+    }
+    let control = Arc::new(control);
+    let _invalidations = spa_control::shared::apply_invalidations_in_background(&control);
 
     // Effect handlers come from modules. An empty dispatcher claims nothing —
     // the same behaviour as a worker rolled out before a module's handler

@@ -1,9 +1,56 @@
 # Running it
 
-Everything you need to bring the API and the workers up by hand, poke at them,
-and see what they did.
+Everything you need to bring the API and the workers up — in containers or by
+hand — poke at them, and see what they did.
 
-## Before anything
+## The whole thing, in containers
+
+```bash
+docker compose up --build -d
+```
+
+One image, five binaries: `api`, `worker`, `migrator`, `reaper` and `demo` are
+the same build and differ only in which `main` runs. Five images would be five
+things to keep at one version, and "the worker is a deploy behind the API" is a
+failure this system has a pre-deploy gate for.
+
+What comes up is deliberately **not** one of everything:
+
+| | | why more than one |
+|---|---|---|
+| `api` | ×2 | one process never disagrees with itself, which is what `REDIS_URL` is for |
+| `worker` | ×2 | tenant leases are load-bearing or they are decorative |
+| `pg-primary` + `pg-standby` | streaming | `TenantDb::read` has routed to a replica since Phase 1 with nothing attached |
+| `redis` | ×1 | the shared session cache and the invalidation broadcast |
+| `mailpit` | ×1 | catches every email; read them at <http://localhost:8025> |
+
+`migrate` runs first and everything else waits for it to exit 0, so `up` is one
+command. Then:
+
+```bash
+docker compose run --rm demo                       # a tenant to sign into
+curl -H 'Host: demo.localhost' http://localhost:8080/v1/tenant
+docker compose logs -f api worker
+docker compose down -v                             # and the volumes with it
+```
+
+**This is a model, not a deployment.** The passwords are `postgres`, nothing is
+encrypted in transit, and there is no backup.
+
+### Checking the replica is really streaming
+
+```bash
+docker compose exec pg-primary psql -U postgres -tAc \
+  "SELECT application_name, state, sync_state FROM pg_stat_replication"
+docker compose exec pg-standby psql -U postgres -tAc "SELECT pg_is_in_recovery()"
+```
+
+The first should name a walreceiver in `streaming`; the second should be `t`.
+Reads that tolerate lag go there — a VAT return, a list of invoices. Anything
+that must see its own write uses the primary, which is what
+`?consistent_after=` is for.
+
+## Before anything (running it by hand)
 
 ```bash
 just prepare
@@ -33,11 +80,38 @@ PRIMARY_CLUSTER_URL    # the tenant cluster named `primary` in the control plane
 PUBLIC_DOMAIN          # tenants are subdomains of this; defaults to `localhost`
 BIND                   # the API's address; defaults to 0.0.0.0:8080
 SEALING_KEY            # <id>:<64 hex chars> — see below
+PRIMARY_REPLICA_URL    # reads that tolerate lag; blank or unset means no replica
+REDIS_URL              # the shared session cache and invalidation — see below
 SMTP_URL               # the relay; without it nothing sends mail — see below
 SMTP_FROM              # e.g. "SPA <noreply@spa.com>"; required when SMTP_URL is set
 WORKER_NAME            # for logs; defaults to $HOSTNAME
 RUST_LOG               # e.g. info,spa_worker=debug
 ```
+
+**`REDIS_URL` is what makes more than one API process correct.**
+
+Without it everything still works and two things get worse, both of which this
+system documented before Redis existed:
+
+- Every authenticated request reads its session from the control database. That
+  is the busiest lookup in the system and the one that was deliberately never
+  cached, because an *in-process* cache would make a logout take effect on the
+  node that served it and nowhere else. Shared, it can be cached, and a logout
+  deletes it for everybody at once.
+- A role change invalidates the cache on the node that made it. The others wait
+  out their five-second TTL. With one API process there are no others.
+
+So: one process, skip it. More than one, set it.
+
+```bash
+REDIS_URL="redis://localhost:6379/"
+REDIS_URL="rediss://:password@redis.internal:6379/"   # TLS, via the OpenSSL already linked
+```
+
+Redis being unreachable degrades to exactly the behaviour above and says so in
+the log. The one exception is stated in `spa_control::shared`: a logout that
+cannot reach Redis leaves that token usable until the cached entry expires,
+which is why `SESSION_TTL` is one minute and not an hour.
 
 **`SMTP_URL` is what makes invitations arrive.** Without it the worker registers
 no email handler, and an effect whose kind has no handler is **not claimed** — so
@@ -65,8 +139,9 @@ To watch it locally without sending anything, point it at a catcher:
 docker run --rm -p 1025:1025 -p 8025:8025 axllent/mailpit
 ```
 
-then `SMTP_URL="smtp://localhost:1025?tls=none"` and read the mail at
-`http://localhost:8025`. `tls=none` is for this and nothing else.
+then `SMTP_URL="smtp://localhost:1025"` and read the mail at
+`http://localhost:8025`. **No `?tls=` at all** is how lettre spells plain SMTP —
+`tls=none` is not a value it knows and is refused at start-up.
 
 **`SEALING_KEY` is what module secrets are sealed under.** Without it the API
 refuses to store a tenant's ZATCA private key (503, `request.no_sealing_key`)

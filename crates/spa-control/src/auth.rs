@@ -72,7 +72,9 @@ impl std::fmt::Debug for SessionToken {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Serializable because it is cached in Redis when a deployment has one — see
+/// [`crate::shared`]. It carries no token, only what the token proved.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub identity: IdentityId,
     pub expires_at: Timestamp,
@@ -286,43 +288,82 @@ impl crate::ControlPlane {
     /// **Not cached.** Every other entry-path lookup is, because a five-second
     /// stale membership is survivable; a five-second stale *logout* is not.
     pub async fn session(&self, token: &str) -> Result<Session, AuthError> {
+        let digest = SessionToken::digest(token);
+
+        // **The shared cache, and only the shared one.**
+        //
+        // This lookup runs on every authenticated request and was the one hot
+        // query with no cache in front of it, deliberately: an in-process cache
+        // would make a logout take effect on the node that served it and
+        // nowhere else, and a stale logout is not a survivable kind of stale.
+        //
+        // Shared, that objection goes away — a logout deletes the entry for
+        // every node at once. See `crate::shared` for what a Redis outage costs
+        // and what bounds it.
+        if let Some(shared) = &self.shared
+            && let Some(cached) = shared.session(&digest).await
+        {
+            // Expiry is still checked here rather than trusted to the key's TTL,
+            // because the two are set from different clocks.
+            if cached.expires_at > chrono::Utc::now() {
+                return Ok(cached);
+            }
+            shared.forget_session(&digest).await;
+            return Err(AuthError::NoSession);
+        }
+
         let row = sqlx::query!(
             r#"SELECT identity_id as "identity_id: IdentityId", expires_at
                  FROM session
                 WHERE token_hash = $1 AND expires_at > now()"#,
-            SessionToken::digest(token),
+            digest,
         )
         .fetch_optional(&self.pool)
         .await?
         .ok_or(AuthError::NoSession)?;
 
-        Ok(Session {
+        let session = Session {
             identity: row.identity_id,
             expires_at: row.expires_at,
-        })
+        };
+        if let Some(shared) = &self.shared {
+            shared.remember_session(&digest, &session).await;
+        }
+        Ok(session)
     }
 
     /// Ends one session.
     pub async fn log_out(&self, token: &str) -> Result<(), AuthError> {
-        sqlx::query!(
-            "DELETE FROM session WHERE token_hash = $1",
-            SessionToken::digest(token),
-        )
-        .execute(&self.pool)
-        .await?;
+        let digest = SessionToken::digest(token);
+
+        // **Postgres first.** It is the source of truth, and a cache cleared
+        // before the record it caches would be re-populated by the next request
+        // that arrived in between.
+        sqlx::query!("DELETE FROM session WHERE token_hash = $1", digest)
+            .execute(&self.pool)
+            .await?;
+
+        if let Some(shared) = &self.shared {
+            shared.forget_session(&digest).await;
+        }
         Ok(())
     }
 
     /// Ends every session for an identity. What "log out everywhere" and a
     /// suspension both call.
     pub async fn log_out_everywhere(&self, identity: IdentityId) -> Result<u64, AuthError> {
-        Ok(sqlx::query!(
+        let ended = sqlx::query!(
             "DELETE FROM session WHERE identity_id = $1",
             identity.as_uuid(),
         )
         .execute(&self.pool)
         .await?
-        .rows_affected())
+        .rows_affected();
+
+        if let Some(shared) = &self.shared {
+            shared.forget_sessions_of(identity).await;
+        }
+        Ok(ended)
     }
 
     /// Deletes expired sessions. For the reaper.

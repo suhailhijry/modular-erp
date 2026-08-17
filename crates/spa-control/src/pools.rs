@@ -254,12 +254,70 @@ impl ClusterRegistry {
     /// Reads routed here may lag the primary, so this is opt-in per query via
     /// [`TenantDb::read`](crate::TenantDb::read) rather than automatic. Anything
     /// that must observe its own write uses the primary.
+    ///
+    /// **A name that is not registered is an error**, not a no-op. It used to be
+    /// a no-op, which meant `with_replica("primry", …)` returned `Ok` with the
+    /// replica silently dropped: every read would go to the primary, the deploy
+    /// would look correct, and the only symptom would be a primary carrying
+    /// twice the load it was sized for.
     pub fn with_replica(mut self, name: &str, url: &str) -> Result<Self, sqlx::Error> {
         let replica: PgConnectOptions = url.parse()?;
-        if let Some(cluster) = self.clusters.get_mut(name) {
-            cluster.replica = Some(replica);
-        }
+        let cluster = self.clusters.get_mut(name).ok_or_else(|| {
+            sqlx::Error::Configuration(
+                format!("no cluster named `{name}` to attach a replica to").into(),
+            )
+        })?;
+        cluster.replica = Some(replica);
         Ok(self)
+    }
+
+    /// The clusters this deployment can reach, from the environment.
+    ///
+    /// `PRIMARY_CLUSTER_URL` is required and `PRIMARY_REPLICA_URL` is not. Read
+    /// here rather than in each binary because there are five of them and they
+    /// were already drifting: every one registered the primary and **not one of
+    /// them ever called [`Self::with_replica`]**, so the replica routing in
+    /// `TenantDb::read` was reachable only from a unit test.
+    ///
+    /// Credentials come from the environment and never from the `cluster` table
+    /// (architecture D13), which is why this reads variables rather than rows.
+    pub fn from_env() -> Result<Self, sqlx::Error> {
+        Self::from_urls(
+            std::env::var("PRIMARY_CLUSTER_URL").ok().as_deref(),
+            std::env::var("PRIMARY_REPLICA_URL").ok().as_deref(),
+        )
+    }
+
+    /// [`Self::from_env`] with the environment already read.
+    ///
+    /// Separate so the decision — required, optional, blank-means-absent — can
+    /// be tested without `set_var`. Editing the process environment from a test
+    /// needs `unsafe`, which this workspace denies, and races every other test
+    /// in the same binary regardless.
+    fn from_urls(primary: Option<&str>, replica: Option<&str>) -> Result<Self, sqlx::Error> {
+        let primary = primary
+            .filter(|url| !url.trim().is_empty())
+            .ok_or_else(|| {
+                sqlx::Error::Configuration(
+                    "PRIMARY_CLUSTER_URL is not set; no tenant database is reachable".into(),
+                )
+            })?;
+        let registry = Self::new().with_url("primary", primary)?;
+
+        // Blank is absent. A compose file or a unit file that declares the
+        // variable and leaves it empty is the normal way to say "no replica
+        // here", and treating `""` as a URL fails at parse with a message about
+        // nothing.
+        match replica.filter(|url| !url.trim().is_empty()) {
+            Some(url) => {
+                tracing::info!("read replica configured for cluster `primary`");
+                registry.with_replica("primary", url)
+            }
+            // Not a warning. A single-node deployment is a supported shape, and
+            // `read()` falls back to the primary — which is why it is always
+            // safe to call and why adding a replica later is configuration.
+            None => Ok(registry),
+        }
     }
 
     fn options_for(
@@ -645,6 +703,56 @@ mod tests {
             "a replica must produce a separate read pool"
         );
         assert_eq!(pools.cached_pool_count().await, 2);
+    }
+
+    /// **A replica attached to a name that is not a cluster is refused.**
+    ///
+    /// It used to be a silent no-op, which is the worst available answer: the
+    /// deploy succeeds, every read goes to the primary, and the only symptom is
+    /// a primary carrying twice the load somebody sized it for.
+    #[test]
+    fn a_replica_for_a_cluster_that_does_not_exist_is_an_error() {
+        let refused = registry().with_replica("primry", "postgres://postgres@localhost/postgres");
+        assert!(refused.is_err(), "a typo silently dropped the replica");
+        assert!(
+            refused.unwrap_err().to_string().contains("primry"),
+            "the error has to name what was not found"
+        );
+    }
+
+    /// **The replica seam, from the environment that actually configures it.**
+    ///
+    /// `TenantDb::read` has routed to a replica since Phase 1 and **no binary
+    /// ever attached one** — five composition roots, each registering the
+    /// primary and nothing else, so the whole read path was reachable only from
+    /// the test above.
+    ///
+    #[test]
+    fn the_environment_decides_whether_there_is_a_replica() {
+        let url = Some("postgres://postgres@localhost/postgres");
+
+        assert!(
+            !ClusterRegistry::from_urls(url, None)
+                .expect("a primary is enough")
+                .has_replica("primary"),
+            "a replica appeared from nowhere"
+        );
+        assert!(
+            ClusterRegistry::from_urls(url, url)
+                .expect("primary and replica")
+                .has_replica("primary"),
+            "PRIMARY_REPLICA_URL was read and then not used"
+        );
+        assert!(
+            !ClusterRegistry::from_urls(url, Some("   "))
+                .expect("blank is not an error")
+                .has_replica("primary"),
+            "a blank variable is how a compose file says `no replica`"
+        );
+        assert!(
+            ClusterRegistry::from_urls(None, url).is_err(),
+            "a replica with no primary is a deployment that cannot write"
+        );
     }
 
     #[tokio::test]

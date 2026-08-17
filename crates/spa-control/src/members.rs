@@ -202,7 +202,11 @@ impl ControlPlane {
 
         // Now, not after the TTL: a demotion that takes five seconds to apply is
         // five seconds of someone doing what they were just told they cannot.
-        self.memberships.invalidate(&(identity, tenant_id));
+        self.forget(crate::shared::Invalidate::Membership {
+            identity,
+            tenant: tenant_id,
+        })
+        .await;
 
         self.record(
             actor,
@@ -289,7 +293,11 @@ impl ControlPlane {
         // Now, not after the TTL — same reason a demotion is invalidated at
         // once: the seconds in between are seconds of somebody doing what they
         // have just been told they cannot.
-        self.memberships.invalidate(&(identity, tenant_id));
+        self.forget(crate::shared::Invalidate::Membership {
+            identity,
+            tenant: tenant_id,
+        })
+        .await;
 
         self.record(
             actor,

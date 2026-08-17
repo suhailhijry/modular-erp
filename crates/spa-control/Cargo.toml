@@ -13,6 +13,9 @@ workspace = true
 spa-types = { workspace = true, features = ["sqlx"] }
 spa-i18n = { workspace = true }
 spa-eventlog = { workspace = true }
+redis = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

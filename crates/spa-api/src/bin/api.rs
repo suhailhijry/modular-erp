@@ -25,8 +25,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let control_url =
         std::env::var("CONTROL_DATABASE_URL").map_err(|_| "CONTROL_DATABASE_URL is not set")?;
-    let primary_url =
-        std::env::var("PRIMARY_CLUSTER_URL").map_err(|_| "PRIMARY_CLUSTER_URL is not set")?;
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
 
     // **Tenants are subdomains of this.** `bassat.spa.com` is one company and
@@ -42,11 +40,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .connect(&control_url)
         .await?;
 
-    let clusters = ClusterRegistry::new().with_url("primary", &primary_url)?;
-    let control = Arc::new(ControlPlane::new(
-        pool,
-        TenantPools::new(clusters, PoolConfig::default()),
-    ));
+    // Primary and, if this deployment has one, its read replica.
+    let clusters = ClusterRegistry::from_env()?;
+    // **Shared state, when this deployment runs more than one of these.**
+    //
+    // Sessions read from Redis instead of the control database on every
+    // request, and a cache invalidation reaches every node rather than only
+    // this one. Without `REDIS_URL` both fall back to what this system did
+    // before — see `spa_control::shared`.
+    let mut control = ControlPlane::new(pool, TenantPools::new(clusters, PoolConfig::default()));
+    if let Some(shared) = spa_control::shared::Shared::from_env().await? {
+        control = control.sharing(shared);
+    }
+    let control = Arc::new(control);
+    let _invalidations = spa_control::shared::apply_invalidations_in_background(&control);
 
     // **The key module secrets are sealed under.** Optional, and its absence is
     // not a degraded mode: without it, anything that would store a tenant's

@@ -59,19 +59,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let control_url =
         std::env::var("CONTROL_DATABASE_URL").map_err(|_| "CONTROL_DATABASE_URL is not set")?;
-    let primary_url =
-        std::env::var("PRIMARY_CLUSTER_URL").map_err(|_| "PRIMARY_CLUSTER_URL is not set")?;
 
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(&control_url)
         .await?;
 
-    let clusters = ClusterRegistry::new().with_url("primary", &primary_url)?;
+    // Primary and, if this deployment has one, its read replica.
+    let clusters = ClusterRegistry::from_env()?;
     let control = Arc::new(ControlPlane::new(
         pool,
         TenantPools::new(clusters, PoolConfig::default()),
     ));
+
+    // **The control plane's own schema, first.**
+    //
+    // Only in the apply mode. `check` and `versions` are the pre-deploy gates
+    // and are look-only by contract — a gate that writes is a gate you cannot
+    // run against production before deciding to deploy.
+    //
+    // It was missing entirely: nothing but `spa_demo::bootstrap` ever called
+    // `ControlPlane::migrate`, so a fresh deployment could only get its control
+    // schema by building a demo tenant first. That is backwards for the thing
+    // this document calls the deploy step.
+    if mode.is_empty() {
+        control.migrate().await?;
+    }
 
     if mode == "versions" {
         return match unreadable_events(&control).await? {

@@ -1,0 +1,13 @@
+# The build context.
+#
+# `target/` is gigabytes and the image builds its own; `.env` carries
+# credentials and must never end up in a layer.
+#
+# Everything the build actually needs is source, `Cargo.*`, `migrations/`,
+# `modules/*/schema/*.sql` (embedded by `include_str!`) and `.sqlx/` — so this
+# list stays deliberately short rather than trying to be an allow-list.
+target
+.git
+.env
+.env.*
+docker/pgdata

@@ -35,6 +35,7 @@ mod placement;
 mod pools;
 mod provision;
 mod roles;
+pub mod shared;
 mod tenant_db;
 
 pub use auth::{
@@ -144,6 +145,13 @@ pub struct ControlPlane {
     /// what someone may do inside a tenant's books.
     platform: TtlCache<IdentityId, bool>,
     entitlements: TtlCache<TenantId, EnabledModules>,
+    /// The caches every node shares, when this deployment has any.
+    ///
+    /// `None` is a supported shape and means exactly the behaviour this system
+    /// had before it existed: sessions from Postgres on every request, and an
+    /// invalidation that reaches only the node that wrote it. See
+    /// [`shared`](crate::shared).
+    shared: Option<crate::shared::Shared>,
     /// Entry-path cache hits and misses. A miss is a control-database round
     /// trip, so the ratio is the number that decides whether the control plane
     /// survives the request rate — worth exporting, not just asserting in tests.
@@ -162,9 +170,61 @@ impl ControlPlane {
             memberships: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             platform: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             entitlements: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            shared: None,
             entry_hits: AtomicU64::new(0),
             entry_misses: AtomicU64::new(0),
         }
+    }
+
+    /// The same control plane, sharing its session cache and its invalidations
+    /// with every other node.
+    #[must_use]
+    pub fn sharing(mut self, shared: crate::shared::Shared) -> Self {
+        self.shared = Some(shared);
+        self
+    }
+
+    /// Drops a key locally **and tells every other node to**.
+    ///
+    /// Every `invalidate` call in this crate goes through here. The local drop
+    /// is immediate and unconditional; the broadcast is best-effort, because a
+    /// failure to publish leaves the other nodes on the TTL window that was the
+    /// only behaviour before this existed.
+    async fn forget(&self, what: crate::shared::Invalidate) {
+        use crate::shared::Invalidate;
+        match what {
+            Invalidate::Identity(id) => self.identities.invalidate(&id),
+            Invalidate::Tenant(id) => self.tenants_cache.invalidate(&id),
+            Invalidate::Membership { identity, tenant } => {
+                self.memberships.invalidate(&(identity, tenant));
+            }
+            Invalidate::Platform(id) => self.platform.invalidate(&id),
+            Invalidate::Entitlements(id) => self.entitlements.invalidate(&id),
+        }
+        if let Some(shared) = &self.shared {
+            shared.publish(&what).await;
+        }
+    }
+
+    /// Applies an invalidation that arrived from another node. Local only —
+    /// re-publishing it would be a loop.
+    pub fn apply_invalidation(&self, what: &crate::shared::Invalidate) {
+        use crate::shared::Invalidate;
+        match what {
+            Invalidate::Identity(id) => self.identities.invalidate(id),
+            Invalidate::Tenant(id) => self.tenants_cache.invalidate(id),
+            Invalidate::Membership { identity, tenant } => {
+                self.memberships.invalidate(&(*identity, *tenant));
+            }
+            Invalidate::Platform(id) => self.platform.invalidate(id),
+            Invalidate::Entitlements(id) => self.entitlements.invalidate(id),
+        }
+    }
+
+    /// The shared cache, if this deployment has one.
+    #[must_use]
+    pub const fn shared(&self) -> Option<&crate::shared::Shared> {
+        self.shared.as_ref()
     }
 
     /// `(hits, misses)` on the entry path since start.
@@ -534,6 +594,20 @@ impl ControlPlane {
         Ok(fresh)
     }
 
+    /// What an identity may do in a tenant, through the entry cache.
+    ///
+    /// The same answer [`Self::enter`] decides on, without needing the tenant's
+    /// database to exist — which is what makes it the thing to ask when the
+    /// question is about *authorization* rather than about data. `None` is "no
+    /// live membership".
+    pub async fn access(
+        &self,
+        identity: IdentityId,
+        tenant: TenantId,
+    ) -> Result<Option<Access>, AccessError> {
+        self.cached_membership(identity, tenant).await
+    }
+
     /// `tenant` is `None` for a platform membership.
     /// The caller's role in a scope, or `None` if they have no live membership.
     ///
@@ -657,7 +731,7 @@ impl ControlPlane {
         // Local invalidation: this node stops honouring the identity at once.
         // Other nodes converge within ENTRY_CACHE_TTL — a documented window,
         // see the `cache` module.
-        self.identities.invalidate(&id);
+        self.forget(crate::shared::Invalidate::Identity(id)).await;
 
         self.record(
             actor,
@@ -717,7 +791,7 @@ impl ControlPlane {
 
         // This node stops honouring them at once; others converge within
         // `ENTRY_CACHE_TTL`, the same window as a suspension.
-        self.identities.invalidate(&id);
+        self.forget(crate::shared::Invalidate::Identity(id)).await;
         Ok(())
     }
 
@@ -994,7 +1068,7 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
-        self.tenants_cache.invalidate(&id);
+        self.forget(crate::shared::Invalidate::Tenant(id)).await;
 
         self.record(
             actor,
@@ -1062,8 +1136,17 @@ impl ControlPlane {
         // A grant or revocation must take effect now on this node, not after
         // the TTL. Both caches, because the scope decides which one holds it.
         match scope.tenant() {
-            Some(tenant_id) => self.memberships.invalidate(&(identity_id, tenant_id)),
-            None => self.platform.invalidate(&identity_id),
+            Some(tenant) => {
+                self.forget(crate::shared::Invalidate::Membership {
+                    identity: identity_id,
+                    tenant,
+                })
+                .await;
+            }
+            None => {
+                self.forget(crate::shared::Invalidate::Platform(identity_id))
+                    .await;
+            }
         }
 
         self.record(
@@ -1138,8 +1221,17 @@ impl ControlPlane {
         // A grant or revocation must take effect now on this node, not after
         // the TTL. Both caches, because the scope decides which one holds it.
         match scope.tenant() {
-            Some(tenant_id) => self.memberships.invalidate(&(identity_id, tenant_id)),
-            None => self.platform.invalidate(&identity_id),
+            Some(tenant) => {
+                self.forget(crate::shared::Invalidate::Membership {
+                    identity: identity_id,
+                    tenant,
+                })
+                .await;
+            }
+            None => {
+                self.forget(crate::shared::Invalidate::Platform(identity_id))
+                    .await;
+            }
         }
 
         self.record(
@@ -1268,7 +1360,8 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
-        self.entitlements.invalidate(&tenant_id);
+        self.forget(crate::shared::Invalidate::Entitlements(tenant_id))
+            .await;
 
         self.record(
             actor,
@@ -1297,7 +1390,8 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
-        self.entitlements.invalidate(&tenant_id);
+        self.forget(crate::shared::Invalidate::Entitlements(tenant_id))
+            .await;
 
         self.record(
             actor,

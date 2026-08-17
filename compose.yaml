@@ -1,0 +1,288 @@
+# The whole system, on one machine.
+#
+#     docker compose up --build -d
+#     docker compose run --rm demo            # a tenant you can sign into
+#     curl -H 'Host: demo.localhost' http://localhost:8080/v1/health
+#
+# # What this is a model of
+#
+# Not "Postgres in a box". The point is the shapes that only exist when there is
+# more than one of something:
+#
+#   - **two API replicas**, which is what makes the in-process entry cache
+#     disagree with itself and therefore what `REDIS_URL` is for;
+#   - **two workers**, which is what makes tenant leases load-bearing rather
+#     than decorative;
+#   - **a streaming standby**, which is what `PRIMARY_REPLICA_URL` and
+#     `TenantDb::read` have routed to since Phase 1 with nothing attached.
+#
+# Every one of those was written and untested against a real second instance.
+#
+# # What this is not
+#
+# Production. The passwords are `postgres`, nothing is encrypted in transit, and
+# there is no backup. See `docs/RUNNING.md`.
+
+name: spa
+
+x-app: &app
+  build:
+    context: .
+  image: spa:local
+  environment: &app-env
+    CONTROL_DATABASE_URL: postgres://postgres:postgres@pg-primary:5432/spa_control
+    PRIMARY_CLUSTER_URL: postgres://postgres:postgres@pg-primary:5432/postgres
+    # Reads that tolerate lag go here. Empty is a supported deployment and means
+    # "no replica" — see `ClusterRegistry::from_env`.
+    PRIMARY_REPLICA_URL: postgres://postgres:postgres@pg-standby:5432/postgres
+    REDIS_URL: redis://redis:6379/
+    PUBLIC_DOMAIN: localhost
+    RUST_LOG: ${RUST_LOG:-info}
+    # Both processes must agree, or the worker cannot read what the API sealed.
+    SEALING_KEY: ${SEALING_KEY:-compose:0000000000000000000000000000000000000000000000000000000000000000}
+    # **No `?tls=` at all** is how lettre spells "plain SMTP". `tls=none` is
+    # not a value it knows and is refused at start-up — found by running this.
+    SMTP_URL: smtp://mailpit:1025
+    SMTP_FROM: SPA <noreply@localhost>
+  depends_on:
+    pg-primary:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  # ---------------------------------------------------------------------------
+  # Postgres: primary, and a standby streaming from it
+  # ---------------------------------------------------------------------------
+  pg-primary:
+    image: postgres:18.3-trixie
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      # A replication slot is created by the standby's `pg_basebackup -C`, so
+      # the primary only has to allow one and keep enough WAL to serve it.
+      POSTGRES_INITDB_ARGS: --data-checksums
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=8
+      - -c
+      - max_replication_slots=8
+      # **The standby's lag budget.** Without this the primary is free to
+      # recycle WAL a lagging standby still needs, and the standby dies with
+      # "requested WAL segment has already been removed" — which reads like
+      # corruption and is a configuration default.
+      - -c
+      - wal_keep_size=256MB
+      # A tenant per database, and each of the two workers plus two API replicas
+      # holds a pool per active tenant. See `spa_control::pools` for the
+      # arithmetic; 200 is comfortable for a demo and nowhere near a fleet.
+      - -c
+      - max_connections=200
+    volumes:
+      - ./docker/primary-init.sh:/docker-entrypoint-initdb.d/10-replication.sh:ro
+      # **`/var/lib/postgresql`, not `/var/lib/postgresql/data`.** Postgres 18's
+      # image puts the cluster in a version subdirectory so `pg_upgrade --link`
+      # can cross versions without a mount-point boundary in the way. Mounting
+      # the old path makes the image refuse to start, with a long and initially
+      # confusing message about finding data in an unused volume.
+      - pg-primary:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "${PGPORT_PRIMARY:-55432}:5432"
+
+  pg-standby:
+    image: postgres:18.3-trixie
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: postgres
+      # Named explicitly so the script below and the server agree about where
+      # the cluster is, rather than both depending on the image's default.
+      PGDATA: /var/lib/postgresql/18/docker
+    # Base-backs-up once, then runs as a hot standby for ever. The marker file
+    # is what makes a restart not re-clone: `pg_basebackup` refuses a non-empty
+    # directory, and re-cloning on every restart would quietly discard the
+    # replication slot along with the data.
+    entrypoint:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        if [ ! -f "$$PGDATA/standby.signal" ]; then
+          echo "cloning from pg-primary…"
+          mkdir -p "$$PGDATA"
+          rm -rf "$$PGDATA"/*
+          pg_basebackup --pgdata="$$PGDATA" \
+            --host=pg-primary --port=5432 --username=postgres \
+            --wal-method=stream --write-recovery-conf --checkpoint=fast --progress \
+            --create-slot --slot=standby1
+        fi
+        chmod 0700 "$$PGDATA"
+        exec postgres -c hot_standby=on -c max_connections=200
+    user: postgres
+    volumes:
+      - pg-standby:/var/lib/postgresql
+    healthcheck:
+      # `pg_isready` alone is true while the standby is still catching up and
+      # refusing connections, so this asks the question that matters: is it in
+      # recovery *and* answering?
+      test:
+        - CMD-SHELL
+        - psql -U postgres -d postgres -tAc 'SELECT pg_is_in_recovery()' | grep -q t
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    ports:
+      - "${PGPORT_STANDBY:-55433}:5432"
+
+  # ---------------------------------------------------------------------------
+  # Shared state
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:8-alpine
+    # No persistence on purpose. Everything here is a cache with Postgres behind
+    # it; a Redis that comes back empty costs one slow request per session, and
+    # a Redis that comes back with *stale* data would cost correctness.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "${REDIS_PORT:-56379}:6379"
+
+  # Catches every email the worker sends. Read them at http://localhost:8025.
+  mailpit:
+    image: axllent/mailpit:latest
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "${MAILPIT_UI_PORT:-8025}:8025"
+
+  # ---------------------------------------------------------------------------
+  # One-shots
+  # ---------------------------------------------------------------------------
+
+  # `CREATE DATABASE spa_control`, and nothing else.
+  #
+  # Its own service, on the Postgres image, because the application image has no
+  # `psql` in it and should not: adding a Postgres client to every API replica to
+  # run one statement once is twenty megabytes on every node for a job that
+  # belongs to whatever provisions the cluster.
+  createdb:
+    image: postgres:18.3-trixie
+    restart: "no"
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: postgres
+    entrypoint:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        psql -h pg-primary -U postgres -d postgres \
+          -tAc "SELECT 1 FROM pg_database WHERE datname='spa_control'" | grep -q 1 \
+          || psql -h pg-primary -U postgres -d postgres -c 'CREATE DATABASE spa_control'
+
+  # Both migration chains: the control plane's own schema, then every tenant's.
+  # Everything else waits for it to exit 0, which is what makes `up` one command.
+  migrate:
+    <<: *app
+    command: ["migrator"]
+    restart: "no"
+    # Not an HTTP server. The image's healthcheck is the API's.
+    healthcheck:
+      disable: true
+    depends_on:
+      createdb:
+        condition: service_completed_successfully
+
+  # A tenant with every module enabled, filled through the public API.
+  #   docker compose run --rm demo
+  demo:
+    <<: *app
+    command: ["demo"]
+    restart: "no"
+    profiles: ["tools"]
+    healthcheck:
+      disable: true
+    environment:
+      <<: *app-env
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-correct-horse-battery-staple}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Destroys expired demo tenants. Scheduled, not resident — it exits when done.
+  #   docker compose run --rm reaper
+  reaper:
+    <<: *app
+    command: ["reaper"]
+    restart: "no"
+    profiles: ["tools"]
+    healthcheck:
+      disable: true
+
+  # ---------------------------------------------------------------------------
+  # The long-lived processes
+  # ---------------------------------------------------------------------------
+  api:
+    <<: *app
+    command: ["api"]
+    # **Two of them.** One API process never disagrees with itself, so a single
+    # replica would test none of what `REDIS_URL` is for.
+    deploy:
+      replicas: 2
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # **No published port.** Two replicas cannot both bind one host port, and
+    # the one that lost the race exits with a networking error. `proxy` is what
+    # is reachable from outside.
+
+  # Round-robins across the API replicas, so both of them actually serve.
+  proxy:
+    image: nginx:1.29-alpine
+    depends_on:
+      api:
+        condition: service_started
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${API_PORT:-8080}:8080"
+    restart: unless-stopped
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    # Two, so tenant leases are exercised rather than assumed. They coordinate
+    # through the control plane, not through Redis.
+    deploy:
+      replicas: 2
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+volumes:
+  pg-primary:
+  pg-standby:
