@@ -20,7 +20,7 @@ Databases and credentials come from `.env` — see [DATABASE_SETUP.md](DATABASE_
 | | what it does | needs |
 |---|---|---|
 | `bin/api` | serves HTTP | control DB, cluster URL |
-| `bin/worker` | projections, the outbox, health checks, the ZATCA sweeps | the same, plus `SEALING_KEY` for ZATCA |
+| `bin/worker` | projections, both outboxes, health checks, the ZATCA sweeps | the same, plus `SEALING_KEY` for ZATCA and `SMTP_URL` for email |
 | `bin/migrator` | brings tenant schemas up to this build; **run before a deploy** | the same |
 
 `bin/reaper` destroys expired demo tenants. Schedule it; it exits when done.
@@ -33,9 +33,40 @@ PRIMARY_CLUSTER_URL    # the tenant cluster named `primary` in the control plane
 PUBLIC_DOMAIN          # tenants are subdomains of this; defaults to `localhost`
 BIND                   # the API's address; defaults to 0.0.0.0:8080
 SEALING_KEY            # <id>:<64 hex chars> — see below
+SMTP_URL               # the relay; without it nothing sends mail — see below
+SMTP_FROM              # e.g. "SPA <noreply@spa.com>"; required when SMTP_URL is set
 WORKER_NAME            # for logs; defaults to $HOSTNAME
 RUST_LOG               # e.g. info,spa_worker=debug
 ```
+
+**`SMTP_URL` is what makes invitations arrive.** Without it the worker registers
+no email handler, and an effect whose kind has no handler is **not claimed** — so
+an invitation email waits in the control plane's outbox as an undelivered promise
+rather than being attempted and given up on. Configure a relay later and
+everything already promised goes out.
+
+lettre's URL form, and **`tls=required` is not optional**: without it `smtp://`
+will continue in the clear when a relay does not offer STARTTLS, and an
+invitation link is a credential.
+
+```bash
+SMTP_URL="smtps://user:pass@smtp.example.com:465"                 # implicit TLS
+SMTP_URL="smtp://user:pass@smtp.example.com:587?tls=required"     # STARTTLS
+SMTP_FROM="SPA <noreply@spa.com>"
+```
+
+Any relay that speaks SMTP works — a provider, or a Postfix of your own. There is
+one sender for the whole platform; a per-tenant `From` needs domain verification
+first, or mail claiming a tenant's domain fails SPF at most receivers.
+
+To watch it locally without sending anything, point it at a catcher:
+
+```bash
+docker run --rm -p 1025:1025 -p 8025:8025 axllent/mailpit
+```
+
+then `SMTP_URL="smtp://localhost:1025?tls=none"` and read the mail at
+`http://localhost:8025`. `tls=none` is for this and nothing else.
 
 **`SEALING_KEY` is what module secrets are sealed under.** Without it the API
 refuses to store a tenant's ZATCA private key (503, `request.no_sealing_key`)

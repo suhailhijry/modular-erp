@@ -165,3 +165,62 @@ impl Job for OutboxJob {
         Ok(Activity::Worked)
     }
 }
+
+/// Delivers what the **control plane's** outbox owes.
+///
+/// # Why this exists beside [`OutboxJob`]
+///
+/// Same dispatcher, same table shape, different plane. An invitation is a
+/// control-plane row, so the promise to email it is one too — there is no tenant
+/// database it could live in, and putting it in one would mean writing across
+/// two databases and losing the single transaction that makes the promise worth
+/// anything.
+///
+/// It is a [`PlatformJob`] rather than a [`Job`] because it is not per-tenant.
+/// See that trait for why running it per-tenant would be safe and still wrong.
+pub struct PlatformOutboxJob {
+    dispatcher: Arc<Dispatcher>,
+    batch_size: i64,
+}
+
+impl std::fmt::Debug for PlatformOutboxJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformOutboxJob")
+            .field("kinds", &self.dispatcher.kinds())
+            .field("batch_size", &self.batch_size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PlatformOutboxJob {
+    #[must_use]
+    pub const fn new(dispatcher: Arc<Dispatcher>, batch_size: i64) -> Self {
+        Self {
+            dispatcher,
+            batch_size,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::PlatformJob for PlatformOutboxJob {
+    fn name(&self) -> &'static str {
+        "platform-outbox"
+    }
+
+    async fn tick(&self, control: &spa_control::ControlPlane) -> Result<Activity, BoxError> {
+        // `dispatch_once` rather than the claim/deliver/settle dance `OutboxJob`
+        // does by hand: that one exists to take a *permit* per database moment
+        // out of a tenant's bulkhead. The control pool has no per-tenant budget
+        // to protect, so the simpler call is the honest one.
+        let pass = self
+            .dispatcher
+            .dispatch_once(control.pool(), self.batch_size)
+            .await?;
+        Ok(if pass.claimed == 0 {
+            Activity::Idle
+        } else {
+            Activity::Worked
+        })
+    }
+}

@@ -36,9 +36,16 @@ fmt-check:
 prepare:
     psql "{{admin_url}}" -q -c "DROP DATABASE IF EXISTS spa_typecheck WITH (FORCE)"
     psql "{{admin_url}}" -q -c "CREATE DATABASE spa_typecheck"
-    # Both schemas live in one type-check database. Table names do not collide,
-    # and sqlx validates every query against a single connection.
-    for f in migrations/control/*.sql migrations/tenant/*.sql; do psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 -f "$f"; done
+    # Both schemas live in one type-check database, and sqlx validates every
+    # query against a single connection.
+    #
+    # **Tenant first**, and it matters for exactly one table: `outbox` exists in
+    # both planes and is deliberately the same table, so whichever chain runs
+    # first is the definition sqlx checks against. The tenant one is the
+    # original and the one with `CREATE TABLE` rather than
+    # `CREATE TABLE IF NOT EXISTS`, so running it second would fail outright —
+    # which is a loud way to be reminded of this, but a slow one.
+    for f in migrations/tenant/*.sql migrations/control/*.sql; do psql "{{typecheck_url}}" -q -v ON_ERROR_STOP=1 -f "$f"; done
     # A module's install SQL is schema-relative — it says `invoice`, not
     # `proj_sales.invoice`, which is what lets a rebuild aim it at a staging
     # schema. So the schema has to be created and pointed at here too, the same

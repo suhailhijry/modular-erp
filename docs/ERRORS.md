@@ -148,6 +148,29 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **ar** — لا يمكن أن يكون السطر بقيمة صفر.
 
 
+## `mail`
+
+### `mail.invitation_body`
+
+- **en** — You have been invited to join {company}.
+
+Open this link to accept and choose a password:
+{link}
+
+The link works once and expires. If you were not expecting this, ignore this message — nothing happens until you open it.
+- **ar** — تمت دعوتك للانضمام إلى {company}.
+
+افتح هذا الرابط لقبول الدعوة واختيار كلمة مرور:
+{link}
+
+يعمل الرابط مرة واحدة ثم ينتهي. إن لم تكن تتوقع هذه الرسالة فتجاهلها — لا يحدث شيء حتى تفتحها.
+
+### `mail.invitation_subject`
+
+- **en** — You have been invited to {company}
+- **ar** — تمت دعوتك إلى {company}
+
+
 ## `members`
 
 ### `members.already_a_member`

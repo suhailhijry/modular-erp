@@ -11,6 +11,11 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
+**Where this stands:** 667 tests green, clippy and fmt clean. The per-phase test
+counts below are the numbers *at the time that phase was met* and are left as
+written; they are history, not status. What is not yet true is collected under
+[What needs work now](#what-needs-work-now) at the end.
+
 ---
 
 ## Phase 1 — Foundations · 3–4 weeks
@@ -37,7 +42,7 @@ exist, because everything after inherits them.
 - [x] Template-database-per-test fixture (`CREATE DATABASE … TEMPLATE`)
 - [x] Measured: ≈280 ms to acquire, ≈140 ms to drop (local Postgres 18)
 - [x] Parallel-safe (unique names, automatic teardown)
-- [ ] Fault-injection hooks at transaction boundaries *(deferred to Phase 2, where the transactions exist)*
+- [x] Fault-injection hooks at transaction boundaries *(landed in Phase 2, where the transactions exist)*
 
 ### 1d · Control plane
 - [x] Schema: identities, memberships, tenants, entitlements
@@ -46,7 +51,7 @@ exist, because everything after inherits them.
 - [x] `TenantDb` with no public constructor; `ControlPlane::enter`
 - [x] Tenant registry carries `(cluster, database)` from day one
 - [x] Support access as a separate audited path — no `is_system` bypass
-- [ ] Authenticators and sessions *(deferred to Phase 3, with the rest of auth)*
+- [x] Authenticators and sessions *(landed in 3a, with the rest of auth)*
 
 ### 1e · Build hygiene
 - [x] `.sqlx/` offline query data; `SQLX_OFFLINE=true` in `.cargo/config.toml`
@@ -132,9 +137,9 @@ every projection, so they land before the first projection exists.
 - [x] SIGTERM-mid-batch test, verified by shadow differ rather than by assertion
 - [x] Fault injection at transaction boundaries (carried from 1c) —
       `pg_terminate_backend`, not a simulated failure
-- [ ] Snapshots *(deferred — see above)*
-- [x] Shadow replay wired into CI *(done in Phase 4b, against the demo tenant —
-      every group, on every run)*
+- [x] Shadow replay against the demo tenant, on every run *(Phase 4b — all four
+      groups, and the list is checked against `spa_api::modules()` rather than
+      trusted, so a module added without a line there fails the test)*
 
 **Exit:** a projection can be written, replayed into a shadow schema, and proven
 identical by a differ rather than by assertion. **Met.** 215 tests.
@@ -168,7 +173,10 @@ modules can say what shape they need.
 - [x] problem+json (RFC 9457) plus `code` and `args` — a client branches on the
       code, never on the prose
 - [x] `Accept-Language` honoured on every response including failures
-- [x] Composite catalog across crates, with a duplicate-code test
+- [x] Composite catalog across crates, with a duplicate-code test — layered
+      since modules ship their own routes: `spa_web::CATALOG` is what any route
+      can answer with, a module adds its own and its dependencies', and
+      `spa_api::CATALOG` is the union `docs/ERRORS.md` comes from
 - [x] `Tenant` extractor: the only route to a `TenantDb`, so "did we check the
       membership?" is answered by the signature
 - [x] Status mapping in one place; a tenant that exists but is not yours is
@@ -181,8 +189,9 @@ modules can say what shape they need.
 - [x] Compensation: a failure drops the database and the row, so the name is
       free again — proved by signing the same name up successfully after
 - [x] `ControlPlane::sign_up` — the whole thing, plus the account and a session
-- [x] `ModuleSetup`: a module *describes* its install (SQL + projection groups)
-      rather than the control plane knowing what a ledger is
+- [x] `ModuleSetup`: a module *describes* itself — install SQL, seed SQL,
+      projection groups, event versions, dependencies — rather than the control
+      plane knowing what a ledger is
 - [x] **`POST /v1/signups`** — one request, and the caller has a working system
       they are already logged into, with the ledger installed and usable
 - [ ] A sweeper for tenants stuck in `provisioning` *(not needed while signup
@@ -199,19 +208,25 @@ Built only where the ledger produced a second consumer.
       contributes the trial balance through the composition root
 - [x] `bin/worker` composes the kernel and the modules; neither crate depends on
       the other
-- [ ] `Module` trait and registry *(still blocked on a real contradiction: the
-      trait would carry a router, and a module must not depend on `spa-api`. What
-      a third module showed is that the **registry** half is the part that was
-      actually load-bearing — five composition roots each list every module, and
-      one of them was unchecked. That is now closed by tests rather than by a
-      trait; see the running note. The trait itself waits for the router problem
-      to have an answer, and building it without one would be guessing twice)*
+- [~] `Module` trait and registry *(the **registry** half is done and was the
+      load-bearing one: `modules::REGISTERED` is one entry per module carrying
+      both its `ModuleSetup` and its router, so neither can be added without the
+      other. The **router** half is done too — `spa-web` sits below the modules,
+      so a module ships `http::routes()` itself.
+      What is left is the reason a trait is still not worth writing: a module's
+      **worker jobs** are registered in `bin/worker.rs` and cannot move, because
+      a module must not depend on `spa-worker` and the kernel must not know what
+      a ZATCA document is. A trait with two of its three methods implemented
+      somewhere else describes nothing)*
 - [ ] `Idempotency-Key` *(the ledger's mutations take client-chosen ids, so both
       are already idempotent — this may turn out to be unnecessary)*
 - [ ] `ETag`/`If-Match` *(no update-in-place endpoint yet)*
 - [x] `?consistent_after=<position>` — read your own write, with the write
       nudging the worker so the wait is a claim cycle rather than the idle backoff
-- [ ] Cursors *(no list long enough)*
+- [x] Cursors — keyset paging on the columns each list is ordered by, an
+      opaque cursor, and `next` absent meaning **the list ended**. Every list
+      used to stop at 200 and say nothing. A cursor this build cannot read is
+      refused rather than ignored
 - [x] Roles and capabilities: `Role::allows` is the one place authorization is
       decided, and `Allowed<C>` in a handler's signature *is* the check
 - [x] Authorization matrix as a test, written out rather than derived — over
@@ -291,7 +306,7 @@ first `Idempotency-Key` and `ETag` have a real mutation to attach to.
 - [x] Chart-of-accounts templates — `services` and `retail`, bilingual, with
       Saudi VAT and Zakat accounts in both
 - [x] `GET /v1/ledger/charts` (unauthenticated — a signup form has to show the
-      choices) and `POST /v1/tenants/{slug}/ledger/chart`
+      choices) and `POST /v1/ledger/chart`
 - [x] Installing is idempotent, so a half-finished install is fixed by retrying,
       and `retail` on top of `services` opens only the difference
 
@@ -324,7 +339,12 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       not a 500 from a missing table
 - [x] A VAT return — output tax by rate for a half-open period, per currency,
       with credited invoices excluded
-- [ ] ZATCA clearance *(needs a certificate and the first real outbox handler)*
+- [x] ZATCA clearance and reporting — the whole chain: onboarding by OTP, the
+      key and CSR, the XAdES signature, the QR, the invoice hash chain, the
+      transport, and the worker sweeps that sign and submit. Nine documents
+      accepted by ZATCA's sandbox with zero warnings. **Not** an outbox handler
+      in the end — it is two worker jobs, because a submission has to read a
+      sealed private key and the outbox carries values, not secrets *(4e)*
 - [x] The input-tax side — `modules/purchases`, and the whole return composed in
       the API from both modules' own reads, because their projection groups never
       see each other (L3) and nothing below the composition root could produce
@@ -343,11 +363,15 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       screenshotted and a CI failure is never "did the data change?"
 - [x] Something in every state a screen has to render: settled, part-paid and
       untouched invoices; all three VAT treatments; expenses as well as sales
-- [x] **A required CI check.** `cargo test --workspace` builds the whole demo
-      and asserts every module answers, every group replays, every invariant is
-      clean
-- [x] **Shadow replay wired into CI** *(carried from Phase 2 — it needed the
-      demo tenant, and now has one)*
+- [x] **Part of `cargo test --workspace`**, which builds the whole demo and
+      asserts every module answers, every group replays identically, and every
+      invariant is clean. Called "a required CI check" in an earlier draft of
+      this document: **there is no CI**, here or anywhere in the repo. It is a
+      required *test*, and nothing runs it but a person
+- [x] **Shadow replay against the demo** *(carried from Phase 2 — it needed the
+      demo tenant, and now has one. All four groups, with the coverage itself
+      asserted; each group names a table the demo must have filled, because
+      `EXCEPT ALL` between two empty tables is clean)*
 - [x] `spa_api::modules()` — the module set in one place, so "every module
       enabled" is true by construction rather than by a second list agreeing
 - [x] `bin/demo` + `just demo <password>`, so the demo is a thing a person signs
@@ -360,16 +384,23 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 
 ### 4c · Entitlements a tenant can change
 
-- [x] `POST /v1/tenants/{slug}/modules` and `DELETE .../modules/{module}` —
-      a tenant buys a module on a Tuesday and it works immediately
+- [x] `POST /v1/modules` and `DELETE /v1/modules/{module}` — a tenant buys a
+      module on a Tuesday and it works immediately. No `{slug}`: the tenant is
+      the subdomain
 - [x] `ControlPlane::install_module` — read models **and** entitlement, because
       either alone is a tenant that 500s
-- [x] `ModuleSetup::requires` — the dependency declared once and read by all
-      three places that ask: signing up, enabling later, refusing to disable
+- [x] `ModuleSetup::requires` and `requires_any` — dependencies declared once
+      and read by all three places that ask: signing up, enabling later, refusing
+      to disable. `requires` is an AND list; `requires_any` is a group satisfied
+      by any member, which is what `tax_sa` needs — a VAT return wants a source
+      for one side or the other and does not care which
 - [x] Disabling deletes nothing. The entitlement is marked off; the events and
       read models stay, so a tenant who downgrades and returns finds their data
-- [x] `GET /v1/modules` — the catalogue, unauthenticated, carrying dependencies
-      so a picker can grey out impossible combinations
+- [x] `GET /v1/catalogue` — unauthenticated and on the apex, because a pricing
+      page needs it before anyone has an account or a subdomain. Carries both
+      kinds of dependency, so a picker can grey out impossible combinations.
+      (`GET /v1/modules` is the tenant's own list; the two collided when the
+      tenant moved to the subdomain and the router refused to start)
 - [x] The test fixture installs modules through `install_module` rather than by
       hand, so it can no longer be right while the product is wrong
 - [ ] `ModuleEnabled<M>` capability tokens *(`require_module` is a runtime check
@@ -396,6 +427,45 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [x] Module schema refresh across the fleet — `refresh_module`,
       `refresh_module_fleet`, `just migrate-fleet refresh <module>`. Drop the
       schema, install it again, rewind the checkpoint, let the worker replay
+
+### 4e · Saudi e-invoicing, and the seams it broke
+
+Not in the original plan at all — it was one line in 4a. It is a phase.
+
+- [x] `modules/tax_sa` — the VAT return netting output against input, filed
+      returns, and the first module standing on two others
+- [x] The invoice hash chain (PIH/ICV), the QR as TLV, the canonical UBL
+- [x] Onboarding: key pair, CSR, OTP, compliance checks, production certificate
+- [x] The XAdES signature, and the transport (`reqwest` over the OpenSSL stack
+      sqlx already links)
+- [x] Sealed module secrets — `SEALING_KEY`, and anything that would store a
+      private key **refuses** without one rather than storing it in the clear
+- [x] Worker sweeps: `tax_sa.sign` and `tax_sa.submit`, registered only when the
+      deployment has a sealing key
+- [x] `CertificateExpiry` invariant — sixty days' warning, because renewal needs
+      a human reading an OTP off the Fatoora portal and nothing here can do it
+- [x] Verified against ZATCA's **sandbox** with a real certificate: nine
+      documents, zero warnings
+- [ ] Verified against **simulation**, and then production *(needs a real
+      taxpayer's OTP — see [What needs work now](#what-needs-work-now))*
+- [ ] Per-line exemption reasons; per-till device certificates
+
+### 4f · Modules that are actually modules
+
+- [x] `spa-web` — extractors, problem+json, paging and the request-level messages
+      moved *below* the modules, so a module can name what its routes are built
+      from without depending on `spa-api`
+- [x] Every module ships `http::routes()`; `spa-api` mounts them and writes none
+- [x] `ModuleSetup::seeding` — a module's data is a step of its own, not a rider
+      on its DDL
+- [x] PDPL erasure — `audit_entry`'s trigger permits exactly one shape of update,
+      one that nulls an actor and changes nothing else. An identity that had ever
+      acted could not be deleted at all, and "our schema will not let us" is not
+      a lawful ground for refusing
+- [ ] An HTTP endpoint for erasure *(deliberately absent: **who may erase whom**
+      is a policy question, and answering it while fixing a schema bug would
+      answer it badly)*
+- [x] `docs/RUNNING.md` — bringing the API and workers up by hand
 
 **Exit:** someone signs up online, picks a chart of accounts, and gets a working
 system.
@@ -453,6 +523,146 @@ the generic `Document` aggregate is right for the real document mix.
 deploy.
 
 ---
+
+---
+
+## What needs work now
+
+Written after reading this document against the code, in the order I would do
+them. Everything here was **checked**, not remembered — the file and the command
+that shows it are named.
+
+### 1. ~~The outbox has no producers and no handlers~~ — done
+
+Was: `grep` for `with_effect|enqueue(` outside `spa-eventlog`'s own tests
+returned **nothing**, and `bin/worker.rs` built its dispatcher with no
+`.register(...)` after it. Every piece of D9 was finished, tested, and reaching
+nothing; the concrete cost was that an invitation was a link somebody copied out
+of an API response by hand.
+
+Email is the handler, invitations are the producer, and the shape of the fix was
+decided by a fact nobody had noticed: **the outbox only existed in tenant
+databases, and invitations are control-plane rows.** See the running note.
+
+The original text follows, because the reasoning in it is what led to the
+control-plane outbox rather than to a sweep.
+
+#### The original finding
+
+`grep -rn "with_effect\|enqueue(" crates/ modules/` outside `spa-eventlog`'s own
+tests returns **nothing**, and `bin/worker.rs:54` builds
+`Dispatcher::new(RetryPolicy::default())` with no `.register(...)` after it.
+
+So: the outbox schema, effects-as-values, claim-under-`SKIP LOCKED`, exponential
+backoff, dead letters, the at-least-once idempotency key, the crash tests that
+prove a lost delivery record replays with the same key — all built, all tested,
+and **nothing in the product uses any of it**. D9 is the architecture's answer to
+"how does anything reach the outside world", and the answer currently reaches
+nothing.
+
+The concrete cost is one feature short: an invitation is a link the inviter has
+to copy and pass on by hand, because sending an email is an outbox effect and no
+handler exists. That was the right call when it was written — "belongs with the
+first real handler" — and ZATCA turned out **not** to be that handler, because a
+submission reads a sealed private key and an effect is a value in a table.
+
+So email is the first real handler, and it is the one that unblocks invitations,
+password reset, and every notification after. Until it exists the outbox is the
+largest piece of finished, unexercised machinery in the build — and unexercised
+machinery is where the next silent bug lives. Two of them have already been found
+this way (the ZATCA sweeps had no caller; `ON DELETE SET NULL` on `audit_entry`
+was unreachable from the day it was written).
+
+### 2. There is no CI
+
+No `.github`, no `.gitlab-ci.yml`, nothing. `just check` exists and runs
+`fmt-check`, `clippy -D warnings` and `cargo test --workspace`; a person has to
+remember to run it.
+
+This document claimed "a required CI check" in two places, which is how a claim
+like that survives — it was true of the intent and never of the repository. Both
+are corrected above.
+
+What CI has to run, and why each one is not optional: `just check`, `just errors`
+and `just openapi` (both regenerate a committed file and fail on drift), and
+`just migrate-fleet check` / `versions` against a scratch database (the two
+pre-deploy gates). The soak test and the ZATCA sandbox tests are `#[ignore]`d and
+need credentials; they belong on a schedule, not on a push.
+
+### 3. ~~Shadow replay covers two groups of four~~ — done
+
+Was: `ledger` and `sales` were replayed, `purchases` and `tax_sa` were not, while
+the test's own doc comment said "every group". `tax_sa` was the one that mattered
+most — its projection builds the ZATCA hash chain, and a rebuild producing a
+different document produces a different hash, breaking a chain **the tax
+authority validates**.
+
+All four now, and the list is no longer trusted: the group names replayed are
+compared against every group `spa_api::modules()` declares, so a module added
+without a line there fails rather than becoming the next one nobody watches.
+
+Each group also names a table the demo must have filled, because `EXCEPT ALL`
+between two **empty** tables is clean — a group whose read models happen to be
+empty was "reproducible" the way a blank page is correct.
+
+Falsified four ways: dropping `tax_sa` from the list fails the coverage
+assertion; dropping a projection from the group empties its witness table; and a
+`clock_timestamp()` in either the `tax_sa` or `purchases` insert is caught by the
+differ (7 documents and 4 bills respectively).
+
+### 4. Nothing says how to deploy this, or how to get a tenant back
+
+The target is 2,000–5,000 tenants self-managed on Hetzner. The repository has no
+container image, no unit files, no scheduling for `bin/reaper` or `bin/migrator`
+(both of which exit when done and are meant to be scheduled), and no backup or
+restore procedure — tested or otherwise.
+
+A database per tenant makes restore *the* operational question, not a footnote:
+restoring one tenant to a point in time must not touch the other 4,999, and the
+control plane's row for that tenant has to agree with whatever the database
+became. Nothing in the code or the docs addresses it, and "we will work it out
+when it happens" is a bad plan for the day it happens.
+
+`docs/RUNNING.md` covers running it by hand, which is a different question.
+
+### 5. Signup is public, unlimited, and creates a database
+
+`POST /v1/signups` is `security()` — unauthenticated by definition, which is
+correct. What is on the API is `RequestBodyLimitLayer`, `TimeoutLayer` and
+`TraceLayer` (`bin/api.rs:68`). There is no rate limit, no proof of work, no
+captcha, and no email verification.
+
+Every call that gets past validation runs `CREATE DATABASE` and a full migration
+chain. A script can therefore exhaust a cluster's disk from the open internet
+with no account, and each attempt costs the attacker one HTTP request and costs
+the operator a database. Email verification before provisioning would fix the
+abuse case and the "is this address real" case at once — and it needs the outbox
+handler from item 1, which is part of why that is first.
+
+### 6. ZATCA is proven in sandbox only
+
+Nine documents accepted with zero warnings, against **sandbox**. Simulation and
+production are untested, and both need a real taxpayer's OTP from the Fatoora
+portal — so this is blocked on access, not on code. Simulation is the one that
+matters: it is the environment ZATCA requires a solution to pass before
+production, and its certificate template differs from sandbox's (found the hard
+way — see the running note).
+
+Renewal is a five-year deadline with a sixty-day warning and no automation
+possible, because it needs a human with an OTP. That is written down here so it
+is a known limitation rather than a surprise in 2031.
+
+### Then, and only then
+
+Phase 5b (the rules engine) and Phase 6 (configured domain) are still correctly
+sequenced: both wait for a second real consumer to describe them, and neither has
+one yet. Blueprints (4d) are the nearest thing with a customer-visible payoff.
+
+The smaller deferrals — snapshots, `Idempotency-Key`, `ETag`, `ModuleEnabled<M>`,
+partial credit notes, customers as records, an entry-level read model — each name
+the condition that should trigger them, and none of those conditions has been
+met. They are fine where they are.
+
 
 ## Running notes
 
@@ -2690,3 +2900,103 @@ code — which is how "sales و purchases" ends up in an English sentence.
 
 `GET /v1/catalogue` and `GET /v1/modules` both carry `requires_any`, so a picker
 can grey out what is impossible rather than let somebody discover it.
+
+## The first outbox handler, and the plane it had to go in
+
+The outbox was finished in Phase 2 and joined to nothing for the whole of Phases
+3 and 4. Effects as values, claim under `SKIP LOCKED`, leases, exponential
+backoff, dead letters, the at-least-once idempotency key, crash tests proving a
+lost delivery record replays with the *same* key — all of it real, all of it
+tested, and **no producer anywhere in the product and no registered handler**.
+An effect enqueued by hand in a test was the only effect this system had ever
+seen.
+
+Email is the first handler. Invitations are the first producer.
+
+- **The outbox was in the wrong database for its first real user.** It was built
+  where commands and events are, which is a tenant database. But the things that
+  most need to reach the outside world do not happen in a tenant database at all:
+  an invitation is a control-plane row, and so is a signup, and so is a password
+  reset.
+
+  Writing the invitation in the control plane and its email into the tenant's
+  outbox would be two databases, therefore two transactions, therefore a window
+  where the invitation exists and the email was never promised — with nothing
+  recording that it was owed. That window is the exact thing D9 exists to close,
+  so closing it in one plane and leaving it open in the other is not a design.
+
+  So the control plane has an outbox now, and it is **byte-for-byte** the tenant
+  one: `Dispatcher` and `enqueue` are compile-time-checked against a table named
+  `outbox` with those columns, and reusing them costs one obligation — the two
+  files must not drift. Nothing in the compiler can see that obligation, because
+  sqlx validates against a single type-check database where the two are the same
+  table. A column added to one chain would type-check perfectly and fail at
+  runtime in the other plane. `the_two_outboxes_are_the_same_table` compares them
+  column by column and constraint by constraint; adding one column to either
+  fails it.
+
+  `just prepare` now loads the tenant chain **first**, so the tenant definition is
+  the one sqlx checks against and the control migration is a no-op there.
+
+- **`PlatformJob`, because a `Job` is handed a `TenantDb`.** The control-plane
+  outbox has no tenant. Running it as a per-tenant job would be *safe* —
+  `SKIP LOCKED` sees to that — and still wrong: the work would scale with the
+  number of tenants rather than with the amount of work, under a tenant's lease,
+  N times a cycle.
+
+  It runs once per claim cycle, inline, **before** tenants are claimed, so an
+  idle deployment with nothing due still pumps the queue. A failure is logged and
+  stepped over rather than propagated: one unreachable relay must not stall every
+  projection on the fleet.
+
+- **SMTP, not a vendor's HTTP API.** Every provider speaks it and so does a
+  Postfix somebody runs themselves, which for a self-managed fleet means changing
+  provider is one environment variable rather than a code change. `lettre` on
+  `native-tls` — the OpenSSL sqlx already links for Postgres TLS, the same call
+  made for `reqwest`, and the reason this build has one TLS stack rather than
+  two. Not hand-rolled, because an Arabic subject line needs RFC 2047
+  encoded-words and getting that subtly wrong produces mojibake in exactly the
+  clients this market uses.
+
+- **The interesting part of the handler is not SMTP.** It is which failures are
+  worth retrying. A refused connection, a TLS handshake, a 4xx greylisting, a
+  timeout — the relay having a moment, and dead-lettering an invitation because a
+  mail server was restarting would be losing it. A 5xx, or an address that will
+  not parse — permanent, and retrying spends four attempts and two minutes of
+  backoff to arrive at the same answer. A payload this build cannot read is
+  permanent too, rather than retried three times first with a misleading error
+  left on the row.
+
+  That is why there is a `Mailer` trait: a test of it has to make the transport
+  fail on demand, and must never send real mail by accident.
+
+- **The text is rendered when the invitation is written, not when it is sent.**
+  L5: the effect records a resolved decision. The recipient has no account and
+  therefore no stored language, so what exists at the moment of inviting — the
+  language the *inviter* was working in — is the best signal there will ever be,
+  and it is gone by the time a worker picks the row up. It also means editing the
+  catalog does not silently change what an already-issued invitation says, which
+  is the same reason an invoice stores its VAT rate.
+
+- **No relay configured is not an error.** With `SMTP_URL` unset the handler is
+  not registered, and an effect whose kind has no handler is *not claimed* — so
+  the email waits as an undelivered promise rather than being attempted and given
+  up on. Configure a relay a month later and everything already promised goes
+  out. Same call `SEALING_KEY` makes for the ZATCA sweeps.
+
+- **What the tests pin.** `inviting_somebody_promises_them_an_email` asserts the
+  row is there after the request, in Arabic, carrying the invitation's own token
+  — and then *uses* that token against `/v1/join/`, because a body with a
+  plausible-looking URL that 404s is worse than no email.
+  `an_invitation_is_promised_by_the_control_plane_and_delivered_by_the_worker`
+  runs the platform pass and asserts the message reached the mailer and the row
+  says delivered, then runs it again and asserts nothing is sent twice.
+
+  Falsified: removing the `enqueue` empties the outbox; a batch limit of zero
+  never delivers; an unregistered handler claims nothing; a drifted column fails
+  the parity test.
+
+- **A second `git checkout` cost a file.** `git checkout <path>` restores from
+  the *index*, and a test appended but never staged is not in the index — so
+  reverting a deliberate falsification deleted the test along with it. Second
+  time this session. The habit is now `git add -A` before falsifying anything.

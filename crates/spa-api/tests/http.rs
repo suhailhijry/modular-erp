@@ -3187,6 +3187,93 @@ async fn inviting_an_existing_member_is_refused() {
     fixture.cleanup().await;
 }
 
+/// **Inviting somebody promises the email, in the same transaction.**
+///
+/// The outbox was built in Phase 2 and had **no producer anywhere in the
+/// product** until this one: every piece of it — effects as values, claim under
+/// `SKIP LOCKED`, backoff, dead letters, the at-least-once idempotency key —
+/// was finished, tested, and reaching nothing. An invitation was a link
+/// somebody copied out of this response by hand.
+///
+/// What this asserts is the part that cannot be checked by reading the code:
+/// that the row is there after the request, in the caller's language, carrying
+/// the link that actually works.
+#[tokio::test]
+async fn inviting_somebody_promises_them_an_email() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // In Arabic, because the invitee has no account and therefore no stored
+    // language — what the *inviter* was reading is the only signal there is,
+    // and it is gone by the time a worker picks the row up.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/invitations")
+                .header(header::HOST, "acme.localhost")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT_LANGUAGE, "ar")
+                .body(Body::from(
+                    serde_json::json!({ "handle": "sara@acme.test", "role": "clerk" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let link_token = body["token"].as_str().expect("a token").to_owned();
+
+    let (kind, payload, key): (String, serde_json::Value, String) =
+        sqlx::query_as("SELECT kind, payload, idempotency_key FROM outbox")
+            .fetch_one(fixture.db.pool())
+            .await
+            .expect("the invitation promised nothing; the outbox is empty");
+
+    assert_eq!(kind, "email.send");
+    assert_eq!(payload["to"], "sara@acme.test");
+    assert_eq!(
+        payload["locale"], "arabic",
+        "rendered in the inviter's language"
+    );
+    assert!(
+        payload["subject"]
+            .as_str()
+            .is_some_and(|s| s.contains("دعوتك")),
+        "the subject is not Arabic: {payload}"
+    );
+
+    // **The link in the email is the link that works.** A body with a
+    // plausible-looking URL in it that 404s is worse than no email at all.
+    let body_text = payload["body"].as_str().expect("a body");
+    assert!(
+        body_text.contains(&link_token),
+        "the email does not carry the invitation's own token"
+    );
+    assert!(
+        body_text.contains("https://acme.localhost/v1/join/"),
+        "the link is not addressed to this tenant: {body_text}"
+    );
+
+    // The key ties the promise to the invitation, so a redelivery is one email
+    // rather than a second invitation.
+    assert!(key.starts_with("invitation:"), "{key}");
+
+    // And the token in the email is honoured, which is the only proof the link
+    // is real rather than well-formed.
+    let (status, _, _) = fixture
+        .send(
+            Request::get(format!("/v1/join/{link_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the emailed link does not work");
+
+    fixture.cleanup().await;
+}
+
 /// A password chosen through an invitation gets the same rule as one chosen at
 /// signup, and the rule is applied before the token is looked at.
 #[tokio::test]

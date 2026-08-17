@@ -154,6 +154,17 @@ async fn invite(
         .parse()
         .map_err(|_| bad_request(spa_web::messages::UNKNOWN_ROLE, "role", &body.role, locale))?;
 
+    // **Where the link points is decided here**, because only this layer knows
+    // the deployment's public domain and the subdomain the request arrived on.
+    // The token is appended by `invite`, which is the only place it exists in
+    // the clear — passing a base rather than a finished URL is what keeps it
+    // that way.
+    //
+    // ponytail: it points at the API path, which answers with the invitation as
+    // JSON. That is a landing a person can act on and not one they would enjoy.
+    // When a frontend exists, this is the one line that changes.
+    let accept_base = format!("https://{}.{}/v1/join/", tenant.slug, state.domain);
+
     let (invitation, token) = state
         .control
         .invite(
@@ -161,6 +172,8 @@ async fn invite(
             body.handle,
             role,
             tenant.session.identity,
+            &accept_base,
+            locale,
         )
         .await
         .map_err(|e| invitation_problem(&e, locale))?;

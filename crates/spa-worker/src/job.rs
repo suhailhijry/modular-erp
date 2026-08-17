@@ -55,3 +55,34 @@ pub trait Job: Send + Sync + 'static {
     /// Does a bounded amount of work for one tenant.
     async fn tick(&self, db: &TenantDb) -> Result<Activity, BoxError>;
 }
+
+/// Background work for the **platform**, not for any one tenant.
+///
+/// # Why this is not a [`Job`]
+///
+/// Because a `Job` is handed a `TenantDb`, and the things that need this have no
+/// tenant. The control plane's outbox is the first: an invitation is a
+/// control-plane row, so the promise to email it is a control-plane row, and
+/// there is no tenant database it could sensibly live in.
+///
+/// Running it as a `Job` would mean doing control-plane work once per tenant,
+/// under a tenant's lease, N times a cycle. `SKIP LOCKED` would make that safe
+/// and it would still be wrong: the amount of work would scale with the number
+/// of tenants rather than with the amount of work.
+///
+/// # When it runs
+///
+/// Once per claim cycle, inline, before tenants are claimed — so an idle
+/// deployment with no tenants due still pumps the queue every
+/// `empty_claim_pause`.
+///
+/// ponytail: inline means a slow relay delays tenant claiming by however long
+/// the batch takes. Bounded, because every implementation takes a batch limit.
+/// Move it onto the task tracker if a platform job ever grows one that is not.
+#[async_trait::async_trait]
+pub trait PlatformJob: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+
+    /// Does a bounded amount of work against the control plane.
+    async fn tick(&self, control: &spa_control::ControlPlane) -> Result<Activity, BoxError>;
+}

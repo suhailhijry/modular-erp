@@ -51,6 +51,19 @@ hex = "0.4"
 # it — secp256k1, a PKCS#10 request, and two extensions written as exact DER.
 openssl = "0.10"
 
+# SMTP. `native-tls` on purpose: it is OpenSSL, which sqlx already links for
+# Postgres TLS — the same call made for `reqwest`, and the reason this build has
+# one TLS stack rather than two. Default features are off because they pull
+# rustls, a second resolver, and a file transport nothing uses.
+#
+# Not hand-rolled: an Arabic subject line needs RFC 2047 encoded-words and an
+# Arabic body needs quoted-printable or base64 with the right charset, and
+# getting either subtly wrong produces mail that renders as mojibake in exactly
+# the clients this market uses.
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport", "native-tls", "tokio1", "tokio1-native-tls", "builder",
+] }
+
 # Async
 async-trait = "0.1"
 

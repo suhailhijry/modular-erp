@@ -44,7 +44,15 @@ pub const INVITATION_NOT_VALID: MessageCode = MessageCode::new("invitations.not_
 pub const LAST_OWNER: MessageCode = MessageCode::new("members.last_owner");
 
 /// Every code this crate can produce. The completeness test walks this list.
+/// The subject line of an invitation email. Not an error — the first message
+/// code in this system that is *outgoing* rather than a refusal.
+pub const INVITATION_SUBJECT: MessageCode = MessageCode::new("mail.invitation_subject");
+/// The body of an invitation email.
+pub const INVITATION_BODY: MessageCode = MessageCode::new("mail.invitation_body");
+
 pub static CODES: &[MessageCode] = &[
+    INVITATION_SUBJECT,
+    INVITATION_BODY,
     NO_SUCH_IDENTITY,
     IDENTITY_SUSPENDED,
     TENANT_UNAVAILABLE,
@@ -291,5 +299,43 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_A_MEMBER,
         Locale::Arabic,
         Template::Simple("هذا الشخص ليس عضوًا لدى هذا المستأجر."),
+    ),
+    // -----------------------------------------------------------------------
+    // Outgoing mail
+    // -----------------------------------------------------------------------
+    //
+    // Written as a person would write it, not as an error is written. `{link}`
+    // is a URL and therefore Latin script inside an Arabic sentence, which the
+    // catalog bidi-isolates — without that it renders with the path segments in
+    // the wrong order, which is a broken link that *looks* fine.
+    (
+        INVITATION_SUBJECT,
+        Locale::English,
+        Template::Simple("You have been invited to {company}"),
+    ),
+    (
+        INVITATION_SUBJECT,
+        Locale::Arabic,
+        Template::Simple("تمت دعوتك إلى {company}"),
+    ),
+    (
+        INVITATION_BODY,
+        Locale::English,
+        Template::Simple(
+            "You have been invited to join {company}.\n\n\
+             Open this link to accept and choose a password:\n{link}\n\n\
+             The link works once and expires. If you were not expecting this, \
+             ignore this message — nothing happens until you open it.",
+        ),
+    ),
+    (
+        INVITATION_BODY,
+        Locale::Arabic,
+        Template::Simple(
+            "تمت دعوتك للانضمام إلى {company}.\n\n\
+             افتح هذا الرابط لقبول الدعوة واختيار كلمة مرور:\n{link}\n\n\
+             يعمل الرابط مرة واحدة ثم ينتهي. إن لم تكن تتوقع هذه الرسالة \
+             فتجاهلها — لا يحدث شيء حتى تفتحها.",
+        ),
     ),
 ];

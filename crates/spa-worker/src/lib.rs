@@ -28,11 +28,12 @@
 mod health;
 mod job;
 mod jobs;
+pub mod mail;
 mod worker;
 
 pub use health::{Finding, HealthJob, Invariant};
-pub use job::{Activity, BoxError, Job};
-pub use jobs::{OutboxJob, ProjectionJob};
+pub use job::{Activity, BoxError, Job, PlatformJob};
+pub use jobs::{OutboxJob, PlatformOutboxJob, ProjectionJob};
 pub use worker::{Shutdown, Worker, WorkerConfig};
 
 use tokio_util::sync::CancellationToken;

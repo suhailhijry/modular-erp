@@ -315,3 +315,136 @@ async fn a_dead_letter_makes_a_tenant_unhealthy() {
 
     fixture.cleanup().await;
 }
+
+// ---------------------------------------------------------------------------
+// The platform pass
+// ---------------------------------------------------------------------------
+
+/// A mailer that records, so a test never sends anything.
+#[derive(Default)]
+struct Recorder {
+    sent: std::sync::Mutex<Vec<spa_control::mail::Email>>,
+}
+
+#[async_trait::async_trait]
+impl spa_worker::mail::Mailer for Recorder {
+    async fn send(
+        &self,
+        email: &spa_control::mail::Email,
+        _key: &str,
+    ) -> Result<(), spa_worker::mail::MailError> {
+        self.sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(email.clone());
+        Ok(())
+    }
+}
+
+/// **The whole path, from inviting somebody to the message going out.**
+///
+/// Every piece of this existed for two phases joined to nothing: the outbox had
+/// no producer anywhere in the product and the dispatcher had no registered
+/// handler, so an effect enqueued by hand in a test was the only effect this
+/// system had ever seen. What that cost, concretely, was that an invitation was
+/// a link somebody copied out of an API response.
+///
+/// The assertion is the boring one, and that is the point: after inviting, and
+/// after one platform pass, the message is with the mailer and the outbox row
+/// says it was delivered.
+#[tokio::test]
+async fn an_invitation_is_promised_by_the_control_plane_and_delivered_by_the_worker() {
+    use spa_worker::PlatformJob as _;
+
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.tenant("acme").await;
+
+    let owner = fixture
+        .control
+        .create_identity(Actor::system())
+        .await
+        .expect("identity");
+    fixture
+        .control
+        .register_login(
+            owner.id,
+            "owner@acme.test".to_owned(),
+            "hunter2hunter2".to_owned(),
+        )
+        .await
+        .expect("login");
+    fixture
+        .control
+        .grant_membership(
+            owner.id,
+            spa_control::Scope::Tenant(tenant),
+            "owner",
+            Actor::system(),
+        )
+        .await
+        .expect("membership");
+
+    fixture
+        .control
+        .invite(
+            tenant,
+            "sara@acme.test".to_owned(),
+            spa_control::Role::Clerk,
+            owner.id,
+            "https://acme.spa.test/v1/join/",
+            spa_i18n::Locale::Arabic,
+        )
+        .await
+        .expect("invites");
+
+    let recorder = Arc::new(Recorder::default());
+    let dispatcher = Arc::new(
+        spa_eventlog::Dispatcher::new(spa_eventlog::RetryPolicy::default()).register(Arc::new(
+            spa_worker::mail::EmailHandler::new(recorder.clone()),
+        )),
+    );
+    let job = spa_worker::PlatformOutboxJob::new(dispatcher, 32);
+
+    let activity = job.tick(&fixture.control).await.expect("dispatches");
+    assert_eq!(activity, Activity::Worked);
+
+    let sent = recorder
+        .sent
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(sent.len(), 1, "the invitation email did not go out");
+    assert_eq!(sent[0].to, "sara@acme.test");
+    assert!(
+        sent[0].body.contains("https://acme.spa.test/v1/join/"),
+        "the link did not survive the round trip: {}",
+        sent[0].body
+    );
+
+    // And the outbox knows, so a second pass sends nothing.
+    let delivered: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE delivered_at IS NOT NULL AND dead_at IS NULL",
+    )
+    .fetch_one(fixture.control.pool())
+    .await
+    .expect("counts");
+    assert_eq!(delivered, 1);
+
+    let again = job.tick(&fixture.control).await.expect("dispatches");
+    assert_eq!(
+        again,
+        Activity::Idle,
+        "a delivered effect was claimed again"
+    );
+    assert_eq!(
+        recorder
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "the same invitation was emailed twice"
+    );
+
+    fixture.cleanup().await;
+}

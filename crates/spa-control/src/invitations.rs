@@ -7,18 +7,19 @@
 //! An invitation inverts it: the recipient sets their own, and nobody else ever
 //! sees it.
 //!
-//! # Why there is no email here
+//! # How it reaches the person
 //!
-//! The invitation link is returned to whoever created it, once, and they pass it
-//! on however they already talk to that person. That is not a placeholder for
-//! sending mail — for a small business in this market it is frequently *better*
-//! than mail, and it is the difference between this working today and waiting on
-//! a decision about a mail provider.
+//! Two ways, and both matter. The link is **returned to whoever created it**,
+//! once, so they can pass it on however they already talk to that person — for a
+//! small business in this market that is frequently better than mail. And an
+//! email is **promised in the same transaction** as the invitation, so it also
+//! arrives without anybody copying anything.
 //!
-//! Sending it by email is an outbox effect (D9) and belongs with the first real
-//! [`EffectHandler`](spa_eventlog::EffectHandler). The control plane has no
-//! outbox table yet; adding one to carry a handler nobody has written would be
-//! building the mechanism before the need.
+//! The email is an outbox effect (D9), which is what makes the second one safe:
+//! sending inline would either mail somebody about an invitation that rolled
+//! back, or lose the send to a crash with nothing recording it was owed. This
+//! was the first real consumer of the outbox, and the reason the control plane
+//! grew one of its own — see `migrations/control/0008_outbox.sql`.
 //!
 //! # What the link is worth
 //!
@@ -136,12 +137,26 @@ impl ControlPlane {
     /// Re-inviting an address revokes the previous invitation rather than
     /// leaving two live links — otherwise revoking one would revoke one of
     /// several ways in, which is not revoking.
+    ///
+    /// Also promises the email, in the same transaction.
+    ///
+    /// `accept_base` is where the invitee accepts, **without** the token: this
+    /// function appends it, which keeps this the only place the token exists in
+    /// the clear. `locale` is the language the **inviter** was working in.
+    ///
+    /// Both are the caller's because neither is something this crate can know.
+    /// The public domain is a deployment fact. And the invitee has no account,
+    /// so there is no stored language to render from later — what the inviter
+    /// was reading is the best signal there will ever be, and it is gone by the
+    /// time a worker picks the row up.
     pub async fn invite(
         &self,
         tenant_id: TenantId,
         handle: String,
         role: Role,
         invited_by: IdentityId,
+        accept_base: &str,
+        locale: spa_i18n::Locale,
     ) -> Result<(Invitation, InvitationToken), InvitationError> {
         let handle = handle.trim().to_lowercase();
 
@@ -192,6 +207,27 @@ impl ControlPlane {
         .await
         .map_err(AccessError::Database)?;
 
+        // **The email, in the same transaction as the invitation.**
+        //
+        // This is D9's whole point and the reason the control plane has an
+        // outbox at all. Before it, an invitation was a link the inviter had to
+        // copy out of an API response and pass on by hand — there was no way to
+        // send one, because sending inline is the thing the outbox exists to
+        // refuse.
+        //
+        // The key is the invitation's own id, so the row and the promise to
+        // mail it are one-to-one. Re-inviting the same address writes a new
+        // invitation with a new id and therefore a new email, which is right:
+        // the old link was just revoked and the old email now points at nothing.
+        let company = self.tenant_display_name(&mut tx, tenant_id).await?;
+        let (subject, body) =
+            crate::mail::invitation_messages(&company, &format!("{accept_base}{}", token.expose()));
+        let email =
+            crate::mail::Email::rendered(&crate::CATALOG, locale, handle.clone(), &subject, &body);
+        spa_eventlog::enqueue(&mut tx, None, &[email.promised(format!("invitation:{id}"))])
+            .await
+            .map_err(|e| AccessError::Corrupt(e.to_string()))?;
+
         tx.commit().await.map_err(AccessError::Database)?;
 
         self.record(
@@ -214,6 +250,26 @@ impl ControlPlane {
             },
             token,
         ))
+    }
+
+    /// The company's name, for an email that has to say who is inviting.
+    ///
+    /// Read inside the caller's transaction rather than through the cache: the
+    /// text is written into the effect and never re-rendered, so it has to be
+    /// what the row said at that moment.
+    async fn tenant_display_name(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        tenant_id: TenantId,
+    ) -> Result<String, AccessError> {
+        sqlx::query_scalar!(
+            "SELECT display_name FROM tenant WHERE id = $1",
+            tenant_id.as_uuid()
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(AccessError::Database)?
+        .ok_or(AccessError::NoSuchTenant)
     }
 
     /// Outstanding invitations for a tenant. Never includes tokens.

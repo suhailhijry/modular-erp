@@ -302,51 +302,100 @@ async fn the_demo_has_filed_a_vat_return() {
     demo.cleanup().await;
 }
 
-/// **Shadow replay, in CI.** Architecture L2 says projections are pure functions
-/// of the event stream. This is where that stops being a claim about code nobody
-/// can check by reading it.
+/// Rebuilds one group into a shadow schema and diffs it against what is live.
 ///
-/// Every group, because a module added without one here would be the one that
-/// silently is not reproducible.
+/// The witness table is what makes the result mean something. `EXCEPT ALL`
+/// between two **empty** tables is clean, so a group whose read models happen to
+/// be empty is "reproducible" in the way that a blank page is correct. Each
+/// group therefore names a table the demo must have filled, and this refuses to
+/// report on a group that did no work.
+macro_rules! replay {
+    ($pool:expr, $module:ident, $group:ty, $witness:literal) => {{
+        let schema = <$group as spa_projection::ProjectionGroup>::SCHEMA;
+        // Both halves are compile-time constants — a group's `SCHEMA` const and
+        // a literal at the call site below — so there is nothing here for a
+        // caller to inject into.
+        let counted = sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {schema}.{}", $witness));
+        let rows: i64 = sqlx::query_scalar(counted)
+            .fetch_one(&$pool)
+            .await
+            .unwrap_or_else(|e| panic!("{schema}.{} is not readable: {e}", $witness));
+        assert!(
+            rows > 0,
+            "{schema}.{} is empty, so replaying {} proves nothing",
+            $witness,
+            stringify!($module),
+        );
+
+        let owned = $module::projections();
+        let refs: Vec<&dyn Projection<Group = $group>> = owned.iter().map(AsRef::as_ref).collect();
+        replay_shadow::<$group>(&$pool, &refs, $module::upcasters(), 500)
+            .await
+            .unwrap_or_else(|e| panic!("{} replays: {e}", stringify!($module)))
+    }};
+}
+
+/// **Shadow replay.** Architecture L2 says projections are pure functions of the
+/// event stream. This is where that stops being a claim about code nobody can
+/// check by reading it.
+///
+/// # Every group, and the check that it is every group
+///
+/// This used to replay `ledger` and `sales` while claiming to cover everything.
+/// `purchases` and `tax_sa` had projection groups and neither was ever rebuilt —
+/// and `tax_sa` is the one where it matters most: its projection builds the
+/// ZATCA hash chain, where each document carries the hash of the one before it.
+/// A rebuild that produces a different document produces a different hash, and
+/// breaks a chain **the tax authority validates**. The group nobody was watching
+/// was the group with the most to lose.
+///
+/// So the list is no longer trusted to be complete. Every group every module
+/// declares has to appear in it, and a module added to `spa_api::modules()`
+/// without a line here fails this test rather than becoming the next one that
+/// silently does not rebuild.
 #[tokio::test]
 async fn the_demo_replays_to_exactly_what_is_live() {
     let demo = Demo::build("demo-replay").await;
     let pool = demo.tenant_pool().await;
 
-    let owned = ledger::projections();
-    let refs: Vec<&dyn Projection<Group = ledger::Ledger>> =
-        owned.iter().map(AsRef::as_ref).collect();
-    let ledger_report = replay_shadow::<ledger::Ledger>(&pool, &refs, ledger::upcasters(), 500)
-        .await
-        .expect("the ledger replays");
-
-    let owned = sales::projections();
-    let refs: Vec<&dyn Projection<Group = sales::Sales>> =
-        owned.iter().map(AsRef::as_ref).collect();
-    let sales_report = replay_shadow::<sales::Sales>(&pool, &refs, sales::upcasters(), 500)
-        .await
-        .expect("sales replays");
+    let reports = vec![
+        replay!(pool, ledger, ledger::Ledger, "account"),
+        replay!(pool, sales, sales::Sales, "invoice"),
+        replay!(pool, purchases, purchases::Purchases, "bill"),
+        replay!(pool, tax_sa, tax_sa::TaxSa, "zatca_document"),
+    ];
 
     pool.close().await;
 
-    // Not vacuous: a report over an empty log is trivially reproducible, so the
-    // position both were compared at has to be somewhere.
-    assert!(
-        ledger_report.position.get() > 20,
-        "the demo should have written a substantial log, got {}",
-        ledger_report.position
+    // **Nothing was left out.** The demo enables every module, so every group
+    // every module owns exists in this tenant and must have been rebuilt.
+    let replayed: std::collections::BTreeSet<&str> =
+        reports.iter().map(|report| report.group).collect();
+    let declared: std::collections::BTreeSet<&str> = spa_api::modules()
+        .iter()
+        .flat_map(|(_, setup)| setup.groups.iter().map(|(name, _)| *name))
+        .collect();
+    assert_eq!(
+        replayed, declared,
+        "a projection group is not covered by shadow replay"
     );
 
+    // A report over an empty log is trivially reproducible, so the position they
+    // were all compared at has to be somewhere.
     assert!(
-        ledger_report.is_reproducible(),
-        "the ledger does not rebuild to what is live: {:?}",
-        ledger_report.differences()
+        reports[0].position.get() > 20,
+        "the demo should have written a substantial log, got {}",
+        reports[0].position
     );
-    assert!(
-        sales_report.is_reproducible(),
-        "sales does not rebuild to what is live: {:?}",
-        sales_report.differences()
-    );
+
+    for report in &reports {
+        assert!(
+            report.is_reproducible(),
+            "{} does not rebuild to what is live: {:?}",
+            report.group,
+            report.differences()
+        );
+    }
 
     demo.cleanup().await;
 }

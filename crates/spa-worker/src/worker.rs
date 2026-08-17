@@ -91,6 +91,7 @@ pub struct Shutdown {
 pub struct Worker {
     control: Arc<ControlPlane>,
     jobs: Arc<Vec<Arc<dyn Job>>>,
+    platform: Arc<Vec<Arc<dyn crate::PlatformJob>>>,
     config: WorkerConfig,
 }
 
@@ -112,8 +113,17 @@ impl Worker {
         Self {
             control,
             jobs: Arc::new(Vec::new()),
+            platform: Arc::new(Vec::new()),
             config,
         }
+    }
+
+    /// Adds work that is not about any one tenant. See
+    /// [`PlatformJob`](crate::PlatformJob).
+    #[must_use]
+    pub fn with_platform_job(mut self, job: Arc<dyn crate::PlatformJob>) -> Self {
+        Arc::make_mut(&mut self.platform).push(job);
+        self
     }
 
     #[must_use]
@@ -137,6 +147,11 @@ impl Worker {
         );
 
         while !cancel.is_cancelled() {
+            // **Before claiming tenants**, so a deployment with nothing due
+            // still pumps the platform queue every `empty_claim_pause` rather
+            // than only when a tenant happens to need visiting.
+            self.run_platform_jobs().await;
+
             let claimed = match self
                 .control
                 .claim_tenants(
@@ -232,6 +247,29 @@ impl Worker {
             failed_visits: failures.load(std::sync::atomic::Ordering::Relaxed),
             drained,
             leases_released,
+        }
+    }
+}
+
+impl Worker {
+    /// Runs every platform job once, in order.
+    ///
+    /// A failure is **logged and stepped over**, not propagated: a platform job
+    /// that cannot reach its dependency must not stop the worker from visiting
+    /// tenants, whose work has nothing to do with it. That is the same trade
+    /// `Visit::work` makes for a tenant job, and for the same reason — the
+    /// alternative is one broken relay stalling every projection on the fleet.
+    async fn run_platform_jobs(&self) {
+        for job in self.platform.iter() {
+            match job.tick(&self.control).await {
+                Ok(Activity::Worked) => {
+                    tracing::debug!(job = job.name(), "platform job did work");
+                }
+                Ok(Activity::Idle) => {}
+                Err(e) => {
+                    tracing::error!(job = job.name(), error = %e, "platform job failed");
+                }
+            }
         }
     }
 }

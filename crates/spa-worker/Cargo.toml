@@ -21,6 +21,8 @@ tax_sa = { workspace = true }
 # For the module catalogue, so `migrator refresh <name>` and the API cannot
 # disagree about which modules exist.
 spa-api = { workspace = true }
+lettre = { workspace = true }
+spa-i18n = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 sqlx = { workspace = true }

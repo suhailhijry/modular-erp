@@ -27,6 +27,7 @@ mod cache;
 mod fleet;
 mod invitations;
 mod leases;
+pub mod mail;
 mod members;
 pub mod messages;
 mod model;

@@ -14,8 +14,8 @@ use spa_control::{ClusterRegistry, ControlPlane, PoolConfig, TenantPools};
 use spa_eventlog::{Dispatcher, RetryPolicy};
 use spa_types::ModuleId;
 use spa_worker::{
-    Activity, Finding, HealthJob, Invariant, OutboxJob, ProjectionJob, Worker, WorkerConfig,
-    shutdown_signal,
+    Activity, Finding, HealthJob, Invariant, OutboxJob, PlatformOutboxJob, ProjectionJob, Worker,
+    WorkerConfig, shutdown_signal,
 };
 
 #[tokio::main]
@@ -53,6 +53,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // exists, and deliberately not an error.
     let dispatcher = Arc::new(Dispatcher::new(RetryPolicy::default()));
 
+    // **The control plane's dispatcher**, which is a different queue in a
+    // different database. Email lives here because the things that send it —
+    // invitations today, password resets next — are control-plane rows.
+    //
+    // A longer lease than the default: a slow relay is the normal failure, and
+    // a lease that lapses while a message is still in flight sends it twice.
+    let mut platform = Dispatcher::new(RetryPolicy {
+        lease: Duration::from_mins(2),
+        ..RetryPolicy::default()
+    });
+    for handler in mailer()? {
+        platform = platform.register(handler);
+    }
+    let platform = Arc::new(platform);
+
     let config = WorkerConfig {
         name: std::env::var("WORKER_NAME")
             .unwrap_or_else(|_| std::env::var("HOSTNAME").unwrap_or_else(|_| "worker".to_owned())),
@@ -64,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // the modules. `spa-worker` itself depends on no module, which is what keeps
     // the dependency arrow pointing one way.
     let mut worker = Worker::new(control, config)
+        .with_platform_job(Arc::new(PlatformOutboxJob::new(platform, EMAIL_BATCH)))
         .with_job(Arc::new(OutboxJob::new(dispatcher, 64)))
         .with_job(Arc::new(
             HealthJob::every(Duration::from_mins(5))
@@ -236,6 +252,44 @@ fn certificate_time(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// every tenant, and a clearance call is a network round trip in front of a
 /// person. What is not swept this visit is swept the next.
 const ZATCA_BATCH: i64 = 20;
+
+/// How many emails one pass sends.
+///
+/// Small on purpose. The platform pass runs **inline** in the claim loop, so a
+/// batch is time the worker is not visiting tenants — and a relay that answers
+/// in 200 ms turns 32 into six seconds. Anything left over goes on the next
+/// cycle, which is at most `empty_claim_pause` away.
+const EMAIL_BATCH: i64 = 32;
+
+/// The mailer, from the deployment's environment.
+///
+/// **Registered only when `SMTP_URL` is set**, and the handler is absent
+/// otherwise — which is not the same as broken. An effect whose kind has no
+/// registered handler is *not claimed* (see `spa_eventlog::outbox`), so on a
+/// deployment with no relay an invitation email waits in the outbox as an
+/// undelivered promise rather than being attempted and dead-lettered. Configure
+/// SMTP later and everything already promised goes out.
+///
+/// That is the same call `SEALING_KEY` makes below, for the same reason: a job
+/// that runs and finds it can do nothing is quieter than one that was never
+/// registered.
+fn mailer()
+-> Result<Vec<Arc<dyn spa_eventlog::EffectHandler>>, Box<dyn std::error::Error + Send + Sync>> {
+    let Ok(url) = std::env::var("SMTP_URL") else {
+        tracing::warn!(
+            "SMTP_URL is not set; invitations are still created and their emails \
+             still promised, but nothing sends them — the invitation link in the \
+             API response is the only way in until a relay is configured"
+        );
+        return Ok(Vec::new());
+    };
+    let from = std::env::var("SMTP_FROM")?;
+    let smtp = spa_worker::mail::Smtp::new(&url, &from)?;
+    tracing::info!(from = %from, "SMTP configured; email effects will be delivered");
+    Ok(vec![Arc::new(spa_worker::mail::EmailHandler::new(
+        Arc::new(smtp),
+    ))])
+}
 
 /// Anything a worker writes is the platform's doing, not a person's.
 fn by_the_platform() -> spa_eventlog::Metadata {

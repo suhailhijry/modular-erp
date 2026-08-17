@@ -76,6 +76,12 @@ impl FromRequestParts<AppState> for Authenticated {
 pub struct Tenant {
     pub db: TenantDb,
     pub session: Session,
+    /// The subdomain this request arrived on, which is the tenant's name.
+    ///
+    /// Carried because a handler that has to build a link back into this tenant
+    /// — an invitation email is the first — would otherwise have to re-derive it
+    /// from the `Host` header it no longer has.
+    pub slug: String,
 }
 
 impl FromRequestParts<AppState> for Tenant {
@@ -113,6 +119,7 @@ impl FromRequestParts<AppState> for Tenant {
         Ok(Self {
             db,
             session: auth.session,
+            slug: tenant.slug,
         })
     }
 }
