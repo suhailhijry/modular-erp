@@ -31,6 +31,8 @@ pub const COMPLIANCE_REFUSED: MessageCode = MessageCode::new("request.compliance
 pub const NOT_CAUGHT_UP: MessageCode = MessageCode::new("request.not_caught_up");
 /// A module was asked for without one it cannot work without.
 pub const MODULE_REQUIRES: MessageCode = MessageCode::new("request.module_requires");
+/// A module that needs at least one of several, and has none of them.
+pub const MODULE_REQUIRES_ONE_OF: MessageCode = MessageCode::new("request.module_requires_one_of");
 /// 404. The tenant did not enable the module this route belongs to.
 pub const MODULE_NOT_ENABLED: MessageCode = MessageCode::new("request.module_not_enabled");
 pub const UNKNOWN_VAT_CATEGORY: MessageCode = MessageCode::new("request.unknown_vat_category");
@@ -74,6 +76,7 @@ pub static CODES: &[MessageCode] = &[
     COMPLIANCE_REFUSED,
     NOT_CAUGHT_UP,
     MODULE_REQUIRES,
+    MODULE_REQUIRES_ONE_OF,
     MODULE_NOT_ENABLED,
     UNKNOWN_VAT_CATEGORY,
     NO_SUCH_INVOICE,
@@ -428,6 +431,24 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         MODULE_REQUIRES,
         Locale::Arabic,
         Template::Simple("تحتاج وحدة {module} إلى {required}. أضفها إلى القائمة."),
+    ),
+    // `required` is a comma-separated list of module names. A comma separates a
+    // list in both languages, so the sentence reads in both without the
+    // conjunction having to be built in the code — which is the sort of thing
+    // that produces "sales و purchases" in an English sentence.
+    (
+        MODULE_REQUIRES_ONE_OF,
+        Locale::English,
+        Template::Simple(
+            "The {module} module needs at least one of: {required}. Add one to the list.",
+        ),
+    ),
+    (
+        MODULE_REQUIRES_ONE_OF,
+        Locale::Arabic,
+        Template::Simple(
+            "تحتاج وحدة {module} إلى واحدة على الأقل من: {required}. أضف واحدة إلى القائمة.",
+        ),
     ),
     (
         MODULE_NOT_ENABLED,

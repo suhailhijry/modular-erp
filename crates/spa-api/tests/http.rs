@@ -2680,6 +2680,86 @@ async fn a_module_cannot_be_turned_on_without_what_it_needs() {
     fixture.cleanup().await;
 }
 
+/// **A module that needs at least one of several, over HTTP.**
+///
+/// `tax_sa` nets output tax against input tax and needs a source for one side or
+/// the other. Requiring both would force a shop with no supplier bills to enable
+/// `purchases`; requiring neither — which is what it did — let a tenant turn on
+/// a VAT return with nothing feeding it.
+#[tokio::test]
+async fn a_module_needing_one_of_several_takes_either_and_refuses_neither() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let enable = |module: &str, locale: &str| {
+        Request::post("/v1/modules")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT_LANGUAGE, locale)
+            .body(Body::from(
+                serde_json::json!({ "module": module }).to_string(),
+            ))
+            .unwrap()
+    };
+
+    // The ledger alone is not a VAT return. In Arabic, because the refusal is
+    // something a Saudi accountant reads.
+    let (status, body, _) = fixture.send(enable("tax_sa", "ar")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.module_requires_one_of");
+    assert_eq!(body["args"]["required"]["value"], "sales, purchases");
+    assert!(
+        body["detail"]
+            .as_str()
+            .expect("a sentence")
+            .contains("واحدة على الأقل"),
+        "the refusal has to say *one of*, not read like the AND case: {body}"
+    );
+
+    // Either side is enough. Sales here; `one_of_several_is_enough_and_none_of_
+    // them_is_not` covers purchases-only and both.
+    let (status, body, _) = fixture.send(enable("sales", "en")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = fixture.send(enable("tax_sa", "en")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // And the last side cannot be pulled out from under it.
+    let (status, body, _) = fixture
+        .send(
+            Request::delete("/v1/modules/sales")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.module_in_use");
+    assert_eq!(body["args"]["dependent"]["value"], "tax_sa");
+
+    // With the other side on, it can: the return still has something to report.
+    let (status, body, _) = fixture.send(enable("purchases", "en")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = fixture
+        .send(
+            Request::delete("/v1/modules/sales")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "purchases still feeds the return: {body}"
+    );
+
+    fixture.cleanup().await;
+}
+
 /// Only `ManageTenant` may change what a tenant is paying for.
 #[tokio::test]
 async fn changing_modules_needs_the_capability_to_manage_the_tenant() {

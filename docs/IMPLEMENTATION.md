@@ -2641,3 +2641,52 @@ The existing `enabling_the_module_seeds_the_saudi_rate` did **not** catch it: it
 calls `tax_sa::install()`, a test helper that had its own copy of the two
 statements. That helper reads `setup()` now, so it installs what production
 installs.
+
+## `requires` learns "at least one of"
+
+`tax_sa` computes a VAT return, which nets output tax against input tax. It
+needs a source for one side or the other and does not care which: a business
+that only sells still files, and so does one that has bought but not yet sold.
+
+`requires` is an AND list, so neither answer was available. Naming both would
+force a shop with no supplier bills to enable `purchases` in order to declare
+tax they do owe. So `tax_sa` named **neither**, with a comment saying what it
+actually meant — and that let a tenant turn on a VAT return with nothing on
+either side, and disable the last module feeding it without a word.
+
+`ModuleSetup::requires_any`: one group, satisfied by any member.
+`.requiring(&["ledger"]).requiring_any(&["sales", "purchases"])` is now the whole
+sentence. One group and not a list of groups — "ledger AND (sales OR purchases)"
+is what this system needs, a second disjunction has no consumer, and the nested
+shape can arrive with the module that wants one.
+
+`ledger` is named explicitly even though either alternative brings it: `tax_sa`
+reads `ledger::Rates` itself, and a dependency relied on directly is one to
+declare rather than inherit.
+
+**The interesting half is disabling.** A tenant with sales, purchases and
+`tax_sa` may turn either side off; the *second* one is refused, because a return
+with nothing on either side is not a downgrade, it is a module that cannot
+answer. `dependent_on` asks whether `name` is the last enabled member of a
+dependent's `requires_any`, which is three distinct ways to be wrong:
+
+- skip the enable check → `tax_sa` goes on with only the ledger
+- treat `requires_any` as AND when disabling → *neither* side can ever be turned
+  off, which is worse than the bug being fixed
+- ignore `requires_any` when disabling → the last side goes and the return is
+  left mute
+
+Each fails `one_of_several_is_enough_and_none_of_them_is_not` with its own
+message. `a_module_needing_one_of_several_takes_either_and_refuses_neither`
+walks the same path over HTTP, in Arabic, and asserts the refusal reads *one of*
+— `request.module_requires_one_of` is a separate code from
+`request.module_requires`, because "needs sales, purchases" and "needs at least
+one of sales, purchases" are different sentences and a client rendering its own
+has to be able to tell them apart.
+
+The list arrives in `args.required` comma-separated. A comma separates a list in
+both English and Arabic, so neither language needs a conjunction built in the
+code — which is how "sales و purchases" ends up in an English sentence.
+
+`GET /v1/catalogue` and `GET /v1/modules` both carry `requires_any`, so a picker
+can grey out what is impossible rather than let somebody discover it.

@@ -302,6 +302,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — The {module} module needs {required}. Add it to the list.
 - **ar** — تحتاج وحدة {module} إلى {required}. أضفها إلى القائمة.
 
+### `request.module_requires_one_of`
+
+- **en** — The {module} module needs at least one of: {required}. Add one to the list.
+- **ar** — تحتاج وحدة {module} إلى واحدة على الأقل من: {required}. أضف واحدة إلى القائمة.
+
 ### `request.no_sealing_key`
 
 - **en** — This deployment has no sealing key, so a private key cannot be stored safely. Set SEALING_KEY and try again.

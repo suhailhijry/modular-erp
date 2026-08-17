@@ -139,13 +139,18 @@ pub(crate) fn check_offered(setup: &ModuleSetup, locale: Locale) -> Result<(), P
 /// Shared by signup (where `present` is what was asked for) and enabling (where
 /// it is what the tenant already has), because "sales needs the ledger" must not
 /// be true in one and forgotten in the other.
+///
+/// Both kinds of dependency: everything in `requires`, and **at least one** of
+/// `requires_any`. See [`ModuleSetup::requires_any`].
 pub(crate) fn check_requirements(
     setup: &ModuleSetup,
     present: &[String],
     locale: Locale,
 ) -> Result<(), Problem> {
+    let has = |name: &str| present.iter().any(|p| p == name);
+
     for required in setup.requires {
-        if present.iter().any(|p| p == required) {
+        if has(required) {
             continue;
         }
         return Err(ApiError::BadRequest(
@@ -155,6 +160,16 @@ pub(crate) fn check_requirements(
         )
         .into_problem(locale, &crate::CATALOG));
     }
+
+    if !setup.requires_any.is_empty() && !setup.requires_any.iter().copied().any(has) {
+        return Err(ApiError::BadRequest(
+            Message::new(spa_web::messages::MODULE_REQUIRES_ONE_OF)
+                .with("module", MessageArg::text(setup.module.as_str().to_owned()))
+                .with("required", MessageArg::text(setup.requires_any.join(", "))),
+        )
+        .into_problem(locale, &crate::CATALOG));
+    }
+
     Ok(())
 }
 
@@ -168,9 +183,12 @@ struct ModuleView {
     /// Set when the module is no longer offered, and says why. A tenant that has
     /// it keeps it; nobody new can turn it on.
     deprecated: Option<&'static str>,
-    /// What this module needs underneath it. A client building a picker needs
-    /// this to grey out the impossible combinations rather than discover them.
+    /// What this module needs underneath it, all of it. A client building a
+    /// picker needs this to grey out the impossible combinations rather than
+    /// let someone discover them.
     requires: &'static [&'static str],
+    /// What this module needs **at least one** of. Empty for most.
+    requires_any: &'static [&'static str],
     enabled: bool,
 }
 
@@ -180,6 +198,8 @@ struct CatalogueView {
     /// Set when the module is no longer offered. A picker should hide it.
     deprecated: Option<&'static str>,
     requires: &'static [&'static str],
+    /// What this module needs **at least one** of. Empty for most.
+    requires_any: &'static [&'static str],
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -218,6 +238,7 @@ async fn catalogue() -> Json<Vec<CatalogueView>> {
                 name,
                 deprecated: setup.deprecated,
                 requires: setup.requires,
+                requires_any: setup.requires_any,
             })
             .collect(),
     )
@@ -244,6 +265,7 @@ async fn list_modules(tenant: Allowed<Read>) -> Json<Vec<ModuleView>> {
                 name,
                 deprecated: setup.deprecated,
                 requires: setup.requires,
+                requires_any: setup.requires_any,
                 enabled: tenant.db.has_module(&setup.module),
             })
             .collect(),
@@ -368,12 +390,30 @@ async fn disable_module(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// An enabled module that needs `name`, if there is one.
+/// An enabled module that would be left without something it needs, if `name`
+/// were turned off.
+///
+/// Two ways to be left without:
+///
+/// - `name` is in its `requires`, which is an AND list — turning it off breaks
+///   the dependent outright.
+/// - `name` is in its `requires_any` and is the **last one enabled**. A tenant
+///   with sales, purchases and `tax_sa` may turn either side off; the second one
+///   is refused, because a VAT return with nothing on either side is not a
+///   downgrade, it is a module that cannot answer.
 fn dependent_on(name: &str, enabled: &spa_control::EnabledModules) -> Option<String> {
+    let still_on = |module: &str| {
+        module != name && spa_types::ModuleId::new(module).is_ok_and(|id| enabled.contains(&id))
+    };
+
     available()
         .into_iter()
         .filter(|(_, setup)| enabled.contains(&setup.module))
-        .find(|(_, setup)| setup.requires.contains(&name))
+        .find(|(_, setup)| {
+            setup.requires.contains(&name)
+                || (setup.requires_any.contains(&name)
+                    && !setup.requires_any.iter().copied().any(still_on))
+        })
         .map(|(dependent, _)| dependent.to_owned())
 }
 
@@ -431,18 +471,87 @@ mod tests {
         // un-enableable, and nothing else would notice until someone tried.
         let names: Vec<&str> = available().into_iter().map(|(name, _)| name).collect();
         for (name, setup) in available() {
-            for required in setup.requires {
+            for required in setup.requires.iter().chain(setup.requires_any) {
                 assert!(
                     names.contains(required),
                     "{name} requires {required:?}, which is not a module"
                 );
+                assert_ne!(setup.module.as_str(), *required, "{name} requires itself");
             }
+            // A single alternative is an AND requirement written the confusing
+            // way, and it takes the wrong error message with it.
             assert_ne!(
-                setup.module.as_str(),
-                *setup.requires.first().unwrap_or(&""),
-                "{name} requires itself"
+                setup.requires_any.len(),
+                1,
+                "{name} needs `at least one of` exactly one thing; that is `requiring`"
             );
         }
+    }
+
+    /// **"At least one of", in the two places it decides something.**
+    ///
+    /// `tax_sa` nets output tax against input tax and needs a source for one
+    /// side or the other. Declaring both in `requires` would force a shop with
+    /// no supplier bills to enable `purchases`; declaring neither — which is
+    /// what it did — let a tenant turn on a VAT return with nothing on either
+    /// side, and disable the last module feeding it without a word.
+    #[test]
+    fn one_of_several_is_enough_and_none_of_them_is_not() {
+        let tax_sa = find("tax_sa", Locale::DEFAULT).expect("a module");
+        let present =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_owned()).collect() };
+
+        // Enabling: either side satisfies it, neither does not.
+        for enough in [
+            vec!["ledger", "sales"],
+            vec!["ledger", "purchases"],
+            vec!["ledger", "sales", "purchases"],
+        ] {
+            assert!(
+                check_requirements(&tax_sa, &present(&enough), Locale::DEFAULT).is_ok(),
+                "tax_sa refused with {enough:?}"
+            );
+        }
+        let refused = check_requirements(&tax_sa, &present(&["ledger"]), Locale::DEFAULT)
+            .expect_err("a VAT return with neither side is not a return");
+        assert_eq!(refused.code, "request.module_requires_one_of");
+        assert_eq!(
+            refused.args["required"],
+            MessageArg::text("sales, purchases")
+        );
+
+        // And the AND half still bites, with its own message.
+        let refused = check_requirements(&tax_sa, &present(&["sales"]), Locale::DEFAULT)
+            .expect_err("ledger is not optional");
+        assert_eq!(refused.code, "request.module_requires");
+
+        // Disabling: one of two may go, the last may not.
+        let enabled = |names: &[&str]| {
+            spa_control::EnabledModules::new(
+                names
+                    .iter()
+                    .map(|n| spa_types::ModuleId::new(*n).expect("a module id"))
+                    .collect(),
+            )
+        };
+        let both = enabled(&["ledger", "sales", "purchases", "tax_sa"]);
+        assert_eq!(
+            dependent_on("sales", &both),
+            None,
+            "purchases still feeds the return, so sales may go"
+        );
+        assert_eq!(dependent_on("purchases", &both), None);
+
+        let one = enabled(&["ledger", "sales", "tax_sa"]);
+        assert_eq!(
+            dependent_on("sales", &one).as_deref(),
+            Some("tax_sa"),
+            "turning off the only side leaves a return that cannot answer"
+        );
+
+        // A module that needs none of this is unaffected either way.
+        let without = enabled(&["ledger", "sales", "purchases"]);
+        assert_eq!(dependent_on("sales", &without), None);
     }
 
     /// **The database is stricter than `ModuleId`, and it wins.**

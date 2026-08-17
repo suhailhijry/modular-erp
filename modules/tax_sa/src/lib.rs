@@ -118,22 +118,24 @@ const GROUPS: &[(&str, &str)] = &[(
 
 /// What a tenant enabling this module needs installed.
 ///
-/// # Why it requires nothing, while depending on two modules
+/// # Why one side is enough, and no side is not
 ///
-/// The crate depends on `sales` and `purchases` — it calls their read functions
-/// to net one against the other. The **entitlement** requires neither, and the
-/// distinction turned out to matter: `requires` is an AND list, and a business
-/// that only sells still files a return. Demanding purchases would force them to
-/// enable a module they do not use in order to declare tax they do owe.
+/// A VAT return nets output tax against input tax, so this crate depends on both
+/// `sales` and `purchases` and calls their read functions. The **entitlement**
+/// needs at least one of them and does not care which: a business that only
+/// sells still files a return, and demanding purchases would force a shop with
+/// no supplier bills to enable a module they do not use in order to declare tax
+/// they do owe. Each side is reported if the tenant has it and zero if not —
+/// which is not a fallback but the truth.
 ///
-/// So each side is reported if the tenant has it and zero if not — which is not
-/// a fallback but the truth. A business that has not enabled purchases genuinely
-/// reclaimed nothing.
+/// It used to require *neither*, because `requires` is an AND list and there was
+/// nothing else to say it with. That let a tenant enable a return with nothing
+/// on either side, and let them disable the last module feeding it without a
+/// word. [`ModuleSetup::requires_any`] is the shape that says it.
 ///
-/// ponytail: "at least one of sales or purchases" is the rule that would
-/// actually describe this, and `requires` cannot express it. Worth a shape that
-/// can when a second module wants the same thing; one consumer is not a reason
-/// to invent one.
+/// `ledger` is named too, though `sales` and `purchases` each bring it: this
+/// module reads `ledger::Rates` itself, and a dependency you rely on directly is
+/// one you declare rather than inherit.
 #[must_use]
 pub fn setup() -> spa_control::ModuleSetup {
     spa_control::ModuleSetup::new(
@@ -145,6 +147,8 @@ pub fn setup() -> spa_control::ModuleSetup {
     // The Saudi VAT rate. `ledger` owns the shape of a rate and has no opinion
     // about the number; this is where the number comes from.
     .seeding(include_str!("../schema/seed.sql"))
+    .requiring(&["ledger"])
+    .requiring_any(&["sales", "purchases"])
 }
 
 /// This module's entitlement name.

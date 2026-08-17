@@ -697,6 +697,14 @@ VAT return nets output tax against input tax, and the thing that nets them has t
 be above both rather than a third sibling reaching sideways. What no module may do
 is reach the control plane, or reach another module's tables (L3).
 
+The *crate* dependency and the *entitlement* dependency are not the same thing.
+`tax_sa` links against both sales and purchases, and a tenant needs **at least
+one** of them: a business that only sells still files a return, and demanding
+both would force a shop with no supplier bills to enable a module they do not
+use. `ModuleSetup` says both — `requires` is an AND list, `requires_any` a group
+satisfied by any member — and signup, enabling, and refusing to disable all read
+the same declaration.
+
 **Extension is by subscription, and the extended module does not know.** `tax_sa`
 builds a ZATCA document out of `sales.invoice.issued` without a line of `sales`
 changing: a projection reads the whole log rather than its own module's slice, its

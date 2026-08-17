@@ -104,12 +104,30 @@ pub struct ModuleSetup {
     /// A function pointer rather than a reference so the whole thing stays
     /// const-constructible; every module's is a `OnceLock` behind one.
     pub upcasters: fn() -> &'static spa_eventlog::Upcasters,
-    /// Modules this one cannot work without, by name.
+    /// Modules this one cannot work without, by name. **All of them.**
     ///
     /// Declared here rather than checked at each call site, because three
     /// places need the same answer: signing up, enabling later, and refusing to
     /// disable something another module is standing on.
     pub requires: &'static [&'static str],
+    /// Modules this one needs **at least one of**.
+    ///
+    /// # Why an AND list was not enough
+    ///
+    /// `tax_sa` computes a VAT return, which nets output tax against input tax.
+    /// It needs a source for at least one of those sides and does not care
+    /// which: a business that only sells still files a return, and so does one
+    /// that has bought but not yet sold. Putting `sales` and `purchases` in
+    /// [`Self::requires`] would force a shop with no supplier bills to enable a
+    /// module they do not use; leaving both out — which is what it did — let a
+    /// tenant turn on a return with nothing on either side, and let them
+    /// disable the last module feeding it without a word.
+    ///
+    /// One group, not a list of groups. "ledger AND (sales OR purchases)" is
+    /// what this system needs and a second disjunction has no consumer; the
+    /// shape that takes nested alternatives can arrive with the module that
+    /// wants one.
+    pub requires_any: &'static [&'static str],
     /// Why this module is no longer offered, if it is not.
     ///
     /// # Why modules are deprecated and never removed
@@ -142,6 +160,7 @@ impl ModuleSetup {
             groups,
             upcasters,
             requires: &[],
+            requires_any: &[],
             deprecated: None,
         }
     }
@@ -162,10 +181,18 @@ impl ModuleSetup {
         self
     }
 
-    /// Names the modules this one needs underneath it.
+    /// Names the modules this one needs underneath it. All of them.
     #[must_use]
     pub const fn requiring(mut self, modules: &'static [&'static str]) -> Self {
         self.requires = modules;
+        self
+    }
+
+    /// Names the modules this one needs **at least one** of. See
+    /// [`Self::requires_any`].
+    #[must_use]
+    pub const fn requiring_any(mut self, modules: &'static [&'static str]) -> Self {
+        self.requires_any = modules;
         self
     }
 }

@@ -469,11 +469,19 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "requires_any": {
+            "description": "What this module needs **at least one** of. Empty for most.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
           "name",
-          "requires"
+          "requires",
+          "requires_any"
         ],
         "type": "object"
       },
@@ -1350,7 +1358,14 @@
             "type": "string"
           },
           "requires": {
-            "description": "What this module needs underneath it. A client building a picker needs\nthis to grey out the impossible combinations rather than discover them.",
+            "description": "What this module needs underneath it, all of it. A client building a\npicker needs this to grey out the impossible combinations rather than\nlet someone discover them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "requires_any": {
+            "description": "What this module needs **at least one** of. Empty for most.",
             "items": {
               "type": "string"
             },
@@ -1360,6 +1375,7 @@
         "required": [
           "name",
           "requires",
+          "requires_any",
           "enabled"
         ],
         "type": "object"
