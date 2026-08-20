@@ -162,8 +162,8 @@ impl Rates {
     /// **Read inside the command's transaction**, for the same reason
     /// `sales::PostingAccounts` is: a rate that changed between the read and the
     /// write would leave an invoice stamped with one that was never current.
-    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, spa_eventlog::ConfigError> {
-        Ok(spa_eventlog::configuration::get::<Self>(conn, Self::KEY)
+    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, erp_eventlog::ConfigError> {
+        Ok(erp_eventlog::configuration::get::<Self>(conn, Self::KEY)
             .await?
             .map_or_else(Self::saudi_arabia, |configured| configured.value))
     }

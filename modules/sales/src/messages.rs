@@ -1,6 +1,6 @@
 //! The sales module's messages, in every supported language.
 
-use spa_i18n::{Locale, MessageCode, Template};
+use erp_i18n::{Locale, MessageCode, Template};
 
 pub const NOTHING_TO_INVOICE: MessageCode = MessageCode::new("sales.nothing_to_invoice");
 pub const NOT_ISSUED: MessageCode = MessageCode::new("sales.not_issued");

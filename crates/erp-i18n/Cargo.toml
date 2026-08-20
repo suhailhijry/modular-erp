@@ -1,0 +1,21 @@
+[package]
+name = "erp-i18n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Localization. Errors are codes plus arguments; prose is chosen at the edge."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+tracing = { workspace = true }
+# So `MessageArg` describes itself in the OpenAPI document. The alternative — a
+# mirror of this enum in `erp-api` — is a second declaration that can disagree
+# with the first, which is the drift the generated document exists to prevent.
+utoipa = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

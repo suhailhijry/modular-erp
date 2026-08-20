@@ -13,20 +13,20 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use spa_control::CommandError;
-use spa_eventlog::ExecuteError;
-use spa_i18n::{Locale, Localize};
-use spa_types::{CurrencyCode, Timestamp};
+use erp_control::CommandError;
+use erp_eventlog::ExecuteError;
+use erp_i18n::{Locale, Localize};
+use erp_types::{CurrencyCode, Timestamp};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use spa_web::ApiError;
-use spa_web::AppState;
-use spa_web::Problem;
-use spa_web::{Allowed, Language, ManageAccounts, ManageTenant, Read};
-use spa_web::{Consistency, nudge};
-use spa_web::{Json, Query, bad_request, metadata, require_module};
+use erp_web::ApiError;
+use erp_web::AppState;
+use erp_web::Problem;
+use erp_web::{Allowed, Language, ManageAccounts, ManageTenant, Read};
+use erp_web::{Consistency, nudge};
+use erp_web::{Json, Query, bad_request, metadata, require_module};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -48,7 +48,7 @@ const PAGE: i64 = 200;
 ///
 /// Its own failures, the failures of the modules it is built on, and everything
 /// any route can produce — the request-level messages, the control plane's and
-/// the event log's, which [`spa_web::CATALOG`] already unions.
+/// the event log's, which [`erp_web::CATALOG`] already unions.
 ///
 /// That list is exhaustive by construction: a route can only surface a message
 /// from a crate this one depends on. Leaving one out is not a compile error and
@@ -56,13 +56,13 @@ const PAGE: i64 = 200;
 /// the bare code with no sentence in it, which is how this was found.
 ///
 /// A module cannot name its siblings and has no reason to. The complete catalog
-/// is `spa_api::CATALOG`, and `docs/ERRORS.md` comes from that.
-static CATALOG: spa_i18n::Composite = spa_i18n::Composite::new(&[
+/// is `erp_api::CATALOG`, and `docs/ERRORS.md` comes from that.
+static CATALOG: erp_i18n::Composite = erp_i18n::Composite::new(&[
     &crate::CATALOG,
     &sales::CATALOG,
     &purchases::CATALOG,
     &ledger::CATALOG,
-    &spa_web::CATALOG,
+    &erp_web::CATALOG,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -171,7 +171,7 @@ struct FiledView {
     path = "/v1/tax_sa/vat-return",
     tag = "tax_sa",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("from" = String, Query, description = "Start of the period, inclusive. RFC 3339."),
         ("until" = String, Query, description = "End of the period, **exclusive**. RFC 3339."),
         ("currency" = String, Query, description = "ISO 4217."),
@@ -230,7 +230,7 @@ async fn vat_return(
     post,
     path = "/v1/tax_sa/returns",
     tag = "tax_sa",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = NewFiling,
     responses(
         (status = CREATED, description = "Filed. The numbers are recorded as they stood.", body = FiledView),
@@ -290,7 +290,7 @@ async fn file_return(
     path = "/v1/tax_sa/returns",
     tag = "tax_sa",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
     responses(
@@ -341,7 +341,7 @@ async fn filed_returns(
 // ---------------------------------------------------------------------------
 
 /// Which sides of the return this tenant contributes to.
-fn sides_of<C: spa_web::Capability>(tenant: &Allowed<C>) -> Sides {
+fn sides_of<C: erp_web::Capability>(tenant: &Allowed<C>) -> Sides {
     Sides {
         sells: tenant.db.has_module(&sales::module_id()),
         buys: tenant.db.has_module(&purchases::module_id()),
@@ -356,7 +356,7 @@ fn period_of(
 ) -> Result<(CurrencyCode, Timestamp, Timestamp), Problem> {
     let parsed = CurrencyCode::new(currency).map_err(|_| {
         bad_request(
-            spa_web::messages::UNKNOWN_CURRENCY,
+            erp_web::messages::UNKNOWN_CURRENCY,
             "currency",
             currency,
             locale,
@@ -364,7 +364,7 @@ fn period_of(
     })?;
     if until <= from {
         return Err(bad_request(
-            spa_web::messages::EMPTY_PERIOD,
+            erp_web::messages::EMPTY_PERIOD,
             "period",
             &from.to_rfc3339(),
             locale,
@@ -414,20 +414,20 @@ fn tax_problem(error: &CommandError<TaxError>, locale: Locale) -> Problem {
             rejection.message(),
         ),
 
-        CommandError::Pool(e @ spa_control::PoolError::Overloaded { .. }) => {
+        CommandError::Pool(e @ erp_control::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())
         }
 
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
-            spa_i18n::Message::new(spa_eventlog::messages::CONCURRENT_MODIFICATION),
+            erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
         ),
 
         other => {
             tracing::error!(error = %other, "tax command failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                spa_i18n::Message::new(spa_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_control::messages::INTERNAL),
             )
         }
     };
@@ -627,7 +627,7 @@ fn document_view(stored: crate::Stored) -> DocumentView {
     put,
     path = "/v1/tax_sa/registration",
     tag = "tax_sa",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = RegistrationBody,
     responses(
         (status = OK, description = "Registered, from here on.", body = RegistrationBody),
@@ -651,7 +651,7 @@ async fn register(
         .parse::<crate::taxpayer::IdScheme>()
         .map_err(|_| {
             bad_request(
-                spa_web::messages::UNKNOWN_ID_SCHEME,
+                erp_web::messages::UNKNOWN_ID_SCHEME,
                 "scheme",
                 &body.scheme,
                 locale,
@@ -702,7 +702,7 @@ async fn register(
     path = "/v1/tax_sa/registration",
     tag = "tax_sa",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
     responses(
@@ -734,7 +734,7 @@ async fn registration(
     drop(conn);
 
     let registration = found.ok_or_else(|| {
-        ApiError::NotFound(spa_i18n::Message::new(crate::messages::NOT_REGISTERED))
+        ApiError::NotFound(erp_i18n::Message::new(crate::messages::NOT_REGISTERED))
             .into_problem(locale, &CATALOG)
     })?;
 
@@ -768,7 +768,7 @@ async fn registration(
     path = "/v1/tax_sa/zatca",
     tag = "tax_sa",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("as_of" = Option<String>, Query, description = "Judge the deadlines as of this instant rather than now."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
@@ -827,11 +827,11 @@ struct AsOf {
     path = "/v1/tax_sa/zatca/documents",
     tag = "tax_sa",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
     responses(
-        (status = OK, description = "One page. `next` is absent when the list ended.", body = spa_web::Paged<DocumentView>),
+        (status = OK, description = "One page. `next` is absent when the list ended.", body = erp_web::Paged<DocumentView>),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -842,8 +842,8 @@ async fn zatca_documents(
     tenant: Allowed<Read>,
     Language(locale): Language,
     consistency: Consistency,
-    Query(page): Query<spa_web::After>,
-) -> Result<Json<spa_web::Paged<DocumentView>>, Problem> {
+    Query(page): Query<erp_web::After>,
+) -> Result<Json<erp_web::Paged<DocumentView>>, Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
@@ -861,7 +861,7 @@ async fn zatca_documents(
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
     drop(conn);
 
-    Ok(Json(spa_web::Paged::of(found, document_view)))
+    Ok(Json(erp_web::Paged::of(found, document_view)))
 }
 
 /// One document, with the UBL that was hashed and the stamp that came back.
@@ -870,7 +870,7 @@ async fn zatca_documents(
     path = "/v1/tax_sa/zatca/documents/{number}",
     tag = "tax_sa",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("number" = String, Path, description = "The statutory document number — `INV-00001`."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
@@ -905,8 +905,8 @@ async fn zatca_document(
 
     let stored = found.ok_or_else(|| {
         ApiError::NotFound(
-            spa_i18n::Message::new(crate::messages::NO_SUCH_DOCUMENT)
-                .with("document", spa_i18n::MessageArg::text(number.clone())),
+            erp_i18n::Message::new(crate::messages::NO_SUCH_DOCUMENT)
+                .with("document", erp_i18n::MessageArg::text(number.clone())),
         )
         .into_problem(locale, &CATALOG)
     })?;
@@ -1036,7 +1036,7 @@ struct OnboardingView {
     post,
     path = "/v1/tax_sa/zatca/onboarding",
     tag = "tax_sa",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = OnboardingRequest,
     responses(
         (status = CREATED, description = "A key pair and a request. The key is sealed here.", body = CsrView),
@@ -1084,7 +1084,7 @@ async fn begin_onboarding(
     put,
     path = "/v1/tax_sa/zatca/onboarding/certificate",
     tag = "tax_sa",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = CertificateBody,
     responses(
         (status = OK, description = "Stored. The tenant can now do what this stage allows.", body = CertificateView),
@@ -1110,7 +1110,7 @@ async fn accept_certificate(
         .parse::<crate::zatca::onboarding::Stage>()
         .map_err(|_| {
             bad_request(
-                spa_web::messages::UNKNOWN_ONBOARDING_STAGE,
+                erp_web::messages::UNKNOWN_ONBOARDING_STAGE,
                 "stage",
                 &body.stage,
                 locale,
@@ -1155,7 +1155,7 @@ async fn accept_certificate(
     path = "/v1/tax_sa/zatca/onboarding",
     tag = "tax_sa",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
     responses(
@@ -1181,7 +1181,7 @@ async fn onboarding_status(
         .acquire()
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
-    let loaded = spa_eventlog::load::<crate::Onboarding>(
+    let loaded = erp_eventlog::load::<crate::Onboarding>(
         &mut conn,
         &crate::onboarding_id(),
         crate::upcasters(),
@@ -1193,7 +1193,7 @@ async fn onboarding_status(
         tracing::error!(error = %e, "loading the onboarding aggregate failed");
         Problem::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &spa_i18n::Message::new(spa_control::messages::INTERNAL),
+            &erp_i18n::Message::new(erp_control::messages::INTERNAL),
             locale,
             &CATALOG,
         )
@@ -1237,7 +1237,7 @@ async fn unit_for(
     drop(conn);
 
     let registration = registration.ok_or_else(|| {
-        ApiError::NotFound(spa_i18n::Message::new(crate::messages::NOT_REGISTERED))
+        ApiError::NotFound(erp_i18n::Message::new(crate::messages::NOT_REGISTERED))
             .into_problem(locale, &CATALOG)
     })?;
 
@@ -1266,12 +1266,12 @@ async fn unit_for(
 }
 
 /// What this software calls itself to ZATCA. Registered once, per solution.
-const SOLUTION: &str = "Spa";
+const SOLUTION: &str = "Erp";
 
 fn environment_of(value: &str, locale: Locale) -> Result<crate::zatca::csr::Environment, Problem> {
     value.parse().map_err(|_| {
         bad_request(
-            spa_web::messages::UNKNOWN_ZATCA_ENVIRONMENT,
+            erp_web::messages::UNKNOWN_ZATCA_ENVIRONMENT,
             "environment",
             value,
             locale,
@@ -1284,11 +1284,11 @@ fn environment_of(value: &str, locale: Locale) -> Result<crate::zatca::csr::Envi
 /// **Not a degraded mode.** Without it there is nowhere safe to put a signing
 /// key, and storing one in the clear because an environment variable is missing
 /// is exactly the "log a warning and continue" this system does not do (L6).
-fn sealing(state: &AppState, locale: Locale) -> Result<&spa_eventlog::SealingKey, Problem> {
+fn sealing(state: &AppState, locale: Locale) -> Result<&erp_eventlog::SealingKey, Problem> {
     state.sealing.as_ref().ok_or_else(|| {
-        spa_web::Problem::new(
+        erp_web::Problem::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            &spa_i18n::Message::new(spa_web::messages::NO_SEALING_KEY),
+            &erp_i18n::Message::new(erp_web::messages::NO_SEALING_KEY),
             locale,
             &CATALOG,
         )
@@ -1302,22 +1302,22 @@ fn onboarding_problem(error: &crate::zatca::onboarding::OnboardError, locale: Lo
         // The caller's, and each one names what to fix.
         OnboardError::Csr(reason) => (
             StatusCode::BAD_REQUEST,
-            spa_i18n::Message::new(spa_web::messages::UNUSABLE_UNIT)
-                .with("reason", spa_i18n::MessageArg::text(reason.to_string())),
+            erp_i18n::Message::new(erp_web::messages::UNUSABLE_UNIT)
+                .with("reason", erp_i18n::MessageArg::text(reason.to_string())),
         ),
         OnboardError::Certificate(reason) => (
             StatusCode::BAD_REQUEST,
-            spa_i18n::Message::new(spa_web::messages::UNREADABLE_CERTIFICATE)
-                .with("reason", spa_i18n::MessageArg::text(reason.clone())),
+            erp_i18n::Message::new(erp_web::messages::UNREADABLE_CERTIFICATE)
+                .with("reason", erp_i18n::MessageArg::text(reason.clone())),
         ),
         OnboardError::KeyMismatch => (
             StatusCode::BAD_REQUEST,
-            spa_i18n::Message::new(spa_web::messages::CERTIFICATE_KEY_MISMATCH),
+            erp_i18n::Message::new(erp_web::messages::CERTIFICATE_KEY_MISMATCH),
         ),
         OnboardError::NotYet(what) => (
             StatusCode::NOT_FOUND,
-            spa_i18n::Message::new(spa_web::messages::ONBOARDING_NOT_YET)
-                .with("stage", spa_i18n::MessageArg::text((*what).to_owned())),
+            erp_i18n::Message::new(erp_web::messages::ONBOARDING_NOT_YET)
+                .with("stage", erp_i18n::MessageArg::text((*what).to_owned())),
         ),
         // ZATCA's.
         OnboardError::NotIssued {
@@ -1325,28 +1325,28 @@ fn onboarding_problem(error: &crate::zatca::onboarding::OnboardError, locale: Lo
             detail,
         } => (
             StatusCode::BAD_GATEWAY,
-            spa_i18n::Message::new(spa_web::messages::CSID_NOT_ISSUED)
+            erp_i18n::Message::new(erp_web::messages::CSID_NOT_ISSUED)
                 .with(
                     "disposition",
-                    spa_i18n::MessageArg::text(disposition.clone()),
+                    erp_i18n::MessageArg::text(disposition.clone()),
                 )
-                .with("detail", spa_i18n::MessageArg::text(detail.clone())),
+                .with("detail", erp_i18n::MessageArg::text(detail.clone())),
         ),
         // **Which of the four calls**, because they all fail the same way and
         // an error that does not say leaves somebody bisecting a flow that
         // talked to a tax authority.
         OnboardError::Unanswered { step, source } => (
             StatusCode::BAD_GATEWAY,
-            spa_i18n::Message::new(spa_web::messages::ZATCA_UNREACHABLE)
-                .with("step", spa_i18n::MessageArg::text((*step).to_owned()))
-                .with("reason", spa_i18n::MessageArg::text(source.to_string())),
+            erp_i18n::Message::new(erp_web::messages::ZATCA_UNREACHABLE)
+                .with("step", erp_i18n::MessageArg::text((*step).to_owned()))
+                .with("reason", erp_i18n::MessageArg::text(source.to_string())),
         ),
         // Ours.
         other => {
             tracing::error!(error = %other, "ZATCA onboarding failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                spa_i18n::Message::new(spa_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_control::messages::INTERNAL),
             )
         }
     };
@@ -1410,7 +1410,7 @@ struct ActivationView {
     post,
     path = "/v1/tax_sa/zatca/onboarding/activate",
     tag = "tax_sa",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = ActivationRequest,
     responses(
         (status = OK, description = "Live. This business can now clear and report invoices.", body = ActivationView),
@@ -1438,7 +1438,7 @@ async fn activate(
         .map_err(|_| {
             // The value itself never reaches the message: an OTP in a log is a
             // certificate somebody else can obtain for an hour.
-            bad_request(spa_web::messages::NOT_AN_OTP, "otp", "", locale)
+            bad_request(erp_web::messages::NOT_AN_OTP, "otp", "", locale)
         })?;
 
     let registration = registered_unit(&tenant, locale).await?;
@@ -1499,20 +1499,20 @@ async fn activate(
 
         return Err(Problem::new(
             StatusCode::BAD_GATEWAY,
-            &spa_i18n::Message::new(spa_web::messages::COMPLIANCE_REFUSED)
+            &erp_i18n::Message::new(erp_web::messages::COMPLIANCE_REFUSED)
                 .with(
                     "failed",
-                    spa_i18n::MessageArg::Count(
+                    erp_i18n::MessageArg::Count(
                         i64::try_from(checks.submitted - checks.passed).unwrap_or_default(),
                     ),
                 )
                 .with(
                     "submitted",
-                    spa_i18n::MessageArg::Count(
+                    erp_i18n::MessageArg::Count(
                         i64::try_from(checks.submitted).unwrap_or_default(),
                     ),
                 )
-                .with("reason", spa_i18n::MessageArg::text(reason)),
+                .with("reason", erp_i18n::MessageArg::text(reason)),
             locale,
             &CATALOG,
         ));
@@ -1546,7 +1546,7 @@ fn certificate_view(issued: crate::zatca::onboarding::Issued) -> CertificateView
 }
 
 /// The tenant's ZATCA registration, or a 404 that says to make one first.
-async fn registered_unit<C: spa_web::Capability>(
+async fn registered_unit<C: erp_web::Capability>(
     tenant: &Allowed<C>,
     locale: Locale,
 ) -> Result<crate::Registration, Problem> {
@@ -1561,7 +1561,7 @@ async fn registered_unit<C: spa_web::Capability>(
     drop(conn);
 
     found.ok_or_else(|| {
-        ApiError::NotFound(spa_i18n::Message::new(crate::messages::NOT_REGISTERED))
+        ApiError::NotFound(erp_i18n::Message::new(crate::messages::NOT_REGISTERED))
             .into_problem(locale, &CATALOG)
     })
 }

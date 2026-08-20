@@ -17,9 +17,9 @@
 //! ZATCA.
 
 use ledger::LedgerError;
-use spa_control::{CommandError, TenantDb};
-use spa_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
-use spa_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
+use erp_control::{CommandError, TenantDb};
+use erp_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
+use erp_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
 
 use crate::invoice::{
     Customer, Discount as InvoiceDiscount, DraftDiscount, DraftLine, Invoice, InvoiceEvent,
@@ -52,9 +52,9 @@ pub enum SalesError {
     #[error(transparent)]
     Tax(#[from] TaxError),
     #[error(transparent)]
-    Config(#[from] spa_eventlog::ConfigError),
+    Config(#[from] erp_eventlog::ConfigError),
     #[error(transparent)]
-    Numbering(#[from] spa_eventlog::NumberingError),
+    Numbering(#[from] erp_eventlog::NumberingError),
     #[error(transparent)]
     Unbalanced(#[from] ledger::Unbalanced),
     /// The ledger refused the posting — a missing or closed account, almost
@@ -64,10 +64,10 @@ pub enum SalesError {
     Ledger(#[from] LedgerError),
 }
 
-impl spa_i18n::Localize for SalesError {
-    fn message(&self) -> spa_i18n::Message {
+impl erp_i18n::Localize for SalesError {
+    fn message(&self) -> erp_i18n::Message {
         use crate::messages;
-        use spa_i18n::{Message, MessageArg};
+        use erp_i18n::{Message, MessageArg};
         match self {
             Self::NothingToInvoice => Message::new(messages::NOTHING_TO_INVOICE),
             Self::NotIssued(id) => {
@@ -259,7 +259,7 @@ async fn issue_in(
     // nobody else can take this number between the decision and it. It also
     // fixes the lock order — counter, then stream — so two concurrent issues
     // cannot deadlock by taking them the other way round.
-    let reserved = spa_eventlog::numbering::reserve(&mut *conn, crate::INVOICE_SERIES)
+    let reserved = erp_eventlog::numbering::reserve(&mut *conn, crate::INVOICE_SERIES)
         .await
         .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
     let number = crate::format_number(crate::INVOICE_PREFIX, reserved);
@@ -301,7 +301,7 @@ async fn issue_in(
     // nothing, and burning a number there would put a gap in the sequence of a
     // business whose client merely retried a timed-out request.
     let number = if committed.at.is_some() {
-        spa_eventlog::numbering::consume(&mut *conn, crate::INVOICE_SERIES)
+        erp_eventlog::numbering::consume(&mut *conn, crate::INVOICE_SERIES)
             .await
             .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
         number
@@ -312,7 +312,7 @@ async fn issue_in(
         //
         // An invoice from before this system numbered anything has none stored:
         // its id *was* its number.
-        spa_eventlog::load::<Invoice>(&mut *conn, id, crate::upcasters())
+        erp_eventlog::load::<Invoice>(&mut *conn, id, crate::upcasters())
             .await?
             .aggregate
             .number
@@ -548,7 +548,7 @@ async fn cancel_in(
 
     // Same order as issuing: the counter first. A credit note is a statutory
     // document in its own right and gets its own gapless series.
-    let reserved = spa_eventlog::numbering::reserve(&mut *conn, crate::CREDIT_NOTE_SERIES)
+    let reserved = erp_eventlog::numbering::reserve(&mut *conn, crate::CREDIT_NOTE_SERIES)
         .await
         .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
     let credit_note = crate::format_number(crate::CREDIT_NOTE_PREFIX, reserved);
@@ -594,13 +594,13 @@ async fn cancel_in(
     let number = if already {
         // A repeat of a cancellation that already happened. Tell the caller the
         // credit note that exists, not the one they would have got.
-        spa_eventlog::load::<Invoice>(&mut *conn, invoice, crate::upcasters())
+        erp_eventlog::load::<Invoice>(&mut *conn, invoice, crate::upcasters())
             .await?
             .aggregate
             .credit_note
             .unwrap_or(credit_note)
     } else {
-        spa_eventlog::numbering::consume(&mut *conn, crate::CREDIT_NOTE_SERIES)
+        erp_eventlog::numbering::consume(&mut *conn, crate::CREDIT_NOTE_SERIES)
             .await
             .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
         ledger::reverse_in(conn, entry_id, credit_id, on, memo, metadata)
@@ -621,7 +621,7 @@ async fn resolve_accounts(
     let accounts = PostingAccounts::resolve(&mut *conn)
         .await
         .map_err(|e| ExecuteError::Rejected(SalesError::Config(e)))?;
-    let version = spa_eventlog::configuration::version(&mut *conn)
+    let version = erp_eventlog::configuration::version(&mut *conn)
         .await
         .map_err(|e| ExecuteError::Rejected(SalesError::Config(e)))?;
 
@@ -640,7 +640,7 @@ fn rejected(error: SalesError) -> CommandError<SalesError> {
 
 fn contended(id: &AggregateId) -> CommandError<SalesError> {
     ExecuteError::Contended {
-        stream: StreamId::new(<Invoice as spa_eventlog::Aggregate>::domain(), id.clone()),
+        stream: StreamId::new(<Invoice as erp_eventlog::Aggregate>::domain(), id.clone()),
         attempts: MAX_ATTEMPTS,
     }
     .into()
@@ -668,7 +668,7 @@ fn lift(error: ExecuteError<LedgerError>) -> ExecuteError<SalesError> {
 /// When they are not, rustc reports the failure at the *route table* with types
 /// from files that look unrelated (rust-lang/rust#102211) — so the assertion
 /// lives here, in the crate that owns the code, where the error lands on the
-/// line that caused it. See `spa-control/src/provision.rs` for the four triggers
+/// line that caused it. See `erp-control/src/provision.rs` for the four triggers
 /// this catches.
 const _: fn() = || {
     fn assert_send<T: Send>(_: T) {}
@@ -686,7 +686,7 @@ const _: fn() = || {
             id,
             "",
             "",
-            spa_types::Timestamp::UNIX_EPOCH,
+            erp_types::Timestamp::UNIX_EPOCH,
             metadata,
         ));
     }

@@ -34,7 +34,7 @@
 --
 -- The nonce is the first 12 bytes and the GCM tag the last 16, so a row is
 -- self-describing and there is no second column to get out of step with the
--- first. See `spa_eventlog::secrets`.
+-- first. See `erp_eventlog::secrets`.
 CREATE TABLE IF NOT EXISTS module_secret (
     -- `<module>.<name>` — `tax_sa.zatca.production` and so on. The module
     -- prefix is convention, not enforcement: core has no list of modules and

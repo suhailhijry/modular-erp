@@ -29,7 +29,7 @@ exist, because everything after inherits them.
 - [x] Shared lint configuration (`workspace.lints`), warnings denied
 - [x] Retire the prototype `src/` tree (preserved at `f2e8acd`)
 
-### 1b · `spa-types`
+### 1b · `erp-types`
 - [x] Newtype macro: `Display`, `FromStr`, serde, sqlx, validation
 - [x] Identifiers: `TenantId`, `IdentityId`, `AggregateId`, `StreamId`
 - [x] Distinct position types: `LogPosition` (global) vs `Sequence` (per-aggregate)
@@ -38,7 +38,7 @@ exist, because everything after inherits them.
 - [x] `NonEmpty<T>`
 - [x] Unit tests including the "these two types cannot be confused" cases
 
-### 1c · `spa-testkit`
+### 1c · `erp-testkit`
 - [x] Template-database-per-test fixture (`CREATE DATABASE … TEMPLATE`)
 - [x] Measured: ≈280 ms to acquire, ≈140 ms to drop (local Postgres 18)
 - [x] Parallel-safe (unique names, automatic teardown)
@@ -64,7 +64,7 @@ exist, because everything after inherits them.
 - [x] Two-tenant isolation test: no code path reaches across
 - [x] `cargo test --workspace` green (60 tests), `clippy -- -D warnings` clean,
       `cargo fmt --check` clean
-- [x] **Soak test** (`spa-control/tests/soak.rs`, run with `--ignored`).
+- [x] **Soak test** (`erp-control/tests/soak.rs`, run with `--ignored`).
       Measured: open connections track *active tenants × per-tenant pool*, busy
       connections track the lane budget, neither tracks request count, entry
       cache hit rate 99.9%. 22,169 ops/s across 40 tenants with 256 workers.
@@ -73,7 +73,7 @@ exist, because everything after inherits them.
 - [x] Read-replica seam (`TenantDb::read`, falls back to primary)
 
 ### 1g · Localization (D12)
-- [x] `spa-i18n`: `Locale`, `MessageCode`, `MessageArg`, `Message`, `Localize`
+- [x] `erp-i18n`: `Locale`, `MessageCode`, `MessageArg`, `Message`, `Localize`
 - [x] CLDR plural rules — six categories for Arabic, two for English
 - [x] Bidi isolation of Latin arguments inside RTL text
 - [x] `Accept-Language` negotiation with quality values and regional subtags
@@ -132,13 +132,13 @@ every projection, so they land before the first projection exists.
 - [x] Per-visit tenant leases (`claim_tenants`), `next_visit_at` scheduling with
       per-tenant jitter, `request_visit` as the seam for the push path
 - [x] `enter_for_maintenance` — background access with no identity, own lane
-- [x] `spa-worker`: `Job` trait, `ProjectionJob`, `OutboxJob`, `bin/worker`
+- [x] `erp-worker`: `Job` trait, `ProjectionJob`, `OutboxJob`, `bin/worker`
 - [x] `CancellationToken` + `TaskTracker` drain; leases released on the way out
 - [x] SIGTERM-mid-batch test, verified by shadow differ rather than by assertion
 - [x] Fault injection at transaction boundaries (carried from 1c) —
       `pg_terminate_backend`, not a simulated failure
 - [x] Shadow replay against the demo tenant, on every run *(Phase 4b — all four
-      groups, and the list is checked against `spa_api::modules()` rather than
+      groups, and the list is checked against `erp_api::modules()` rather than
       trusted, so a module added without a line there fails the test)*
 
 **Exit:** a projection can be written, replayed into a shadow schema, and proven
@@ -169,14 +169,14 @@ modules can say what shape they need.
 - [ ] MFA, OIDC, API keys *(more rows in `authenticator`, not more tables)*
 
 ### 3b · The HTTP surface
-- [x] `spa-api` on axum; `bin/api` with body limit, timeout, graceful shutdown
+- [x] `erp-api` on axum; `bin/api` with body limit, timeout, graceful shutdown
 - [x] problem+json (RFC 9457) plus `code` and `args` — a client branches on the
       code, never on the prose
 - [x] `Accept-Language` honoured on every response including failures
 - [x] Composite catalog across crates, with a duplicate-code test — layered
-      since modules ship their own routes: `spa_web::CATALOG` is what any route
+      since modules ship their own routes: `erp_web::CATALOG` is what any route
       can answer with, a module adds its own and its dependencies', and
-      `spa_api::CATALOG` is the union `docs/ERRORS.md` comes from
+      `erp_api::CATALOG` is the union `docs/ERRORS.md` comes from
 - [x] `Tenant` extractor: the only route to a `TenantDb`, so "did we check the
       membership?" is answered by the signature
 - [x] Status mapping in one place; a tenant that exists but is not yours is
@@ -211,11 +211,11 @@ Built only where the ledger produced a second consumer.
 - [~] `Module` trait and registry *(the **registry** half is done and was the
       load-bearing one: `modules::REGISTERED` is one entry per module carrying
       both its `ModuleSetup` and its router, so neither can be added without the
-      other. The **router** half is done too — `spa-web` sits below the modules,
+      other. The **router** half is done too — `erp-web` sits below the modules,
       so a module ships `http::routes()` itself.
       What is left is the reason a trait is still not worth writing: a module's
       **worker jobs** are registered in `bin/worker.rs` and cannot move, because
-      a module must not depend on `spa-worker` and the kernel must not know what
+      a module must not depend on `erp-worker` and the kernel must not know what
       a ZATCA document is. A trait with two of its three methods implemented
       somewhere else describes nothing)*
 - [ ] `Idempotency-Key` *(the ledger's mutations take client-chosen ids, so both
@@ -245,7 +245,7 @@ Built only where the ledger produced a second consumer.
       its first and only consumer. Declarations, layers and resolution rules are
       Phase 6's, and they are what §6 describes; this is what sits underneath
       them
-- [x] Numbering (gapless per-tenant document sequences) — `spa_eventlog::numbering`
+- [x] Numbering (gapless per-tenant document sequences) — `erp_eventlog::numbering`
       and `migrations/tenant/0005_numbering.sql`. A counter row read `FOR UPDATE`
       and advanced in the same transaction as the document, so a refusal, a
       retry, or a crash releases the number rather than burning it. Saudi VAT
@@ -261,7 +261,7 @@ Built only where the ledger produced a second consumer.
       hand-written half (which status carries what) is checked by validating
       every response in `tests/http.rs` against the published schema
 - [x] Authorization matrix tests — every role against **every** role-scoped
-      endpoint, with the endpoint list taken from `spa_api::openapi()` so a route
+      endpoint, with the endpoint list taken from `erp_api::openapi()` so a route
       added tomorrow appears whether or not anybody remembers, and an operation
       the table does not name fails the test rather than defaulting to untested
 
@@ -356,7 +356,7 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 
 ### 4b · The demo tenant
 
-- [x] `spa-demo`: a tenant with every module enabled, filled **through the
+- [x] `erp-demo`: a tenant with every module enabled, filled **through the
       public HTTP API** — so a demo built out of internal calls cannot be
       perfect while the API a customer would use is broken
 - [x] Deterministic: fixed dates, amounts and identifiers, so the numbers can be
@@ -372,11 +372,11 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       demo tenant, and now has one. All four groups, with the coverage itself
       asserted; each group names a table the demo must have filled, because
       `EXCEPT ALL` between two empty tables is clean)*
-- [x] `spa_api::modules()` — the module set in one place, so "every module
+- [x] `erp_api::modules()` — the module set in one place, so "every module
       enabled" is true by construction rather than by a second list agreeing
 - [x] `bin/demo` + `just demo <password>`, so the demo is a thing a person signs
       into rather than a thing a test builds
-- [x] `spa_demo::bootstrap` — migrates and registers the cluster, because a
+- [x] `erp_demo::bootstrap` — migrates and registers the cluster, because a
       demo is usually the first thing pointed at an empty database
 - [x] Demo tenant TTL and reaper — `set_demo_expiry`, `expired_demos`,
       `reap_demo`, and `bin/reaper` (`just reap`). Demos expire by default;
@@ -452,10 +452,10 @@ Not in the original plan at all — it was one line in 4a. It is a phase.
 
 ### 4f · Modules that are actually modules
 
-- [x] `spa-web` — extractors, problem+json, paging and the request-level messages
+- [x] `erp-web` — extractors, problem+json, paging and the request-level messages
       moved *below* the modules, so a module can name what its routes are built
-      from without depending on `spa-api`
-- [x] Every module ships `http::routes()`; `spa-api` mounts them and writes none
+      from without depending on `erp-api`
+- [x] Every module ships `http::routes()`; `erp-api` mounts them and writes none
 - [x] `ModuleSetup::seeding` — a module's data is a step of its own, not a rider
       on its DDL
 - [x] PDPL erasure — `audit_entry`'s trigger permits exactly one shape of update,
@@ -495,7 +495,7 @@ and let two working cases describe the engine.
 
 ### 5b · The engine, once there is something to describe it
 
-- [ ] `spa-rules`: `Facts`, `DynCondition`, `FactRegistry`, `Rule<E>`
+- [ ] `erp-rules`: `Facts`, `DynCondition`, `FactRegistry`, `Rule<E>`
 - [ ] Authorization and pricing both on it
 - [ ] Per-request fact assembly with startup coverage assertions — an
       unsatisfiable condition fails the build, not a user's request
@@ -534,7 +534,7 @@ that shows it are named.
 
 ### 1. ~~The outbox has no producers and no handlers~~ — done
 
-Was: `grep` for `with_effect|enqueue(` outside `spa-eventlog`'s own tests
+Was: `grep` for `with_effect|enqueue(` outside `erp-eventlog`'s own tests
 returned **nothing**, and `bin/worker.rs` built its dispatcher with no
 `.register(...)` after it. Every piece of D9 was finished, tested, and reaching
 nothing; the concrete cost was that an invitation was a link somebody copied out
@@ -549,7 +549,7 @@ control-plane outbox rather than to a sweep.
 
 #### The original finding
 
-`grep -rn "with_effect\|enqueue(" crates/ modules/` outside `spa-eventlog`'s own
+`grep -rn "with_effect\|enqueue(" crates/ modules/` outside `erp-eventlog`'s own
 tests returns **nothing**, and `bin/worker.rs:54` builds
 `Dispatcher::new(RetryPolicy::default())` with no `.register(...)` after it.
 
@@ -598,7 +598,7 @@ different document produces a different hash, breaking a chain **the tax
 authority validates**.
 
 All four now, and the list is no longer trusted: the group names replayed are
-compared against every group `spa_api::modules()` declares, so a module added
+compared against every group `erp_api::modules()` declares, so a module added
 without a line there fails rather than becoming the next one nobody watches.
 
 Each group also names a table the demo must have filled, because `EXCEPT ALL`
@@ -702,7 +702,7 @@ met. They are fine where they are.
   Two structural improvements fell out and were kept: DDL now goes through
   helpers that **take and return the connection by value**, so the `Acquire`
   bound never reaches a caller's future; and the control plane no longer depends
-  on `spa-projection`, because creating a projection group turned out to be two
+  on `erp-projection`, because creating a projection group turned out to be two
   statements it can run itself.
 
   **The lesson is the diagnostic, not the fixes.** When an error names types from
@@ -844,7 +844,7 @@ met. They are fine where they are.
   is one attempt in the caller's transaction; `TenantDb::execute` is the loop.
   Same split as `run_once`/`run_once_in`, for the same reason.
 
-- **The ledger's route layer lives in `spa-api`, not in the module.** With one
+- **The ledger's route layer lives in `erp-api`, not in the module.** With one
   module, a `Module` trait that mounts routers is a trait with one
   implementation. When the second module lands, what the two route layers have
   in common *is* the trait — described rather than guessed. The module still
@@ -939,7 +939,7 @@ met. They are fine where they are.
 
 - **Fault injection kills the connection rather than simulating a failure.**
   Returning an error from a fake proves the code's own rollback path works, which
-  was never in doubt. `spa_testkit::kill_connection` issues
+  was never in doubt. `erp_testkit::kill_connection` issues
   `pg_terminate_backend` from a second connection, so Postgres does the rollback
   and the code finds out the way it would in production. That is what makes
   `a_crash_mid_batch_leaves_neither_rows_nor_a_moved_checkpoint` an L4 test
@@ -1000,7 +1000,7 @@ met. They are fine where they are.
   `password authentication failed` even with a correct `.env` — the test binary
   never saw the variable. I had been masking this by exporting `.env` manually in
   every command, which is exactly how a setup bug survives to the first new
-  contributor. `spa-testkit` now loads `.env` itself, and a connection failure
+  contributor. `erp-testkit` now loads `.env` itself, and a connection failure
   reports what it tried, where the setting came from, and the password redacted.
 
 - **L1 needs a counter row, not an advisory lock.** The architecture said
@@ -1012,7 +1012,7 @@ met. They are fine where they are.
   transactional so a rollback returns the position. That turns the contiguity
   check from a warning into a real integrity assertion.
 
-- **Localization completeness is now a shared audit.** `spa_i18n::testing::audit`
+- **Localization completeness is now a shared audit.** `erp_i18n::testing::audit`
   checks translation coverage, plural categories per language, non-empty
   rendering, Arabic-actually-in-Arabic, and code shape. Each crate's test is one
   line, and when `Module` gains `messages()` the registry can run it across every
@@ -1039,7 +1039,7 @@ here and folded back into ARCHITECTURE.md.
 
 - **Test-database acquisition measures ≈280 ms, not the ~200 ms first claimed.**
   Teardown is another ≈140 ms but is off the critical path. Numbers from
-  `cargo test -p spa-testkit --test harness cloning_is_fast -- --nocapture`.
+  `cargo test -p erp-testkit --test harness cloning_is_fast -- --nocapture`.
 
 - **The kernel holds no business domain; accounting is a module.** Recorded as
   D11. The earlier placement confused a universal *invariant* (debits equal
@@ -1083,7 +1083,7 @@ here and folded back into ARCHITECTURE.md.
 
   The first was mechanical: `EffectHandler::deliver` takes a `PendingEffect` and
   nothing else. It cannot reach a `TenantDb`, because `TenantDb` lives in
-  `spa-control` and `spa-control` depends on `spa-eventlog`, not the other way
+  `erp-control` and `erp-control` depends on `erp-eventlog`, not the other way
   round. Making it possible meant a context type parameter threaded through
   `Dispatcher`, `OutboxJob` and their tests — about a hundred lines of kernel
   churn for a mechanism whose first genuine user (email, ZATCA clearance) does
@@ -1129,10 +1129,10 @@ here and folded back into ARCHITECTURE.md.
   repeating whenever this check changes: a demo that passes because it asks
   nothing is worse than no demo.
 
-- **One list, because two things needed it.** `spa_api::modules()` replaced the
+- **One list, because two things needed it.** `erp_api::modules()` replaced the
   `match` in signup. Not a `Module` trait: a trait would also have to carry the
   routes and the worker'"'"'s jobs, and neither can cross that boundary — a module
-  must not depend on `spa-api` or `spa-worker`. So each composition root still
+  must not depend on `erp-api` or `erp-worker`. So each composition root still
   lists what it composes, and only the *set* is shared. That is the part the
   demo needed to make "all of them" mean something.
 
@@ -1201,7 +1201,7 @@ here and folded back into ARCHITECTURE.md.
 - **A green test run was leaking three tenant databases, and had been for a
   while.** The API fixture recorded databases as `provision()` created them —
   but tenants born from `POST /v1/signups` were never on that list, and each
-  signup test tried to drop `spa_tenant_acme`, a name that stopped being right
+  signup test tried to drop `erp_tenant_acme`, a name that stopped being right
   when database names became id-derived rather than slug-derived. Dead cleanup
   that silently did nothing.
 
@@ -1618,7 +1618,7 @@ here and folded back into ARCHITECTURE.md.
   operations existed; four were covered.
 
   The document fixed that as a side effect. The endpoint list now comes from
-  `spa_api::openapi()` — the same value the router is built from — and the
+  `erp_api::openapi()` — the same value the router is built from — and the
   permission table has to name every operation under `/v1/tenants/{slug}` or the
   test fails. **Adding a route now forces the decision instead of allowing it.**
 
@@ -1857,7 +1857,7 @@ here and folded back into ARCHITECTURE.md.
 
   So it is composed in the API, from each module's own answer — which is not a
   workaround but where cross-module composition is supposed to happen, the same
-  place `spa-worker` composes jobs and `modules.rs` composes the catalogue. A
+  place `erp-worker` composes jobs and `modules.rs` composes the catalogue. A
   tenant with only one module gets zeroes for the other side rather than a 404: a
   business that has not enabled purchases genuinely reclaimed nothing, and that is
   a return they can file.
@@ -1873,14 +1873,14 @@ here and folded back into ARCHITECTURE.md.
   than one that defaulted.
 
 - **`just clean-databases` left the two halves disagreeing.** It drops
-  `spa_tenant_%` and never touched the control plane, so the `tenant` rows
+  `erp_tenant_%` and never touched the control plane, so the `tenant` rows
   outlived their databases — and the next `just demo` failed with `slug_taken`
   against a tenant whose database was gone. Found by running it, which is the
   only way a developer-tool bug gets found. The recipe now clears rows whose
   database no longer exists.
 
 - **Five composition roots list every module, and one of them was unchecked.**
-  Adding a module means editing `spa_api::modules()`, the message catalog, the
+  Adding a module means editing `erp_api::modules()`, the message catalog, the
   routes, the worker's job list, and the demo's projection advance. The question
   worth asking after a third module is not "can this be a trait" but **"what
   happens if somebody forgets one of the five?"**
@@ -1899,7 +1899,7 @@ here and folded back into ARCHITECTURE.md.
 - **The fix is a list a test can look at.** `bin/worker.rs` built its jobs with a
   chain of `with_job` calls, which nothing could inspect. They are a
   `module_jobs()` function now, and two tests read it: every module in
-  `spa_api::modules()` has a job, and every job is scoped to its module — because
+  `erp_api::modules()` has a job, and every job is scoped to its module — because
   a `for_module` somebody forgot looks identical until a tenant is billed for
   projections they declined.
 
@@ -1911,7 +1911,7 @@ here and folded back into ARCHITECTURE.md.
 
 - **This is the registry the plan asked for, and not the trait.** The `Module`
   trait is still blocked on a genuine contradiction — it would carry a router,
-  and a module must not depend on `spa-api`. What three modules made clear is
+  and a module must not depend on `erp-api`. What three modules made clear is
   that the *registry* half was the load-bearing part, and it did not need a trait
   to be closed. The trait can wait for the router problem to have an answer
   rather than being built around a guess at one.
@@ -1942,7 +1942,7 @@ rebuilds is the fourth and is its own increment — see the note at the end.
   was already deployed. Exemptions live in `migrations/EXEMPTIONS` now, and the
   reason that file is separate is written at the top of it.
 
-- **The pre-deploy version gate.** `spa_eventlog::upcast` refuses an event from a
+- **The pre-deploy version gate.** `erp_eventlog::upcast` refuses an event from a
   newer build rather than guessing (L6), which is right — and means a build
   deployed out of order does not fail *at deploy time*. It fails later, when a
   projection reaches the first event it cannot read and stops, by which point the
@@ -2091,7 +2091,7 @@ rebuilds is the fourth and is its own increment — see the note at the end.
   border. `ledger` owns that a line *has* a treatment and a rate; `tax_sa` owns
   what the number is, and seeds it when a tenant enables the module.
 
-- **The VAT return moved out of `spa-api`, where I had put domain that does not
+- **The VAT return moved out of `erp-api`, where I had put domain that does not
   belong there.** I composed it in the API two increments ago and wrote that
   cross-module composition belongs in the composition root. The core/module model
   says otherwise, and the test it gives settles it: *can a tenant disable it?* A
@@ -2133,7 +2133,7 @@ rebuilds is the fourth and is its own increment — see the note at the end.
   Everything is `tax_sa` now, one spelling from crate to URL, and
   `every_module_id_satisfies_the_entitlement_constraint` catches the next one at
   build time. The honest fix is for `ModuleId` to carry the narrower rule so the
-  type refuses what the schema will; that is a `spa-types` change with no
+  type refuses what the schema will; that is a `erp-types` change with no
   consumer asking for it yet.
 
 - **Seeding rides on the only hook a module has.** The rate is an `INSERT … ON
@@ -2150,7 +2150,7 @@ rebuilds is the fourth and is its own increment — see the note at the end.
 
 - **`/v1/tenants/{slug}/sales/invoices` was wrong, and it was wrong in a way
   every route repeated.** A tenant is a company, and a company on this platform
-  is `bassat.spa.com` — not a path segment that every handler has to remember to
+  is `bassat.erp.com` — not a path segment that every handler has to remember to
   scope by. The slug moved into the `Host` header, and the paths became what they
   describe: `/v1/login`, `/v1/sales/invoices`, `/v1/tax_sa/vat-return`.
 
@@ -2160,8 +2160,8 @@ rebuilds is the fourth and is its own increment — see the note at the end.
   `Tenant` cannot reach a tenant database at all, because `TenantDb` has no
   public constructor.
 
-- **Exactly one label under the configured domain.** `demo.spa.test` is a tenant;
-  `spa.test` is not, `a.demo.spa.test` is not, and neither is anything under a
+- **Exactly one label under the configured domain.** `demo.erp.test` is a tenant;
+  `erp.test` is not, `a.demo.erp.test` is not, and neither is anything under a
   domain this build was not told about. The port is stripped, a trailing dot is
   stripped, and the comparison is lowercase, because all three arrive in real
   `Host` headers. `PUBLIC_DOMAIN` configures it and defaults to `localhost`, so
@@ -2765,7 +2765,7 @@ came out of running them, and neither was deducible from the specification.
 ## Modules ship their own routes
 
 Four files — `ledger_routes.rs`, `sales_routes.rs`, `purchases_routes.rs`,
-`tax_sa_routes.rs`, about 3,900 lines — lived in `spa-api`. So a module's HTTP
+`tax_sa_routes.rs`, about 3,900 lines — lived in `erp-api`. So a module's HTTP
 surface was written by something the module could not see, adding an endpoint
 meant editing two crates, and "read the sales module" meant reading two
 directories. They are `modules/*/src/http.rs` now, next to the aggregates and
@@ -2773,13 +2773,13 @@ read models they serve.
 
 - **What was actually in the way was the furniture.** Extractors, problem+json,
   the JSON and query rejections, paging, the request-level messages — all in
-  `spa-api`, which names every module, so a module reaching for `Json` or
+  `erp-api`, which names every module, so a module reaching for `Json` or
   `require_module` would have closed a cycle. Those moved *down* into a new
-  crate, `spa-web`, below the modules. What is left in `spa-api` is the core's
+  crate, `erp-web`, below the modules. What is left in `erp-api` is the core's
   own routes — sessions, the tenant, members, invitations, signup, module
   management — and the composition.
 
-  The split falls where the architecture already said it did: `spa-web` holds no
+  The split falls where the architecture already said it did: `erp-web` holds no
   business domain (D11) and cannot be given one without becoming a module.
 
 - **One list, two views.** `modules::REGISTERED` carries each module's
@@ -2791,7 +2791,7 @@ read models they serve.
 - **Authorization reads the path, and the path list moved.** `Allowed<C>` decides
   which role applies by taking the module out of `/v1/{module}/…`, and it used to
   check that segment against the *build's* module list — which is above
-  `spa-web` now. It checks the **tenant's** list instead, which is the better
+  `erp-web` now. It checks the **tenant's** list instead, which is the better
   answer: a segment naming a module the tenant does not have is judged on the
   tenant-wide role, exactly as `/v1/members` is, and the handler's own
   `require_module` then answers 404. A request for a module they do not have
@@ -2806,7 +2806,7 @@ read models they serve.
 
 - **The catalog had to be split, and getting it wrong was silent.** A module
   renders its failures through a composite of its own catalog, its dependencies',
-  and `spa_web::CATALOG`; `spa_api::CATALOG` is the complete union and is still
+  and `erp_web::CATALOG`; `erp_api::CATALOG` is the complete union and is still
   what `docs/ERRORS.md` comes from.
 
   `ApiError::into_problem` rendered through a fixed catalog, which was fine while
@@ -3092,13 +3092,13 @@ assertion was not.
 
 One image with five binaries, because five images are five things to keep at one
 version and "the worker is a deploy behind the API" is a failure this system has
-a pre-deploy gate for. No `ENTRYPOINT`, so `docker run spa worker` puts the
+a pre-deploy gate for. No `ENTRYPOINT`, so `docker run erp worker` puts the
 worker at PID 1 and SIGTERM reaches it directly — which the graceful shutdown and
 the lease-releasing drain are both written against.
 
 Cache mounts rather than the usual dummy-sources-then-real-sources trick. That
 trick works by making cargo believe the dependency layer is current, and it fails
-quietly: a stale `libspa_control.rlib` built from an empty `lib.rs` links cleanly
+quietly: a stale `liberp_control.rlib` built from an empty `lib.rs` links cleanly
 and contains none of the code.
 
 What the stack runs is deliberately not one of everything — two API replicas, two
@@ -3132,7 +3132,7 @@ was about a second instance or a real service:
   default, which would turn every tenant-scoped request into a 404.
 
 And one gap in the product rather than the packaging: **`migrator` never applied
-the control-plane migrations.** Nothing but `spa_demo::bootstrap` ever called
+the control-plane migrations.** Nothing but `erp_demo::bootstrap` ever called
 `ControlPlane::migrate`, so a fresh deployment could only get its control schema
 by building a demo tenant first — backwards for the thing this document calls
 the deploy step. It applies them now, in the apply mode only: `check` and
@@ -3145,7 +3145,7 @@ that writes is one you cannot run against production before deciding to deploy.
   `pg_is_in_recovery()` on the standby is `t`.
 - The demo builds through the containers: 6 invoices, 4 bills, a filed VAT
   return, 7 ZATCA documents chained.
-- A session created through the proxy is a `spa:session:…` key in Redis; logging
+- A session created through the proxy is a `erp:session:…` key in Redis; logging
   out once makes **every** subsequent request 401 regardless of which replica
   answers.
 - Inviting somebody in Arabic puts a message in Mailpit with the subject
@@ -3153,7 +3153,7 @@ that writes is one you cannot run against production before deciding to deploy.
   of the company name — and the link in that body, pasted back at
   `GET /v1/join/…`, returns the invitation.
 - `PATCH /v1/members/{id}` publishes
-  `{"what":"membership","which":{"identity":…,"tenant":…}}` on `spa:invalidate`,
+  `{"what":"membership","which":{"identity":…,"tenant":…}}` on `erp:invalidate`,
   and both replicas answer with the new role immediately afterwards.
 
 ## Standards for a pooler, and three costs it made visible
@@ -3171,7 +3171,7 @@ forbids session state surviving between transactions, so:
 | hazard | found |
 |---|---|
 | `SET search_path` at session scope | **12 sites, every one DDL or install** |
-| session advisory locks | only `spa-testkit` |
+| session advisory locks | only `erp-testkit` |
 | `LISTEN`/`NOTIFY` | none — D4 banned it years ago |
 | temp tables, `WITH HOLD` cursors | none |
 
@@ -3252,7 +3252,7 @@ Three details that are not obvious:
 
 ### Two more gaps found by running it
 
-**`migrator` never registered a cluster.** Only `spa_demo::bootstrap` ever called
+**`migrator` never registered a cluster.** Only `erp_demo::bootstrap` ever called
 `register_cluster`, so a fresh compose stack had migrations applied, an empty
 `cluster` table, and every signup failing with a 500 that said
 `no cluster has capacity (0 at their limit)` — which names a capacity problem and

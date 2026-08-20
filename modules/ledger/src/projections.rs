@@ -1,8 +1,8 @@
 //! The ledger's read models, and the invariant that checks them.
 
-use spa_eventlog::Envelope;
-use spa_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
-use spa_types::{CurrencyCode, Money};
+use erp_eventlog::Envelope;
+use erp_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
+use erp_types::{CurrencyCode, Money};
 use sqlx::PgConnection;
 
 use crate::account::{AccountEvent, AccountKind};

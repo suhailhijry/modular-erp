@@ -2,8 +2,8 @@
 
 use ledger::VatCategory;
 use serde::{Deserialize, Serialize};
-use spa_eventlog::{Aggregate, DomainEvent};
-use spa_types::{CurrencyCode, DomainName, EventName, Money, SchemaVersion, Timestamp};
+use erp_eventlog::{Aggregate, DomainEvent};
+use erp_types::{CurrencyCode, DomainName, EventName, Money, SchemaVersion, Timestamp};
 
 /// Who sent the bill, **as they were on it**.
 ///
@@ -58,7 +58,7 @@ pub struct BillLine {
     pub description: String,
     /// The expense or asset account this line lands in. Named per line, because
     /// one bill routinely covers rent and stationery.
-    pub account: spa_types::AggregateId,
+    pub account: erp_types::AggregateId,
     /// Excluding tax.
     pub net: Money,
     pub category: VatCategory,
@@ -98,7 +98,7 @@ pub enum BillEvent {
         amount: Money,
         paid_on: Timestamp,
         /// The cash or bank account it left.
-        from: spa_types::AggregateId,
+        from: erp_types::AggregateId,
     },
 }
 
@@ -205,7 +205,7 @@ mod tests {
             payment: reference.to_owned(),
             amount: Money::from_minor(amount, sar()),
             paid_on: Timestamp::UNIX_EPOCH,
-            from: spa_types::AggregateId::new("1000").unwrap_or_else(|_| unreachable!()),
+            from: erp_types::AggregateId::new("1000").unwrap_or_else(|_| unreachable!()),
         }
     }
 

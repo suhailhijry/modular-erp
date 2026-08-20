@@ -21,9 +21,9 @@
 //! way, and marking them refused would be a permanent verdict on documents that
 //! are fine, written by an outage.
 
-use spa_control::{CommandError, TenantDb};
-use spa_eventlog::Metadata;
-use spa_types::Timestamp;
+use erp_control::{CommandError, TenantDb};
+use erp_eventlog::Metadata;
+use erp_types::Timestamp;
 
 use crate::commands::TaxError;
 use crate::documents::pending;
@@ -61,7 +61,7 @@ pub enum SweepError {
     #[error(transparent)]
     Read(#[from] sqlx::Error),
     #[error(transparent)]
-    Pool(#[from] spa_control::PoolError),
+    Pool(#[from] erp_control::PoolError),
     #[error("recording what ZATCA said failed: {0}")]
     Record(String),
 }
@@ -94,7 +94,7 @@ pub struct SignedOff {
 /// [`zatca::signing`](crate::zatca::signing).
 pub async fn sign_pending(
     db: &TenantDb,
-    sealing: &spa_eventlog::SealingKey,
+    sealing: &erp_eventlog::SealingKey,
     at: Timestamp,
     batch: i64,
     metadata: &Metadata,

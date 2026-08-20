@@ -6,7 +6,7 @@
 //! is decided — and testable — before any transaction is open.
 
 use ledger::{BalancedLines, Line, Unbalanced};
-use spa_types::{AggregateId, Money};
+use erp_types::{AggregateId, Money};
 
 use crate::vat::Totals;
 
@@ -40,8 +40,8 @@ impl PostingAccounts {
     /// A tenant who *has* configured it and stored something unusable gets an
     /// error rather than the default — silently falling back would hide a
     /// misconfiguration until a month-end reconciliation found it.
-    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, spa_eventlog::ConfigError> {
-        Ok(spa_eventlog::configuration::get::<Self>(conn, Self::KEY)
+    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, erp_eventlog::ConfigError> {
+        Ok(erp_eventlog::configuration::get::<Self>(conn, Self::KEY)
             .await?
             .map_or_else(Self::conventional, |configured| configured.value))
     }
@@ -119,7 +119,7 @@ fn negate(amount: Money) -> Result<Money, Unbalanced> {
 mod tests {
     use super::*;
     use crate::vat::{Vat, VatCategory, total};
-    use spa_types::CurrencyCode;
+    use erp_types::CurrencyCode;
 
     fn sar() -> CurrencyCode {
         CurrencyCode::new("SAR").unwrap_or_else(|_| unreachable!())

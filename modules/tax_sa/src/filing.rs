@@ -14,8 +14,8 @@
 //! than a derivation.
 
 use serde::{Deserialize, Serialize};
-use spa_eventlog::{Aggregate, DomainEvent};
-use spa_types::{CurrencyCode, DomainName, EventName, Money, SchemaVersion, Timestamp};
+use erp_eventlog::{Aggregate, DomainEvent};
+use erp_types::{CurrencyCode, DomainName, EventName, Money, SchemaVersion, Timestamp};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

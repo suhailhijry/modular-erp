@@ -1,8 +1,8 @@
 //! Filing a return.
 
-use spa_control::{CommandError, TenantDb};
-use spa_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
-use spa_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
+use erp_control::{CommandError, TenantDb};
+use erp_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
+use erp_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
 
 use crate::filing::{Filing, FilingEvent};
 use crate::report::{Return, Sides};
@@ -23,10 +23,10 @@ pub enum TaxError {
     Read(#[from] sqlx::Error),
 }
 
-impl spa_i18n::Localize for TaxError {
-    fn message(&self) -> spa_i18n::Message {
+impl erp_i18n::Localize for TaxError {
+    fn message(&self) -> erp_i18n::Message {
         use crate::messages;
-        use spa_i18n::{Message, MessageArg};
+        use erp_i18n::{Message, MessageArg};
         match self {
             Self::EmptyPeriod => Message::new(messages::EMPTY_PERIOD),
             Self::AlreadyFiled { period, on } => Message::new(messages::ALREADY_FILED)
@@ -42,7 +42,7 @@ impl spa_i18n::Localize for TaxError {
             Self::InvalidDocument(document) => Message::new(messages::INVALID_DOCUMENT)
                 .with("document", MessageArg::text(document.clone())),
             // Ours: the read models are unwell, not something a user did.
-            Self::Read(_) => Message::new(spa_eventlog::messages::INTERNAL),
+            Self::Read(_) => Message::new(erp_eventlog::messages::INTERNAL),
         }
     }
 }
@@ -118,7 +118,7 @@ pub async fn file_return(
     }
 
     Err(ExecuteError::Contended {
-        stream: StreamId::new(<Filing as spa_eventlog::Aggregate>::domain(), id),
+        stream: StreamId::new(<Filing as erp_eventlog::Aggregate>::domain(), id),
         attempts: MAX_ATTEMPTS,
     }
     .into())
@@ -146,7 +146,7 @@ async fn file_in(
         .await
         .map_err(|e| ExecuteError::Rejected(TaxError::Read(e)))?;
 
-    let existing = spa_eventlog::load::<Filing>(&mut *conn, id, crate::upcasters())
+    let existing = erp_eventlog::load::<Filing>(&mut *conn, id, crate::upcasters())
         .await?
         .aggregate;
     if existing.filed {

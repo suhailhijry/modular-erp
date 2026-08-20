@@ -51,8 +51,8 @@ pub use projections::{
 };
 pub use vat::{TaxBand, TaxError, Totals, Vat, VatCategory, total};
 
-use spa_i18n::StaticCatalog;
-use spa_types::{DomainName, EventName, SchemaVersion};
+use erp_i18n::StaticCatalog;
+use erp_types::{DomainName, EventName, SchemaVersion};
 
 /// This module's messages, in every supported language.
 pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
@@ -74,7 +74,7 @@ const CREDIT_NOTE_PREFIX: &str = "CN-";
 ///
 /// ponytail: the prefix and the five-digit width are fixed. They become a
 /// `sales.numbering` configuration the first time a tenant asks — the store and
-/// the typed surface both already exist (`spa_eventlog::configuration`), and the
+/// the typed surface both already exist (`erp_eventlog::configuration`), and the
 /// only new thing would be the route. Deliberately not built on speculation,
 /// but worth knowing the shape: a tenant must choose **before** their first
 /// invoice, because a number that has been on a document cannot be restated.
@@ -90,11 +90,11 @@ pub fn format_number(prefix: &str, value: i64) -> String {
 /// Creates this module's read models in a tenant database.
 ///
 /// Idempotent, and deliberately not a numbered migration chain — see
-/// `schema/install.sql`. Pair it with `spa_projection::ensure_group_schema`
+/// `schema/install.sql`. Pair it with `erp_projection::ensure_group_schema`
 /// so the checkpoint exists too.
 pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
     // **The install SQL is schema-relative**, so this is what aims it — the same
-    // thing `ControlPlane::install_schema` and `spa_projection::rebuild_swap` do,
+    // thing `ControlPlane::install_schema` and `erp_projection::rebuild_swap` do,
     // and the reason a rebuild can aim it somewhere else.
     sqlx::raw_sql("CREATE SCHEMA IF NOT EXISTS proj_sales; SET search_path TO proj_sales, public;")
         .execute(&mut *conn)
@@ -114,12 +114,12 @@ pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
 pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 
 /// This module's projection group name, for `?consistent_after=`.
-pub const GROUP_NAME: &str = <Sales as spa_projection::ProjectionGroup>::NAME;
+pub const GROUP_NAME: &str = <Sales as erp_projection::ProjectionGroup>::NAME;
 
 /// This module's projection groups, as `(name, schema)`.
 const GROUPS: &[(&str, &str)] = &[(
-    <Sales as spa_projection::ProjectionGroup>::NAME,
-    <Sales as spa_projection::ProjectionGroup>::SCHEMA,
+    <Sales as erp_projection::ProjectionGroup>::NAME,
+    <Sales as erp_projection::ProjectionGroup>::SCHEMA,
 )];
 
 /// What a tenant enabling this module needs installed, and what it needs
@@ -130,8 +130,8 @@ const GROUPS: &[(&str, &str)] = &[(
 /// call site is what lets signup, enabling later, and refusing to disable the
 /// ledger all give the same answer.
 #[must_use]
-pub fn setup() -> spa_control::ModuleSetup {
-    spa_control::ModuleSetup::new(
+pub fn setup() -> erp_control::ModuleSetup {
+    erp_control::ModuleSetup::new(
         module_id(),
         include_str!("../schema/install.sql"),
         GROUPS,
@@ -142,19 +142,19 @@ pub fn setup() -> spa_control::ModuleSetup {
 
 /// This module's entitlement name.
 #[must_use]
-pub fn module_id() -> spa_types::ModuleId {
-    spa_types::ModuleId::new("sales")
+pub fn module_id() -> erp_types::ModuleId {
+    erp_types::ModuleId::new("sales")
         .unwrap_or_else(|_| unreachable!("a literal that satisfies ModuleId"))
 }
 
 /// Every event shape this build can read.
 #[must_use]
-pub fn upcasters() -> &'static spa_eventlog::Upcasters {
-    static UPCASTERS: std::sync::OnceLock<spa_eventlog::Upcasters> = std::sync::OnceLock::new();
+pub fn upcasters() -> &'static erp_eventlog::Upcasters {
+    static UPCASTERS: std::sync::OnceLock<erp_eventlog::Upcasters> = std::sync::OnceLock::new();
     UPCASTERS.get_or_init(|| {
         InvoiceEvent::NAMES
             .iter()
-            .fold(spa_eventlog::Upcasters::new(), |u, n| {
+            .fold(erp_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             })
     })

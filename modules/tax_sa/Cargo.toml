@@ -17,17 +17,17 @@ ledger = { workspace = true }
 sales = { workspace = true }
 purchases = { workspace = true }
 
-# The module ships its own routes; `spa-web` is what they are built from.
-spa-web = { workspace = true }
+# The module ships its own routes; `erp-web` is what they are built from.
+erp-web = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
-spa-control = { workspace = true }
-spa-eventlog = { workspace = true }
-spa-i18n = { workspace = true }
-spa-projection = { workspace = true }
-spa-types = { workspace = true, features = ["sqlx"] }
+erp-control = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
@@ -42,7 +42,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-spa-testkit = { workspace = true }
+erp-testkit = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 openssl = { workspace = true }

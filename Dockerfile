@@ -8,9 +8,9 @@
 # API" is a class of bug this system takes seriously enough to have a pre-deploy
 # gate for it (`just migrate-fleet versions`). One image makes it impossible.
 #
-#     docker run … spa                 # the API, by default
-#     docker run … spa worker
-#     docker run … spa migrator check
+#     docker run … erp                 # the API, by default
+#     docker run … erp worker
+#     docker run … erp migrator check
 #
 # ---------------------------------------------------------------------------
 # Build
@@ -28,7 +28,7 @@ ENV SQLX_OFFLINE=true
 
 # Cache mounts rather than the usual dummy-sources-then-real-sources dance.
 # That trick works by making cargo believe the dependency layer is current, and
-# it goes wrong quietly: a stale `libspa_control.rlib` built from an empty
+# it goes wrong quietly: a stale `liberp_control.rlib` built from an empty
 # `lib.rs` links cleanly and contains none of the code. This caches the same
 # thing without lying to cargo about anything.
 #
@@ -57,9 +57,9 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends ca-certificates libssl3 curl; \
     rm -rf /var/lib/apt/lists/*
 
-RUN useradd --system --create-home --uid 10001 spa
-USER spa
-WORKDIR /home/spa
+RUN useradd --system --create-home --uid 10001 erp
+USER erp
+WORKDIR /home/erp
 
 COPY --from=build /out/api      /usr/local/bin/
 COPY --from=build /out/worker   /usr/local/bin/
@@ -76,7 +76,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=6 \
     CMD curl -fsS "http://127.0.0.1:8080/v1/health" || exit 1
 
-# **No `ENTRYPOINT`**, so `docker run spa worker` runs the worker as PID 1 and
+# **No `ENTRYPOINT`**, so `docker run erp worker` runs the worker as PID 1 and
 # receives SIGTERM directly. That matters: the API's graceful shutdown and the
 # worker's lease-releasing drain are both written against the signal arriving at
 # the process, not at a shell that forwards it if it feels like it.

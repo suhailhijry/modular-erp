@@ -1,6 +1,6 @@
 //! The Saudi tax module's messages, in every supported language.
 
-use spa_i18n::{Locale, MessageCode, Template};
+use erp_i18n::{Locale, MessageCode, Template};
 
 pub const EMPTY_PERIOD: MessageCode = MessageCode::new("tax_sa.empty_period");
 pub const ALREADY_FILED: MessageCode = MessageCode::new("tax_sa.already_filed");

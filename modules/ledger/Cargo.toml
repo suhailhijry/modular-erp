@@ -10,21 +10,21 @@ description = "Double-entry accounting: accounts, journal entries, and the invar
 workspace = true
 
 [dependencies]
-# `spa-control` is here for `TenantDb` alone — the handle a command needs.
-# ponytail: the architecture says modules depend on `spa-kernel`, which does not
+# `erp-control` is here for `TenantDb` alone — the handle a command needs.
+# ponytail: the architecture says modules depend on `erp-kernel`, which does not
 # exist yet; when it does it re-exports `TenantDb` and this line changes to it.
 # Nothing here touches `ControlPlane`, so the isolation property already holds.
-# The module ships its own routes; `spa-web` is what they are built from.
-spa-web = { workspace = true }
+# The module ships its own routes; `erp-web` is what they are built from.
+erp-web = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
-spa-control = { workspace = true }
-spa-eventlog = { workspace = true }
-spa-i18n = { workspace = true }
-spa-projection = { workspace = true }
-spa-types = { workspace = true, features = ["sqlx"] }
+erp-control = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -32,8 +32,8 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-spa-testkit = { workspace = true }
-spa-i18n = { workspace = true }
+erp-testkit = { workspace = true }
+erp-i18n = { workspace = true }
 proptest = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

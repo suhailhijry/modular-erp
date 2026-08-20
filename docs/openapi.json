@@ -1882,7 +1882,7 @@
             "type": "string"
           },
           "password": {
-            "description": "Chosen by the owner and handed over. An invitation flow would leave this\nto the recipient — see `spa-control/src/members.rs`.",
+            "description": "Chosen by the owner and handed over. An invitation flow would leave this\nto the recipient — see `erp-control/src/members.rs`.",
             "type": "string"
           },
           "role": {
@@ -2469,7 +2469,7 @@
           "detail": "Those login details are not right. Please try again.",
           "status": 401,
           "title": "Unauthorized",
-          "type": "https://errors.spa.example/auth.invalid_credentials"
+          "type": "https://errors.erp.example/auth.invalid_credentials"
         },
         "properties": {
           "args": {
@@ -2499,7 +2499,7 @@
             "type": "string"
           },
           "type": {
-            "description": "`https://errors.spa.example/` followed by the code. Stable, and a place\nto look it up — see `docs/ERRORS.md` for every code this API can answer\nwith.",
+            "description": "`https://errors.erp.example/` followed by the code. Stable, and a place\nto look it up — see `docs/ERRORS.md` for every code this API can answer\nwith.",
             "type": "string"
           }
         },
@@ -2956,7 +2956,7 @@
     "license": {
       "name": "AGPL-3.0-or-later"
     },
-    "title": "SPA",
+    "title": "ERP",
     "version": "0.1.0"
   },
   "openapi": "3.1.0",
@@ -3063,7 +3063,7 @@
         "operationId": "list_invitations",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -3151,7 +3151,7 @@
         "operationId": "invite",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -3273,7 +3273,7 @@
         "operationId": "revoke_invitation",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -3553,7 +3553,7 @@
         "operationId": "list_accounts",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -3670,7 +3670,7 @@
         "operationId": "open_account",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -3795,7 +3795,7 @@
         "operationId": "books",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -3880,7 +3880,7 @@
         "operationId": "close_books",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -4000,7 +4000,7 @@
         "operationId": "install_chart",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -4187,7 +4187,7 @@
         "operationId": "post_entry",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -4334,7 +4334,7 @@
         "operationId": "reverse_entry",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -4476,7 +4476,7 @@
         "operationId": "trial_balance",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -4595,7 +4595,7 @@
         "operationId": "vat_rates",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -4680,7 +4680,7 @@
         "operationId": "set_vat_rates",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -4786,7 +4786,7 @@
         "operationId": "list_members",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -4874,7 +4874,7 @@
         "operationId": "add_member",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -4997,7 +4997,7 @@
         "operationId": "remove_member",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -5094,7 +5094,7 @@
         "operationId": "change_role",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -5210,7 +5210,7 @@
         "operationId": "clear_module_role",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -5317,7 +5317,7 @@
         "operationId": "set_module_role",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -5441,7 +5441,7 @@
         "operationId": "list_modules",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -5529,7 +5529,7 @@
         "operationId": "enable_module",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -5635,7 +5635,7 @@
         "operationId": "disable_module",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -5776,7 +5776,7 @@
         "operationId": "list_bills",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -5891,7 +5891,7 @@
         "operationId": "record_bill",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -6023,7 +6023,7 @@
         "operationId": "get_bill",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -6162,7 +6162,7 @@
         "operationId": "pay_bill",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -6304,7 +6304,7 @@
         "operationId": "list_invoices",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -6419,7 +6419,7 @@
         "operationId": "issue_invoice",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -6551,7 +6551,7 @@
         "operationId": "get_invoice",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -6691,7 +6691,7 @@
         "operationId": "credit_note",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -6847,7 +6847,7 @@
         "operationId": "record_payment",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -6989,7 +6989,7 @@
         "operationId": "posting_accounts",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -7074,7 +7074,7 @@
         "operationId": "set_posting_accounts",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -7430,7 +7430,7 @@
         "operationId": "registration",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -7545,7 +7545,7 @@
         "operationId": "register",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -7667,7 +7667,7 @@
         "operationId": "filed_returns",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -7785,7 +7785,7 @@
         "operationId": "file_return",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -7918,7 +7918,7 @@
         "operationId": "vat_return",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -8062,7 +8062,7 @@
         "operationId": "zatca_standing",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -8187,7 +8187,7 @@
         "operationId": "zatca_documents",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -8303,7 +8303,7 @@
         "operationId": "zatca_document",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -8429,7 +8429,7 @@
         "operationId": "onboarding_status",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -8544,7 +8544,7 @@
         "operationId": "begin_onboarding",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -8681,7 +8681,7 @@
         "operationId": "activate",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -8828,7 +8828,7 @@
         "operationId": "accept_certificate",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -8951,7 +8951,7 @@
         "operationId": "tenant",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant.",
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,

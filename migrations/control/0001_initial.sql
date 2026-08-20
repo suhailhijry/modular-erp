@@ -68,7 +68,7 @@ CREATE TABLE tenant (
     -- the worst kind. The database refuses.
     CONSTRAINT tenant_database_is_exclusive UNIQUE (cluster, database_name),
 
-    -- Matches spa-testkit's identifier rules and Postgres's 63-byte limit, so a
+    -- Matches erp-testkit's identifier rules and Postgres's 63-byte limit, so a
     -- name that reaches CREATE DATABASE is always valid.
     CONSTRAINT tenant_database_name_is_a_safe_identifier
         CHECK (database_name ~ '^[a-z][a-z0-9_]{0,62}$')

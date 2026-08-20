@@ -16,7 +16,7 @@
 //! module owns the *values*: it seeds `ledger::Rates` when a tenant enables it,
 //! and it holds ZATCA.
 //!
-//! # Why the return moved here from `spa-api`
+//! # Why the return moved here from `erp-api`
 //!
 //! It was composed in the API, with the reasoning that cross-module composition
 //! belongs in the composition root. Under the core/module model that is wrong:
@@ -72,8 +72,8 @@ pub use report::{Band, Return, Side, Sides, vat_return};
 pub use submit::{SignedOff, SweepError, Swept, sign_pending, submit_pending};
 pub use taxpayer::{Registration, Taxpayer, TaxpayerEvent};
 
-use spa_i18n::StaticCatalog;
-use spa_types::{DomainName, EventName, SchemaVersion};
+use erp_i18n::StaticCatalog;
+use erp_types::{DomainName, EventName, SchemaVersion};
 
 /// This module's messages, in every supported language.
 pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
@@ -109,11 +109,11 @@ pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
 pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 
 /// This module's projection group name, for `?consistent_after=`.
-pub const GROUP_NAME: &str = <TaxSa as spa_projection::ProjectionGroup>::NAME;
+pub const GROUP_NAME: &str = <TaxSa as erp_projection::ProjectionGroup>::NAME;
 
 const GROUPS: &[(&str, &str)] = &[(
-    <TaxSa as spa_projection::ProjectionGroup>::NAME,
-    <TaxSa as spa_projection::ProjectionGroup>::SCHEMA,
+    <TaxSa as erp_projection::ProjectionGroup>::NAME,
+    <TaxSa as erp_projection::ProjectionGroup>::SCHEMA,
 )];
 
 /// What a tenant enabling this module needs installed.
@@ -137,8 +137,8 @@ const GROUPS: &[(&str, &str)] = &[(
 /// module reads `ledger::Rates` itself, and a dependency you rely on directly is
 /// one you declare rather than inherit.
 #[must_use]
-pub fn setup() -> spa_control::ModuleSetup {
-    spa_control::ModuleSetup::new(
+pub fn setup() -> erp_control::ModuleSetup {
+    erp_control::ModuleSetup::new(
         module_id(),
         include_str!("../schema/install.sql"),
         GROUPS,
@@ -153,8 +153,8 @@ pub fn setup() -> spa_control::ModuleSetup {
 
 /// This module's entitlement name.
 #[must_use]
-pub fn module_id() -> spa_types::ModuleId {
-    spa_types::ModuleId::new("tax_sa")
+pub fn module_id() -> erp_types::ModuleId {
+    erp_types::ModuleId::new("tax_sa")
         .unwrap_or_else(|_| unreachable!("a literal that satisfies ModuleId"))
 }
 
@@ -164,17 +164,17 @@ pub fn module_id() -> spa_types::ModuleId {
 /// `sales.invoice.issued`, and a projection cannot decode an event whose version
 /// it has not declared. Folded in rather than re-declared, so a version `sales`
 /// adds next year is readable here without a second copy of its history that
-/// could disagree with the first. See [`spa_eventlog::Upcasters::also`].
+/// could disagree with the first. See [`erp_eventlog::Upcasters::also`].
 #[must_use]
-pub fn upcasters() -> &'static spa_eventlog::Upcasters {
-    static UPCASTERS: std::sync::OnceLock<spa_eventlog::Upcasters> = std::sync::OnceLock::new();
+pub fn upcasters() -> &'static erp_eventlog::Upcasters {
+    static UPCASTERS: std::sync::OnceLock<erp_eventlog::Upcasters> = std::sync::OnceLock::new();
     UPCASTERS.get_or_init(|| {
         let mine = FilingEvent::NAMES
             .iter()
             .chain(TaxpayerEvent::NAMES.iter())
             .chain(ClearanceEvent::NAMES.iter())
             .chain(OnboardingEvent::NAMES.iter())
-            .fold(spa_eventlog::Upcasters::new(), |u, n| {
+            .fold(erp_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             });
         mine.also(sales::upcasters())

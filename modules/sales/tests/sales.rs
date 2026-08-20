@@ -15,16 +15,16 @@ use sales::{
     Customer, Draft, DraftLine, Receipt, Sales, SalesError, VatCategory, issue_invoice,
     record_payment,
 };
-use spa_control::{
+use erp_control::{
     Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
 };
-use spa_eventlog::{ExecuteError, Metadata};
-use spa_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head};
-use spa_testkit::{Schema, TestDb};
-use spa_types::{AggregateId, CurrencyCode, Money, Timestamp};
+use erp_eventlog::{ExecuteError, Metadata};
+use erp_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head};
+use erp_testkit::{Schema, TestDb};
+use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 
-static CONTROL: Schema = Schema::migrations("control", &spa_control::MIGRATIONS);
-static TENANT: Schema = Schema::migrations("tenant", &spa_eventlog::MIGRATIONS);
+static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
+static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
 
 fn sar() -> CurrencyCode {
     CurrencyCode::new("SAR").expect("valid")
@@ -91,7 +91,7 @@ impl Fixture {
     /// The same tenant with no accounts at all, for the tests about what happens
     /// when the ledger refuses.
     async fn bare() -> Self {
-        let control_db = spa_testkit::Template::get(&CONTROL)
+        let control_db = erp_testkit::Template::get(&CONTROL)
             .await
             .expect("control template builds")
             .fresh()
@@ -99,7 +99,7 @@ impl Fixture {
             .expect("control database clones");
 
         let clusters = ClusterRegistry::new()
-            .with_url("primary", &spa_testkit::database_url())
+            .with_url("primary", &erp_testkit::database_url())
             .expect("the test database URL parses");
 
         let control = Arc::new(ControlPlane::new(
@@ -109,7 +109,7 @@ impl Fixture {
         control
             .register_cluster(
                 "primary",
-                "SPA_CLUSTER_PRIMARY_URL",
+                "ERP_CLUSTER_PRIMARY_URL",
                 None,
                 10_000,
                 10_000,
@@ -122,7 +122,7 @@ impl Fixture {
             .register_tenant_on("rawabi", "Rawabi", "primary", Actor::system())
             .await
             .expect("tenant registers");
-        spa_testkit::create_named_database(&tenant.database_name, &TENANT)
+        erp_testkit::create_named_database(&tenant.database_name, &TENANT)
             .await
             .expect("tenant database is created");
         control
@@ -191,7 +191,7 @@ impl Fixture {
     }
 
     async fn tenant_pool(&self) -> sqlx::PgPool {
-        let url = spa_testkit::database_url();
+        let url = erp_testkit::database_url();
         let base = url.rsplit_once('/').map_or(url.as_str(), |(head, _)| head);
         sqlx::PgPool::connect(&format!("{base}/{}", self.tenant_database))
             .await
@@ -217,7 +217,7 @@ impl Fixture {
     /// run yet also produces no row.
     async fn is_issued(&self, id: &str) -> bool {
         let mut conn = self.db.acquire().await.expect("connection");
-        spa_eventlog::load::<sales::Invoice>(&mut conn, &code(id), sales::upcasters())
+        erp_eventlog::load::<sales::Invoice>(&mut conn, &code(id), sales::upcasters())
             .await
             .expect("loads")
             .aggregate
@@ -231,7 +231,7 @@ impl Fixture {
 
     async fn cleanup(self) {
         drop(self.db);
-        let _ = spa_testkit::drop_named_database(&self.tenant_database).await;
+        let _ = erp_testkit::drop_named_database(&self.tenant_database).await;
     }
 }
 
@@ -287,7 +287,7 @@ async fn credit_numbered(
     .await
 }
 
-type Outcome = Result<spa_eventlog::Committed<sales::InvoiceEvent>, CommandError<SalesError>>;
+type Outcome = Result<erp_eventlog::Committed<sales::InvoiceEvent>, CommandError<SalesError>>;
 
 fn rejection(error: &CommandError<SalesError>) -> Option<&SalesError> {
     match error {
@@ -903,7 +903,7 @@ async fn a_tenant_can_choose_which_accounts_a_sale_posts_to() {
     }
 
     let mut conn = fixture.db.acquire().await.expect("connection");
-    spa_eventlog::configuration::set(
+    erp_eventlog::configuration::set(
         &mut conn,
         sales::PostingAccounts::KEY,
         &sales::PostingAccounts {
@@ -961,7 +961,7 @@ async fn changing_where_sales_post_leaves_earlier_invoices_alone() {
     .expect("issues");
 
     let mut conn = fixture.db.acquire().await.expect("connection");
-    spa_eventlog::configuration::set(
+    erp_eventlog::configuration::set(
         &mut conn,
         sales::PostingAccounts::KEY,
         &sales::PostingAccounts {
@@ -1035,7 +1035,7 @@ async fn a_command_stamps_the_configuration_it_resolved_against() {
         "nothing configured is a real answer, not a missing one"
     );
 
-    spa_eventlog::configuration::set(
+    erp_eventlog::configuration::set(
         &mut conn,
         sales::PostingAccounts::KEY,
         &sales::PostingAccounts::conventional(),
@@ -1609,7 +1609,7 @@ async fn invoices_are_numbered_in_an_unbroken_sequence() {
 
 /// **A retried request does not burn a number.**
 ///
-/// This is the pairing `spa_eventlog::numbering` cannot enforce from inside
+/// This is the pairing `erp_eventlog::numbering` cannot enforce from inside
 /// itself: reserve, decide nothing, and do *not* consume. A client whose request
 /// timed out and repeated it is the normal case, not an edge one, and putting a
 /// gap in a business's invoice sequence because their network blinked would be
@@ -1644,7 +1644,7 @@ async fn re_issuing_does_not_move_the_series() {
 
     let mut conn = fixture.db.acquire().await.expect("connection");
     assert_eq!(
-        spa_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
+        erp_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
             .await
             .expect("reads"),
         3,
@@ -1694,7 +1694,7 @@ async fn a_refused_invoice_leaves_the_series_where_it_was() {
     );
     let mut conn = closed.db.acquire().await.expect("connection");
     assert_eq!(
-        spa_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
+        erp_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
             .await
             .expect("reads"),
         1,
@@ -1852,7 +1852,7 @@ async fn a_replay_reproduces_the_numbers_it_issued_under() {
     // The counter is *not* consulted by a replay, so it has not moved either.
     let mut conn = fixture.db.acquire().await.expect("connection");
     assert_eq!(
-        spa_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
+        erp_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
             .await
             .expect("reads"),
         4,
@@ -1869,7 +1869,7 @@ async fn a_series_can_start_somewhere_other_than_one() {
     let fixture = Fixture::new().await;
 
     let mut conn = fixture.db.acquire().await.expect("connection");
-    spa_eventlog::numbering::start_at(&mut conn, sales::INVOICE_SERIES, 4108)
+    erp_eventlog::numbering::start_at(&mut conn, sales::INVOICE_SERIES, 4108)
         .await
         .expect("sets");
     drop(conn);
@@ -1886,7 +1886,7 @@ async fn a_series_can_start_somewhere_other_than_one() {
     // And it refuses to go backwards, which would reissue numbers that are
     // already printed on documents somebody holds.
     let mut conn = fixture.db.acquire().await.expect("connection");
-    let settled = spa_eventlog::numbering::start_at(&mut conn, sales::INVOICE_SERIES, 7)
+    let settled = erp_eventlog::numbering::start_at(&mut conn, sales::INVOICE_SERIES, 7)
         .await
         .expect("sets");
     drop(conn);
@@ -2083,7 +2083,7 @@ async fn an_invoice_cannot_be_dated_into_a_closed_period() {
         "a refused invoice left a row behind"
     );
     assert_eq!(
-        spa_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
+        erp_eventlog::numbering::peek(&mut conn, sales::INVOICE_SERIES)
             .await
             .expect("reads"),
         1,
@@ -2249,7 +2249,7 @@ async fn an_invoice_carries_the_rate_the_tenant_configured() {
     let fixture = Fixture::new().await;
 
     let mut conn = fixture.db.acquire().await.expect("connection");
-    spa_eventlog::configuration::set(
+    erp_eventlog::configuration::set(
         &mut conn,
         ledger::Rates::KEY,
         &ledger::Rates { standard: 500 },
@@ -2307,7 +2307,7 @@ async fn changing_the_rate_leaves_earlier_invoices_alone() {
     .expect("issues at the shipped 15%");
 
     let mut conn = fixture.db.acquire().await.expect("connection");
-    spa_eventlog::configuration::set(
+    erp_eventlog::configuration::set(
         &mut conn,
         ledger::Rates::KEY,
         &ledger::Rates { standard: 500 },

@@ -10,16 +10,16 @@ license = "UNLICENSED"
 
 [workspace.dependencies]
 # Internal
-spa-i18n = { path = "crates/spa-i18n" }
-spa-eventlog = { path = "crates/spa-eventlog" }
-spa-projection = { path = "crates/spa-projection" }
-spa-types = { path = "crates/spa-types" }
-spa-testkit = { path = "crates/spa-testkit" }
-spa-control = { path = "crates/spa-control" }
-spa-worker = { path = "crates/spa-worker" }
-spa-api = { path = "crates/spa-api" }
-spa-web = { path = "crates/spa-web" }
-spa-demo = { path = "crates/spa-demo" }
+erp-i18n = { path = "crates/erp-i18n" }
+erp-eventlog = { path = "crates/erp-eventlog" }
+erp-projection = { path = "crates/erp-projection" }
+erp-types = { path = "crates/erp-types" }
+erp-testkit = { path = "crates/erp-testkit" }
+erp-control = { path = "crates/erp-control" }
+erp-worker = { path = "crates/erp-worker" }
+erp-api = { path = "crates/erp-api" }
+erp-web = { path = "crates/erp-web" }
+erp-demo = { path = "crates/erp-demo" }
 ledger = { path = "modules/ledger" }
 sales = { path = "modules/sales" }
 purchases = { path = "modules/purchases" }
@@ -78,7 +78,7 @@ lettre = { version = "0.11", default-features = false, features = [
 # Async
 async-trait = "0.1"
 # Stream adapters. Already in the lock through sqlx; named here for the Redis
-# pub/sub stream in `spa_control::shared`.
+# pub/sub stream in `erp_control::shared`.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }

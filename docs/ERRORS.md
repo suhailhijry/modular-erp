@@ -9,7 +9,7 @@ Every error is `application/problem+json` (RFC 9457) with `code`,
 where a client gets the machine-readable version of what went wrong —
 which account, which module, how much was outstanding.
 
-<!-- Generated from the message catalog by `crates/spa-api/tests/errors.rs`.
+<!-- Generated from the message catalog by `crates/erp-api/tests/errors.rs`.
 Run `just errors` after adding a code; CI fails if this drifts. -->
 
 

@@ -39,8 +39,8 @@
 //! per caller would be a check somebody forgets, and the one forgotten would be
 //! the one that mattered.
 
-use spa_eventlog::ConfigError;
-use spa_types::Timestamp;
+use erp_eventlog::ConfigError;
+use erp_types::Timestamp;
 
 /// The books, as a business has closed them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -72,7 +72,7 @@ impl Books {
 /// lets exactly the entries through that somebody just closed the books to keep
 /// out.
 pub async fn books(conn: &mut sqlx::PgConnection) -> Result<Books, ConfigError> {
-    Ok(spa_eventlog::configuration::get::<Books>(conn, Books::KEY)
+    Ok(erp_eventlog::configuration::get::<Books>(conn, Books::KEY)
         .await?
         .map(|configured| configured.value)
         .unwrap_or_default())
@@ -95,7 +95,7 @@ pub async fn close(
     by: Option<&str>,
 ) -> Result<Books, ConfigError> {
     let books = Books { closed_before };
-    spa_eventlog::configuration::set(conn, Books::KEY, &books, by).await?;
+    erp_eventlog::configuration::set(conn, Books::KEY, &books, by).await?;
     Ok(books)
 }
 

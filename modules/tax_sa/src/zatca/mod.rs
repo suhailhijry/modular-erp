@@ -57,7 +57,7 @@ pub mod wire;
 
 use ledger::VatCategory;
 use serde::{Deserialize, Serialize};
-use spa_types::{CurrencyCode, Money, Timestamp};
+use erp_types::{CurrencyCode, Money, Timestamp};
 use uuid::Uuid;
 
 pub use chain::Link;

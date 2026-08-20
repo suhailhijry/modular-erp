@@ -16,8 +16,8 @@
 //! about an hour, and recording it would be recording a credential.
 
 use serde::{Deserialize, Serialize};
-use spa_eventlog::{Aggregate, DomainEvent};
-use spa_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
+use erp_eventlog::{Aggregate, DomainEvent};
+use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
 
 use crate::zatca::csr::Environment;
 use crate::zatca::onboarding::Stage;

@@ -4,7 +4,7 @@
 //!
 //! It was one, until the shape of the system said otherwise. Netting output tax
 //! against input tax is **domain** — VAT law, and Saudi VAT law specifically —
-//! and it was sitting in `spa-api`, the crate that is supposed to hold none. The
+//! and it was sitting in `erp-api`, the crate that is supposed to hold none. The
 //! test that catches it is the one the model gives: *can a tenant disable it?*
 //! A business with neither sales nor purchases had a VAT return endpoint, which
 //! is the answer.
@@ -26,7 +26,7 @@
 //! forced it.
 
 use ledger::VatCategory;
-use spa_types::{CurrencyCode, Money, Timestamp};
+use erp_types::{CurrencyCode, Money, Timestamp};
 
 /// One rate band, on one side of the return.
 #[derive(Debug, Clone, PartialEq, Eq)]

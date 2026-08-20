@@ -1,0 +1,27 @@
+[package]
+name = "erp-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Core value types. No I/O, no async, no database — safe to compile to WASM and share with a frontend."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Optional so the crate stays WASM-safe and frontend-shareable by default.
+sqlx = { workspace = true, optional = true }
+
+[features]
+default = []
+sqlx = ["dep:sqlx"]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+proptest = { workspace = true }

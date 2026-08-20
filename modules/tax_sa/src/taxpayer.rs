@@ -33,8 +33,8 @@
 //! own screens — it never reaches ZATCA.
 
 use serde::{Deserialize, Serialize};
-use spa_eventlog::{Aggregate, DomainEvent};
-use spa_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
+use erp_eventlog::{Aggregate, DomainEvent};
+use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
 
 /// The single stream a tenant's registration lives in.
 ///

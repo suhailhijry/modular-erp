@@ -1,9 +1,9 @@
 //! What a caller can ask the ledger to do.
 
-use spa_control::{CommandError, TenantDb};
-use spa_eventlog::{Committed, Decision, ExecuteError, Metadata};
-use spa_i18n::Locale;
-use spa_types::{AggregateId, CurrencyCode, Timestamp};
+use erp_control::{CommandError, TenantDb};
+use erp_eventlog::{Committed, Decision, ExecuteError, Metadata};
+use erp_i18n::Locale;
+use erp_types::{AggregateId, CurrencyCode, Timestamp};
 
 use crate::account::{Account, AccountEvent, AccountKind};
 use crate::charts::{Chart, Installed};
@@ -34,17 +34,17 @@ pub enum LedgerError {
     #[error(transparent)]
     Unbalanced(#[from] Unbalanced),
     #[error(transparent)]
-    Config(#[from] spa_eventlog::ConfigError),
+    Config(#[from] erp_eventlog::ConfigError),
     /// A chart shipped a code that is not a usable identifier. A build bug, not
     /// something a user can cause — `charts::tests` catches it first.
     #[error("{0}")]
     BadAccountCode(String),
 }
 
-impl spa_i18n::Localize for LedgerError {
-    fn message(&self) -> spa_i18n::Message {
+impl erp_i18n::Localize for LedgerError {
+    fn message(&self) -> erp_i18n::Message {
         use crate::messages;
-        use spa_i18n::{Message, MessageArg};
+        use erp_i18n::{Message, MessageArg};
         match self {
             Self::AccountExists(code) => {
                 Message::new(messages::ACCOUNT_EXISTS).with("code", MessageArg::text(code.clone()))
@@ -77,7 +77,7 @@ impl spa_i18n::Localize for LedgerError {
                 Message::new(messages::ALREADY_REVERSED).with("by", MessageArg::text(by.clone()))
             }
             Self::Unbalanced(e) => e.message(),
-            Self::BadAccountCode(_) => Message::new(spa_control::messages::INTERNAL),
+            Self::BadAccountCode(_) => Message::new(erp_control::messages::INTERNAL),
         }
     }
 }
@@ -167,7 +167,7 @@ pub async fn post_entry(
     lines: BalancedLines,
     metadata: &Metadata,
 ) -> Outcome<JournalEntryEvent> {
-    for _ in 1..=spa_eventlog::MAX_ATTEMPTS {
+    for _ in 1..=erp_eventlog::MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
         match post_entry_in(&mut tx, id, occurred_on, memo, &lines, metadata).await {
             Ok(committed) => {
@@ -185,11 +185,11 @@ pub async fn post_entry(
     }
 
     Err(ExecuteError::Contended {
-        stream: spa_types::StreamId::new(
-            <JournalEntry as spa_eventlog::Aggregate>::domain(),
+        stream: erp_types::StreamId::new(
+            <JournalEntry as erp_eventlog::Aggregate>::domain(),
             id.clone(),
         ),
-        attempts: spa_eventlog::MAX_ATTEMPTS,
+        attempts: erp_eventlog::MAX_ATTEMPTS,
     }
     .into())
 }
@@ -204,7 +204,7 @@ pub async fn post_entry(
 /// state the system can reach, and nothing has to sweep for one afterwards.
 ///
 /// No retry: the caller owns the transaction, so the caller owns the retry. See
-/// `spa_eventlog::try_execute` for why the two cannot be separated.
+/// `erp_eventlog::try_execute` for why the two cannot be separated.
 ///
 /// The account checks run inside that transaction on purpose. Reading them
 /// outside would be marginally cheaper and would let an account be closed
@@ -234,7 +234,7 @@ pub async fn post_entry_in(
 
     for line in lines.as_slice() {
         let account =
-            spa_eventlog::load::<Account>(&mut *conn, &line.account, crate::upcasters()).await?;
+            erp_eventlog::load::<Account>(&mut *conn, &line.account, crate::upcasters()).await?;
 
         if !account.aggregate.exists {
             return Err(ExecuteError::Rejected(LedgerError::NoSuchAccount(
@@ -261,7 +261,7 @@ pub async fn post_entry_in(
     }
 
     let memo = memo.trim().to_owned();
-    spa_eventlog::try_execute::<JournalEntry, _, LedgerError>(
+    erp_eventlog::try_execute::<JournalEntry, _, LedgerError>(
         conn,
         id,
         crate::upcasters(),
@@ -311,7 +311,7 @@ pub async fn reverse_entry(
     memo: &str,
     metadata: &Metadata,
 ) -> Outcome<JournalEntryEvent> {
-    for _ in 1..=spa_eventlog::MAX_ATTEMPTS {
+    for _ in 1..=erp_eventlog::MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
         match reverse_in(&mut tx, original, reversal, occurred_on, memo, metadata).await {
             Ok(committed) => {
@@ -329,11 +329,11 @@ pub async fn reverse_entry(
     }
 
     Err(ExecuteError::Contended {
-        stream: spa_types::StreamId::new(
-            <JournalEntry as spa_eventlog::Aggregate>::domain(),
+        stream: erp_types::StreamId::new(
+            <JournalEntry as erp_eventlog::Aggregate>::domain(),
             original.clone(),
         ),
-        attempts: spa_eventlog::MAX_ATTEMPTS,
+        attempts: erp_eventlog::MAX_ATTEMPTS,
     }
     .into())
 }
@@ -351,7 +351,7 @@ pub async fn reverse_in(
     metadata: &Metadata,
 ) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
     let loaded =
-        spa_eventlog::load::<JournalEntry>(&mut *conn, original, crate::upcasters()).await?;
+        erp_eventlog::load::<JournalEntry>(&mut *conn, original, crate::upcasters()).await?;
 
     if !loaded.aggregate.posted {
         return Err(ExecuteError::Rejected(LedgerError::NoSuchEntry(
@@ -403,7 +403,7 @@ pub async fn reverse_in(
     post_entry_in(&mut *conn, reversal, occurred_on, memo, &flipped, metadata).await?;
 
     let by = reversal.as_str().to_owned();
-    spa_eventlog::try_execute::<JournalEntry, _, LedgerError>(
+    erp_eventlog::try_execute::<JournalEntry, _, LedgerError>(
         conn,
         original,
         crate::upcasters(),
@@ -432,13 +432,13 @@ pub async fn reverse_in(
 pub async fn accepts_postings(
     conn: &mut sqlx::PgConnection,
     code: &AggregateId,
-) -> Result<bool, spa_eventlog::LoadError> {
-    let account = spa_eventlog::load::<Account>(conn, code, crate::upcasters()).await?;
+) -> Result<bool, erp_eventlog::LoadError> {
+    let account = erp_eventlog::load::<Account>(conn, code, crate::upcasters()).await?;
     Ok(account.aggregate.accepts_postings())
 }
 
 fn rejected(error: LedgerError) -> CommandError<LedgerError> {
-    CommandError::Execute(spa_eventlog::ExecuteError::Rejected(error))
+    CommandError::Execute(erp_eventlog::ExecuteError::Rejected(error))
 }
 
 /// Opens every account in a chart that is not already there.

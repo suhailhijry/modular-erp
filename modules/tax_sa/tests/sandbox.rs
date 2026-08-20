@@ -33,7 +33,7 @@
 
 use base64::Engine as _;
 use ledger::VatCategory;
-use spa_types::{CurrencyCode, Money, Timestamp};
+use erp_types::{CurrencyCode, Money, Timestamp};
 use tax_sa::zatca::csr::Environment;
 use tax_sa::zatca::onboarding::{Csid, Registrar};
 use tax_sa::zatca::{Band, Buyer, Document, Kind, Line, Link, Totals, TypeCode, document_uuid};

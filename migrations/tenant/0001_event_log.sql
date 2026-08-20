@@ -57,7 +57,7 @@ CREATE TABLE event (
     stream_id      TEXT NOT NULL CHECK (length(stream_id) BETWEEN 1 AND 128),
     -- The aggregate's version after this event. A DIFFERENT quantity from
     -- `position`, which is why they are different types in Rust: conflating
-    -- them is the defect that motivated the newtypes in `spa-types`.
+    -- them is the defect that motivated the newtypes in `erp-types`.
     sequence       BIGINT NOT NULL CHECK (sequence >= 1),
 
     event_name     TEXT NOT NULL CHECK (event_name ~ '^[A-Za-z0-9_.-]{1,96}$'),

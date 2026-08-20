@@ -45,9 +45,9 @@
 //! fails is an orphan that the next attempt overwrites.
 
 use serde::{Deserialize, Serialize};
-use spa_control::TenantDb;
-use spa_eventlog::{Metadata, SealingKey};
-use spa_types::Timestamp;
+use erp_control::TenantDb;
+use erp_eventlog::{Metadata, SealingKey};
+use erp_types::Timestamp;
 
 use base64::Engine as _;
 
@@ -374,11 +374,11 @@ pub enum OnboardError {
     #[error("this tenant has no {0} certificate yet")]
     NotYet(&'static str),
     #[error(transparent)]
-    Secret(#[from] spa_eventlog::SecretError),
+    Secret(#[from] erp_eventlog::SecretError),
     #[error(transparent)]
-    Command(#[from] spa_control::CommandError<crate::TaxError>),
+    Command(#[from] erp_control::CommandError<crate::TaxError>),
     #[error(transparent)]
-    Pool(#[from] spa_control::PoolError),
+    Pool(#[from] erp_control::PoolError),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
@@ -761,7 +761,7 @@ pub async fn credentials(
     stage: Stage,
 ) -> Result<Option<Csid>, OnboardError> {
     let mut conn = db.acquire().await?;
-    let found = spa_eventlog::secrets::get(&mut conn, sealing, stage.secret_key()).await?;
+    let found = erp_eventlog::secrets::get(&mut conn, sealing, stage.secret_key()).await?;
     drop(conn);
 
     found
@@ -778,7 +778,7 @@ pub async fn private_key(
     sealing: &SealingKey,
 ) -> Result<Option<Vec<u8>>, OnboardError> {
     let mut conn = db.acquire().await?;
-    let found = spa_eventlog::secrets::get(&mut conn, sealing, KEY_SECRET).await?;
+    let found = erp_eventlog::secrets::get(&mut conn, sealing, KEY_SECRET).await?;
     drop(conn);
     Ok(found)
 }
@@ -791,7 +791,7 @@ pub async fn reached(db: &TenantDb) -> Result<Vec<Stage>, OnboardError> {
     let mut conn = db.read().await?;
     let mut found = Vec::new();
     for stage in Stage::ALL {
-        if spa_eventlog::secrets::exists(&mut conn, stage.secret_key()).await? {
+        if erp_eventlog::secrets::exists(&mut conn, stage.secret_key()).await? {
             found.push(stage);
         }
     }
@@ -805,7 +805,7 @@ async fn seal_key(
     generated: &Generated,
 ) -> Result<(), OnboardError> {
     let mut conn = db.acquire().await?;
-    spa_eventlog::secrets::put(&mut conn, sealing, KEY_SECRET, &generated.private_key_pem).await?;
+    erp_eventlog::secrets::put(&mut conn, sealing, KEY_SECRET, &generated.private_key_pem).await?;
     drop(conn);
     Ok(())
 }
@@ -819,7 +819,7 @@ async fn store(
     let encoded = serde_json::to_vec(csid)
         .map_err(|e| OnboardError::Certificate(format!("storing credentials: {e}")))?;
     let mut conn = db.acquire().await?;
-    spa_eventlog::secrets::put(&mut conn, sealing, stage.secret_key(), &encoded).await?;
+    erp_eventlog::secrets::put(&mut conn, sealing, stage.secret_key(), &encoded).await?;
     drop(conn);
     Ok(())
 }

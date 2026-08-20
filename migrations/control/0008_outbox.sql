@@ -20,13 +20,13 @@
 -- Why it is byte-for-byte the tenant's table
 -- ===========================================================================
 --
--- `spa_eventlog`'s `Dispatcher` and `enqueue` are compile-time-checked against a
+-- `erp_eventlog`'s `Dispatcher` and `enqueue` are compile-time-checked against a
 -- table named `outbox` with these columns. Reusing them here — claim under
 -- `SKIP LOCKED`, lease, backoff, dead letters, the at-least-once idempotency
 -- key, and every crash test already written against them — costs exactly one
 -- thing: this file must not drift from `migrations/tenant/0003_outbox.sql`.
 --
--- `the_two_outboxes_are_the_same_table` in `crates/spa-control/tests/outbox.rs`
+-- `the_two_outboxes_are_the_same_table` in `crates/erp-control/tests/outbox.rs`
 -- is what stops it drifting, by comparing the two schemas column by column.
 -- Without that, a column added to one would fail against the other at runtime,
 -- in whichever plane was touched second.

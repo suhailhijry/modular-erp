@@ -1,4 +1,4 @@
-# SPA
+# ERP
 
 Multi-tenant ERP backend. Rust, Postgres, one database per tenant.
 
@@ -40,14 +40,14 @@ regenerates the offline query data; commit the `.sqlx/` diff alongside it.
 ## Layout
 
 ```
-crates/spa-types      value types — no I/O, WASM-safe, shareable with a frontend
-crates/spa-i18n       message codes and typed arguments; English and Arabic
-crates/spa-testkit    test harness — real Postgres, one database per test
-crates/spa-control    control plane — identities, tenants, memberships, TenantDb
-crates/spa-eventlog   the tenant log: gapless append, aggregates, upcasters, outbox
-crates/spa-projection projection groups, checkpoints, shadow replay and the differ
-crates/spa-worker     background worker — tenant visits, jobs, drain; bin/worker
-crates/spa-api        HTTP surface — sessions, problem+json, extractors; bin/api
+crates/erp-types      value types — no I/O, WASM-safe, shareable with a frontend
+crates/erp-i18n       message codes and typed arguments; English and Arabic
+crates/erp-testkit    test harness — real Postgres, one database per test
+crates/erp-control    control plane — identities, tenants, memberships, TenantDb
+crates/erp-eventlog   the tenant log: gapless append, aggregates, upcasters, outbox
+crates/erp-projection projection groups, checkpoints, shadow replay and the differ
+crates/erp-worker     background worker — tenant visits, jobs, drain; bin/worker
+crates/erp-api        HTTP surface — sessions, problem+json, extractors; bin/api
 modules/ledger        double-entry accounting — the first module, and declinable
 migrations/control    control-plane schema
 migrations/tenant     per-tenant schema

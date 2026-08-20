@@ -24,7 +24,7 @@
 //! impossible.
 
 use ledger::VatCategory;
-use spa_types::{CurrencyCode, Money, Timestamp};
+use erp_types::{CurrencyCode, Money, Timestamp};
 
 use super::csr::{Issues, Unit};
 use super::{Band, Buyer, Document, Kind, Line, Link, Reference, Totals, TypeCode, document_uuid};

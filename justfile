@@ -1,6 +1,6 @@
 # Task runner. See docs/DATABASE_SETUP.md for the database layout.
 
-# `.env` is loaded here for the same reason `spa-testkit` loads it: a developer
+# `.env` is loaded here for the same reason `erp-testkit` loads it: a developer
 # whose Postgres wants a password has it in `.env`, and neither cargo nor just
 # reads that file by default. Without this, `just prepare` fails with
 # `no password supplied` on a checkout where `cargo test` works fine.
@@ -10,7 +10,7 @@ set dotenv-load := true
 # so there is one place to configure credentials. Override either directly if
 # your server needs something the substitution cannot express.
 base_url := env("DATABASE_URL", "postgres://postgres@localhost/postgres")
-typecheck_url := env("TYPECHECK_DATABASE_URL", replace_regex(base_url, "/[^/]*$", "/spa_typecheck"))
+typecheck_url := env("TYPECHECK_DATABASE_URL", replace_regex(base_url, "/[^/]*$", "/erp_typecheck"))
 admin_url := env("ADMIN_DATABASE_URL", replace_regex(base_url, "/[^/]*$", "/postgres"))
 
 default:
@@ -34,8 +34,8 @@ fmt-check:
 # Rebuild the type-check database and regenerate offline query data.
 # Run after any migration change, and commit the `.sqlx/` diff.
 prepare:
-    psql "{{admin_url}}" -q -c "DROP DATABASE IF EXISTS spa_typecheck WITH (FORCE)"
-    psql "{{admin_url}}" -q -c "CREATE DATABASE spa_typecheck"
+    psql "{{admin_url}}" -q -c "DROP DATABASE IF EXISTS erp_typecheck WITH (FORCE)"
+    psql "{{admin_url}}" -q -c "CREATE DATABASE erp_typecheck"
     # Both schemas live in one type-check database, and sqlx validates every
     # query against a single connection.
     #
@@ -52,7 +52,7 @@ prepare:
     # way `install_schema` does it.
     #
     # The schema is guessed from the crate directory, hyphens to underscores.
-    # `a_modules_schema_is_named_after_its_crate` in `crates/spa-api/src/modules.rs`
+    # `a_modules_schema_is_named_after_its_crate` in `crates/erp-api/src/modules.rs`
     # is what stops that guess drifting from what the modules declare.
     #
     # `install.sql` only, deliberately: a module's `seed.sql` writes a tenant's
@@ -93,16 +93,16 @@ reap:
 # Regenerate the error-code reference from the message catalog.
 # `just check` fails when `docs/ERRORS.md` no longer matches.
 errors:
-    REGENERATE_DOCS=1 cargo test --quiet -p spa-api --test errors
+    REGENERATE_DOCS=1 cargo test --quiet -p erp-api --test errors
 
 # Regenerate the OpenAPI document from the router that serves the requests.
 # `just check` fails when `docs/openapi.json` no longer matches.
 openapi:
-    REGENERATE_DOCS=1 cargo test --quiet -p spa-api --test openapi
+    REGENERATE_DOCS=1 cargo test --quiet -p erp-api --test openapi
 
 # Drop every database this project creates. Does not touch anything else.
 #
-# Includes `spa_tenant_%`: a soak test that fails an assertion panics before its
+# Includes `erp_tenant_%`: a soak test that fails an assertion panics before its
 # own cleanup runs, so those leak. Harmless, but they accumulate.
 #
 # The control plane is cleared of the tenants that went with them. Without that
@@ -134,13 +134,13 @@ clean-databases:
     # wrong place. It has already cost one.
     busy=$(psql "{{admin_url}}" -tAc "
         SELECT count(*) FROM pg_stat_activity
-         WHERE datname LIKE 'spa_test_%' OR datname LIKE 'spa_tmpl_%'")
+         WHERE datname LIKE 'erp_test_%' OR datname LIKE 'erp_tmpl_%'")
     if [ "${busy:-0}" -gt 0 ]; then
         echo "refusing: ${busy} connection(s) to test databases — a test run is in progress." >&2
         echo "wait for it to finish, or drop them by hand if you are sure." >&2
         exit 1
     fi
-    psql "{{admin_url}}" -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'spa_test_%' OR datname LIKE 'spa_tmpl_%' OR datname LIKE 'spa_tenant_%'" \
+    psql "{{admin_url}}" -tAc "SELECT datname FROM pg_database WHERE datname LIKE 'erp_test_%' OR datname LIKE 'erp_tmpl_%' OR datname LIKE 'erp_tenant_%'" \
       | xargs -r -I{} psql "{{admin_url}}" -q -c 'DROP DATABASE IF EXISTS "{}" WITH (FORCE)'
     psql "{{base_url}}" -q -c "DELETE FROM tenant WHERE database_name NOT IN (SELECT datname FROM pg_database)" 2>/dev/null || true
     psql "{{base_url}}" -q -c "TRUNCATE audit_entry" -c "DELETE FROM identity WHERE id NOT IN (SELECT identity_id FROM membership)" 2>/dev/null || true

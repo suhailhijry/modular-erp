@@ -14,16 +14,16 @@ use ledger::{
     AccountKind, BalancedLines, Ledger, LedgerError, Line, account_balances, close_account,
     imbalances, open_account, post_entry, projections, rename_account, trial_balance,
 };
-use spa_control::{
+use erp_control::{
     Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
 };
-use spa_eventlog::{ExecuteError, Metadata};
-use spa_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head};
-use spa_testkit::{Schema, TestDb};
-use spa_types::{AggregateId, CurrencyCode, Money, Timestamp};
+use erp_eventlog::{ExecuteError, Metadata};
+use erp_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head};
+use erp_testkit::{Schema, TestDb};
+use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 
-static CONTROL: Schema = Schema::migrations("control", &spa_control::MIGRATIONS);
-static TENANT: Schema = Schema::migrations("tenant", &spa_eventlog::MIGRATIONS);
+static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
+static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
 
 fn sar() -> CurrencyCode {
     CurrencyCode::new("SAR").expect("valid")
@@ -56,7 +56,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let control_db = spa_testkit::Template::get(&CONTROL)
+        let control_db = erp_testkit::Template::get(&CONTROL)
             .await
             .expect("control template builds")
             .fresh()
@@ -64,7 +64,7 @@ impl Fixture {
             .expect("control database clones");
 
         let clusters = ClusterRegistry::new()
-            .with_url("primary", &spa_testkit::database_url())
+            .with_url("primary", &erp_testkit::database_url())
             .expect("the test database URL parses");
 
         let control = Arc::new(ControlPlane::new(
@@ -74,7 +74,7 @@ impl Fixture {
         control
             .register_cluster(
                 "primary",
-                "SPA_CLUSTER_PRIMARY_URL",
+                "ERP_CLUSTER_PRIMARY_URL",
                 None,
                 10_000,
                 10_000,
@@ -87,7 +87,7 @@ impl Fixture {
             .register_tenant_on("acme", "Acme", "primary", Actor::system())
             .await
             .expect("tenant registers");
-        spa_testkit::create_named_database(&tenant.database_name, &TENANT)
+        erp_testkit::create_named_database(&tenant.database_name, &TENANT)
             .await
             .expect("tenant database is created");
         control
@@ -130,7 +130,7 @@ impl Fixture {
     /// A pool straight at the tenant database, for the projection runner and the
     /// shadow differ — both operator tools, not request paths.
     async fn tenant_pool(&self) -> sqlx::PgPool {
-        let url = spa_testkit::database_url();
+        let url = erp_testkit::database_url();
         let base = url.rsplit_once('/').map_or(url.as_str(), |(head, _)| head);
         sqlx::PgPool::connect(&format!("{base}/{}", self.tenant_database))
             .await
@@ -168,7 +168,7 @@ impl Fixture {
     async fn cleanup(self) {
         drop(self.db);
         drop(self.control);
-        let _ = spa_testkit::drop_named_database(&self.tenant_database).await;
+        let _ = erp_testkit::drop_named_database(&self.tenant_database).await;
     }
 }
 
@@ -590,7 +590,7 @@ fn names_are_valid_and_declared() {
         .iter()
         .chain(ledger::JournalEntryEvent::NAMES.iter())
     {
-        let parsed = spa_types::EventName::new(*name).expect("a valid event name");
+        let parsed = erp_types::EventName::new(*name).expect("a valid event name");
         assert!(
             upcasters.current_version(&parsed).is_some(),
             "{name} is not declared; events would be written that cannot be read"
@@ -601,7 +601,7 @@ fn names_are_valid_and_declared() {
 
 #[test]
 fn every_message_has_a_translation() {
-    spa_i18n::testing::assert_complete(&ledger::CATALOG);
+    erp_i18n::testing::assert_complete(&ledger::CATALOG);
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +617,7 @@ async fn installing_a_chart_opens_its_accounts() {
         &fixture.db,
         services,
         sar(),
-        spa_i18n::Locale::English,
+        erp_i18n::Locale::English,
         &Metadata::default(),
     )
     .await
@@ -650,7 +650,7 @@ async fn installing_a_chart_twice_changes_nothing() {
         &fixture.db,
         services,
         sar(),
-        spa_i18n::Locale::English,
+        erp_i18n::Locale::English,
         &Metadata::default(),
     )
     .await
@@ -659,7 +659,7 @@ async fn installing_a_chart_twice_changes_nothing() {
         &fixture.db,
         services,
         sar(),
-        spa_i18n::Locale::English,
+        erp_i18n::Locale::English,
         &Metadata::default(),
     )
     .await
@@ -693,7 +693,7 @@ async fn a_second_chart_opens_only_what_is_missing() {
         &fixture.db,
         services,
         sar(),
-        spa_i18n::Locale::English,
+        erp_i18n::Locale::English,
         &Metadata::default(),
     )
     .await
@@ -703,7 +703,7 @@ async fn a_second_chart_opens_only_what_is_missing() {
         &fixture.db,
         retail,
         sar(),
-        spa_i18n::Locale::English,
+        erp_i18n::Locale::English,
         &Metadata::default(),
     )
     .await
@@ -731,7 +731,7 @@ async fn a_chart_installs_in_the_callers_language() {
         &fixture.db,
         services,
         sar(),
-        spa_i18n::Locale::Arabic,
+        erp_i18n::Locale::Arabic,
         &Metadata::default(),
     )
     .await
@@ -764,7 +764,7 @@ async fn an_installed_chart_is_ordinary_accounts() {
         &fixture.db,
         services,
         sar(),
-        spa_i18n::Locale::English,
+        erp_i18n::Locale::English,
         &Metadata::default(),
     )
     .await
@@ -1022,7 +1022,7 @@ async fn reversals_replay_like_anything_else() {
 async fn reverse(
     fixture: &Fixture,
     reversal: &str,
-) -> Result<spa_eventlog::Committed<ledger::JournalEntryEvent>, CommandError<LedgerError>> {
+) -> Result<erp_eventlog::Committed<ledger::JournalEntryEvent>, CommandError<LedgerError>> {
     ledger::reverse_entry(
         &fixture.db,
         &code("E-2"),
@@ -1050,7 +1050,7 @@ async fn post_on(
     fixture: &Fixture,
     id: &str,
     day: &str,
-) -> Result<spa_eventlog::Committed<ledger::JournalEntryEvent>, CommandError<LedgerError>> {
+) -> Result<erp_eventlog::Committed<ledger::JournalEntryEvent>, CommandError<LedgerError>> {
     let lines = BalancedLines::new(vec![
         Line::new(code("1000"), riyals(100)),
         Line::new(code("3000"), riyals(-100)),

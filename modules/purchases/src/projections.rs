@@ -1,9 +1,9 @@
 //! The purchases module's read models.
 
 use ledger::VatCategory;
-use spa_eventlog::Envelope;
-use spa_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
-use spa_types::{CurrencyCode, Cursor, Money, Page, Timestamp};
+use erp_eventlog::Envelope;
+use erp_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
+use erp_types::{CurrencyCode, Cursor, Money, Page, Timestamp};
 use sqlx::PgConnection;
 
 use crate::bill::BillEvent;
@@ -262,7 +262,7 @@ fn resume(after: Option<&Cursor>) -> Result<(Option<Timestamp>, Option<String>),
     let Some(cursor) = after else {
         return Ok((None, None));
     };
-    let malformed = || sqlx::Error::Decode(Box::new(spa_types::NotACursor));
+    let malformed = || sqlx::Error::Decode(Box::new(erp_types::NotACursor));
 
     let billed_on = cursor
         .part(0)

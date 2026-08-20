@@ -1,7 +1,7 @@
 //! Journal lines that cannot be unbalanced.
 
 use serde::{Deserialize, Serialize};
-use spa_types::{AggregateId, CurrencyCode, Money, MoneyError};
+use erp_types::{AggregateId, CurrencyCode, Money, MoneyError};
 
 /// One side of an entry.
 ///
@@ -59,10 +59,10 @@ pub enum Unbalanced {
     Money(#[from] MoneyError),
 }
 
-impl spa_i18n::Localize for Unbalanced {
-    fn message(&self) -> spa_i18n::Message {
+impl erp_i18n::Localize for Unbalanced {
+    fn message(&self) -> erp_i18n::Message {
         use crate::messages;
-        use spa_i18n::{Message, MessageArg};
+        use erp_i18n::{Message, MessageArg};
         match self {
             Self::TooFewLines(n) => Message::new(messages::TOO_FEW_LINES).with(
                 "n",

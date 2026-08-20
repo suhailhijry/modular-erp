@@ -1,6 +1,6 @@
 # Migrations exempted from the expand-only rule.
 #
-# `crates/spa-control/tests/migrations.rs` refuses a migration that takes away
+# `crates/erp-control/tests/migrations.rs` refuses a migration that takes away
 # something a draining pod still uses. This file is where one says it means it.
 #
 #     <chain>/<file>  <rule>  <why this is safe to run while the previous build serves>

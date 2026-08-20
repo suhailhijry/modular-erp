@@ -1,6 +1,6 @@
 //! The purchases module's messages, in every supported language.
 
-use spa_i18n::{Locale, MessageCode, Template};
+use erp_i18n::{Locale, MessageCode, Template};
 
 pub const NOTHING_ON_IT: MessageCode = MessageCode::new("purchases.nothing_on_it");
 pub const NOT_RECORDED: MessageCode = MessageCode::new("purchases.not_recorded");

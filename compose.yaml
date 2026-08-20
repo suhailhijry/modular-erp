@@ -23,14 +23,14 @@
 # Production. The passwords are `postgres`, nothing is encrypted in transit, and
 # there is no backup. See `docs/RUNNING.md`.
 
-name: spa
+name: erp
 
 x-app: &app
   build:
     context: .
-  image: spa:local
+  image: erp:local
   environment: &app-env
-    CONTROL_DATABASE_URL: postgres://postgres:postgres@pg-primary:5432/spa_control
+    CONTROL_DATABASE_URL: postgres://postgres:postgres@pg-primary:5432/erp_control
     PRIMARY_CLUSTER_URL: postgres://postgres:postgres@pg-primary:5432/postgres
     # Reads that tolerate lag go here. Empty is a supported deployment and means
     # "no replica" — see `ClusterRegistry::from_env`.
@@ -64,7 +64,7 @@ x-app: &app
     # **No `?tls=` at all** is how lettre spells "plain SMTP". `tls=none` is
     # not a value it knows and is refused at start-up — found by running this.
     SMTP_URL: smtp://mailpit:1025
-    SMTP_FROM: SPA <noreply@localhost>
+    SMTP_FROM: ERP <noreply@localhost>
   depends_on:
     pg-primary:
       condition: service_healthy
@@ -209,7 +209,7 @@ services:
   # One-shots
   # ---------------------------------------------------------------------------
 
-  # `CREATE DATABASE spa_control`, and nothing else.
+  # `CREATE DATABASE erp_control`, and nothing else.
   #
   # Its own service, on the Postgres image, because the application image has no
   # `psql` in it and should not: adding a Postgres client to every API replica to
@@ -229,8 +229,8 @@ services:
       - |
         set -euo pipefail
         psql -h pg-primary -U postgres -d postgres \
-          -tAc "SELECT 1 FROM pg_database WHERE datname='spa_control'" | grep -q 1 \
-          || psql -h pg-primary -U postgres -d postgres -c 'CREATE DATABASE spa_control'
+          -tAc "SELECT 1 FROM pg_database WHERE datname='erp_control'" | grep -q 1 \
+          || psql -h pg-primary -U postgres -d postgres -c 'CREATE DATABASE erp_control'
 
   # Both migration chains: the control plane's own schema, then every tenant's.
   # Everything else waits for it to exit 0, which is what makes `up` one command.

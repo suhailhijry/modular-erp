@@ -14,17 +14,17 @@ use std::sync::Arc;
 use ledger::{AccountKind, Ledger, VatCategory, open_account};
 use purchases::Purchases;
 use sales::{Customer, Draft, DraftLine, Sales};
-use spa_control::{
+use erp_control::{
     Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
 };
-use spa_eventlog::{ExecuteError, Metadata};
-use spa_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head};
-use spa_testkit::{Schema, TestDb};
-use spa_types::{AggregateId, CurrencyCode, Money, Timestamp};
+use erp_eventlog::{ExecuteError, Metadata};
+use erp_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head};
+use erp_testkit::{Schema, TestDb};
+use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 use tax_sa::{Sides, TaxError, TaxSa};
 
-static CONTROL: Schema = Schema::migrations("control", &spa_control::MIGRATIONS);
-static TENANT: Schema = Schema::migrations("tenant", &spa_eventlog::MIGRATIONS);
+static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
+static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
 
 fn sar() -> CurrencyCode {
     CurrencyCode::new("SAR").expect("valid")
@@ -55,7 +55,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let control_db = spa_testkit::Template::get(&CONTROL)
+        let control_db = erp_testkit::Template::get(&CONTROL)
             .await
             .expect("control template builds")
             .fresh()
@@ -63,7 +63,7 @@ impl Fixture {
             .expect("control database clones");
 
         let clusters = ClusterRegistry::new()
-            .with_url("primary", &spa_testkit::database_url())
+            .with_url("primary", &erp_testkit::database_url())
             .expect("the test database URL parses");
 
         let control = Arc::new(ControlPlane::new(
@@ -73,7 +73,7 @@ impl Fixture {
         control
             .register_cluster(
                 "primary",
-                "SPA_CLUSTER_PRIMARY_URL",
+                "ERP_CLUSTER_PRIMARY_URL",
                 None,
                 10_000,
                 10_000,
@@ -86,7 +86,7 @@ impl Fixture {
             .register_tenant_on("acme", "Acme", "primary", Actor::system())
             .await
             .expect("tenant registers");
-        spa_testkit::create_named_database(&tenant.database_name, &TENANT)
+        erp_testkit::create_named_database(&tenant.database_name, &TENANT)
             .await
             .expect("tenant database is created");
         control
@@ -183,7 +183,7 @@ impl Fixture {
     }
 
     async fn tenant_pool(&self) -> sqlx::PgPool {
-        let url = spa_testkit::database_url();
+        let url = erp_testkit::database_url();
         let base = url.rsplit_once('/').map_or(url.as_str(), |(head, _)| head);
         sqlx::PgPool::connect(&format!("{base}/{}", self.tenant_database))
             .await
@@ -252,7 +252,7 @@ impl Fixture {
 
     async fn cleanup(self) {
         drop(self.db);
-        let _ = spa_testkit::drop_named_database(&self.tenant_database).await;
+        let _ = erp_testkit::drop_named_database(&self.tenant_database).await;
     }
 }
 
@@ -276,7 +276,7 @@ async fn enabling_the_module_seeds_the_saudi_rate() {
 
     let mut conn = fixture.db.acquire().await.expect("connection");
     let rates = ledger::Rates::resolve(&mut conn).await.expect("reads");
-    let stored = spa_eventlog::configuration::get::<ledger::Rates>(&mut conn, ledger::Rates::KEY)
+    let stored = erp_eventlog::configuration::get::<ledger::Rates>(&mut conn, ledger::Rates::KEY)
         .await
         .expect("reads");
     drop(conn);
@@ -299,7 +299,7 @@ async fn re_installing_does_not_overwrite_a_rate_the_tenant_set() {
     let fixture = Fixture::new().await;
 
     let mut conn = fixture.db.acquire().await.expect("connection");
-    spa_eventlog::configuration::set(
+    erp_eventlog::configuration::set(
         &mut conn,
         ledger::Rates::KEY,
         &ledger::Rates { standard: 500 },
@@ -524,7 +524,7 @@ async fn a_filing_replays_to_exactly_what_it_recorded() {
 fn names_are_valid() {
     for name in tax_sa::FilingEvent::NAMES {
         assert!(
-            spa_types::EventName::new(name).is_ok(),
+            erp_types::EventName::new(name).is_ok(),
             "{name} is not a usable event name"
         );
     }
@@ -1375,7 +1375,7 @@ fn unit() -> Unit {
         organization: "روابي للاستشارات".to_owned(),
         branch: "الفرع الرئيسي".to_owned(),
         common_name: "EGS1-886431145".to_owned(),
-        solution: "Spa".to_owned(),
+        solution: "Erp".to_owned(),
         version: "1.0".to_owned(),
         serial: "886431145".to_owned(),
         address: "الرياض 12211".to_owned(),
@@ -1584,8 +1584,8 @@ impl Registrar for FakeZatcaCa {
     }
 }
 
-fn sealing() -> spa_eventlog::SealingKey {
-    spa_eventlog::SealingKey::new("test", &[3u8; 32]).expect("32 bytes")
+fn sealing() -> erp_eventlog::SealingKey {
+    erp_eventlog::SealingKey::new("test", &[3u8; 32]).expect("32 bytes")
 }
 
 /// **The whole onboarding.** An OTP goes in, two certificates come back, and
@@ -1713,7 +1713,7 @@ async fn the_private_key_is_sealed_and_never_stored_in_the_clear() {
     }
 
     // And another sealing key gets nothing.
-    let other = spa_eventlog::SealingKey::new("other", &[9u8; 32]).expect("32 bytes");
+    let other = erp_eventlog::SealingKey::new("other", &[9u8; 32]).expect("32 bytes");
     assert!(
         tax_sa::zatca::onboarding::private_key(&fixture.db, &other)
             .await
@@ -1929,7 +1929,7 @@ async fn the_log_records_the_certificate_and_never_the_key() {
         .expect("goes live");
 
     let mut conn = fixture.db.acquire().await.expect("connection");
-    let loaded = spa_eventlog::load::<tax_sa::Onboarding>(
+    let loaded = erp_eventlog::load::<tax_sa::Onboarding>(
         &mut conn,
         &tax_sa::onboarding_id(),
         tax_sa::upcasters(),
@@ -1966,7 +1966,7 @@ async fn the_log_records_the_certificate_and_never_the_key() {
 
 impl Fixture {
     /// Takes this tenant all the way to a production certificate.
-    async fn go_live(&self, sealing: &spa_eventlog::SealingKey) {
+    async fn go_live(&self, sealing: &erp_eventlog::SealingKey) {
         let zatca = FakeZatcaCa::new();
         let onboarder = Onboarder::new(&self.db, sealing, &zatca);
         onboarder

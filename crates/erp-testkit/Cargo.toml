@@ -1,0 +1,20 @@
+[package]
+name = "erp-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Test harness. Real Postgres, one fresh database per test, no mocks."
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+dotenvy = "0.15"
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

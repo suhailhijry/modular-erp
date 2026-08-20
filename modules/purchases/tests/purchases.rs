@@ -14,16 +14,16 @@ use ledger::{AccountKind, Ledger, VatCategory, account_balances, open_account, t
 use purchases::{
     BillLine, Draft, Payment, PurchaseError, Purchases, Supplier, pay_bill, record_bill,
 };
-use spa_control::{
+use erp_control::{
     Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
 };
-use spa_eventlog::{ExecuteError, Metadata};
-use spa_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head};
-use spa_testkit::{Schema, TestDb};
-use spa_types::{AggregateId, CurrencyCode, Money, Timestamp};
+use erp_eventlog::{ExecuteError, Metadata};
+use erp_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head};
+use erp_testkit::{Schema, TestDb};
+use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 
-static CONTROL: Schema = Schema::migrations("control", &spa_control::MIGRATIONS);
-static TENANT: Schema = Schema::migrations("tenant", &spa_eventlog::MIGRATIONS);
+static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
+static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
 
 fn sar() -> CurrencyCode {
     CurrencyCode::new("SAR").expect("valid")
@@ -91,7 +91,7 @@ impl Fixture {
     }
 
     async fn bare() -> Self {
-        let control_db = spa_testkit::Template::get(&CONTROL)
+        let control_db = erp_testkit::Template::get(&CONTROL)
             .await
             .expect("control template builds")
             .fresh()
@@ -99,7 +99,7 @@ impl Fixture {
             .expect("control database clones");
 
         let clusters = ClusterRegistry::new()
-            .with_url("primary", &spa_testkit::database_url())
+            .with_url("primary", &erp_testkit::database_url())
             .expect("the test database URL parses");
 
         let control = Arc::new(ControlPlane::new(
@@ -109,7 +109,7 @@ impl Fixture {
         control
             .register_cluster(
                 "primary",
-                "SPA_CLUSTER_PRIMARY_URL",
+                "ERP_CLUSTER_PRIMARY_URL",
                 None,
                 10_000,
                 10_000,
@@ -122,7 +122,7 @@ impl Fixture {
             .register_tenant_on("najd", "Najd", "primary", Actor::system())
             .await
             .expect("tenant registers");
-        spa_testkit::create_named_database(&tenant.database_name, &TENANT)
+        erp_testkit::create_named_database(&tenant.database_name, &TENANT)
             .await
             .expect("tenant database is created");
         control
@@ -190,7 +190,7 @@ impl Fixture {
     }
 
     async fn tenant_pool(&self) -> sqlx::PgPool {
-        let url = spa_testkit::database_url();
+        let url = erp_testkit::database_url();
         let base = url.rsplit_once('/').map_or(url.as_str(), |(head, _)| head);
         sqlx::PgPool::connect(&format!("{base}/{}", self.tenant_database))
             .await
@@ -213,7 +213,7 @@ impl Fixture {
 
     async fn cleanup(self) {
         drop(self.db);
-        let _ = spa_testkit::drop_named_database(&self.tenant_database).await;
+        let _ = erp_testkit::drop_named_database(&self.tenant_database).await;
     }
 }
 
@@ -236,7 +236,7 @@ async fn pay(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> Out
     .await
 }
 
-type Outcome = Result<spa_eventlog::Committed<purchases::BillEvent>, CommandError<PurchaseError>>;
+type Outcome = Result<erp_eventlog::Committed<purchases::BillEvent>, CommandError<PurchaseError>>;
 
 fn rejection(error: &CommandError<PurchaseError>) -> Option<&PurchaseError> {
     match error {
@@ -742,7 +742,7 @@ async fn bills_replay_to_exactly_what_is_live() {
 fn names_are_valid() {
     for name in purchases::BillEvent::NAMES {
         assert!(
-            spa_types::EventName::new(name).is_ok(),
+            erp_types::EventName::new(name).is_ok(),
             "{name} is not a usable event name"
         );
     }

@@ -1,0 +1,49 @@
+[package]
+name = "erp-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The HTTP surface: authentication, problem+json, and the route to a tenant."
+
+[lints]
+workspace = true
+
+[dependencies]
+erp-web = { workspace = true }
+erp-control = { workspace = true }
+erp-eventlog = { workspace = true }
+ledger = { workspace = true }
+sales = { workspace = true }
+purchases = { workspace = true }
+tax_sa = { workspace = true }
+erp-i18n = { workspace = true }
+erp-types = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+
+[dev-dependencies]
+openssl = { workspace = true }
+base64 = { workspace = true }
+erp-testkit = { workspace = true }
+erp-eventlog = { workspace = true }
+ledger = { workspace = true }
+sales = { workspace = true }
+purchases = { workspace = true }
+tax_sa = { workspace = true }
+erp-projection = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tower = { workspace = true }

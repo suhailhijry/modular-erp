@@ -47,8 +47,8 @@ pub use projections::{
 };
 pub use vat::{Rates, VatCategory};
 
-use spa_i18n::StaticCatalog;
-use spa_types::{DomainName, EventName, SchemaVersion};
+use erp_i18n::StaticCatalog;
+use erp_types::{DomainName, EventName, SchemaVersion};
 
 /// This module's messages, in every supported language.
 pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
@@ -60,10 +60,10 @@ pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messag
 /// than migrating. See `schema/install.sql`.
 ///
 /// Called when a tenant enables the module. Pair it with
-/// `spa_projection::ensure_group_schema::<Ledger>` so the checkpoint exists too.
+/// `erp_projection::ensure_group_schema::<Ledger>` so the checkpoint exists too.
 pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
     // **The install SQL is schema-relative**, so this is what aims it — the same
-    // thing `ControlPlane::install_schema` and `spa_projection::rebuild_swap` do,
+    // thing `ControlPlane::install_schema` and `erp_projection::rebuild_swap` do,
     // and the reason a rebuild can aim it somewhere else.
     sqlx::raw_sql(
         "CREATE SCHEMA IF NOT EXISTS proj_ledger; SET search_path TO proj_ledger, public;",
@@ -85,12 +85,12 @@ pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
 pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 
 /// This module's projection group name, for `?consistent_after=`.
-pub const GROUP_NAME: &str = <Ledger as spa_projection::ProjectionGroup>::NAME;
+pub const GROUP_NAME: &str = <Ledger as erp_projection::ProjectionGroup>::NAME;
 
 /// This module's projection groups, as `(name, schema)`.
 const GROUPS: &[(&str, &str)] = &[(
-    <Ledger as spa_projection::ProjectionGroup>::NAME,
-    <Ledger as spa_projection::ProjectionGroup>::SCHEMA,
+    <Ledger as erp_projection::ProjectionGroup>::NAME,
+    <Ledger as erp_projection::ProjectionGroup>::SCHEMA,
 )];
 
 /// What a tenant enabling this module needs installed.
@@ -98,8 +98,8 @@ const GROUPS: &[(&str, &str)] = &[(
 /// Described rather than performed: the control plane runs it during
 /// provisioning, and neither crate has to know what the other is for.
 #[must_use]
-pub fn setup() -> spa_control::ModuleSetup {
-    spa_control::ModuleSetup::new(
+pub fn setup() -> erp_control::ModuleSetup {
+    erp_control::ModuleSetup::new(
         module_id(),
         include_str!("../schema/install.sql"),
         GROUPS,
@@ -109,8 +109,8 @@ pub fn setup() -> spa_control::ModuleSetup {
 
 /// This module's entitlement name.
 #[must_use]
-pub fn module_id() -> spa_types::ModuleId {
-    spa_types::ModuleId::new("ledger")
+pub fn module_id() -> erp_types::ModuleId {
+    erp_types::ModuleId::new("ledger")
         .unwrap_or_else(|_| unreachable!("a literal that satisfies ModuleId"))
 }
 
@@ -118,15 +118,15 @@ pub fn module_id() -> spa_types::ModuleId {
 ///
 /// One entry per name at version 1. When a payload changes, the new version is
 /// declared here with a step function and the old events keep decoding — see
-/// `spa_eventlog::Upcasters`.
+/// `erp_eventlog::Upcasters`.
 #[must_use]
-pub fn upcasters() -> &'static spa_eventlog::Upcasters {
-    static UPCASTERS: std::sync::OnceLock<spa_eventlog::Upcasters> = std::sync::OnceLock::new();
+pub fn upcasters() -> &'static erp_eventlog::Upcasters {
+    static UPCASTERS: std::sync::OnceLock<erp_eventlog::Upcasters> = std::sync::OnceLock::new();
     UPCASTERS.get_or_init(|| {
         AccountEvent::NAMES
             .iter()
             .chain(JournalEntryEvent::NAMES.iter())
-            .fold(spa_eventlog::Upcasters::new(), |u, n| {
+            .fold(erp_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             })
     })

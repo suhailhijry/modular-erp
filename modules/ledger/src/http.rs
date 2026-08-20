@@ -3,15 +3,15 @@
 //! Translation only: the aggregates, the invariant and the read models are the
 //! module; this turns a request into a call and a result into JSON.
 //!
-//! # Why it is in the module and not in `spa-api`
+//! # Why it is in the module and not in `erp-api`
 //!
 //! Because a module you cannot read in one place is not a module. This file used
 //! to live in the composition root, which meant the ledger's routes were written
 //! by something the ledger could not see, and adding an endpoint meant editing
 //! two crates. What made that necessary was the extractors — and those are in
-//! [`spa_web`] now, below every module, so a module can name them.
+//! [`erp_web`] now, below every module, so a module can name them.
 //!
-//! `spa-api` still decides what is *mounted*, which is the part that belongs to
+//! `erp-api` still decides what is *mounted*, which is the part that belongs to
 //! the composition root.
 
 use crate::{AccountKind, BalancedLines, Line};
@@ -19,20 +19,20 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
-use spa_control::CommandError;
-use spa_eventlog::ExecuteError;
-use spa_i18n::{Locale, Localize};
-use spa_types::{CurrencyCode, Timestamp};
+use erp_control::CommandError;
+use erp_eventlog::ExecuteError;
+use erp_i18n::{Locale, Localize};
+use erp_types::{CurrencyCode, Timestamp};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use spa_web::ApiError;
-use spa_web::AppState;
-use spa_web::Problem;
-use spa_web::{Allowed, Language, ManageAccounts, PostEntries, Read};
-use spa_web::{Amount, Json, bad_request, metadata, parse_id, require_module};
-use spa_web::{Consistency, nudge};
+use erp_web::ApiError;
+use erp_web::AppState;
+use erp_web::Problem;
+use erp_web::{Allowed, Language, ManageAccounts, PostEntries, Read};
+use erp_web::{Amount, Json, bad_request, metadata, parse_id, require_module};
+use erp_web::{Consistency, nudge};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -52,7 +52,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
 ///
 /// Its own failures, the failures of the modules it is built on, and everything
 /// any route can produce — the request-level messages, the control plane's and
-/// the event log's, which [`spa_web::CATALOG`] already unions.
+/// the event log's, which [`erp_web::CATALOG`] already unions.
 ///
 /// That list is exhaustive by construction: a route can only surface a message
 /// from a crate this one depends on. Leaving one out is not a compile error and
@@ -60,9 +60,9 @@ pub fn routes() -> OpenApiRouter<AppState> {
 /// the bare code with no sentence in it, which is how this was found.
 ///
 /// A module cannot name its siblings and has no reason to. The complete catalog
-/// is `spa_api::CATALOG`, and `docs/ERRORS.md` comes from that.
-static CATALOG: spa_i18n::Composite =
-    spa_i18n::Composite::new(&[&crate::CATALOG, &spa_web::CATALOG]);
+/// is `erp_api::CATALOG`, and `docs/ERRORS.md` comes from that.
+static CATALOG: erp_i18n::Composite =
+    erp_i18n::Composite::new(&[&crate::CATALOG, &erp_web::CATALOG]);
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -161,7 +161,7 @@ struct TrialBalanceView {
     path = "/v1/ledger/accounts",
     tag = "ledger",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
@@ -213,7 +213,7 @@ async fn list_accounts(
     post,
     path = "/v1/ledger/accounts",
     tag = "ledger",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = NewAccount,
     responses(
         (status = CREATED, description = "Opened."),
@@ -235,7 +235,7 @@ async fn open_account(
     let code = parse_id(&body.code, locale)?;
     let kind: AccountKind = body.kind.parse().map_err(|_| {
         bad_request(
-            spa_web::messages::UNKNOWN_ACCOUNT_KIND,
+            erp_web::messages::UNKNOWN_ACCOUNT_KIND,
             "kind",
             &body.kind,
             locale,
@@ -243,7 +243,7 @@ async fn open_account(
     })?;
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
-            spa_web::messages::UNKNOWN_CURRENCY,
+            erp_web::messages::UNKNOWN_CURRENCY,
             "currency",
             &body.currency,
             locale,
@@ -274,7 +274,7 @@ async fn open_account(
     post,
     path = "/v1/ledger/entries",
     tag = "ledger",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = NewEntry,
     responses(
         (status = OK, description = "Posted, or already posted under this id.", body = EntryPosted),
@@ -328,7 +328,7 @@ async fn post_entry(
 
     Ok(Json(EntryPosted {
         id: body.id,
-        position: committed.at.map(spa_types::LogPosition::get),
+        position: committed.at.map(erp_types::LogPosition::get),
         lines: line_count,
     }))
 }
@@ -360,7 +360,7 @@ struct NewReversal {
     path = "/v1/ledger/entries/{entry}/reversal",
     tag = "ledger",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("entry" = String, Path, description = "The id of the entry being undone."),
     ),
     request_body = NewReversal,
@@ -402,7 +402,7 @@ async fn reverse_entry(
 
     Ok(Json(EntryPosted {
         id: body.id,
-        position: committed.at.map(spa_types::LogPosition::get),
+        position: committed.at.map(erp_types::LogPosition::get),
         // The reversal has exactly the lines the original had. Reporting the
         // count would mean loading it again to say something the client already
         // knows.
@@ -419,7 +419,7 @@ async fn reverse_entry(
     path = "/v1/ledger/trial-balance",
     tag = "ledger",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
@@ -493,7 +493,7 @@ fn ledger_problem(error: &CommandError<crate::LedgerError>, locale: Locale) -> P
 
         // Backpressure. Retryable, and saying so is the difference between a
         // client that backs off and one that hammers.
-        CommandError::Pool(e @ spa_control::PoolError::Overloaded { .. }) => {
+        CommandError::Pool(e @ erp_control::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())
         }
 
@@ -501,14 +501,14 @@ fn ledger_problem(error: &CommandError<crate::LedgerError>, locale: Locale) -> P
         // conflict rather than a capacity problem.
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
-            spa_i18n::Message::new(spa_eventlog::messages::CONCURRENT_MODIFICATION),
+            erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
         ),
 
         other => {
             tracing::error!(error = %other, "ledger command failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                spa_i18n::Message::new(spa_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_control::messages::INTERNAL),
             )
         }
     };
@@ -543,7 +543,7 @@ struct BooksView {
     get,
     path = "/v1/ledger/books",
     tag = "ledger",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, body = BooksView),
         (status = UNAUTHORIZED, body = Problem),
@@ -590,7 +590,7 @@ async fn books(
     put,
     path = "/v1/ledger/books",
     tag = "ledger",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = BooksView,
     responses(
         (status = NO_CONTENT, description = "Closed. Entries dated before it are refused from now on."),
@@ -622,7 +622,7 @@ async fn close_books(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn config_problem(error: &spa_eventlog::ConfigError, locale: Locale) -> Problem {
+fn config_problem(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem {
     tracing::error!(error = %error, "configuration failed");
     Problem::new(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -656,7 +656,7 @@ struct RatesView {
     get,
     path = "/v1/ledger/vat-rates",
     tag = "ledger",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, body = RatesView),
         (status = UNAUTHORIZED, body = Problem),
@@ -699,7 +699,7 @@ async fn vat_rates(
     put,
     path = "/v1/ledger/vat-rates",
     tag = "ledger",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = RatesView,
     responses(
         (status = NO_CONTENT, description = "Set. Applies to the next invoice, not to past ones."),
@@ -720,7 +720,7 @@ async fn set_vat_rates(
     // would charge more tax than the supply. Neither is a rate anywhere.
     if !(0..=10_000).contains(&body.standard) {
         return Err(bad_request(
-            spa_web::messages::UNUSABLE_VAT_RATE,
+            erp_web::messages::UNUSABLE_VAT_RATE,
             "rate",
             &body.standard.to_string(),
             locale,
@@ -732,7 +732,7 @@ async fn set_vat_rates(
         .acquire()
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
-    spa_eventlog::configuration::set(
+    erp_eventlog::configuration::set(
         &mut conn,
         crate::Rates::KEY,
         &crate::Rates {
@@ -828,7 +828,7 @@ struct ChartInstalled {
     post,
     path = "/v1/ledger/chart",
     tag = "ledger",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = InstallChart,
     responses(
         (status = OK, body = ChartInstalled),
@@ -848,7 +848,7 @@ async fn install_chart(
     require_module(&tenant, &crate::module_id(), locale)?;
     let chart = crate::chart(&body.template).ok_or_else(|| {
         bad_request(
-            spa_web::messages::UNKNOWN_CHART,
+            erp_web::messages::UNKNOWN_CHART,
             "chart",
             &body.template,
             locale,
@@ -856,7 +856,7 @@ async fn install_chart(
     })?;
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
-            spa_web::messages::UNKNOWN_CURRENCY,
+            erp_web::messages::UNKNOWN_CURRENCY,
             "currency",
             &body.currency,
             locale,

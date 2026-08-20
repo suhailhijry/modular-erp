@@ -26,7 +26,7 @@
 //! the common case is the one that produces an unexplainable balance.
 
 use ledger::{BalancedLines, Line, Unbalanced};
-use spa_types::{AggregateId, Money};
+use erp_types::{AggregateId, Money};
 
 /// Which ledger accounts a purchase moves.
 ///
@@ -45,8 +45,8 @@ impl PostingAccounts {
     pub const KEY: &'static str = "purchases.posting_accounts";
 
     /// What this tenant has configured, or what ships.
-    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, spa_eventlog::ConfigError> {
-        Ok(spa_eventlog::configuration::get::<Self>(conn, Self::KEY)
+    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, erp_eventlog::ConfigError> {
+        Ok(erp_eventlog::configuration::get::<Self>(conn, Self::KEY)
             .await?
             .map_or_else(Self::conventional, |configured| configured.value))
     }
@@ -134,7 +134,7 @@ fn code(literal: &str) -> AggregateId {
 mod tests {
     use super::*;
     use ledger::VatCategory;
-    use spa_types::CurrencyCode;
+    use erp_types::CurrencyCode;
 
     fn sar() -> CurrencyCode {
         CurrencyCode::new("SAR").unwrap_or_else(|_| unreachable!())

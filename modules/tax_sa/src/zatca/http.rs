@@ -73,7 +73,7 @@ impl Fatoora {
         let client = reqwest::Client::builder()
             .timeout(TIMEOUT)
             .connect_timeout(Duration::from_secs(10))
-            .user_agent(concat!("spa/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("erp/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| Unanswered::Unavailable(e.to_string()))?;
 

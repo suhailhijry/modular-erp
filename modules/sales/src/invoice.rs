@@ -1,8 +1,8 @@
 //! The invoice, as an aggregate.
 
 use serde::{Deserialize, Serialize};
-use spa_eventlog::{Aggregate, DomainEvent};
-use spa_types::{
+use erp_eventlog::{Aggregate, DomainEvent};
+use erp_types::{
     AggregateId, CurrencyCode, DomainName, EventName, Money, SchemaVersion, Timestamp,
 };
 

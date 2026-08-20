@@ -1,0 +1,39 @@
+[package]
+name = "erp-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The background worker: tenant visits, projection and outbox jobs, graceful drain."
+
+[lints]
+workspace = true
+
+[dependencies]
+erp-control = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true }
+ledger = { workspace = true }
+sales = { workspace = true }
+purchases = { workspace = true }
+tax_sa = { workspace = true }
+# For the module catalogue, so `migrator refresh <name>` and the API cannot
+# disagree about which modules exist.
+erp-api = { workspace = true }
+lettre = { workspace = true }
+erp-i18n = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+erp-testkit = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

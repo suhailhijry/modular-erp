@@ -16,7 +16,7 @@
 //! without asking a bookkeeper to reclassify every historic line.
 
 use serde::{Deserialize, Serialize};
-use spa_types::{CurrencyCode, Money};
+use erp_types::{CurrencyCode, Money};
 
 // Defined in `ledger` because `purchases` classifies by the same three
 // categories, and two sibling modules must not depend on each other.
@@ -89,11 +89,11 @@ pub enum TaxError {
     DiscountTooLarge,
 }
 
-impl From<spa_types::MoneyError> for TaxError {
-    fn from(error: spa_types::MoneyError) -> Self {
+impl From<erp_types::MoneyError> for TaxError {
+    fn from(error: erp_types::MoneyError) -> Self {
         match error {
-            spa_types::MoneyError::CurrencyMismatch { .. } => Self::MixedCurrencies,
-            spa_types::MoneyError::Overflow { .. } | spa_types::MoneyError::DivideByZero => {
+            erp_types::MoneyError::CurrencyMismatch { .. } => Self::MixedCurrencies,
+            erp_types::MoneyError::Overflow { .. } | erp_types::MoneyError::DivideByZero => {
                 Self::OutOfRange
             }
         }

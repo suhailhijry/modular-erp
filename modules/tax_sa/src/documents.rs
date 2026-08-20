@@ -11,7 +11,7 @@
 //!
 //! 1. **A projection reads the whole log**, not just its own module's events, so
 //!    subscribing costs nothing.
-//! 2. **[`Upcasters::also`](spa_eventlog::Upcasters::also)** folds `sales`'
+//! 2. **[`Upcasters::also`](erp_eventlog::Upcasters::also)** folds `sales`'
 //!    event history into this module's, so a `sales` event version added next
 //!    year is readable here without a second copy of its chain.
 //! 3. **A projection group is the unit of consistency** (L3), and this builds
@@ -25,9 +25,9 @@
 //! byte-identical, which it has to — the hashes went to a tax authority.
 
 use sales::{InvoiceEvent, InvoiceLine};
-use spa_eventlog::Envelope;
-use spa_projection::{Projection, ProjectionCtx, ProjectionError};
-use spa_types::{CurrencyCode, Money, Timestamp};
+use erp_eventlog::Envelope;
+use erp_projection::{Projection, ProjectionCtx, ProjectionError};
+use erp_types::{CurrencyCode, Money, Timestamp};
 use sqlx::PgConnection;
 
 use crate::projections::TaxSa;
@@ -837,8 +837,8 @@ pub async fn standing(conn: &mut PgConnection, now: Timestamp) -> Result<Standin
 pub async fn documents(
     conn: &mut PgConnection,
     limit: i64,
-    after: Option<&spa_types::Cursor>,
-) -> Result<spa_types::Page<Stored>, sqlx::Error> {
+    after: Option<&erp_types::Cursor>,
+) -> Result<erp_types::Page<Stored>, sqlx::Error> {
     let (issued_at, id) = resume(after)?;
     let numbers = sqlx::query_scalar!(
         r#"SELECT id as "id!" FROM proj_tax_sa.zatca_document
@@ -858,20 +858,20 @@ pub async fn documents(
         }
     }
 
-    Ok(spa_types::Page::of(found, limit, |document| {
-        spa_types::Cursor::over(&[&document.issued_at.to_rfc3339(), &document.number])
+    Ok(erp_types::Page::of(found, limit, |document| {
+        erp_types::Cursor::over(&[&document.issued_at.to_rfc3339(), &document.number])
     }))
 }
 
 /// The `(issued_at, id)` a cursor resumes after. A cursor this build cannot
 /// read is refused, not ignored.
 fn resume(
-    after: Option<&spa_types::Cursor>,
+    after: Option<&erp_types::Cursor>,
 ) -> Result<(Option<Timestamp>, Option<String>), sqlx::Error> {
     let Some(cursor) = after else {
         return Ok((None, None));
     };
-    let malformed = || sqlx::Error::Decode(Box::new(spa_types::NotACursor));
+    let malformed = || sqlx::Error::Decode(Box::new(erp_types::NotACursor));
 
     let issued_at = cursor
         .part(0)

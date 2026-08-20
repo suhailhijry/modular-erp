@@ -5,8 +5,8 @@ against the wrong schema and passes.
 
 | Database | Purpose | Who touches it |
 |---|---|---|
-| `spa_typecheck` | Compile-time target for `sqlx::query!`. Holds every schema — control plane and tenant plane — so macros can be checked. Contains no data. | `just prepare` only |
-| *(per test)* `spa_test_*` | Cloned from a template by `spa-testkit`, one per test, dropped by the next run's sweep. | The test suite |
+| `erp_typecheck` | Compile-time target for `sqlx::query!`. Holds every schema — control plane and tenant plane — so macros can be checked. Contains no data. | `just prepare` only |
+| *(per test)* `erp_test_*` | Cloned from a template by `erp-testkit`, one per test, dropped by the next run's sweep. | The test suite |
 
 There is deliberately **no shared development database**. Anything that needs
 data creates a tenant.
@@ -23,7 +23,7 @@ A query whose SQL no longer matches the committed metadata fails the build.
 just prepare
 ```
 
-which rebuilds `spa_typecheck` from `migrations/` and regenerates `.sqlx/`.
+which rebuilds `erp_typecheck` from `migrations/` and regenerates `.sqlx/`.
 Commit the result — a diff in `.sqlx/` is the reviewable evidence that a schema
 change altered a query's types.
 
@@ -40,7 +40,7 @@ That is the whole thing. No environment setup, no manual export.
 
 ### Where the connection comes from
 
-`spa-testkit` resolves Postgres in this order, first hit wins:
+`erp-testkit` resolves Postgres in this order, first hit wins:
 
 1. `DATABASE_URL` already in the environment
 2. `DATABASE_URL` in a `.env` file, searched from the current directory upward
@@ -73,7 +73,7 @@ have a `.env`, the file is not on the search path from where cargo was invoked.
 ### Leftover databases
 
 Test databases accumulate during a run and are swept at the start of the next
-one — see `spa-testkit`'s module docs for why cleanup works that way. To clear
+one — see `erp-testkit`'s module docs for why cleanup works that way. To clear
 everything this project created:
 
 ```bash

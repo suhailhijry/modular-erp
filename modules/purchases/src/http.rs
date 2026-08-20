@@ -13,20 +13,20 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use ledger::VatCategory;
 use serde::{Deserialize, Serialize};
-use spa_control::CommandError;
-use spa_eventlog::ExecuteError;
-use spa_i18n::{Locale, Localize};
-use spa_types::{CurrencyCode, Timestamp};
+use erp_control::CommandError;
+use erp_eventlog::ExecuteError;
+use erp_i18n::{Locale, Localize};
+use erp_types::{CurrencyCode, Timestamp};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use spa_web::ApiError;
-use spa_web::AppState;
-use spa_web::Problem;
-use spa_web::{After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module};
-use spa_web::{Allowed, Language, PostEntries, Read};
-use spa_web::{Consistency, nudge};
+use erp_web::ApiError;
+use erp_web::AppState;
+use erp_web::Problem;
+use erp_web::{After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module};
+use erp_web::{Allowed, Language, PostEntries, Read};
+use erp_web::{Consistency, nudge};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -43,7 +43,7 @@ const PAGE: i64 = 200;
 ///
 /// Its own failures, the failures of the modules it is built on, and everything
 /// any route can produce — the request-level messages, the control plane's and
-/// the event log's, which [`spa_web::CATALOG`] already unions.
+/// the event log's, which [`erp_web::CATALOG`] already unions.
 ///
 /// That list is exhaustive by construction: a route can only surface a message
 /// from a crate this one depends on. Leaving one out is not a compile error and
@@ -51,9 +51,9 @@ const PAGE: i64 = 200;
 /// the bare code with no sentence in it, which is how this was found.
 ///
 /// A module cannot name its siblings and has no reason to. The complete catalog
-/// is `spa_api::CATALOG`, and `docs/ERRORS.md` comes from that.
-static CATALOG: spa_i18n::Composite =
-    spa_i18n::Composite::new(&[&crate::CATALOG, &ledger::CATALOG, &spa_web::CATALOG]);
+/// is `erp_api::CATALOG`, and `docs/ERRORS.md` comes from that.
+static CATALOG: erp_i18n::Composite =
+    erp_i18n::Composite::new(&[&crate::CATALOG, &ledger::CATALOG, &erp_web::CATALOG]);
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -233,7 +233,7 @@ fn view(summary: crate::BillSummary) -> BillView {
     post,
     path = "/v1/purchases/bills",
     tag = "purchases",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = NewBill,
     responses(
         (status = CREATED, description = "Recorded, or already recorded under this key.", body = Recorded),
@@ -257,7 +257,7 @@ async fn record_bill(
     let id = parse_id(&body.id, locale)?;
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
-            spa_web::messages::UNKNOWN_CURRENCY,
+            erp_web::messages::UNKNOWN_CURRENCY,
             "currency",
             &body.currency,
             locale,
@@ -268,7 +268,7 @@ async fn record_bill(
     for line in body.lines {
         let category: VatCategory = line.vat.parse().map_err(|_| {
             bad_request(
-                spa_web::messages::UNKNOWN_VAT_CATEGORY,
+                erp_web::messages::UNKNOWN_VAT_CATEGORY,
                 "vat",
                 &line.vat,
                 locale,
@@ -277,10 +277,10 @@ async fn record_bill(
         lines.push(crate::BillLine {
             description: line.description,
             account: parse_id(&line.account, locale)?,
-            net: spa_types::Money::from_minor(line.net, currency),
+            net: erp_types::Money::from_minor(line.net, currency),
             category,
             rate_bp: line.vat_rate,
-            tax: spa_types::Money::from_minor(line.tax, currency),
+            tax: erp_types::Money::from_minor(line.tax, currency),
         });
     }
 
@@ -309,7 +309,7 @@ async fn record_bill(
         StatusCode::CREATED,
         Json(Recorded {
             id: body.id,
-            position: committed.at.map(spa_types::LogPosition::get),
+            position: committed.at.map(erp_types::LogPosition::get),
         }),
     ))
 }
@@ -320,7 +320,7 @@ async fn record_bill(
     path = "/v1/purchases/bills/{bill}/payments",
     tag = "purchases",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("bill" = String, Path, description = "Your key for the bill."),
     ),
     request_body = NewBillPayment,
@@ -366,7 +366,7 @@ async fn pay_bill(
 
     Ok(Json(Recorded {
         id: raw.to_owned(),
-        position: committed.at.map(spa_types::LogPosition::get),
+        position: committed.at.map(erp_types::LogPosition::get),
     }))
 }
 
@@ -376,7 +376,7 @@ async fn pay_bill(
     path = "/v1/purchases/bills",
     tag = "purchases",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
@@ -419,7 +419,7 @@ async fn list_bills(
     path = "/v1/purchases/bills/{bill}",
     tag = "purchases",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("bill" = String, Path, description = "Your key for the bill."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
     ),
@@ -456,8 +456,8 @@ async fn get_bill(
 
     let detail = detail.ok_or_else(|| {
         ApiError::NotFound(
-            spa_i18n::Message::new(spa_web::messages::NO_SUCH_BILL)
-                .with("bill", spa_i18n::MessageArg::text(id.to_owned())),
+            erp_i18n::Message::new(erp_web::messages::NO_SUCH_BILL)
+                .with("bill", erp_i18n::MessageArg::text(id.to_owned())),
         )
         .into_problem(locale, &CATALOG)
     })?;
@@ -514,20 +514,20 @@ fn purchase_problem(error: &CommandError<PurchaseError>, locale: Locale) -> Prob
             rejection.message(),
         ),
 
-        CommandError::Pool(e @ spa_control::PoolError::Overloaded { .. }) => {
+        CommandError::Pool(e @ erp_control::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())
         }
 
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
-            spa_i18n::Message::new(spa_eventlog::messages::CONCURRENT_MODIFICATION),
+            erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
         ),
 
         other => {
             tracing::error!(error = %other, "purchases command failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                spa_i18n::Message::new(spa_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_control::messages::INTERNAL),
             )
         }
     };

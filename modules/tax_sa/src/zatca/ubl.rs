@@ -599,7 +599,7 @@ fn monetary_total(out: &mut String, document: &Document) {
     let lines_came_to = amount(document.totals.lines_came_to());
     let taxable = amount(document.totals.net);
     let discounted = amount(document.totals.discount());
-    let zero = amount(spa_types::Money::zero(document.currency));
+    let zero = amount(erp_types::Money::zero(document.currency));
 
     out.push_str("  <cac:LegalMonetaryTotal>\n");
     money(out, 2, "cbc:LineExtensionAmount", &lines_came_to, currency);
@@ -745,7 +745,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::zatca::{Band, Buyer, Kind, Line, Reference, Totals, document_uuid};
     use ledger::VatCategory;
-    use spa_types::{CurrencyCode, Money, Timestamp};
+    use erp_types::{CurrencyCode, Money, Timestamp};
 
     fn sar() -> CurrencyCode {
         CurrencyCode::new("SAR").expect("valid")

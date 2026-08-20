@@ -13,9 +13,9 @@
 //! never claimed without a supplier VAT number to evidence it.
 
 use ledger::{LedgerError, VatCategory};
-use spa_control::{CommandError, TenantDb};
-use spa_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
-use spa_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
+use erp_control::{CommandError, TenantDb};
+use erp_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
+use erp_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
 
 use crate::bill::{Bill, BillEvent, BillLine, Supplier};
 use crate::posting::{PostingAccounts, entry_for_bill, entry_for_payment};
@@ -49,7 +49,7 @@ pub enum PurchaseError {
     #[error("{0} cannot be used as a reference")]
     InvalidReference(String),
     #[error(transparent)]
-    Config(#[from] spa_eventlog::ConfigError),
+    Config(#[from] erp_eventlog::ConfigError),
     #[error(transparent)]
     Unbalanced(#[from] ledger::Unbalanced),
     /// The ledger refused the posting — a missing account, a closed one, or a
@@ -59,10 +59,10 @@ pub enum PurchaseError {
     Ledger(#[from] LedgerError),
 }
 
-impl spa_i18n::Localize for PurchaseError {
-    fn message(&self) -> spa_i18n::Message {
+impl erp_i18n::Localize for PurchaseError {
+    fn message(&self) -> erp_i18n::Message {
         use crate::messages;
-        use spa_i18n::{Message, MessageArg};
+        use erp_i18n::{Message, MessageArg};
         match self {
             Self::NothingOnIt => Message::new(messages::NOTHING_ON_IT),
             Self::NotRecorded(id) => {
@@ -406,7 +406,7 @@ async fn resolve_accounts(
     let accounts = PostingAccounts::resolve(&mut *conn)
         .await
         .map_err(|e| ExecuteError::Rejected(PurchaseError::Config(e)))?;
-    let version = spa_eventlog::configuration::version(&mut *conn)
+    let version = erp_eventlog::configuration::version(&mut *conn)
         .await
         .map_err(|e| ExecuteError::Rejected(PurchaseError::Config(e)))?;
 
@@ -427,7 +427,7 @@ fn rejected(error: PurchaseError) -> CommandError<PurchaseError> {
 
 fn contended(id: &AggregateId) -> CommandError<PurchaseError> {
     ExecuteError::Contended {
-        stream: StreamId::new(<Bill as spa_eventlog::Aggregate>::domain(), id.clone()),
+        stream: StreamId::new(<Bill as erp_eventlog::Aggregate>::domain(), id.clone()),
         attempts: MAX_ATTEMPTS,
     }
     .into()

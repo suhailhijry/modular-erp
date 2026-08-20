@@ -381,7 +381,7 @@ pub(crate) mod tests {
             organization: "روابي للاستشارات".to_owned(),
             branch: "الفرع الرئيسي".to_owned(),
             common_name: "EGS1-886431145".to_owned(),
-            solution: "Spa".to_owned(),
+            solution: "Erp".to_owned(),
             version: "1.0".to_owned(),
             serial: "886431145".to_owned(),
             address: "الرياض 12211".to_owned(),
@@ -489,7 +489,7 @@ pub(crate) mod tests {
         let der = B64.decode(strip(&pem)).expect("base64");
 
         for expected in [
-            "1-Spa|2-1.0|3-886431145", // SN
+            "1-Erp|2-1.0|3-886431145", // SN
             "310122393500003",         // UID
             "1100",                    // title: both kinds
             "Consulting",              // businessCategory

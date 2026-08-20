@@ -1,8 +1,8 @@
 //! The chart of accounts.
 
 use serde::{Deserialize, Serialize};
-use spa_eventlog::{Aggregate, DomainEvent};
-use spa_types::{CurrencyCode, DomainName, EventName, SchemaVersion};
+use erp_eventlog::{Aggregate, DomainEvent};
+use erp_types::{CurrencyCode, DomainName, EventName, SchemaVersion};
 
 /// What an account is for.
 ///

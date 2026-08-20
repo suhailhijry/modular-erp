@@ -1,6 +1,6 @@
 # Architecture
 
-Specification for the SPA multi-tenant ERP backend.
+Specification for the ERP multi-tenant ERP backend.
 
 This document states **decisions**, **laws**, and **contracts**. It is the thing to
 read before writing code and the thing to update when a decision changes. The
@@ -50,7 +50,7 @@ no ambient pool. A query that reads another tenant's ledger cannot be written,
 because no connection is in scope that could serve it.
 
 **The cost to manage:** connections. Two ceilings, measured in
-`spa-control/tests/soak.rs`, not assumed:
+`erp-control/tests/soak.rs`, not assumed:
 
 | quantity | bounded by |
 |---|---|
@@ -139,7 +139,7 @@ things make that true, and they are in the build already:
    when unset. Supabase ships exactly this shape: a pooler connection string and
    a direct one.
 2. **`SET LOCAL`, never `SET`, outside a DDL path.** The projection hot path was
-   already transaction-scoped. `crates/spa-control/tests/pooler.rs` walks every
+   already transaction-scoped. `crates/erp-control/tests/pooler.rs` walks every
    `.rs` and `.sql` in the workspace and fails the build on a session-scoped
    `SET`, a session advisory lock, or a `LISTEN` outside the paths that are
    allowed one.
@@ -373,7 +373,7 @@ turns localization into a rewrite. It also duplicates work: the machine-readable
 code is already required as the `type` field of the RFC 9457 problem response, so
 the localization requirement and the API requirement are the same requirement.
 
-Three consequences specific to Arabic, all mechanised in `spa-i18n`:
+Three consequences specific to Arabic, all mechanised in `erp-i18n`:
 
 - **Six CLDR plural categories**, selected by `n % 100`. `if n == 1` is wrong for
   3 vs 103 vs 11 in a way no reviewer catches.
@@ -749,18 +749,18 @@ same artifact. `origin` lets a form-authored rule render back as its form.
 
 ```
 crates/                                                        ← core: what a tenant cannot disable
-  spa-types       (no deps)    newtypes, Money, NonEmpty — WASM-safe, frontend-shareable
-  spa-i18n        types        message catalogs, locales, the Localize trait
-  spa-eventlog    types        gapless append, load, upcasters, numbering, configuration, outbox
-  spa-projection  eventlog     groups, ProjectionCtx, runner, leases, shadow replay and swap
-  spa-control     eventlog     identities, tenants, entitlements, clusters, TenantDb, fleet
-  spa-worker      control,projection  Job trait, tenant visit loop, cancellation and drain,
+  erp-types       (no deps)    newtypes, Money, NonEmpty — WASM-safe, frontend-shareable
+  erp-i18n        types        message catalogs, locales, the Localize trait
+  erp-eventlog    types        gapless append, load, upcasters, numbering, configuration, outbox
+  erp-projection  eventlog     groups, ProjectionCtx, runner, leases, shadow replay and swap
+  erp-control     eventlog     identities, tenants, entitlements, clusters, TenantDb, fleet
+  erp-worker      control,projection  Job trait, tenant visit loop, cancellation and drain,
                                bin/worker, bin/migrator, bin/reaper
-  spa-web         control      extractors, problem+json, paging, request messages —
+  erp-web         control      extractors, problem+json, paging, request messages —
                                what a module's routes are built from
-  spa-api         web,modules  the core's own routes, the module list, composition root
-  spa-demo        api          the seeded tenant, and bin/demo
-  spa-testkit     all          template-DB fixtures, fault injection, differ
+  erp-api         web,modules  the core's own routes, the module list, composition root
+  erp-demo        api          the seeded tenant, and bin/demo
+  erp-testkit     all          template-DB fixtures, fault injection, differ
 modules/                                                       ← what a tenant chooses
   ledger          core,web     accounts, journal entries, fiscal periods, VAT treatment,
                                charts, the trial-balance invariant, its own routes
@@ -770,10 +770,10 @@ modules/                                                       ← what a tenant
 ```
 
 **A module ships its own routes.** `sales::http::routes()` is a router the sales
-crate owns, and `spa-api` mounts it — which is why `spa-web` exists and sits
+crate owns, and `erp-api` mounts it — which is why `erp-web` exists and sits
 *below* the modules: an extractor a module cannot name is one it cannot use, and
-a module reaching up into `spa-api` for one would close a cycle, because
-`spa-api` names every module. What stays in the composition root is the decision
+a module reaching up into `erp-api` for one would close a cycle, because
+`erp-api` names every module. What stays in the composition root is the decision
 about what is mounted, not the writing of it.
 
 **Core is what a tenant cannot disable**; a module is what they choose. Direction
@@ -808,7 +808,7 @@ each test protects.
 
 **Real Postgres everywhere, never a mock.** A fresh database per test, cloned via
 `CREATE DATABASE … TEMPLATE` from a migrated-and-seeded template. Measured at
-**≈280 ms to acquire** on local Postgres 18 (`spa-testkit`'s own timing test
+**≈280 ms to acquire** on local Postgres 18 (`erp-testkit`'s own timing test
 reprints this per machine). Three of the four defects found in the prototype were
 invisible to any test that mocks the database and unmissable to any test that
 doesn't.

@@ -28,7 +28,7 @@
 //! cannot already change *after* installing it — which, since every account here
 //! is renameable and closeable, is nobody yet.
 
-use spa_i18n::Locale;
+use erp_i18n::Locale;
 
 use crate::account::AccountKind;
 
@@ -382,7 +382,7 @@ mod tests {
         for c in CHARTS {
             for a in c.accounts {
                 assert!(
-                    spa_types::AggregateId::new(a.code).is_ok(),
+                    erp_types::AggregateId::new(a.code).is_ok(),
                     "{}/{}",
                     c.id,
                     a.code

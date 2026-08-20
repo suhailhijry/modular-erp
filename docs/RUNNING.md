@@ -84,9 +84,9 @@ PRIMARY_REPLICA_URL    # reads that tolerate lag; blank or unset means no replic
 PRIMARY_DIRECT_URL     # the route that bypasses a connection pooler — see below
 REDIS_URL              # the shared session cache and invalidation — see below
 SMTP_URL               # the relay; without it nothing sends mail — see below
-SMTP_FROM              # e.g. "SPA <noreply@spa.com>"; required when SMTP_URL is set
+SMTP_FROM              # e.g. "ERP <noreply@erp.com>"; required when SMTP_URL is set
 WORKER_NAME            # for logs; defaults to $HOSTNAME
-RUST_LOG               # e.g. info,spa_worker=debug
+RUST_LOG               # e.g. info,erp_worker=debug
 ```
 
 **`PRIMARY_DIRECT_URL` is only needed once there is a pooler.** Leave it unset
@@ -108,7 +108,7 @@ Set `POOL_STATEMENT_CACHE=0` alongside it unless the pooler is configured to
 handle prepared statements — sqlx prepares by default, and a cached handle
 refers to a statement the next backend never parsed.
 
-`crates/spa-control/tests/pooler.rs` is what keeps this true: it fails the build
+`crates/erp-control/tests/pooler.rs` is what keeps this true: it fails the build
 if a session-scoped `SET`, a session advisory lock, or a `LISTEN` appears
 anywhere outside the DDL paths.
 
@@ -133,7 +133,7 @@ REDIS_URL="rediss://:password@redis.internal:6379/"   # TLS, via the OpenSSL alr
 ```
 
 Redis being unreachable degrades to exactly the behaviour above and says so in
-the log. The one exception is stated in `spa_control::shared`: a logout that
+the log. The one exception is stated in `erp_control::shared`: a logout that
 cannot reach Redis leaves that token usable until the cached entry expires,
 which is why `SESSION_TTL` is one minute and not an hour.
 
@@ -150,7 +150,7 @@ invitation link is a credential.
 ```bash
 SMTP_URL="smtps://user:pass@smtp.example.com:465"                 # implicit TLS
 SMTP_URL="smtp://user:pass@smtp.example.com:587?tls=required"     # STARTTLS
-SMTP_FROM="SPA <noreply@spa.com>"
+SMTP_FROM="ERP <noreply@erp.com>"
 ```
 
 Any relay that speaks SMTP works — a provider, or a Postfix of your own. There is
@@ -194,9 +194,9 @@ sign-in address and the tenant id.
 ## Start the API
 
 ```bash
-CONTROL_DATABASE_URL=postgresql://postgres:postgres@localhost/spa_backend \
-PRIMARY_CLUSTER_URL=postgresql://postgres:postgres@localhost/spa_backend \
-PUBLIC_DOMAIN=spa.test \
+CONTROL_DATABASE_URL=postgresql://postgres:postgres@localhost/erp_backend \
+PRIMARY_CLUSTER_URL=postgresql://postgres:postgres@localhost/erp_backend \
+PUBLIC_DOMAIN=erp.test \
 SEALING_KEY="2026-08:$(openssl rand -hex 32)" \
 cargo run --bin api
 ```
@@ -206,8 +206,8 @@ cargo run --bin api
 Same variables, second terminal:
 
 ```bash
-CONTROL_DATABASE_URL=postgresql://postgres:postgres@localhost/spa_backend \
-PRIMARY_CLUSTER_URL=postgresql://postgres:postgres@localhost/spa_backend \
+CONTROL_DATABASE_URL=postgresql://postgres:postgres@localhost/erp_backend \
+PRIMARY_CLUSTER_URL=postgresql://postgres:postgres@localhost/erp_backend \
 SEALING_KEY="…the same key as the API…" \
 RUST_LOG=info \
 cargo run --bin worker
@@ -223,14 +223,14 @@ Run as many as you like; tenant leases keep two workers off the same tenant.
 
 ## Talking to it
 
-**The tenant is the subdomain.** `demo.spa.test` is one company; there is no
+**The tenant is the subdomain.** `demo.erp.test` is one company; there is no
 tenant in any path. `*.localhost` resolves to loopback in every browser and in
 curl with no `/etc/hosts` editing, so `PUBLIC_DOMAIN=localhost` and a `Host:
 demo.localhost` header is the least-setup option.
 
 ```bash
 API=http://127.0.0.1:8080
-H="Host: demo.spa.test"
+H="Host: demo.erp.test"
 
 TOKEN=$(curl -s -X POST $API/v1/sessions -H "$H" -H 'content-type: application/json' \
   -d '{"handle":"owner@demo.example","password":"correct-horse-battery-staple"}' \

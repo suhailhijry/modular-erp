@@ -57,8 +57,8 @@ pub use projections::{
     Purchases, bill, bills, input_tax, overpaid, projections,
 };
 
-use spa_i18n::StaticCatalog;
-use spa_types::{DomainName, EventName, SchemaVersion};
+use erp_i18n::StaticCatalog;
+use erp_types::{DomainName, EventName, SchemaVersion};
 
 /// This module's messages, in every supported language.
 pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
@@ -69,7 +69,7 @@ pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messag
 /// `modules/ledger/schema/install.sql`.
 pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
     // **The install SQL is schema-relative**, so this is what aims it — the same
-    // thing `ControlPlane::install_schema` and `spa_projection::rebuild_swap` do,
+    // thing `ControlPlane::install_schema` and `erp_projection::rebuild_swap` do,
     // and the reason a rebuild can aim it somewhere else.
     sqlx::raw_sql(
         "CREATE SCHEMA IF NOT EXISTS proj_purchases; SET search_path TO proj_purchases, public;",
@@ -91,11 +91,11 @@ pub async fn install(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
 pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 
 /// This module's projection group name, for `?consistent_after=`.
-pub const GROUP_NAME: &str = <Purchases as spa_projection::ProjectionGroup>::NAME;
+pub const GROUP_NAME: &str = <Purchases as erp_projection::ProjectionGroup>::NAME;
 
 const GROUPS: &[(&str, &str)] = &[(
-    <Purchases as spa_projection::ProjectionGroup>::NAME,
-    <Purchases as spa_projection::ProjectionGroup>::SCHEMA,
+    <Purchases as erp_projection::ProjectionGroup>::NAME,
+    <Purchases as erp_projection::ProjectionGroup>::SCHEMA,
 )];
 
 /// What a tenant enabling this module needs installed.
@@ -103,8 +103,8 @@ const GROUPS: &[(&str, &str)] = &[(
 /// **Requires the ledger**, and for the same reason sales does: a bill that
 /// cannot post is a filing cabinet, not accounting.
 #[must_use]
-pub fn setup() -> spa_control::ModuleSetup {
-    spa_control::ModuleSetup::new(
+pub fn setup() -> erp_control::ModuleSetup {
+    erp_control::ModuleSetup::new(
         module_id(),
         include_str!("../schema/install.sql"),
         GROUPS,
@@ -115,19 +115,19 @@ pub fn setup() -> spa_control::ModuleSetup {
 
 /// This module's entitlement name.
 #[must_use]
-pub fn module_id() -> spa_types::ModuleId {
-    spa_types::ModuleId::new("purchases")
+pub fn module_id() -> erp_types::ModuleId {
+    erp_types::ModuleId::new("purchases")
         .unwrap_or_else(|_| unreachable!("a literal that satisfies ModuleId"))
 }
 
 /// Every event shape this build can read.
 #[must_use]
-pub fn upcasters() -> &'static spa_eventlog::Upcasters {
-    static UPCASTERS: std::sync::OnceLock<spa_eventlog::Upcasters> = std::sync::OnceLock::new();
+pub fn upcasters() -> &'static erp_eventlog::Upcasters {
+    static UPCASTERS: std::sync::OnceLock<erp_eventlog::Upcasters> = std::sync::OnceLock::new();
     UPCASTERS.get_or_init(|| {
         BillEvent::NAMES
             .iter()
-            .fold(spa_eventlog::Upcasters::new(), |u, n| {
+            .fold(erp_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             })
     })

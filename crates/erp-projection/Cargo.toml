@@ -1,0 +1,27 @@
+[package]
+name = "erp-projection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The projection runtime: grouped, isolated, and reproducible on replay."
+
+[lints]
+workspace = true
+
+[dependencies]
+erp-types = { workspace = true, features = ["sqlx"] }
+erp-eventlog = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+erp-testkit = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

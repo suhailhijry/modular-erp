@@ -1,6 +1,6 @@
 //! The ledger's messages, in every supported language.
 
-use spa_i18n::{Locale, MessageCode, Template};
+use erp_i18n::{Locale, MessageCode, Template};
 
 pub const ACCOUNT_EXISTS: MessageCode = MessageCode::new("ledger.account_exists");
 pub const NO_SUCH_ACCOUNT: MessageCode = MessageCode::new("ledger.no_such_account");

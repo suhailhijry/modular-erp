@@ -1,0 +1,28 @@
+[package]
+name = "erp-eventlog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The tenant event log: gapless, commit-ordered append and ordered reads."
+
+[lints]
+workspace = true
+
+[dependencies]
+erp-types = { workspace = true, features = ["sqlx"] }
+erp-i18n = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+openssl = { workspace = true }
+hex = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+erp-testkit = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

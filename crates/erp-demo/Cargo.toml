@@ -1,0 +1,38 @@
+[package]
+name = "erp-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A tenant with every module enabled and filled with plausible data."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The third composition root, after `bin/api` and `bin/worker` — and the only
+# one that has to know *every* module, because "every module enabled" is what it
+# is for.
+ledger = { workspace = true }
+sales = { workspace = true }
+purchases = { workspace = true }
+tax_sa = { workspace = true }
+erp-api = { workspace = true }
+erp-control = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true }
+
+axum = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+erp-testkit = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tower = { workspace = true }

@@ -7,20 +7,20 @@ use crate::{Customer, Draft, DraftLine, Receipt, SalesError, VatCategory};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use spa_control::CommandError;
-use spa_eventlog::ExecuteError;
-use spa_i18n::{Locale, Localize};
-use spa_types::{CurrencyCode, Timestamp};
+use erp_control::CommandError;
+use erp_eventlog::ExecuteError;
+use erp_i18n::{Locale, Localize};
+use erp_types::{CurrencyCode, Timestamp};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use spa_web::ApiError;
-use spa_web::AppState;
-use spa_web::Problem;
-use spa_web::{After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module};
-use spa_web::{Allowed, Language, ManageAccounts, PostEntries, Read};
-use spa_web::{Consistency, nudge};
+use erp_web::ApiError;
+use erp_web::AppState;
+use erp_web::Problem;
+use erp_web::{After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module};
+use erp_web::{Allowed, Language, ManageAccounts, PostEntries, Read};
+use erp_web::{Consistency, nudge};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -30,19 +30,19 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(credit_note))
         // Typed on purpose. The store underneath is key-value; this is not, so
         // a value that reaches it has already been through the type that gives
-        // it meaning. See `spa_eventlog::config`.
+        // it meaning. See `erp_eventlog::config`.
         .routes(routes!(posting_accounts, set_posting_accounts))
 }
 
 /// How many invoices a page returns when the caller does not say, and the most
-/// it will give when they ask for more. Paged from there — see [`spa_web::After`].
+/// it will give when they ask for more. Paged from there — see [`erp_web::After`].
 const PAGE: i64 = 200;
 
 /// **What this module's routes can answer with.**
 ///
 /// Its own failures, the failures of the modules it is built on, and everything
 /// any route can produce — the request-level messages, the control plane's and
-/// the event log's, which [`spa_web::CATALOG`] already unions.
+/// the event log's, which [`erp_web::CATALOG`] already unions.
 ///
 /// That list is exhaustive by construction: a route can only surface a message
 /// from a crate this one depends on. Leaving one out is not a compile error and
@@ -50,9 +50,9 @@ const PAGE: i64 = 200;
 /// the bare code with no sentence in it, which is how this was found.
 ///
 /// A module cannot name its siblings and has no reason to. The complete catalog
-/// is `spa_api::CATALOG`, and `docs/ERRORS.md` comes from that.
-static CATALOG: spa_i18n::Composite =
-    spa_i18n::Composite::new(&[&crate::CATALOG, &ledger::CATALOG, &spa_web::CATALOG]);
+/// is `erp_api::CATALOG`, and `docs/ERRORS.md` comes from that.
+static CATALOG: erp_i18n::Composite =
+    erp_i18n::Composite::new(&[&crate::CATALOG, &ledger::CATALOG, &erp_web::CATALOG]);
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -337,7 +337,7 @@ fn view(summary: crate::InvoiceSummary) -> InvoiceView {
     post,
     path = "/v1/sales/invoices",
     tag = "sales",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = NewInvoice,
     responses(
         (status = CREATED, description = "Issued, or already issued under this key.", body = Issued),
@@ -361,7 +361,7 @@ async fn issue_invoice(
     let id = parse_id(&body.id, locale)?;
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
-            spa_web::messages::UNKNOWN_CURRENCY,
+            erp_web::messages::UNKNOWN_CURRENCY,
             "currency",
             &body.currency,
             locale,
@@ -372,7 +372,7 @@ async fn issue_invoice(
     for line in body.lines {
         let category: VatCategory = line.vat.parse().map_err(|_| {
             bad_request(
-                spa_web::messages::UNKNOWN_VAT_CATEGORY,
+                erp_web::messages::UNKNOWN_VAT_CATEGORY,
                 "vat",
                 &line.vat,
                 locale,
@@ -380,7 +380,7 @@ async fn issue_invoice(
         })?;
         lines.push(DraftLine {
             description: line.description,
-            net: spa_types::Money::from_minor(line.net, currency),
+            net: erp_types::Money::from_minor(line.net, currency),
             category,
         });
     }
@@ -389,7 +389,7 @@ async fn issue_invoice(
     for discount in body.discounts {
         let category: VatCategory = discount.vat.parse().map_err(|_| {
             bad_request(
-                spa_web::messages::UNKNOWN_VAT_CATEGORY,
+                erp_web::messages::UNKNOWN_VAT_CATEGORY,
                 "vat",
                 &discount.vat,
                 locale,
@@ -397,7 +397,7 @@ async fn issue_invoice(
         })?;
         discounts.push(crate::DraftDiscount {
             reason: discount.reason.trim().to_owned(),
-            amount: spa_types::Money::from_minor(discount.amount, currency),
+            amount: erp_types::Money::from_minor(discount.amount, currency),
             category,
         });
     }
@@ -438,7 +438,7 @@ async fn issue_invoice(
         Json(Issued {
             id: body.id,
             number: committed.number,
-            position: committed.committed.at.map(spa_types::LogPosition::get),
+            position: committed.committed.at.map(erp_types::LogPosition::get),
         }),
     ))
 }
@@ -453,7 +453,7 @@ async fn issue_invoice(
     path = "/v1/sales/invoices/{invoice}/payments",
     tag = "sales",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("invoice" = String, Path, description = "The invoice number."),
     ),
     request_body = NewPayment,
@@ -499,7 +499,7 @@ async fn record_payment(
 
     Ok(Json(Recorded {
         id: raw.to_owned(),
-        position: committed.at.map(spa_types::LogPosition::get),
+        position: committed.at.map(erp_types::LogPosition::get),
     }))
 }
 
@@ -515,7 +515,7 @@ async fn record_payment(
     path = "/v1/sales/invoices/{invoice}/credit-note",
     tag = "sales",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("invoice" = String, Path, description = "The invoice number being credited."),
     ),
     request_body = NewCreditNote,
@@ -558,7 +558,7 @@ async fn credit_note(
     Ok(Json(Issued {
         id: body.id,
         number: committed.number,
-        position: committed.committed.at.map(spa_types::LogPosition::get),
+        position: committed.committed.at.map(erp_types::LogPosition::get),
     }))
 }
 
@@ -570,7 +570,7 @@ async fn credit_note(
     path = "/v1/sales/invoices",
     tag = "sales",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
     responses(
@@ -613,7 +613,7 @@ async fn list_invoices(
     path = "/v1/sales/invoices/{invoice}",
     tag = "sales",
     params(
-        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
         ("invoice" = String, Path, description = "The invoice number."),
         ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
     ),
@@ -651,8 +651,8 @@ async fn get_invoice(
 
     let detail = detail.ok_or_else(|| {
         ApiError::NotFound(
-            spa_i18n::Message::new(spa_web::messages::NO_SUCH_INVOICE)
-                .with("invoice", spa_i18n::MessageArg::text(id.to_owned())),
+            erp_i18n::Message::new(erp_web::messages::NO_SUCH_INVOICE)
+                .with("invoice", erp_i18n::MessageArg::text(id.to_owned())),
         )
         .into_problem(locale, &CATALOG)
     })?;
@@ -725,7 +725,7 @@ struct ConfiguredAccounts {
     get,
     path = "/v1/sales/posting-accounts",
     tag = "sales",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     responses(
         (status = OK, body = ConfiguredAccounts),
         (status = UNAUTHORIZED, body = Problem),
@@ -745,7 +745,7 @@ async fn posting_accounts(
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
-    let stored = spa_eventlog::configuration::get::<crate::PostingAccounts>(
+    let stored = erp_eventlog::configuration::get::<crate::PostingAccounts>(
         &mut conn,
         crate::PostingAccounts::KEY,
     )
@@ -783,7 +783,7 @@ async fn posting_accounts(
     put,
     path = "/v1/sales/posting-accounts",
     tag = "sales",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.spa.com`. Every path below is about that tenant."),),
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = AccountsView,
     responses(
         (status = NO_CONTENT, description = "Stored. Applies to the next invoice, not to past ones."),
@@ -836,14 +836,14 @@ async fn set_posting_accounts(
 
         if !usable {
             return Err(ApiError::BadRequest(
-                spa_i18n::Message::new(ledger::messages::NO_SUCH_ACCOUNT)
-                    .with("code", spa_i18n::MessageArg::text(code.as_str().to_owned())),
+                erp_i18n::Message::new(ledger::messages::NO_SUCH_ACCOUNT)
+                    .with("code", erp_i18n::MessageArg::text(code.as_str().to_owned())),
             )
             .into_problem(locale, &CATALOG));
         }
     }
 
-    spa_eventlog::configuration::set(
+    erp_eventlog::configuration::set(
         &mut conn,
         crate::PostingAccounts::KEY,
         &accounts,
@@ -855,7 +855,7 @@ async fn set_posting_accounts(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn config_problem(error: &spa_eventlog::ConfigError, locale: Locale) -> Problem {
+fn config_problem(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem {
     tracing::error!(error = %error, "configuration failed");
     Problem::new(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -893,20 +893,20 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
             rejection.message(),
         ),
 
-        CommandError::Pool(e @ spa_control::PoolError::Overloaded { .. }) => {
+        CommandError::Pool(e @ erp_control::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())
         }
 
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
-            spa_i18n::Message::new(spa_eventlog::messages::CONCURRENT_MODIFICATION),
+            erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
         ),
 
         other => {
             tracing::error!(error = %other, "sales command failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                spa_i18n::Message::new(spa_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_control::messages::INTERNAL),
             )
         }
     };
