@@ -56,6 +56,32 @@ CREATE TABLE IF NOT EXISTS taxpayer (
     recorded_at   TIMESTAMPTZ NOT NULL
 );
 
+-- **How far this tenant has got with ZATCA onboarding.**
+--
+-- One row, `id = 'self'`, for the same reason `taxpayer` has one: one solution
+-- per tenant, so one certificate in force at a time.
+--
+-- This table exists because law L7 says reads are served by projections. The
+-- status endpoint used to answer by loading the `Onboarding` aggregate, which
+-- made the event log a query engine for one screen — and made that screen's cost
+-- grow with the number of certificates ever issued, since a renewal appends
+-- rather than replaces.
+--
+-- **Not the certificate, and not the key.** Whether a secret exists is a
+-- different question from what it is, and only the first is answerable here.
+CREATE TABLE IF NOT EXISTS onboarding (
+    id          TEXT PRIMARY KEY,
+    -- `compliance` or `production`. The furthest stage reached, not the last
+    -- event: a production CSID does not stop the compliance one having existed.
+    stage       TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    serial      TEXT NOT NULL,
+    -- As the certificate states it, in its own format. See `onboarded.rs`.
+    not_after   TEXT NOT NULL,
+    issued_at   TIMESTAMPTZ NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL
+);
+
 -- **The document ZATCA sees, and where it stands with them.**
 --
 -- One row per invoice and per credit note, built from `sales` events by this

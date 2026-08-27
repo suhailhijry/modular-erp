@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 erp-control = { workspace = true }
-erp-tenant = { workspace = true }
 erp-eventlog = { workspace = true }
 erp-projection = { workspace = true }
 erp-i18n = { workspace = true }

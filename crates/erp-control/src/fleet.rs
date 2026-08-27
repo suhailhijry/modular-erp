@@ -75,6 +75,28 @@ impl FleetPlan {
     }
 }
 
+/// The oldest tenant-plane migration this build will upgrade from.
+///
+/// **Bump this to the previous major's final migration at each major release.**
+/// Between majors it does not move.
+///
+/// D17 supports the current major and the one before it, and upgrades are
+/// sequential: N-2 reaches N by passing through N-1. That is not tidiness. A
+/// single hop is the only upgrade path that can be exhaustively tested, and
+/// skip-version support multiplies the matrix by the length of the support
+/// window to save a customer one afternoon.
+///
+/// Zero while the product is pre-1.0 and every migration is still in the first
+/// major — nothing is below it yet, which is exactly why now is the cheap moment
+/// to put the check in.
+pub const MIGRATION_FLOOR: i64 = 0;
+
+/// What to install before retrying, named in the refusal.
+///
+/// Changes with [`MIGRATION_FLOOR`], and exists so an operator is never told
+/// "too old" without being told what to do about it.
+pub const UPGRADE_FROM_RELEASE: &str = "the previous major release";
+
 impl ControlPlane {
     /// The migration version this build expects every tenant to be at.
     #[must_use]
@@ -192,6 +214,15 @@ impl ControlPlane {
             version,
         };
 
+        // A tenant below the floor is refused **before** anything is applied.
+        if apply && let Some(at) = below_floor(schema.version, MIGRATION_FLOOR) {
+            return Err(AccessError::TooOldToUpgrade {
+                at,
+                floor: MIGRATION_FLOOR,
+                install_first: UPGRADE_FROM_RELEASE,
+            });
+        }
+
         if apply && !schema.is_current(latest) {
             // By value, then dropped — `Migrator::run` is generic over
             // `Acquire<'_>` and a borrow of it here would put that bound in
@@ -256,6 +287,23 @@ impl ControlPlane {
 /// was not built by `provision` — reported rather than treated as version zero,
 /// because "never migrated" and "built by something else" want different
 /// answers from an operator.
+/// The version to refuse on, or `None` if this tenant may be upgraded.
+///
+/// Separate from [`MIGRATION_FLOOR`] so the rule can be tested against a floor
+/// chosen by the test. Testing it only against the current constant would mean
+/// the check went untested for every release where the constant is zero — which
+/// is every release of the first major, which is now.
+///
+/// `None` in means a database that has never been migrated. That is fresh
+/// provisioning, not a skipped upgrade, and is always allowed — a floor that
+/// blocked new tenants would be found in production, by a signup.
+const fn below_floor(version: Option<i64>, floor: i64) -> Option<i64> {
+    match version {
+        Some(at) if at < floor => Some(at),
+        _ => None,
+    }
+}
+
 async fn applied_version(conn: &mut PgConnection) -> Result<Option<i64>, AccessError> {
     let has_table: Option<bool> =
         sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations') IS NOT NULL")
@@ -275,6 +323,51 @@ async fn applied_version(conn: &mut PgConnection) -> Result<Option<i64>, AccessE
 
 #[cfg(test)]
 mod tests {
+    use super::{MIGRATION_FLOOR, below_floor};
+
+    /// **A tenant more than one major behind is refused, not migrated.**
+    ///
+    /// D17: upgrades are sequential. `migrate_fleet` used to take a tenant from
+    /// migration 2 to migration 42 in one hop, silently, because
+    /// `FleetPlan::is_current` is an equality check against the top and nothing
+    /// bounded the bottom.
+    #[test]
+    fn a_tenant_below_the_floor_is_refused() {
+        assert_eq!(below_floor(Some(2), 31), Some(2), "two majors back");
+        assert_eq!(
+            below_floor(Some(30), 31),
+            Some(30),
+            "one short of the floor"
+        );
+    }
+
+    /// **At the floor is allowed.** The floor is the oldest supported, not the
+    /// oldest refused — an off-by-one here would refuse exactly the tenants the
+    /// support policy promises to upgrade.
+    #[test]
+    fn a_tenant_at_or_above_the_floor_is_allowed() {
+        assert_eq!(below_floor(Some(31), 31), None);
+        assert_eq!(below_floor(Some(42), 31), None);
+    }
+
+    /// **A database that has never been migrated is fresh provisioning.**
+    ///
+    /// Not a skipped upgrade. A floor that also blocked new tenants would be
+    /// discovered in production, by a signup failing.
+    #[test]
+    fn a_never_migrated_database_is_not_too_old() {
+        assert_eq!(below_floor(None, 31), None);
+        assert_eq!(below_floor(None, 0), None);
+    }
+
+    /// **A floor of zero refuses nothing**, which is the pre-1.0 state and is
+    /// why the rule above is tested against a chosen floor rather than this one.
+    #[test]
+    fn the_current_floor_refuses_nothing_yet() {
+        assert_eq!(MIGRATION_FLOOR, 0, "bump this at the first major release");
+        assert_eq!(below_floor(Some(0), MIGRATION_FLOOR), None);
+    }
+
     use super::*;
 
     #[test]

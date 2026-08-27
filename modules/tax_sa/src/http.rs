@@ -1017,7 +1017,9 @@ struct OnboardingView {
     reached: Vec<&'static str>,
     /// Whether it can clear and report real invoices.
     live: bool,
-    environment: Option<&'static str>,
+    // `String` rather than `&'static str` because it now comes from the read
+    // model rather than from an enum in memory. Same JSON either way.
+    environment: Option<String>,
     /// The certificate currently on record.
     serial: Option<String>,
     #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
@@ -1178,26 +1180,22 @@ async fn onboarding_status(
 
     let mut conn = tenant
         .db
-        .acquire()
+        .read()
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
-    let loaded = erp_eventlog::load::<crate::Onboarding>(
-        &mut conn,
-        &crate::onboarding_id(),
-        crate::upcasters(),
-    )
-    .await
-    .map_err(|e| {
-        // Reading an aggregate is ours to get right, so a failure here is not
-        // something a caller can act on.
-        tracing::error!(error = %e, "loading the onboarding aggregate failed");
-        Problem::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
-            locale,
-            &CATALOG,
-        )
-    })?;
+    let onboarded = crate::projections::onboarding(&mut conn)
+        .await
+        .map_err(|e| {
+            // A read model this module owns failing is ours to get right, so it
+            // is not something a caller can act on.
+            tracing::error!(error = %e, "reading the onboarding read model failed");
+            Problem::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
+                locale,
+                &CATALOG,
+            )
+        })?;
     drop(conn);
 
     Ok(Json(OnboardingView {
@@ -1206,12 +1204,9 @@ async fn onboarding_status(
             .into_iter()
             .map(crate::zatca::onboarding::Stage::as_str)
             .collect(),
-        environment: loaded
-            .aggregate
-            .environment
-            .map(crate::zatca::csr::Environment::as_str),
-        serial: loaded.aggregate.serial,
-        issued_at: loaded.aggregate.issued_at,
+        environment: onboarded.as_ref().map(|o| o.environment.clone()),
+        serial: onboarded.as_ref().map(|o| o.serial.clone()),
+        issued_at: onboarded.as_ref().map(|o| o.issued_at),
     }))
 }
 

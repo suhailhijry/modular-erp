@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT stage as \"stage!\", environment as \"environment!\", serial as \"serial!\",\n                  not_after as \"not_after!\", issued_at as \"issued_at!\"\n             FROM proj_tax_sa.onboarding\n            WHERE id = 'self'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stage!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "stage"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "environment!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "environment"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "serial!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "serial"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "not_after!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "not_after"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "issued_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "issued_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "df142499349bded978e2d34885a306525b085e03073bd1124f19f246a0b3e280"
+}

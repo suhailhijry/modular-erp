@@ -22,6 +22,20 @@ check: fmt-check lint test
 test:
     cargo test --workspace
 
+# Redis for the test suite, on the port the tests actually default to.
+#
+# `crates/erp-control/tests/shared.rs` **refuses** rather than skipping when
+# there is no Redis — that is law L6, and it is the right call: a suite that
+# quietly covers three fewer things than it claims is worse than one that stops.
+#
+# The port matters. `compose.yaml` publishes Redis on 56379 so a full stack does
+# not collide with a Redis someone already runs, but the tests default to
+# `redis://127.0.0.1/`, which is 6379. `docker compose up -d redis` therefore
+# leaves four tests failing, which is a confusing way to learn about a port
+# number. This recipe is the one that matches.
+redis:
+    REDIS_PORT=6379 docker compose up -d redis
+
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 

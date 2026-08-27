@@ -5383,6 +5383,13 @@ async fn a_certificate_is_checked_against_the_key_it_is_meant_for() {
         "{body}"
     );
 
+    // The status endpoint reads `proj_tax_sa.onboarding` rather than loading the
+    // aggregate (L7), so the projection has to have run — which in production is
+    // the worker and here is this call. `reached` comes from the sealed secrets
+    // and would answer without it; `environment` would come back null, which is
+    // exactly how this assertion caught the change.
+    fixture.project_tax(tenant).await;
+
     let (status, body, _) = fixture
         .send(
             bearer(Request::get("/v1/tax_sa/zatca/onboarding"))

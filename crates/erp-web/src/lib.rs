@@ -20,8 +20,8 @@
 //!
 //! # The catalog
 //!
-//! [`CATALOG`] renders **this crate's messages, the control plane's and the
-//! event log's** — everything an [`ApiError`] can carry, which is what makes
+//! [`CATALOG`] renders **this crate's messages, the control plane's (which
+//! carries `erp-tenant`'s) and the event log's** — everything an [`ApiError`] can carry, which is what makes
 //! `ApiError::into_problem` a complete function rather than one that degrades
 //! to a bare code for half its inputs.
 //!
@@ -59,7 +59,6 @@ pub static REQUEST_CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES
 /// say. See the crate docs.
 pub static CATALOG: Composite = Composite::new(&[
     &REQUEST_CATALOG,
-    &erp_tenant::CATALOG,
     &erp_control::CATALOG,
     &erp_eventlog::CATALOG,
 ]);

@@ -1,0 +1,144 @@
+# Everything `just check` runs, on hardware nobody has configured by hand.
+#
+# The point of this file is not that it runs the tests — a developer already
+# does. It is that it runs them against a database and a cache that were created
+# thirty seconds ago, which is the only way to find the setup steps that live in
+# somebody's shell history instead of in the repository.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push supersedes the first. Nobody reads the results of a commit that
+# has already been replaced.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on a warning here as well as in `just lint`, so a warning in a build
+  # script or a dependency's cfg is not invisible until someone looks.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      # Pinned to the version `compose.yaml` runs. A test suite that passes on
+      # 18.3 and is never run on it again is not a gate.
+      postgres:
+        image: postgres:18.3
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+      # Not optional. `crates/erp-control/tests/shared.rs` **refuses** rather
+      # than skipping when Redis is absent — that is law L6, and it means a
+      # runner without this service fails four tests rather than quietly
+      # covering three fewer things than the badge claims.
+      redis:
+        image: redis:8-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 6379:6379
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost/postgres
+      REDIS_URL: redis://127.0.0.1/
+      # The committed `.sqlx` is what the build must compile against. Pointing
+      # the macros at the live database instead would let a stale checkout pass
+      # here and fail on a machine without one.
+      SQLX_OFFLINE: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rust-toolchain.toml` pins the channel and components, so there is
+      # nothing to state twice.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install psql
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client
+
+      # fmt, then clippy, then the suite — the order that fails fastest.
+      # Ignored tests stay ignored: the soak test, the rebuild benchmark, and
+      # the ZATCA sandbox tests, which need a real taxpayer certificate.
+      - name: just check
+        run: just check
+
+  # Separate, because it needs `sqlx-cli` and answers a different question:
+  # not "does this build" but "is the committed offline data what these
+  # migrations would produce". A stale `.sqlx` builds fine right up until
+  # someone regenerates it.
+  offline-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:18.3
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost/postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: offline-data
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install psql
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client
+
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features postgres,rustls --locked
+
+      - name: just prepare
+        run: just prepare
+
+      - name: The committed offline data is what these migrations produce
+        run: |
+          if ! git diff --exit-code --stat .sqlx; then
+            echo "::error::.sqlx is out of date. Run 'just prepare' and commit the diff."
+            exit 1
+          fi

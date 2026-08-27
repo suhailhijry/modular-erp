@@ -6,6 +6,7 @@ use erp_types::{CurrencyCode, Money, Timestamp};
 use sqlx::PgConnection;
 
 use crate::filing::FilingEvent;
+use crate::onboarded::OnboardingEvent;
 
 /// Filed returns — one group, and a small one.
 ///
@@ -187,6 +188,78 @@ impl Projection for Outcomes {
 
 /// Every projection this module contributes.
 #[must_use]
+/// **How far onboarding has got**, so the status endpoint need not load an
+/// aggregate to answer (law L7).
+///
+/// A renewal appends another `CsidIssued` rather than replacing the last, so the
+/// aggregate grows without bound while the answer stays one row. `stage` keeps
+/// the furthest reached rather than the most recent, because a production
+/// certificate does not un-issue the compliance one.
+#[derive(Debug)]
+pub struct Onboardings;
+
+#[async_trait::async_trait]
+impl Projection for Onboardings {
+    type Group = TaxSa;
+
+    fn name(&self) -> &'static str {
+        "onboarding"
+    }
+
+    async fn apply(
+        &self,
+        ctx: &ProjectionCtx<'_>,
+        envelope: &Envelope,
+        conn: &mut PgConnection,
+    ) -> Result<(), ProjectionError> {
+        if !OnboardingEvent::NAMES.contains(&envelope.event_name.as_str()) {
+            return Ok(());
+        }
+
+        let OnboardingEvent::CsidIssued {
+            stage,
+            environment,
+            serial,
+            not_after,
+            at,
+            ..
+        } = ctx
+            .decode::<OnboardingEvent>(envelope)
+            .map_err(|source| ProjectionError::Decode {
+                event_name: envelope.event_name.as_str().to_owned(),
+                position: envelope.position,
+                source,
+            })?;
+
+        // `GREATEST` on the stage keeps the furthest reached. The two values
+        // order correctly as text — `compliance` < `production` — which is
+        // luck, so the CHECK on the column is what stops a third stage relying
+        // on it silently.
+        sqlx::query(
+            "INSERT INTO onboarding
+                 (id, stage, environment, serial, not_after, issued_at, recorded_at)
+             VALUES ('self', $1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE
+                SET stage       = GREATEST(onboarding.stage, EXCLUDED.stage),
+                    environment = EXCLUDED.environment,
+                    serial      = EXCLUDED.serial,
+                    not_after   = EXCLUDED.not_after,
+                    issued_at   = EXCLUDED.issued_at,
+                    recorded_at = EXCLUDED.recorded_at",
+        )
+        .bind(stage.as_str())
+        .bind(environment.as_str())
+        .bind(serial)
+        .bind(not_after)
+        .bind(at)
+        .bind(ctx.event_time())
+        .execute(&mut *conn)
+        .await?;
+
+        Ok(())
+    }
+}
+
 pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = TaxSa>>> {
     vec![
         std::sync::Arc::new(FiledReturns),
@@ -197,6 +270,7 @@ pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = TaxSa>>> {
         std::sync::Arc::new(crate::documents::Taxpayers),
         std::sync::Arc::new(crate::documents::ZatcaDocuments),
         std::sync::Arc::new(Outcomes),
+        std::sync::Arc::new(Onboardings),
     ]
 }
 
@@ -301,4 +375,37 @@ async fn signed(
     .await?;
 
     Ok(())
+}
+
+/// What onboarding has reached, as one row.
+#[derive(Debug, Clone)]
+pub struct Onboarded {
+    pub stage: String,
+    pub environment: String,
+    pub serial: String,
+    pub not_after: String,
+    pub issued_at: Timestamp,
+}
+
+/// The onboarding row, or `None` before any certificate has been issued.
+///
+/// This is what the status endpoint reads. It used to load the `Onboarding`
+/// aggregate instead, which made the log a query engine for one screen (L7).
+pub async fn onboarding(conn: &mut PgConnection) -> Result<Option<Onboarded>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"SELECT stage as "stage!", environment as "environment!", serial as "serial!",
+                  not_after as "not_after!", issued_at as "issued_at!"
+             FROM proj_tax_sa.onboarding
+            WHERE id = 'self'"#,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(row.map(|r| Onboarded {
+        stage: r.stage,
+        environment: r.environment,
+        serial: r.serial,
+        not_after: r.not_after,
+        issued_at: r.issued_at,
+    }))
 }

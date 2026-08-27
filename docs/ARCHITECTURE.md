@@ -35,7 +35,7 @@ one means changing this document first.
 | D14 | Background work claims tenants by **per-visit lease**; idle tenants are throttled by `next_visit_at` | Accepted — see §1.14 |
 | D15 | A tenant is a deployable unit; three tiers — shared fleet, managed instance, self-hosted — run the same binary | Accepted — **partly implemented**: modules no longer link the fleet directly; `erp-web` still does, see §1.15 |
 | D16 | The control plane is **reached, never reaching**. Tenants initiate every exchange. | Accepted — **not implemented**, see §1.16 |
-| D17 | Two majors supported; upgrades are **sequential only**, enforced by a migration floor | Accepted — floor not yet implemented, see §1.17 |
+| D17 | Two majors supported; upgrades are **sequential only**, enforced by a migration floor | Accepted — see §1.17 |
 | D18 | Source-available under BSL 1.1 with no Additional Use Grant; production use is sold | Accepted — see §1.18 |
 
 ### 1.1 One database per tenant (D1)
@@ -696,12 +696,27 @@ permanently stranding 100 from a tailer reading `WHERE position > checkpoint`.
 This is rare under light load, certain under contention, and silently breaks
 replay because live and replay observe different sets.
 
-**Mechanism:** a transaction-scoped advisory lock per tenant around the append.
-Writes within a tenant are already largely serialized by aggregate contention, so
-the cost is negligible. The lock must be transaction-scoped (`pg_advisory_xact_lock`)
-to survive PgBouncer.
+**Mechanism:** a single-row counter, `event_log_position`, read and advanced by
+`UPDATE … RETURNING` inside the appending transaction. The row lock that `UPDATE`
+takes means a second appender cannot obtain a position until the first has
+committed, which makes position order equal commit order. Because the counter is
+ordinary transactional data rather than a sequence, a rollback **returns** the
+number instead of burning it — so positions are gapless as well as ordered.
+
+There is no advisory lock, and an earlier draft of this section wrongly said
+there was. A sequence plus `pg_advisory_xact_lock` would also give commit
+ordering, but it leaves a hole wherever a transaction rolls back, and then the
+contiguity check below could only ever be a warning rather than an integrity
+assertion. It is also one more thing a transaction pooler has to be reasoned
+about (§1.1.0.1); the counter needs no such reasoning, because a row lock is
+transaction-scoped by construction.
+
+The cost is real and bounded: appends within one tenant serialize, and the lock
+is held from the append until the caller's transaction ends — so **append last**.
 
 **Asserted by:** a concurrent-append test, plus a continuous contiguity check.
+`crates/erp-control/tests/pooler.rs` separately refuses a session-scoped advisory
+lock anywhere outside the test harness.
 
 ### L2 — Projections are pure functions of the event stream
 
@@ -770,7 +785,30 @@ mechanism, not a query engine.
 
 ### L8 — Every mutation is idempotent under retry
 
-Enforced at the edge by a required `Idempotency-Key`, and in projections by L4.
+**Mechanism:** every mutation's identity comes from the **caller**, never from
+the handler. An invoice carries the key the client sent, a payment carries the
+payer's or bank's reference, a chart install names the chart. A retry therefore
+carries the same identity as the attempt it repeats, and the log's
+`UNIQUE (stream_domain, stream_id, sequence)` refuses the second write — so the
+duplicate is stopped by the database rather than by a convention. In projections
+the guarantee comes from L4 instead.
+
+An earlier draft of this section said the enforcement was a required
+`Idempotency-Key` header. It never was, and on inspection it should not be: a
+header buys nothing without a store of keys and prior responses beside it, and
+that store would exist to reconstruct a property the design already has for free.
+`docs/IMPLEMENTATION.md` had reached the same conclusion — *"the ledger's
+mutations take client-chosen ids, so both are already idempotent — this may turn
+out to be unnecessary"* — and this records the decision rather than leaving it as
+a deferral that reads like an omission.
+
+**Asserted by:** the per-endpoint repeat tests — `installing_a_chart_twice_changes_nothing`,
+`the_same_supplier_invoice_cannot_be_recorded_twice`, `opening_the_same_code_twice_is_refused`,
+`recording_the_same_verdict_twice_writes_nothing`, `an_entry_cannot_be_reversed_twice` —
+and by `crates/erp-api/tests/idempotence.rs`, which refuses a write path that
+mints its own identity. That is the failure mode: a handler that generates an id
+makes its own retries indistinguishable from new requests, and for a payment that
+means taking the money twice.
 
 ---
 

@@ -199,19 +199,17 @@ impl Invariant for CertificateExpiry {
         &self,
         db: &erp_control::TenantDb,
     ) -> Result<Vec<Finding>, erp_worker::BoxError> {
-        let mut conn = db.acquire().await?;
-        let loaded = erp_eventlog::load::<tax_sa::Onboarding>(
-            &mut conn,
-            &tax_sa::onboarding_id(),
-            tax_sa::upcasters(),
-        )
-        .await?;
+        // The read model, not the aggregate (L7). It also costs one row rather
+        // than every certificate ever issued, and a renewal appends.
+        let mut conn = db.read().await?;
+        let onboarded = tax_sa::onboarding(&mut conn).await?;
         drop(conn);
 
         // Never onboarded: nothing to expire, and not a finding.
-        let Some(not_after) = loaded.aggregate.not_after.as_deref() else {
+        let Some(onboarded) = onboarded else {
             return Ok(Vec::new());
         };
+        let not_after = onboarded.not_after.as_str();
         let Some(expires) = certificate_time(not_after) else {
             return Ok(vec![Finding::new(
                 "zatca_certificate_expiry",
@@ -440,22 +438,25 @@ fn zatca_jobs(sealing: &erp_eventlog::SealingKey) -> Vec<Arc<dyn erp_worker::Job
     ]
 }
 
-/// Which ZATCA a tenant onboarded into, from the log.
+/// Which ZATCA a tenant onboarded into.
 ///
 /// `None` when they have not onboarded at all, which is most tenants most of
 /// the time and is why this is not an error.
+///
+/// Read from the projection rather than the log (L7). The stored value is
+/// re-parsed rather than trusted: it was written by this system, but a value
+/// that no longer names an environment is a bad migration, and law L6 says that
+/// stops rather than degrades.
 async fn zatca_environment(
     db: &erp_control::TenantDb,
 ) -> Result<Option<tax_sa::zatca::csr::Environment>, erp_worker::BoxError> {
-    let mut conn = db.acquire().await?;
-    let loaded = erp_eventlog::load::<tax_sa::Onboarding>(
-        &mut conn,
-        &tax_sa::onboarding_id(),
-        tax_sa::upcasters(),
-    )
-    .await?;
+    let mut conn = db.read().await?;
+    let onboarded = tax_sa::onboarding(&mut conn).await?;
     drop(conn);
-    Ok(loaded.aggregate.environment)
+
+    onboarded
+        .map(|o| o.environment.parse().map_err(erp_worker::BoxError::from))
+        .transpose()
 }
 
 /// **Every module's projections, in one list.**

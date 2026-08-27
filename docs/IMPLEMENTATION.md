@@ -218,8 +218,10 @@ Built only where the ledger produced a second consumer.
       a module must not depend on `erp-worker` and the kernel must not know what
       a ZATCA document is. A trait with two of its three methods implemented
       somewhere else describes nothing)*
-- [ ] `Idempotency-Key` *(the ledger's mutations take client-chosen ids, so both
-      are already idempotent — this may turn out to be unnecessary)*
+- [x] `Idempotency-Key` — **decided against**, see architecture L8. Mutations take
+      client-chosen ids and the log's uniqueness constraint refuses the repeat, so
+      a header plus a key/response store would rebuild a property the design
+      already has. `erp-api/tests/idempotence.rs` enforces what makes it true.
 - [ ] `ETag`/`If-Match` *(no update-in-place endpoint yet)*
 - [x] `?consistent_after=<position>` — read your own write, with the write
       nudging the worker so the wait is a claim cycle rather than the idle backoff
@@ -573,7 +575,28 @@ machinery is where the next silent bug lives. Two of them have already been foun
 this way (the ZATCA sweeps had no caller; `ON DELETE SET NULL` on `audit_entry`
 was unreachable from the day it was written).
 
-### 2. There is no CI
+### 2. ~~There is no CI~~ — done, with one job still missing
+
+`.github/workflows/check.yml`: `just check` against Postgres 18.3 and Redis 8 as
+service containers, and a second job that runs `just prepare` and fails if
+`.sqlx` moved. Verified the way it needed to be — the whole suite against a
+**freshly created empty Postgres**, which is what a runner gets and which is the
+only way to find setup that lives in a shell history rather than the repository.
+705 passed there, identical to local.
+
+Redis is a required service, not an optional one: `shared.rs` refuses rather
+than skipping when it is absent (L6), so a runner without it fails four tests
+instead of quietly covering less than the badge claims.
+
+**Still missing:** the job D17 actually wants — upgrading a realistic N-1
+database on every build. It needs a seeded corpus at the previous major, and
+there is no previous major yet (`MIGRATION_FLOOR` is 0 for all of the first).
+Build the corpus at the first major release, not before.
+
+The original finding follows.
+
+#### The original finding
+
 
 No `.github`, no `.gitlab-ci.yml`, nothing. `just check` exists and runs
 `fmt-check`, `clippy -D warnings` and `cargo test --workspace`; a person has to
@@ -610,7 +633,22 @@ assertion; dropping a projection from the group empties its witness table; and a
 `clock_timestamp()` in either the `tax_sa` or `purchases` insert is caught by the
 differ (7 documents and 4 bills respectively).
 
-### 4. Nothing says how to deploy this, or how to get a tenant back
+### 4. ~~Nothing says how to deploy this, or how to get a tenant back~~ — half done
+
+**Getting a tenant back** is done and is a test, not prose:
+`crates/erp-control/tests/restore.rs` dumps a tenant, destroys it, restores it,
+and compares the log row for row. A second test pins the failure an operator
+actually hits — the two planes restored to different points, where *neither*
+direction reports an error and one of them silently loses events.
+`docs/RUNNING.md` documents the procedure those tests execute.
+
+**Still open:** deployment beyond compose, and Postgres failover. Neither is a
+test, and neither should be claimed until it is rehearsed the same way.
+
+The original finding follows.
+
+#### The original finding
+
 
 The target is 2,000–5,000 tenants self-managed on Hetzner. The repository has no
 container image, no unit files, no scheduling for `bin/reaper` or `bin/migrator`
@@ -652,7 +690,23 @@ Renewal is a five-year deadline with a sixty-day warning and no automation
 possible, because it needs a human with an OTP. That is written down here so it
 is a known limitation rather than a surprise in 2031.
 
-### 7. Sequential upgrades are a policy with nothing enforcing them
+### 7. ~~Sequential upgrades are a policy with nothing enforcing them~~ — done
+
+Was: `FleetPlan::is_current` bounded the top and nothing bounded the bottom, so
+`migrate_fleet` would take a tenant from migration 2 to 42 in one hop. Now
+`MIGRATION_FLOOR` plus `below_floor` refuse it, and the error names the release
+to install first. The predicate is separate from the constant so the rule is
+tested against a chosen floor — testing it against the current constant would
+prove nothing while it is zero, which it is for all of the first major.
+
+Also done in the same pass: L1's documented mechanism corrected (it described an
+advisory lock the code deliberately does not use), L7 enforced and its two
+violations fixed, and L8 corrected to the mechanism that actually holds.
+
+The original finding follows.
+
+#### The original finding
+
 
 D17 says upgrades are sequential and that we support two majors. Nothing in the
 tree refuses a skip. Checked:

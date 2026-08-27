@@ -62,6 +62,21 @@ migration or module-schema change, or `cargo` fails with
 
 Databases and credentials come from `.env` — see [DATABASE_SETUP.md](DATABASE_SETUP.md).
 
+```bash
+just redis
+```
+
+**The test suite needs a Redis.** `crates/erp-control/tests/shared.rs` refuses
+rather than skipping when there is none — that is law L6, and it is deliberate: a
+suite that quietly covers three fewer things than it claims is worse than one
+that stops and says so.
+
+Note the port. `compose.yaml` publishes Redis on **56379**, so a full stack does
+not collide with a Redis already running on the machine, but the tests default to
+`redis://127.0.0.1/` — which is **6379**. So `docker compose up -d redis` leaves
+four tests failing, and `just redis` is the one that matches. Either that or set
+`REDIS_URL` to whatever you are running.
+
 ## The three processes
 
 | | what it does | needs |
@@ -365,6 +380,78 @@ SELECT id, status, icv, signed_at FROM proj_tax_sa.zatca_document ORDER BY icv;
 
 A projection stopped behind the log is a group that hit something it could not
 apply — the worker logs it and stops that group rather than skipping the event.
+
+## Backup, and getting a tenant back
+
+**The procedure below is executed by `crates/erp-control/tests/restore.rs` on
+every run.** A backup nobody has restored is not a backup, and under D15 a failed
+restore happens on infrastructure we cannot reach — so this is a test rather than
+a promise.
+
+### What to back up
+
+Two planes, and they are not independent:
+
+| | why |
+|---|---|
+| The control database | the tenant registry, identities, memberships, entitlements. Without it a tenant database has no route to it. |
+| Every tenant database | the event log above all — it is append-only, so nothing else can reconstruct it. |
+
+Projections *could* be skipped, since L2 makes them pure functions of the log and
+`migrator refresh <module>` rebuilds them. Don't. A rebuild runs at roughly four
+thousand events a second (`erp-projection/tests/rebuild_throughput.rs`), so a
+tenant with a few million events costs a quarter of an hour to save backing up
+tables `pg_dump` would have compressed anyway. Keep the option for the day a
+backup turns out to be corrupt, not for the day it turns out to be large.
+
+```bash
+pg_dump --format=custom --no-owner --no-privileges --file control.dump "$CONTROL_DATABASE_URL"
+```
+
+Per tenant, with the database name from `SELECT slug, database_name FROM tenant`:
+
+```bash
+pg_dump --format=custom --no-owner --no-privileges --file "$SLUG.dump" "$CLUSTER_URL/$DATABASE"
+```
+
+### Restoring
+
+`pg_restore` needs the database to exist and be empty:
+
+```bash
+psql "$CLUSTER_URL/postgres" -c "CREATE DATABASE \"$DATABASE\""
+```
+
+```bash
+pg_restore --no-owner --no-privileges --dbname "$CLUSTER_URL/$DATABASE" "$SLUG.dump"
+```
+
+### The part that goes wrong
+
+**Restore both planes to the same point, and check the tenant is enterable
+afterwards.** A restore that stops at "the database is back" has not finished.
+
+The two planes are backed up separately, so they can be restored to different
+points, and *neither direction reports an error*:
+
+- **Control plane older than the tenant.** The database exists, complete and
+  intact, and there is no route to it. `enter` refuses with the same message it
+  gives for a tenant that never existed, because §1.9 requires that a stranger
+  cannot tell those apart — so the log says "no such tenant" about a tenant whose
+  data is sitting on disk. Asserted by
+  `a_tenant_database_without_its_control_row_is_unreachable`.
+- **Control plane newer than the tenant.** The tenant is reachable and has
+  silently lost every event after the tenant backup. Projections rebuilt from it
+  will be internally consistent and wrong, which is worse than an error.
+
+After any restore:
+
+```bash
+cargo run --bin migrator -- survey
+```
+
+A tenant that comes back below `MIGRATION_FLOOR` is refused rather than migrated
+in one hop — that is D17, and an old backup is exactly the case it exists for.
 
 ## Starting over
 

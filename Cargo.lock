@@ -670,7 +670,6 @@ dependencies = [
  "erp-eventlog",
  "erp-i18n",
  "erp-projection",
- "erp-tenant",
  "erp-types",
  "serde",
  "serde_json",

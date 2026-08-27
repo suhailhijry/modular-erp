@@ -48,7 +48,7 @@ pub use erp_tenant::{
     Access, Budget, Capability, CommandError, Conn, EnabledModules, Lane, ModuleSetup, PoolError,
     Role, TenantDb, Tx, UnknownRole,
 };
-pub use fleet::{EventVersions, FleetPlan, TenantSchema};
+pub use fleet::{EventVersions, FleetPlan, MIGRATION_FLOOR, TenantSchema, UPGRADE_FROM_RELEASE};
 pub use invitations::{
     Accepted, INVITATION_LIFETIME, Invitation, InvitationError, PendingInvitation,
 };
@@ -61,10 +61,18 @@ pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
 pub use pools::{ClusterRegistry, PoolConfig, TenantPools};
 pub use provision::SignedUp as ProvisionedTenant;
 
-use erp_i18n::{Localize, Message, MessageArg, StaticCatalog};
+use erp_i18n::{Composite, Localize, Message, MessageArg, StaticCatalog};
 
-/// This crate's messages, in every supported language.
-pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
+/// Only the codes declared in this crate.
+static OWN_CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
+
+/// Everything a control-plane failure can say, in every supported language.
+///
+/// Composed rather than a single table because `PoolError` moved to `erp-tenant`
+/// with `TenantDb` (D15), and it still renders as `OVERLOADED`. A catalog that
+/// covered only this crate's own codes would leave that error as a bare code —
+/// which is what `tests/localization.rs` refuses.
+pub static CATALOG: Composite = Composite::new(&[&OWN_CATALOG, &erp_tenant::CATALOG]);
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -117,6 +125,24 @@ pub enum AccessError {
     Database(#[from] sqlx::Error),
     #[error("stored data is invalid: {0}")]
     Corrupt(String),
+    /// The tenant is further behind than this build will upgrade from.
+    ///
+    /// D17: two majors, and upgrades are **sequential**. A build that will
+    /// migrate from anything would be a build whose upgrade path was never
+    /// tested — the matrix grows with the length of the support window, and
+    /// only a single hop can be exhaustively covered.
+    ///
+    /// Carries the release to install first, because an operator told "too old"
+    /// with no next step will guess, and guessing is what this refuses.
+    #[error(
+        "this tenant is at migration {at}, below the floor of {floor} this build \
+         upgrades from; install {install_first} first (D17: upgrades are sequential)"
+    )]
+    TooOldToUpgrade {
+        at: i64,
+        floor: i64,
+        install_first: &'static str,
+    },
     /// Every cluster is full, draining, or offline.
     ///
     /// An operational condition, not a user error: someone needs to bring
@@ -1519,7 +1545,15 @@ impl Localize for AccessError {
             Self::Auth(e) => e.message(),
             // A database failure or corrupt row is never described to a user.
             // They get "something went wrong"; the detail goes to the log.
-            Self::Database(_) | Self::Corrupt(_) => Message::new(messages::INTERNAL),
+            //
+            // `TooOldToUpgrade` is here for a different reason: it cannot reach a
+            // request at all. Only `migrate_fleet` produces it, and its audience
+            // is an operator reading `Display`, which names the release to
+            // install. Giving it a user-facing code would be inventing an
+            // audience it does not have.
+            Self::Database(_) | Self::Corrupt(_) | Self::TooOldToUpgrade { .. } => {
+                Message::new(messages::INTERNAL)
+            }
         }
     }
 }

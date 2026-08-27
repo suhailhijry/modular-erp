@@ -67,7 +67,10 @@ pub use documents::{
 };
 pub use filing::{Filing, FilingEvent};
 pub use onboarded::{Onboarding, OnboardingEvent, onboarding_id};
-pub use projections::{FiledReturn, FiledReturns, Outcomes, TaxSa, filed, projections};
+pub use projections::{
+    FiledReturn, FiledReturns, Onboarded, Onboardings, Outcomes, TaxSa, filed, onboarding,
+    projections,
+};
 pub use report::{Band, Return, Side, Sides, vat_return};
 pub use submit::{SignedOff, SweepError, Swept, sign_pending, submit_pending};
 pub use taxpayer::{Registration, Taxpayer, TaxpayerEvent};
