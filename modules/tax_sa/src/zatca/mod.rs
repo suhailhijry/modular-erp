@@ -55,9 +55,9 @@ pub mod signing;
 pub mod ubl;
 pub mod wire;
 
+use erp_types::{CurrencyCode, Money, Timestamp};
 use ledger::VatCategory;
 use serde::{Deserialize, Serialize};
-use erp_types::{CurrencyCode, Money, Timestamp};
 use uuid::Uuid;
 
 pub use chain::Link;

@@ -25,8 +25,8 @@
 //! filed — see `modules/sales/schema/install.sql` on the boundary case that
 //! forced it.
 
-use ledger::VatCategory;
 use erp_types::{CurrencyCode, Money, Timestamp};
+use ledger::VatCategory;
 
 /// One rate band, on one side of the return.
 #[derive(Debug, Clone, PartialEq, Eq)]

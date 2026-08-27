@@ -19,9 +19,9 @@
 //! document stays pending and the next sweep tries again. See
 //! [`zatca::wire::Unanswered`](crate::zatca::wire::Unanswered).
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{Aggregate, DomainEvent};
 use erp_types::{DomainName, EventName, SchemaVersion, Timestamp};
+use serde::{Deserialize, Serialize};
 
 use crate::zatca::wire::Remark;
 

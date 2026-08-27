@@ -1,9 +1,9 @@
 //! The purchases module's read models.
 
-use ledger::VatCategory;
 use erp_eventlog::Envelope;
 use erp_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
 use erp_types::{CurrencyCode, Cursor, Money, Page, Timestamp};
+use ledger::VatCategory;
 use sqlx::PgConnection;
 
 use crate::bill::BillEvent;

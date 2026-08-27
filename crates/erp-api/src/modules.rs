@@ -18,7 +18,6 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde::{Deserialize, Serialize};
 use erp_control::{Actor, ModuleSetup};
 use erp_i18n::{Locale, Message, MessageArg};
 use erp_web::ApiError;
@@ -26,6 +25,7 @@ use erp_web::AppState;
 use erp_web::Json;
 use erp_web::Problem;
 use erp_web::{Allowed, Language, ManageTenant, Read};
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;

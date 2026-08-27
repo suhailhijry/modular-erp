@@ -1,7 +1,7 @@
 //! What a stored event looks like on the way out.
 
-use serde::{Deserialize, Serialize};
 use erp_types::{EventName, LogPosition, SchemaVersion, Sequence, StreamId, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// Context recorded alongside an event: who caused it, and under what
 /// configuration.

@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{
     Aggregate, Decision, DeliveryError, Dispatcher, DomainEvent, Effect, EffectHandler,
     EnqueueError, ExecuteError, Metadata, PendingEffect, RetryPolicy, Upcasters, append_events,
@@ -23,6 +22,7 @@ use erp_eventlog::{
 };
 use erp_testkit::{Schema, Template, TestDb};
 use erp_types::{AggregateId, DomainName, EffectKind, EventName, SchemaVersion, Sequence};
+use serde::{Deserialize, Serialize};
 
 static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
 

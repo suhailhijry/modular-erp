@@ -12,13 +12,13 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{DomainEvent, Envelope, Metadata, NewEvent, Upcasters, append, read_since};
 use erp_projection::{
     Projection, ProjectionCtx, ProjectionError, ProjectionGroup, ensure_group_schema, run_to_head,
 };
 use erp_testkit::{Schema, Template, TestDb};
 use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Sequence, StreamId};
+use serde::{Deserialize, Serialize};
 use sqlx::PgConnection;
 
 static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);

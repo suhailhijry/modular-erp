@@ -44,10 +44,10 @@
 //! except by onboarding again with a fresh OTP. A key stored before a call that
 //! fails is an orphan that the next attempt overwrites.
 
-use serde::{Deserialize, Serialize};
 use erp_control::TenantDb;
 use erp_eventlog::{Metadata, SealingKey};
 use erp_types::Timestamp;
+use serde::{Deserialize, Serialize};
 
 use base64::Engine as _;
 

@@ -744,8 +744,8 @@ fn escaped(out: &mut String, value: &str, field: &'static str) -> Result<(), Not
 pub(crate) mod tests {
     use super::*;
     use crate::zatca::{Band, Buyer, Kind, Line, Reference, Totals, document_uuid};
-    use ledger::VatCategory;
     use erp_types::{CurrencyCode, Money, Timestamp};
+    use ledger::VatCategory;
 
     fn sar() -> CurrencyCode {
         CurrencyCode::new("SAR").expect("valid")

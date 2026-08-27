@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "Supplier bills and the input-tax side of a Saudi VAT return."
 
 [lints]

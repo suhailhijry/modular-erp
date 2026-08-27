@@ -15,9 +15,9 @@
 //! The OTP appears in neither. It is the taxpayer's proof of who they are for
 //! about an hour, and recording it would be recording a credential.
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{Aggregate, DomainEvent};
 use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
+use serde::{Deserialize, Serialize};
 
 use crate::zatca::csr::Environment;
 use crate::zatca::onboarding::Stage;

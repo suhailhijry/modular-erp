@@ -10,10 +10,6 @@
 
 use std::sync::Arc;
 
-use ledger::{
-    AccountKind, BalancedLines, Ledger, LedgerError, Line, account_balances, close_account,
-    imbalances, open_account, post_entry, projections, rename_account, trial_balance,
-};
 use erp_control::{
     Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
 };
@@ -21,6 +17,10 @@ use erp_eventlog::{ExecuteError, Metadata};
 use erp_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head};
 use erp_testkit::{Schema, TestDb};
 use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
+use ledger::{
+    AccountKind, BalancedLines, Ledger, LedgerError, Line, account_balances, close_account,
+    imbalances, open_account, post_entry, projections, rename_account, trial_balance,
+};
 
 static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
 static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);

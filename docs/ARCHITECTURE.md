@@ -1,6 +1,6 @@
 # Architecture
 
-Specification for the ERP multi-tenant ERP backend.
+Specification for the ERP multi-tenant backend.
 
 This document states **decisions**, **laws**, and **contracts**. It is the thing to
 read before writing code and the thing to update when a decision changes. The
@@ -33,6 +33,10 @@ one means changing this document first.
 | D12 | Errors are message codes plus typed arguments, never sentences. Arabic is a first-class target. | Accepted — see §1.12 |
 | D13 | Clusters are control-plane data; placement is by concurrently-active tenants | Accepted — see §1.13 |
 | D14 | Background work claims tenants by **per-visit lease**; idle tenants are throttled by `next_visit_at` | Accepted — see §1.14 |
+| D15 | A tenant is a deployable unit; three tiers — shared fleet, managed instance, self-hosted — run the same binary | Accepted — see §1.15 |
+| D16 | The control plane is **reached, never reaching**. Tenants initiate every exchange. | Accepted — see §1.16 |
+| D17 | Two majors supported; upgrades are **sequential only**, enforced by a migration floor | Accepted — floor not yet implemented, see §1.17 |
+| D18 | Source-available under BSL 1.1 with no Additional Use Grant; production use is sold | Accepted — see §1.18 |
 
 ### 1.1 One database per tenant (D1)
 
@@ -441,6 +445,188 @@ than the mechanism, and nothing downstream changes.
 Background access is its own entry path (`enter_for_maintenance`). It takes no
 identity — which is the safety argument, since a request handler always has one
 and so cannot reach it by accident — and is fixed to the background lane.
+
+### 1.15 The tenant is a deployable unit (D15)
+
+D1 put each tenant in its own database. This extends the same reasoning one
+level out: a tenant is a **deployment**, and the platform ships in three tiers
+that differ in topology and in who holds the credentials — never in code.
+
+| tier | who runs it | database | sold as |
+|---|---|---|---|
+| **Shared fleet** | us | tenant DB on a shared cluster (D1, D13) | subscription |
+| **Managed instance** | us, one stack per tenant | the tenant's own Postgres | subscription |
+| **Self-hosted** | the customer | theirs, on their infrastructure | enterprise licence (D18) |
+
+This is the control-plane/data-plane split the industry calls BYOC, and its
+load-bearing property is the one to hold onto: **only orchestration metadata
+crosses the boundary. Application data never does.** A tier-3 tenant's ledger
+is not readable by us, by design, and that is the thing being sold.
+
+**Why the shared fleet survives.** Dedicated costs 8–33× more per tenant in
+infrastructure — roughly €0.15/tenant/month across a shared fleet against
+€1.20–4.90 for a dedicated stack, and Hetzner repriced the relevant lines
+upward by 113–175% in June 2026. The margin still works, but 5,000
+independently deployed stacks is 5,000 things to patch, back up and upgrade.
+The long tail stays shared. Dedicated is sold to tenants who ask for it, which
+in the first market means anyone under SAMA scrutiny or holding data they are
+required to keep in their own control.
+
+**What this forecloses.** The tenant runtime may not contain fleet management,
+cluster placement, or any other tenant's credentials — a binary that ships to a
+customer's own cloud cannot carry the map of everybody else's. That is D11's
+argument (the kernel holds no business domain) applied to the runtime: the
+tenant binary holds no *fleet*. Enforced the way `tests/pooler.rs` enforces its
+rules — by refusing to link, not by review.
+
+**What this costs.** A routing layer that resolves a tenant to a live endpoint,
+which static nginx cannot do; and a provisioner. Terraform is the wrong tool for
+the second — it is built for infrastructure that changes rarely, by humans, in a
+repo, and a tenant provisions on signup, thousands of times, each with its own
+state file and a multi-minute apply. `provision.rs` already holds this logic
+pointed at `CREATE DATABASE`; pointing it at a cloud API is the smaller change.
+Terraform stays for *our* infrastructure.
+
+### 1.16 The control plane is reached, never reaching (D16)
+
+Every exchange between a tenant and the control plane is initiated **by the
+tenant**. There is no path in the other direction, and this is not a default to
+be relaxed later.
+
+**Why the obvious direction is wrong.** A control plane that reaches into a
+tenant needs inbound access to that customer's private network. The customer
+who chose tier 3 chose it precisely to withhold that. It fails security review,
+it fails at the first corporate firewall, and it couples every tenant's
+availability to ours — forfeiting the one property that makes the tier worth
+selling: **tenants keep serving when the control plane is down.**
+
+| crosses | never crosses |
+|---|---|
+| licence state, entitlements | event payloads |
+| running version, health beacon | projection contents |
+| update availability | tenant database credentials (tier 3) |
+| aggregated billing counters | anything a tenant's users typed |
+
+**The consequence for sessions is real and must not be waved at.** Sessions are
+validated against the control database today, deliberately: *a stale membership
+for five seconds is survivable, a stale logout is not*. A tier-2 or tier-3
+tenant cannot make that call per request without a hop that D16 forbids. So the
+control plane issues signed tokens the tenant verifies locally, and revocation
+travels as an invalidation broadcast — the mechanism `shared.rs` already carries
+for cache agreement between nodes. The blast radius of a failed logout becomes
+the token lifetime, which is the bound `SESSION_TTL` already documents and is
+deliberately short for that reason and no other.
+
+**The phone-home protocol is the most stable contract in the system**, more
+stable than the public API. It is how a customer is told they must upgrade
+(D17). A protocol that breaks across its own support window destroys the lever
+at the exact moment it is needed, so it versions independently and changes
+almost never.
+
+### 1.17 Two majors, sequential only, enforced by a floor (D17)
+
+We support the current major and the one before it. Upgrades are **sequential**:
+N-2 reaches N by passing through N-1. No skips, ever.
+
+The reason is not tidiness. Sequential means every upgrade path that will ever
+run in the field is a **single hop**, and a single hop is the only thing that
+can be exhaustively tested. Skip-version support multiplies the test matrix by
+the length of the support window and buys a customer one saved afternoon.
+
+**A policy is not a guarantee until something refuses.** `FleetPlan::is_current`
+compares `version == Some(latest)` — an upper bound, and only an upper bound.
+Nothing in the tree stops `migrate_fleet` taking a tenant from migration 0002 to
+0042 in one hop. The missing half is a floor:
+
+```rust
+/// The oldest migration this build will upgrade from. Bumped to the previous
+/// major's final migration at each major release.
+const MIGRATION_FLOOR: i64 = …;
+```
+
+A tenant below the floor is refused, and **the refusal names the release to
+install first** — an operator who reads "too old" with no next step will guess,
+and guessing is the failure this decision exists to prevent. `None` — never
+migrated — is fresh provisioning and always allowed; the floor constrains
+existing installations only.
+
+**The support window bounds builds, not events.** Upcasters are forever. `upcast.rs`
+states the constraint — *the bytes written in 2026 are the bytes read in 2030* —
+and dropping a `v1→v2` step because v1 left support corrupts every log that still
+contains a v1 event, which is all of them, permanently. Asserted by a test that
+fails if any registered event name loses a step in its chain.
+
+**Why this guarantee is cheap here, and would not be elsewhere.** An upgrade can
+touch exactly three things:
+
+| surface | exposure |
+|---|---|
+| Event log | **Immune.** Append-only by trigger; interpretation moves, bytes do not. |
+| Projections | **Disposable.** L2 makes them pure functions of the log — drop and rebuild rather than migrate. |
+| Control plane | Ordinary schema migration, ordinary risk. |
+
+In a conventional ERP the middle row is both the largest surface and where
+upgrades corrupt data. Here it is throwaway, and the irreplaceable row is the one
+that structurally cannot be migrated.
+
+L3 pays for itself again: a group owns its schema *and* its checkpoint, so an
+upgrade touching only `ledger` rebuilds only `ledger` from position 0 while every
+other group keeps serving. The zero-downtime form is to build the new schema
+alongside, catch it up, and swap `search_path`.
+
+**Rebuild time is the upgrade window**, and it scales with log length rather than
+tenant size. For a five-year-old tenant that is the binding constraint, and for a
+self-hosted one it cannot be measured in advance. Instrument rebuild throughput
+now, while logs are short.
+
+**Two obligations follow.** CI must upgrade a *realistic* N-1 database, never an
+empty one — the classic failure is a migration clean against a fresh schema that
+breaks on a `NOT NULL` added where five years of rows hold nulls. And backup
+before upgrade is enforced by the migrator, not documented: a failed upgrade on
+tier-3 infrastructure cannot be fixed remotely, by anyone, ever.
+
+### 1.18 Source-available; production use is sold (D18)
+
+The source is published under the **Business Source License 1.1** with the
+Additional Use Grant set to `None`, converting to Apache 2.0 four years after
+each version's release. Reading, auditing, modifying and evaluating are free.
+Production use is not, and is sold as either a managed subscription or a separate
+Enterprise Self-Hosting Agreement.
+
+**Why not FSL or Elastic v2**, the two licences a search returns first. FSL-1.1
+says, verbatim:
+
+```
+Permitted Purposes specifically include using the Software:
+
+1. for your internal use and access;
+```
+
+ELv2 has the same shape — it forbids offering the software to third parties as a
+service, not running it yourself. Both were drafted against a hyperscaler
+reselling your product. **Our exposure is the opposite: a customer self-hosts
+instead of subscribing.** An enterprise running this for its own business is
+internal use under both licences, so both would give away tier 3 in the licence
+text.
+
+**Why the grant is `None` rather than prose about subscriptions.** BSL's Covenant
+2 permits an Additional Use Grant only where it *adds* rights without imposing
+"any additional restriction". "Production requires a subscription" is therefore
+not grant text — it is the base licence, which already grants non-production use
+and nothing more. `None` says exactly what is meant, and says it in three
+characters.
+
+Apache 2.0 satisfies Covenant 1 by being compatible with GPL v3, which is a
+"later version" of GPL v2 as the covenant requires.
+
+**Never call this open source.** BSL states in its own Notice that it is not, and
+the vendors who blurred that line paid for it in community trust. The word is
+*source-available*.
+
+**It is a sales asset, not a compromise.** A bank's or a ministry's security team
+can audit the code before buying the *managed* tier. SAP and Oracle cannot offer
+that. In a market where procurement leans on assurance, publishing the source is
+a reason to win, and it costs nothing that BSL does not already protect.
 
 ---
 

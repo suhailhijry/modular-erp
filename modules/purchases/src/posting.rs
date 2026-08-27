@@ -25,8 +25,8 @@
 //! rarely reached — but "rarely" is not "never", and a rule that only holds for
 //! the common case is the one that produces an unexplainable balance.
 
-use ledger::{BalancedLines, Line, Unbalanced};
 use erp_types::{AggregateId, Money};
+use ledger::{BalancedLines, Line, Unbalanced};
 
 /// Which ledger accounts a purchase moves.
 ///
@@ -133,8 +133,8 @@ fn code(literal: &str) -> AggregateId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ledger::VatCategory;
     use erp_types::CurrencyCode;
+    use ledger::VatCategory;
 
     fn sar() -> CurrencyCode {
         CurrencyCode::new("SAR").unwrap_or_else(|_| unreachable!())

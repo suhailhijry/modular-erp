@@ -34,8 +34,8 @@
 
 use std::collections::BTreeMap;
 
-use serde::de::DeserializeOwned;
 use erp_types::{EventName, SchemaVersion};
+use serde::de::DeserializeOwned;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpcastError {

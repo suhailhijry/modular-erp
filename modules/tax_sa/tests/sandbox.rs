@@ -32,8 +32,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::print_stdout)]
 
 use base64::Engine as _;
-use ledger::VatCategory;
 use erp_types::{CurrencyCode, Money, Timestamp};
+use ledger::VatCategory;
 use tax_sa::zatca::csr::Environment;
 use tax_sa::zatca::onboarding::{Csid, Registrar};
 use tax_sa::zatca::{Band, Buyer, Document, Kind, Line, Link, Totals, TypeCode, document_uuid};

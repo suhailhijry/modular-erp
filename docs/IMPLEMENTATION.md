@@ -652,6 +652,38 @@ Renewal is a five-year deadline with a sixty-day warning and no automation
 possible, because it needs a human with an OTP. That is written down here so it
 is a known limitation rather than a surprise in 2031.
 
+### 7. Sequential upgrades are a policy with nothing enforcing them
+
+D17 says upgrades are sequential and that we support two majors. Nothing in the
+tree refuses a skip. Checked:
+
+```
+grep -rn "floor\|minimum_version\|min_version\|too old\|MIN_MIGRATION" crates/ migrations/
+```
+
+returns four hits, none of them about schema versions. `FleetPlan::is_current`
+(`crates/erp-control/src/fleet.rs:45`) is `self.version == Some(latest)` — an
+upper bound only — so `migrate_fleet` will take a tenant from migration 0002 to
+0042 in a single hop today, which is exactly what D17 forbids.
+
+What it needs:
+
+- a `MIGRATION_FLOOR` constant, bumped to the previous major's final migration
+  at each major release;
+- a refusal in `walk_fleet`'s `visit` when `applied_version < MIGRATION_FLOOR`,
+  whose error **names the release to install first** — "too old" with no next
+  step makes an operator guess, which is the failure being prevented;
+- `None` (never migrated) still allowed: that is fresh provisioning, not a skip;
+- a test that an out-of-range tenant is refused *and* that a fresh one is not,
+  since a floor that also blocks provisioning would be found in production.
+
+Related and separate: a test that no registered event name loses a step in its
+upcaster chain. The support window bounds which builds we patch, not which
+events we must read — a v1 event is readable forever or the log is corrupt.
+
+Both are small. Neither is done, and D17 is marked accordingly in the decision
+index.
+
 ### Then, and only then
 
 Phase 5b (the rules engine) and Phase 6 (configured domain) are still correctly

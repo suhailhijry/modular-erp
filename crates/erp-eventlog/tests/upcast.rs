@@ -11,9 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{DomainEvent, UpcastError, Upcasters};
 use erp_types::{EventName, SchemaVersion};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // The event, at its current shape.

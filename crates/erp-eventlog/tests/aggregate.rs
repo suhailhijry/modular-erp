@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{
     Aggregate, Decision, DomainEvent, ExecuteError, Loaded, Metadata, Upcasters, append_events,
     execute, integrity, load,
 };
 use erp_testkit::{Schema, Template};
 use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Sequence};
+use serde::{Deserialize, Serialize};
 
 static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
 

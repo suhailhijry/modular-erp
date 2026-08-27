@@ -1,7 +1,7 @@
 //! Journal lines that cannot be unbalanced.
 
-use serde::{Deserialize, Serialize};
 use erp_types::{AggregateId, CurrencyCode, Money, MoneyError};
+use serde::{Deserialize, Serialize};
 
 /// One side of an entry.
 ///

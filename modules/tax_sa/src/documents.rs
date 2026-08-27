@@ -24,10 +24,10 @@
 //! is the previous document's. Replay the log and every document comes out
 //! byte-identical, which it has to — the hashes went to a tax authority.
 
-use sales::{InvoiceEvent, InvoiceLine};
 use erp_eventlog::Envelope;
 use erp_projection::{Projection, ProjectionCtx, ProjectionError};
 use erp_types::{CurrencyCode, Money, Timestamp};
+use sales::{InvoiceEvent, InvoiceLine};
 use sqlx::PgConnection;
 
 use crate::projections::TaxSa;

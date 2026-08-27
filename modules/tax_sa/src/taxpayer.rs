@@ -32,9 +32,9 @@
 //! contain Arabic script rather than trusted to. The Latin name is ours, for our
 //! own screens — it never reaches ZATCA.
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{Aggregate, DomainEvent};
 use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// The single stream a tenant's registration lives in.
 ///

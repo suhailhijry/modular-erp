@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use erp_control::{Actor, ClusterRegistry, ControlPlane, PoolConfig, TenantPools, WorkSchedule};
 use erp_eventlog::{
     DomainEvent, Envelope, Metadata, NewEvent, Upcasters, append, integrity, read_since,
@@ -30,6 +29,7 @@ use erp_types::{
     AggregateId, DomainName, EventName, LogPosition, SchemaVersion, Sequence, StreamId, TenantId,
 };
 use erp_worker::{Activity, Job, ProjectionJob, Worker, WorkerConfig};
+use serde::{Deserialize, Serialize};
 use sqlx::PgConnection;
 use tokio_util::sync::CancellationToken;
 

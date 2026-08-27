@@ -49,8 +49,8 @@
 
 use std::time::Duration;
 
-use redis::AsyncCommands as _;
 use erp_types::{IdentityId, TenantId};
+use redis::AsyncCommands as _;
 
 /// How long a session stays readable from Redis without being re-checked.
 ///

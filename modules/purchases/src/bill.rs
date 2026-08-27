@@ -1,9 +1,9 @@
 //! A supplier's invoice, as an aggregate.
 
-use ledger::VatCategory;
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{Aggregate, DomainEvent};
 use erp_types::{CurrencyCode, DomainName, EventName, Money, SchemaVersion, Timestamp};
+use ledger::VatCategory;
+use serde::{Deserialize, Serialize};
 
 /// Who sent the bill, **as they were on it**.
 ///

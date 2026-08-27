@@ -1,7 +1,7 @@
 //! Control-plane records.
 
-use serde::{Deserialize, Serialize};
 use erp_types::{IdentityId, MembershipId, ModuleId, TenantId, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// Where a membership grants entry.
 ///

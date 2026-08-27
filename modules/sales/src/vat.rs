@@ -15,8 +15,8 @@
 //! not. Collapsing them into "0%" is a decision that cannot be undone later
 //! without asking a bookkeeper to reclassify every historic line.
 
-use serde::{Deserialize, Serialize};
 use erp_types::{CurrencyCode, Money};
+use serde::{Deserialize, Serialize};
 
 // Defined in `ledger` because `purchases` classifies by the same three
 // categories, and two sibling modules must not depend on each other.

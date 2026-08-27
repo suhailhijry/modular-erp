@@ -11,13 +11,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{
     Aggregate, Decision, DeliveryError, Dispatcher, DomainEvent, Effect, EffectHandler, Metadata,
     PendingEffect, RetryPolicy, Upcasters, append_events, enqueue, execute, integrity,
 };
 use erp_testkit::{Schema, Template, TestDb, kill_connection};
 use erp_types::{AggregateId, DomainName, EffectKind, EventName, SchemaVersion, Sequence};
+use serde::{Deserialize, Serialize};
 
 static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
 

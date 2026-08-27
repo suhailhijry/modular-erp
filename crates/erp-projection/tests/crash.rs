@@ -15,7 +15,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{
     DomainEvent, Envelope, Metadata, NewEvent, Upcasters, append, integrity, read_since,
 };
@@ -27,6 +26,7 @@ use erp_testkit::{Schema, Template, TestDb, kill_connection};
 use erp_types::{
     AggregateId, DomainName, EventName, LogPosition, SchemaVersion, Sequence, StreamId,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::PgConnection;
 
 static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);

@@ -23,8 +23,8 @@
 //! samples were — and a gap is the one thing the chain exists to make
 //! impossible.
 
-use ledger::VatCategory;
 use erp_types::{CurrencyCode, Money, Timestamp};
+use ledger::VatCategory;
 
 use super::csr::{Issues, Unit};
 use super::{Band, Buyer, Document, Kind, Line, Link, Reference, Totals, TypeCode, document_uuid};

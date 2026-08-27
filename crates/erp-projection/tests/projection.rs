@@ -8,7 +8,6 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{
     DomainEvent, Envelope, Metadata, NewEvent, Upcasters, append, integrity, read_since,
 };
@@ -20,6 +19,7 @@ use erp_testkit::{Schema, Template};
 use erp_types::{
     AggregateId, DomainName, EventName, LogPosition, SchemaVersion, Sequence, StreamId,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::PgConnection;
 
 /// The tenant schema, plus two projection groups' tables.

@@ -11,11 +11,11 @@
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use serde::{Deserialize, Serialize};
 use erp_control::ModuleSetup;
 use erp_i18n::Locale;
 use erp_types::Timestamp;
 use erp_web::Json;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;

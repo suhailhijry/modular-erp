@@ -1,8 +1,8 @@
 //! Journal entries.
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{Aggregate, DomainEvent};
 use erp_types::{DomainName, EventName, SchemaVersion, Timestamp};
+use serde::{Deserialize, Serialize};
 
 use crate::lines::BalancedLines;
 

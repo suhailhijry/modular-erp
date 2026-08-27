@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "Double-entry accounting: accounts, journal entries, and the invariant that keeps them honest."
 
 [lints]

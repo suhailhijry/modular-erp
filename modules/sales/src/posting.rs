@@ -5,8 +5,8 @@
 //! comes out. Nothing here touches a database, so what the ledger will be told
 //! is decided — and testable — before any transaction is open.
 
-use ledger::{BalancedLines, Line, Unbalanced};
 use erp_types::{AggregateId, Money};
+use ledger::{BalancedLines, Line, Unbalanced};
 
 use crate::vat::Totals;
 

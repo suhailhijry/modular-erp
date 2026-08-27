@@ -1,8 +1,8 @@
 //! What a projection is, and the only inputs it is allowed.
 
-use serde::de::DeserializeOwned;
 use erp_eventlog::{Envelope, UpcastError, Upcasters};
 use erp_types::{LogPosition, Timestamp};
+use serde::de::DeserializeOwned;
 use sqlx::PgConnection;
 use uuid::Uuid;
 

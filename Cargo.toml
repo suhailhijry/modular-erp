@@ -6,7 +6,11 @@ members = ["crates/*", "modules/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-license = "UNLICENSED"
+license = "BUSL-1.1"
+# Source-available, not open source (D18). No crate here is ever published to
+# crates.io — a registry upload would distribute the Licensed Work under terms
+# the registry assumes and this licence does not grant.
+publish = false
 
 [workspace.dependencies]
 # Internal

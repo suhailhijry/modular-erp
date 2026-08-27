@@ -5,11 +5,11 @@
 //! domain out of the framework. These are the mechanics every module's
 //! aggregates are built on.
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use erp_types::{
     AggregateId, DomainName, EventName, LogPosition, SchemaVersion, Sequence, StreamId,
 };
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use sqlx::{PgConnection, PgPool};
 
 use crate::append::{AppendError, NewEvent, append};

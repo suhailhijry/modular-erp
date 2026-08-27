@@ -13,9 +13,9 @@
 //! argument, and the answer survives a rebuild because it is an event rather
 //! than a derivation.
 
-use serde::{Deserialize, Serialize};
 use erp_eventlog::{Aggregate, DomainEvent};
 use erp_types::{CurrencyCode, DomainName, EventName, Money, SchemaVersion, Timestamp};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
