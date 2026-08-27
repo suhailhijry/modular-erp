@@ -103,8 +103,8 @@ const GROUPS: &[(&str, &str)] = &[(
 /// **Requires the ledger**, and for the same reason sales does: a bill that
 /// cannot post is a filing cabinet, not accounting.
 #[must_use]
-pub fn setup() -> erp_control::ModuleSetup {
-    erp_control::ModuleSetup::new(
+pub fn setup() -> erp_tenant::ModuleSetup {
+    erp_tenant::ModuleSetup::new(
         module_id(),
         include_str!("../schema/install.sql"),
         GROUPS,

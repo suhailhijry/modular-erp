@@ -11,17 +11,20 @@ description = "Double-entry accounting: accounts, journal entries, and the invar
 workspace = true
 
 [dependencies]
-# `erp-control` is here for `TenantDb` alone — the handle a command needs.
-# ponytail: the architecture says modules depend on `erp-kernel`, which does not
-# exist yet; when it does it re-exports `TenantDb` and this line changes to it.
-# Nothing here touches `ControlPlane`, so the isolation property already holds.
+# `erp-tenant` is the handle a command needs — `TenantDb`, `CommandError`,
+# `ModuleSetup` — and nothing else. It deliberately does **not** carry
+# `ClusterRegistry`, `FleetPlan`, `PlacementPolicy` or `TenantPools`: a module
+# is part of a binary that may ship to a customer's own cloud (D15), and that
+# binary cannot hold the map of every other tenant.
+#
+# `erp-control` is a dev-dependency only, for `MIGRATIONS` in tests.
 # The module ships its own routes; `erp-web` is what they are built from.
 erp-web = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
-erp-control = { workspace = true }
+erp-tenant = { workspace = true }
 erp-eventlog = { workspace = true }
 erp-i18n = { workspace = true }
 erp-projection = { workspace = true }
@@ -33,6 +36,7 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+erp-control = { workspace = true }
 erp-testkit = { workspace = true }
 erp-i18n = { workspace = true }
 proptest = { workspace = true }

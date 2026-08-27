@@ -21,7 +21,7 @@ tracing = { workspace = true }
 axum = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
-erp-control = { workspace = true }
+erp-tenant = { workspace = true }
 erp-eventlog = { workspace = true }
 erp-i18n = { workspace = true }
 erp-projection = { workspace = true }
@@ -33,6 +33,7 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+erp-control = { workspace = true }
 erp-testkit = { workspace = true }
 chrono = { workspace = true }
 proptest = { workspace = true }

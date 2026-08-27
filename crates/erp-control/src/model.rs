@@ -113,41 +113,6 @@ pub struct Entitlement {
     pub enabled_at: Timestamp,
 }
 
-/// The set of modules live for a tenant, resolved once and carried on the
-/// [`TenantDb`](crate::TenantDb) handle.
-///
-/// Sorted, so equality and logging are stable.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EnabledModules(Vec<ModuleId>);
-
-impl EnabledModules {
-    #[must_use]
-    pub fn new(mut modules: Vec<ModuleId>) -> Self {
-        modules.sort();
-        modules.dedup();
-        Self(modules)
-    }
-
-    #[must_use]
-    pub fn contains(&self, module: &ModuleId) -> bool {
-        self.0.binary_search(module).is_ok()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &ModuleId> {
-        self.0.iter()
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
 /// Who is acting, for audit purposes.
 ///
 /// `on_behalf_of` is how support access is recorded: both the staff member and
@@ -197,19 +162,6 @@ mod tests {
         let tenant = TenantId::new();
         assert_eq!(Scope::Tenant(tenant).tenant(), Some(tenant));
         assert_eq!(Scope::Platform.tenant(), None);
-    }
-
-    #[test]
-    fn enabled_modules_are_sorted_and_deduplicated() {
-        let ledger = ModuleId::new("ledger").unwrap();
-        let invoicing = ModuleId::new("invoicing").unwrap();
-        let modules = EnabledModules::new(vec![ledger.clone(), invoicing.clone(), ledger.clone()]);
-        assert_eq!(modules.len(), 2);
-        assert!(modules.contains(&ledger));
-        assert!(modules.contains(&invoicing));
-        assert!(!modules.contains(&ModuleId::new("inventory").unwrap()));
-        // Sorted, so two equal sets built in different orders compare equal.
-        assert_eq!(modules, EnabledModules::new(vec![invoicing, ledger]));
     }
 
     #[test]

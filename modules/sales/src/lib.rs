@@ -130,8 +130,8 @@ const GROUPS: &[(&str, &str)] = &[(
 /// call site is what lets signup, enabling later, and refusing to disable the
 /// ledger all give the same answer.
 #[must_use]
-pub fn setup() -> erp_control::ModuleSetup {
-    erp_control::ModuleSetup::new(
+pub fn setup() -> erp_tenant::ModuleSetup {
+    erp_tenant::ModuleSetup::new(
         module_id(),
         include_str!("../schema/install.sql"),
         GROUPS,

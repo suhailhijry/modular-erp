@@ -33,8 +33,8 @@ one means changing this document first.
 | D12 | Errors are message codes plus typed arguments, never sentences. Arabic is a first-class target. | Accepted — see §1.12 |
 | D13 | Clusters are control-plane data; placement is by concurrently-active tenants | Accepted — see §1.13 |
 | D14 | Background work claims tenants by **per-visit lease**; idle tenants are throttled by `next_visit_at` | Accepted — see §1.14 |
-| D15 | A tenant is a deployable unit; three tiers — shared fleet, managed instance, self-hosted — run the same binary | Accepted — see §1.15 |
-| D16 | The control plane is **reached, never reaching**. Tenants initiate every exchange. | Accepted — see §1.16 |
+| D15 | A tenant is a deployable unit; three tiers — shared fleet, managed instance, self-hosted — run the same binary | Accepted — **partly implemented**: modules no longer link the fleet directly; `erp-web` still does, see §1.15 |
+| D16 | The control plane is **reached, never reaching**. Tenants initiate every exchange. | Accepted — **not implemented**, see §1.16 |
 | D17 | Two majors supported; upgrades are **sequential only**, enforced by a migration floor | Accepted — floor not yet implemented, see §1.17 |
 | D18 | Source-available under BSL 1.1 with no Additional Use Grant; production use is sold | Accepted — see §1.18 |
 
@@ -478,6 +478,21 @@ customer's own cloud cannot carry the map of everybody else's. That is D11's
 argument (the kernel holds no business domain) applied to the runtime: the
 tenant binary holds no *fleet*. Enforced the way `tests/pooler.rs` enforces its
 rules — by refusing to link, not by review.
+
+**What has been done, and what has not.** `erp-tenant` now holds the six
+symbols a module actually used — `TenantDb`, `CommandError`, `PoolError`,
+`ModuleSetup`, `EnabledModules` and the two message codes that render them — and
+the modules depend on it rather than on `erp-control`. `TenantDb` no longer holds
+`Arc<TenantPools>`; it holds an `Arc<dyn Budget>`, and *that trait is the seam*:
+the shared fleet supplies `TenantPools`, a single-tenant deployment supplies its
+own. `erp-tenant/tests/boundary.rs` refuses a module that names the control plane.
+
+What remains is not removable by moving code. `erp-web` depends on `erp-control`
+because `AppState` holds an `Arc<ControlPlane>` and its extractors check a session
+against the control database on every request — and every module depends on
+`erp-web`. Closing that path is D16's work: a tenant verifying a signed token
+locally instead of asking. Until then the foreclosure holds directly and not
+transitively, which is stated here rather than implied.
 
 **What this costs.** A routing layer that resolves a tenant to a live endpoint,
 which static nginx cannot do; and a provisioner. Terraform is the wrong tool for
@@ -939,7 +954,9 @@ crates/                                                        ← core: what a 
   erp-i18n        types        message catalogs, locales, the Localize trait
   erp-eventlog    types        gapless append, load, upcasters, numbering, configuration, outbox
   erp-projection  eventlog     groups, ProjectionCtx, runner, leases, shadow replay and swap
-  erp-control     eventlog     identities, tenants, entitlements, clusters, TenantDb, fleet
+  erp-tenant      eventlog     TenantDb, the Budget trait, roles, EnabledModules, ModuleSetup —
+                               what a module needs, and nothing a module must not have (D15)
+  erp-control     tenant       identities, tenants, entitlements, clusters, placement, fleet
   erp-worker      control,projection  Job trait, tenant visit loop, cancellation and drain,
                                bin/worker, bin/migrator, bin/reaper
   erp-web         control      extractors, problem+json, paging, request messages —
@@ -948,7 +965,7 @@ crates/                                                        ← core: what a 
   erp-demo        api          the seeded tenant, and bin/demo
   erp-testkit     all          template-DB fixtures, fault injection, differ
 modules/                                                       ← what a tenant chooses
-  ledger          core,web     accounts, journal entries, fiscal periods, VAT treatment,
+  ledger          tenant,web   accounts, journal entries, fiscal periods, VAT treatment,
                                charts, the trial-balance invariant, its own routes
   sales           ledger       invoices, credit notes, payments received
   purchases       ledger       bills, payments made, input tax

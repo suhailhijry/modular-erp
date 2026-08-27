@@ -59,6 +59,7 @@ pub static REQUEST_CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES
 /// say. See the crate docs.
 pub static CATALOG: Composite = Composite::new(&[
     &REQUEST_CATALOG,
+    &erp_tenant::CATALOG,
     &erp_control::CATALOG,
     &erp_eventlog::CATALOG,
 ]);

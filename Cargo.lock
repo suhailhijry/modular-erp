@@ -534,6 +534,7 @@ dependencies = [
  "chrono",
  "erp-eventlog",
  "erp-i18n",
+ "erp-tenant",
  "erp-testkit",
  "erp-types",
  "futures-util",
@@ -622,6 +623,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "erp-tenant"
+version = "0.1.0"
+dependencies = [
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-types",
+ "serde",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "erp-testkit"
 version = "0.1.0"
 dependencies = [
@@ -655,6 +670,7 @@ dependencies = [
  "erp-eventlog",
  "erp-i18n",
  "erp-projection",
+ "erp-tenant",
  "erp-types",
  "serde",
  "serde_json",
@@ -1258,6 +1274,7 @@ dependencies = [
  "erp-eventlog",
  "erp-i18n",
  "erp-projection",
+ "erp-tenant",
  "erp-testkit",
  "erp-types",
  "erp-web",
@@ -1603,6 +1620,7 @@ dependencies = [
  "erp-eventlog",
  "erp-i18n",
  "erp-projection",
+ "erp-tenant",
  "erp-testkit",
  "erp-types",
  "erp-web",
@@ -1858,6 +1876,7 @@ dependencies = [
  "erp-eventlog",
  "erp-i18n",
  "erp-projection",
+ "erp-tenant",
  "erp-testkit",
  "erp-types",
  "erp-web",
@@ -2332,6 +2351,7 @@ dependencies = [
  "erp-eventlog",
  "erp-i18n",
  "erp-projection",
+ "erp-tenant",
  "erp-testkit",
  "erp-types",
  "erp-web",

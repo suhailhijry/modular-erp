@@ -12,8 +12,8 @@
 //! **plausible** — never negative, zero on anything not standard-rated, and
 //! never claimed without a supplier VAT number to evidence it.
 
-use erp_control::{CommandError, TenantDb};
 use erp_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
+use erp_tenant::{CommandError, TenantDb};
 use erp_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
 use ledger::{LedgerError, VatCategory};
 

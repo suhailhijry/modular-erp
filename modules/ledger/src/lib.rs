@@ -98,8 +98,8 @@ const GROUPS: &[(&str, &str)] = &[(
 /// Described rather than performed: the control plane runs it during
 /// provisioning, and neither crate has to know what the other is for.
 #[must_use]
-pub fn setup() -> erp_control::ModuleSetup {
-    erp_control::ModuleSetup::new(
+pub fn setup() -> erp_tenant::ModuleSetup {
+    erp_tenant::ModuleSetup::new(
         module_id(),
         include_str!("../schema/install.sql"),
         GROUPS,

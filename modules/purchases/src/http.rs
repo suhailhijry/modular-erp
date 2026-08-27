@@ -11,9 +11,9 @@
 use crate::{Draft, Payment, PurchaseError, Supplier};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use erp_control::CommandError;
 use erp_eventlog::ExecuteError;
 use erp_i18n::{Locale, Localize};
+use erp_tenant::CommandError;
 use erp_types::{CurrencyCode, Timestamp};
 use ledger::VatCategory;
 use serde::{Deserialize, Serialize};
@@ -514,7 +514,7 @@ fn purchase_problem(error: &CommandError<PurchaseError>, locale: Locale) -> Prob
             rejection.message(),
         ),
 
-        CommandError::Pool(e @ erp_control::PoolError::Overloaded { .. }) => {
+        CommandError::Pool(e @ erp_tenant::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())
         }
 
@@ -527,7 +527,7 @@ fn purchase_problem(error: &CommandError<PurchaseError>, locale: Locale) -> Prob
             tracing::error!(error = %other, "purchases command failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                erp_i18n::Message::new(erp_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
             )
         }
     };

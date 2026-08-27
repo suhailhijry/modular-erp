@@ -1,8 +1,8 @@
 //! What a caller can ask the ledger to do.
 
-use erp_control::{CommandError, TenantDb};
 use erp_eventlog::{Committed, Decision, ExecuteError, Metadata};
 use erp_i18n::Locale;
+use erp_tenant::{CommandError, TenantDb};
 use erp_types::{AggregateId, CurrencyCode, Timestamp};
 
 use crate::account::{Account, AccountEvent, AccountKind};
@@ -77,7 +77,7 @@ impl erp_i18n::Localize for LedgerError {
                 Message::new(messages::ALREADY_REVERSED).with("by", MessageArg::text(by.clone()))
             }
             Self::Unbalanced(e) => e.message(),
-            Self::BadAccountCode(_) => Message::new(erp_control::messages::INTERNAL),
+            Self::BadAccountCode(_) => Message::new(erp_tenant::messages::INTERNAL),
         }
     }
 }

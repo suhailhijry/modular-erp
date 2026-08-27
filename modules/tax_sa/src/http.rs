@@ -12,9 +12,9 @@ use crate::{Sides, TaxError};
 use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::Utc;
-use erp_control::CommandError;
 use erp_eventlog::ExecuteError;
 use erp_i18n::{Locale, Localize};
+use erp_tenant::CommandError;
 use erp_types::{CurrencyCode, Timestamp};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -414,7 +414,7 @@ fn tax_problem(error: &CommandError<TaxError>, locale: Locale) -> Problem {
             rejection.message(),
         ),
 
-        CommandError::Pool(e @ erp_control::PoolError::Overloaded { .. }) => {
+        CommandError::Pool(e @ erp_tenant::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())
         }
 
@@ -427,7 +427,7 @@ fn tax_problem(error: &CommandError<TaxError>, locale: Locale) -> Problem {
             tracing::error!(error = %other, "tax command failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                erp_i18n::Message::new(erp_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
             )
         }
     };
@@ -1193,7 +1193,7 @@ async fn onboarding_status(
         tracing::error!(error = %e, "loading the onboarding aggregate failed");
         Problem::new(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &erp_i18n::Message::new(erp_control::messages::INTERNAL),
+            &erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
             locale,
             &CATALOG,
         )
@@ -1346,7 +1346,7 @@ fn onboarding_problem(error: &crate::zatca::onboarding::OnboardError, locale: Lo
             tracing::error!(error = %other, "ZATCA onboarding failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                erp_i18n::Message::new(erp_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
             )
         }
     };

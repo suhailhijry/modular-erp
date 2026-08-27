@@ -13,6 +13,10 @@
 
 use erp_i18n::{Locale, MessageCode, Template};
 
+/// Moved to `erp-tenant` with the types that render as them; re-exported so
+/// existing callers are unchanged.
+pub use erp_tenant::messages::{INTERNAL, OVERLOADED};
+
 // ---------------------------------------------------------------------------
 // Codes
 // ---------------------------------------------------------------------------
@@ -22,8 +26,6 @@ pub const IDENTITY_SUSPENDED: MessageCode = MessageCode::new("access.identity_su
 pub const TENANT_UNAVAILABLE: MessageCode = MessageCode::new("access.tenant_unavailable");
 pub const TENANT_PROVISIONING: MessageCode = MessageCode::new("access.tenant_provisioning");
 pub const ACCESS_DENIED: MessageCode = MessageCode::new("access.denied");
-pub const OVERLOADED: MessageCode = MessageCode::new("system.overloaded");
-pub const INTERNAL: MessageCode = MessageCode::new("system.internal_error");
 pub const NO_CAPACITY: MessageCode = MessageCode::new("provisioning.no_capacity");
 /// Operator-facing. Shown on an ops surface, never to a tenant — a signup form
 /// has no business mentioning how our clusters are doing.
@@ -58,8 +60,6 @@ pub static CODES: &[MessageCode] = &[
     TENANT_UNAVAILABLE,
     TENANT_PROVISIONING,
     ACCESS_DENIED,
-    OVERLOADED,
-    INTERNAL,
     NO_CAPACITY,
     CLUSTERS_AT_LIMIT,
     SLUG_TAKEN,
@@ -135,26 +135,6 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Template::Simple("ليس لديك صلاحية الوصول إلى مساحة العمل هذه."),
     ),
     // -- system ------------------------------------------------------------
-    (
-        OVERLOADED,
-        Locale::English,
-        Template::Simple("The system is busy right now. Please try again in a moment."),
-    ),
-    (
-        OVERLOADED,
-        Locale::Arabic,
-        Template::Simple("النظام مشغول حالياً. يُرجى المحاولة مرة أخرى بعد قليل."),
-    ),
-    (
-        INTERNAL,
-        Locale::English,
-        Template::Simple("Something went wrong on our side. The problem has been recorded."),
-    ),
-    (
-        INTERNAL,
-        Locale::Arabic,
-        Template::Simple("حدث خطأ لدينا. تم تسجيل المشكلة."),
-    ),
     // -- provisioning ------------------------------------------------------
     //
     // The plural forms here are the reason `Plural` exists. English needs two;

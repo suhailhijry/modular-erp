@@ -21,8 +21,8 @@
 //! way, and marking them refused would be a permanent verdict on documents that
 //! are fine, written by an outage.
 
-use erp_control::{CommandError, TenantDb};
 use erp_eventlog::Metadata;
+use erp_tenant::{CommandError, TenantDb};
 use erp_types::Timestamp;
 
 use crate::commands::TaxError;
@@ -61,7 +61,7 @@ pub enum SweepError {
     #[error(transparent)]
     Read(#[from] sqlx::Error),
     #[error(transparent)]
-    Pool(#[from] erp_control::PoolError),
+    Pool(#[from] erp_tenant::PoolError),
     #[error("recording what ZATCA said failed: {0}")]
     Record(String),
 }

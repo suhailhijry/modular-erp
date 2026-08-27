@@ -18,9 +18,9 @@ use crate::{AccountKind, BalancedLines, Line};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use erp_control::CommandError;
 use erp_eventlog::ExecuteError;
 use erp_i18n::{Locale, Localize};
+use erp_tenant::CommandError;
 use erp_types::{CurrencyCode, Timestamp};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -493,7 +493,7 @@ fn ledger_problem(error: &CommandError<crate::LedgerError>, locale: Locale) -> P
 
         // Backpressure. Retryable, and saying so is the difference between a
         // client that backs off and one that hammers.
-        CommandError::Pool(e @ erp_control::PoolError::Overloaded { .. }) => {
+        CommandError::Pool(e @ erp_tenant::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())
         }
 
@@ -508,7 +508,7 @@ fn ledger_problem(error: &CommandError<crate::LedgerError>, locale: Locale) -> P
             tracing::error!(error = %other, "ledger command failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                erp_i18n::Message::new(erp_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
             )
         }
     };

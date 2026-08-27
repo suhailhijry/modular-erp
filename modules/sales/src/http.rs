@@ -6,9 +6,9 @@
 use crate::{Customer, Draft, DraftLine, Receipt, SalesError, VatCategory};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use erp_control::CommandError;
 use erp_eventlog::ExecuteError;
 use erp_i18n::{Locale, Localize};
+use erp_tenant::CommandError;
 use erp_types::{CurrencyCode, Timestamp};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -893,7 +893,7 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
             rejection.message(),
         ),
 
-        CommandError::Pool(e @ erp_control::PoolError::Overloaded { .. }) => {
+        CommandError::Pool(e @ erp_tenant::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())
         }
 
@@ -906,7 +906,7 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
             tracing::error!(error = %other, "sales command failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                erp_i18n::Message::new(erp_control::messages::INTERNAL),
+                erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
             )
         }
     };

@@ -19,6 +19,7 @@ erp-eventlog = { path = "crates/erp-eventlog" }
 erp-projection = { path = "crates/erp-projection" }
 erp-types = { path = "crates/erp-types" }
 erp-testkit = { path = "crates/erp-testkit" }
+erp-tenant = { path = "crates/erp-tenant" }
 erp-control = { path = "crates/erp-control" }
 erp-worker = { path = "crates/erp-worker" }
 erp-api = { path = "crates/erp-api" }

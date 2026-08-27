@@ -137,8 +137,8 @@ const GROUPS: &[(&str, &str)] = &[(
 /// module reads `ledger::Rates` itself, and a dependency you rely on directly is
 /// one you declare rather than inherit.
 #[must_use]
-pub fn setup() -> erp_control::ModuleSetup {
-    erp_control::ModuleSetup::new(
+pub fn setup() -> erp_tenant::ModuleSetup {
+    erp_tenant::ModuleSetup::new(
         module_id(),
         include_str!("../schema/install.sql"),
         GROUPS,

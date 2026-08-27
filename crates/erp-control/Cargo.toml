@@ -11,6 +11,7 @@ description = "Control plane: identities, memberships, tenants, entitlements, an
 workspace = true
 
 [dependencies]
+erp-tenant.workspace = true
 erp-types = { workspace = true, features = ["sqlx"] }
 erp-i18n = { workspace = true }
 erp-eventlog = { workspace = true }

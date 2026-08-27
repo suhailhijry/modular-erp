@@ -1,7 +1,7 @@
 //! Filing a return.
 
-use erp_control::{CommandError, TenantDb};
 use erp_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
+use erp_tenant::{CommandError, TenantDb};
 use erp_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
 
 use crate::filing::{Filing, FilingEvent};

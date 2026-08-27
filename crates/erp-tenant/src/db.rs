@@ -5,8 +5,8 @@ use std::sync::Arc;
 use erp_types::{ModuleId, TenantId};
 use sqlx::PgPool;
 
-use crate::model::EnabledModules;
-use crate::pools::{Conn, Lane, PoolError, TenantPools, Tx};
+use crate::budget::{Budget, Conn, Lane, PoolError, Tx};
+use crate::modules::EnabledModules;
 
 /// A route to one tenant's database, plus what is known about that tenant.
 ///
@@ -42,7 +42,7 @@ pub struct TenantDb {
     /// primary, so callers need no fallback logic.
     read: Option<PgPool>,
     modules: EnabledModules,
-    pools: Arc<TenantPools>,
+    budget: Arc<dyn Budget>,
     lane: Lane,
     /// What the caller may do here, and where. `None` for background and
     /// support access, which are not acting as anyone — see [`Self::role`].
@@ -50,12 +50,13 @@ pub struct TenantDb {
 }
 
 impl TenantDb {
-    pub(crate) const fn new(
+    #[must_use]
+    pub fn new(
         tenant: TenantId,
         write: PgPool,
         read: Option<PgPool>,
         modules: EnabledModules,
-        pools: Arc<TenantPools>,
+        budget: Arc<dyn Budget>,
         lane: Lane,
     ) -> Self {
         Self {
@@ -63,13 +64,13 @@ impl TenantDb {
             write,
             read,
             modules,
-            pools,
+            budget,
             lane,
             access: None,
         }
     }
 
-    pub(crate) fn set_access(&mut self, access: Option<crate::Access>) {
+    pub fn set_access(&mut self, access: Option<crate::Access>) {
         self.access = access;
     }
 
@@ -151,7 +152,7 @@ impl TenantDb {
 
     /// A connection to the primary, holding a budget permit until dropped.
     pub async fn acquire(&self) -> Result<Conn, PoolError> {
-        let permit = self.pools.permit(self.lane)?;
+        let permit = self.budget.permit(self.lane)?;
         let conn = self.write.acquire().await?;
         Ok(Conn::new(conn, permit))
     }
@@ -159,7 +160,7 @@ impl TenantDb {
     /// A transaction on the primary, holding a budget permit until it commits
     /// or rolls back.
     pub async fn begin(&self) -> Result<Tx, PoolError> {
-        let permit = self.pools.permit(self.lane)?;
+        let permit = self.budget.permit(self.lane)?;
         let tx = self.write.begin().await?;
         Ok(Tx::new(tx, permit))
     }
@@ -174,7 +175,7 @@ impl TenantDb {
     /// write it just made uses [`Self::acquire`]. The API contract exposes this
     /// to clients as `?consistent_after=<position>`; see architecture §5.7.
     pub async fn read(&self) -> Result<Conn, PoolError> {
-        let permit = self.pools.permit(self.lane)?;
+        let permit = self.budget.permit(self.lane)?;
         let pool = self.read.as_ref().unwrap_or(&self.write);
         let conn = pool.acquire().await?;
         Ok(Conn::new(conn, permit))

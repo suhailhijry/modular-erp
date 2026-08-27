@@ -34,12 +34,19 @@ mod model;
 mod placement;
 mod pools;
 mod provision;
-mod roles;
 pub mod shared;
-mod tenant_db;
 
 pub use auth::{
     AuthError, InvitationToken, SESSION_LIFETIME, Session, SessionToken, hash_password,
+};
+/// Re-exported so the control plane's callers are unchanged by the split.
+///
+/// A **module** must not reach these through here — it depends on `erp-tenant`
+/// directly, which is what stops it linking the fleet (D15). `tests/boundary.rs`
+/// is what enforces that.
+pub use erp_tenant::{
+    Access, Budget, Capability, CommandError, Conn, EnabledModules, Lane, ModuleSetup, PoolError,
+    Role, TenantDb, Tx, UnknownRole,
 };
 pub use fleet::{EventVersions, FleetPlan, TenantSchema};
 pub use invitations::{
@@ -48,14 +55,11 @@ pub use invitations::{
 pub use leases::{Claimed, WorkSchedule};
 pub use members::{Member, MemberError};
 pub use model::{
-    Actor, EnabledModules, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant,
-    TenantStatus,
+    Actor, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant, TenantStatus,
 };
 pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
-pub use pools::{ClusterRegistry, Conn, Lane, PoolConfig, PoolError, TenantPools, Tx};
-pub use provision::{ModuleSetup, SignedUp as ProvisionedTenant};
-pub use roles::{Access, Capability, Role, UnknownRole};
-pub use tenant_db::{CommandError, TenantDb};
+pub use pools::{ClusterRegistry, PoolConfig, TenantPools};
+pub use provision::SignedUp as ProvisionedTenant;
 
 use erp_i18n::{Localize, Message, MessageArg, StaticCatalog};
 
@@ -581,7 +585,7 @@ impl ControlPlane {
             write,
             read,
             modules,
-            Arc::clone(&self.tenants),
+            Arc::clone(&self.tenants) as Arc<dyn erp_tenant::Budget>,
             lane,
         ))
     }
@@ -1516,17 +1520,6 @@ impl Localize for AccessError {
             // A database failure or corrupt row is never described to a user.
             // They get "something went wrong"; the detail goes to the log.
             Self::Database(_) | Self::Corrupt(_) => Message::new(messages::INTERNAL),
-        }
-    }
-}
-
-impl Localize for PoolError {
-    fn message(&self) -> Message {
-        match self {
-            Self::Overloaded { .. } => Message::new(messages::OVERLOADED),
-            // An unconfigured cluster is our misconfiguration, not the user's
-            // problem to understand.
-            Self::UnknownCluster(_) | Self::Connect(_) => Message::new(messages::INTERNAL),
         }
     }
 }

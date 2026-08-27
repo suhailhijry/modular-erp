@@ -44,8 +44,8 @@
 //! except by onboarding again with a fresh OTP. A key stored before a call that
 //! fails is an orphan that the next attempt overwrites.
 
-use erp_control::TenantDb;
 use erp_eventlog::{Metadata, SealingKey};
+use erp_tenant::TenantDb;
 use erp_types::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -376,9 +376,9 @@ pub enum OnboardError {
     #[error(transparent)]
     Secret(#[from] erp_eventlog::SecretError),
     #[error(transparent)]
-    Command(#[from] erp_control::CommandError<crate::TaxError>),
+    Command(#[from] erp_tenant::CommandError<crate::TaxError>),
     #[error(transparent)]
-    Pool(#[from] erp_control::PoolError),
+    Pool(#[from] erp_tenant::PoolError),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }

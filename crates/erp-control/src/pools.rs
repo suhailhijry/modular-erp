@@ -77,50 +77,14 @@
 //! not get, which is how a slow database becomes an outage.
 
 use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use erp_tenant::{Lane, PoolError};
 use erp_types::TenantId;
+use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{PgConnection, PgPool, Postgres};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-
-#[derive(Debug, thiserror::Error)]
-pub enum PoolError {
-    #[error("no cluster named {0:?} is configured")]
-    UnknownCluster(String),
-    #[error("the {lane} connection budget is exhausted; retry shortly")]
-    Overloaded { lane: Lane },
-    #[error(transparent)]
-    Connect(#[from] sqlx::Error),
-}
-
-/// Which bulkhead an operation draws its budget from.
-///
-/// Sized separately so one class of traffic cannot exhaust another. The API
-/// layer picks the lane from the authenticated audience and the route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Lane {
-    /// An employee waiting on a screen. Smallest allowance, most protected —
-    /// a counter that stops working is worse than a slow consumer app.
-    Interactive,
-    /// A tenant's customers, through their app or website. The flood.
-    Client,
-    /// Projections, outbox delivery, migrations, reapers. Yields to both of the
-    /// above: nobody is watching.
-    Background,
-}
-
-impl std::fmt::Display for Lane {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Interactive => "interactive",
-            Self::Client => "client",
-            Self::Background => "background",
-        })
-    }
-}
 
 /// Per-lane operation allowances.
 ///
@@ -560,10 +524,6 @@ impl TenantPools {
         Ok((write, read))
     }
 
-    pub(crate) fn permit(&self, lane: Lane) -> Result<OwnedSemaphorePermit, PoolError> {
-        self.budget.try_acquire(lane)
-    }
-
     /// Says at start-up what this process could demand and what the server
     /// allows, because neither number was written down anywhere before.
     ///
@@ -732,89 +692,21 @@ impl TenantPools {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Permit-carrying connection handles
-// ---------------------------------------------------------------------------
-
-/// A pooled connection that holds its budget permit for exactly as long as it
-/// lives. Dropping it returns both.
-#[derive(Debug)]
-pub struct Conn {
-    inner: sqlx::pool::PoolConnection<Postgres>,
-    _permit: OwnedSemaphorePermit,
-}
-
-impl Conn {
-    pub(crate) const fn new(
-        inner: sqlx::pool::PoolConnection<Postgres>,
-        permit: OwnedSemaphorePermit,
-    ) -> Self {
-        Self {
-            inner,
-            _permit: permit,
-        }
-    }
-}
-
-impl Deref for Conn {
-    type Target = PgConnection;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl DerefMut for Conn {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-/// A transaction that holds its budget permit until it commits or rolls back.
+/// The shared fleet's answer to *may this operation run now?*
 ///
-/// Not `Drop`-committing: an unfinished transaction rolls back, which is the
-/// safe default and matches sqlx.
-#[derive(Debug)]
-pub struct Tx {
-    inner: sqlx::Transaction<'static, Postgres>,
-    _permit: OwnedSemaphorePermit,
-}
-
-impl Tx {
-    pub(crate) const fn new(
-        inner: sqlx::Transaction<'static, Postgres>,
-        permit: OwnedSemaphorePermit,
-    ) -> Self {
-        Self {
-            inner,
-            _permit: permit,
-        }
-    }
-
-    pub async fn commit(self) -> Result<(), sqlx::Error> {
-        self.inner.commit().await
-    }
-
-    pub async fn rollback(self) -> Result<(), sqlx::Error> {
-        self.inner.rollback().await
-    }
-}
-
-impl Deref for Tx {
-    type Target = PgConnection;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl DerefMut for Tx {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+/// One process serves many tenants here, so the permit comes from a budget they
+/// all share. A tenant running as its own deployment (D15) supplies a different
+/// implementation and never links this type.
+impl erp_tenant::Budget for TenantPools {
+    fn permit(&self, lane: Lane) -> Result<OwnedSemaphorePermit, PoolError> {
+        self.budget.try_acquire(lane)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use erp_tenant::Budget as _;
 
     fn registry() -> ClusterRegistry {
         ClusterRegistry::new()
