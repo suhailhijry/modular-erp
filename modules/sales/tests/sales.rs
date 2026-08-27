@@ -2360,3 +2360,336 @@ async fn changing_the_rate_leaves_earlier_invoices_alone() {
 
     fixture.cleanup().await;
 }
+
+// ---------------------------------------------------------------------------
+// Receivables
+// ---------------------------------------------------------------------------
+//
+// The question an accounts-receivable clerk asks every morning, and one this
+// system could not answer until there was a report for it: invoices could be
+// listed and paid, but not summed by the person who owed them.
+//
+// What these are really about is the bucket boundaries. Ageing is arithmetic on
+// dates, off-by-one is the standard defect, and the direction it fails matters —
+// a debt that shows one bucket too young is a debt nobody escalates.
+
+/// Issues an invoice to a named customer, due on a given day.
+async fn owe(
+    fixture: &Fixture,
+    id: &str,
+    customer: &str,
+    issued: &str,
+    due: Option<&str>,
+    amount: Money,
+) -> Outcome {
+    issue_invoice(
+        &fixture.db,
+        &code(id),
+        &Draft {
+            customer: Customer::new(customer),
+            issued_on: on(issued),
+            due_on: due.map(on),
+            currency: amount.currency(),
+            lines: vec![line("Consulting", amount, VatCategory::Zero)],
+            discounts: Vec::new(),
+            note: String::new(),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .map(|numbered| numbered.committed)
+}
+
+/// The report, as at a day.
+async fn aged(fixture: &Fixture, as_of: &str) -> Vec<sales::AgedCustomer> {
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    sales::receivables(&mut conn, on(as_of), 100, None)
+        .await
+        .expect("receivables")
+        .items
+}
+
+/// **Each bucket takes the days it says it does.**
+///
+/// One invoice per boundary, aged from a fixed date. An off-by-one at any edge
+/// moves money into an adjacent column, and the one that matters is 90/91: over
+/// ninety days is the column a business writes off against.
+#[tokio::test]
+async fn debt_lands_in_the_bucket_its_age_says() {
+    let fixture = Fixture::new().await;
+
+    // As at 2026-04-01. Due dates chosen to sit on each edge.
+    owe(
+        &fixture,
+        "FUT",
+        "Rawabi",
+        "2026-03-01",
+        Some("2026-04-10"),
+        riyals(10),
+    )
+    .await
+    .expect("issues");
+    owe(
+        &fixture,
+        "D0",
+        "Rawabi",
+        "2026-03-01",
+        Some("2026-04-01"),
+        riyals(20),
+    )
+    .await
+    .expect("issues");
+    owe(
+        &fixture,
+        "D1",
+        "Rawabi",
+        "2026-03-01",
+        Some("2026-03-31"),
+        riyals(30),
+    )
+    .await
+    .expect("issues");
+    owe(
+        &fixture,
+        "D30",
+        "Rawabi",
+        "2026-02-01",
+        Some("2026-03-02"),
+        riyals(40),
+    )
+    .await
+    .expect("issues");
+    owe(
+        &fixture,
+        "D31",
+        "Rawabi",
+        "2026-02-01",
+        Some("2026-03-01"),
+        riyals(50),
+    )
+    .await
+    .expect("issues");
+    owe(
+        &fixture,
+        "D90",
+        "Rawabi",
+        "2026-01-01",
+        Some("2026-01-01"),
+        riyals(60),
+    )
+    .await
+    .expect("issues");
+    owe(
+        &fixture,
+        "D91",
+        "Rawabi",
+        "2025-12-01",
+        Some("2025-12-31"),
+        riyals(70),
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let rows = aged(&fixture, "2026-04-01").await;
+    assert_eq!(rows.len(), 1, "one customer, one currency");
+    let row = &rows[0];
+
+    assert_eq!(row.not_yet_due, riyals(30), "due later, plus due today");
+    assert_eq!(
+        row.days_1_30,
+        riyals(70),
+        "one day late, and thirty days late"
+    );
+    assert_eq!(row.days_31_60, riyals(50), "thirty-one days late");
+    assert_eq!(
+        row.days_61_90,
+        riyals(60),
+        "ninety days late is not yet over ninety"
+    );
+    assert_eq!(row.over_90, riyals(70), "ninety-one days late");
+    assert_eq!(row.total, riyals(280), "every bucket together");
+    assert_eq!(row.invoices, 7);
+    assert_eq!(row.oldest_due, on("2025-12-31"));
+}
+
+/// **An invoice with no terms was due when it was issued.**
+///
+/// `due_on` is optional, and treating an absent one as "not yet due" for ever is
+/// how a ledger fills with debts nobody chases — the invoice never ages, so it
+/// never reaches a column anyone escalates.
+#[tokio::test]
+async fn an_invoice_with_no_due_date_ages_from_when_it_was_issued() {
+    let fixture = Fixture::new().await;
+
+    owe(
+        &fixture,
+        "NOTERMS",
+        "Rawabi",
+        "2025-11-01",
+        None,
+        riyals(100),
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let rows = aged(&fixture, "2026-04-01").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].over_90,
+        riyals(100),
+        "five months after issue, with no terms to say otherwise"
+    );
+    assert_eq!(
+        rows[0].not_yet_due,
+        Money::from_minor(0, sar()),
+        "an absent due date must not park the debt in `not_yet_due` for ever"
+    );
+}
+
+/// **A credited invoice owes nothing.**
+///
+/// `invoice_status` already excludes it, and this is the assertion that keeps it
+/// excluded: the view's own comment says what goes wrong otherwise — somebody
+/// chases a customer for money that was credited back to them.
+#[tokio::test]
+async fn a_cancelled_invoice_is_not_owed() {
+    let fixture = Fixture::new().await;
+
+    owe(
+        &fixture,
+        "GONE",
+        "Rawabi",
+        "2026-01-01",
+        Some("2026-01-15"),
+        riyals(500),
+    )
+    .await
+    .expect("issues");
+    credit(&fixture, "GONE", "CN-GONE").await.expect("credits");
+    fixture.project().await;
+
+    assert!(
+        aged(&fixture, "2026-04-01").await.is_empty(),
+        "a credited invoice must not appear in receivables"
+    );
+}
+
+/// **A tenant cannot yet owe in two currencies, and the ledger is what says so.**
+///
+/// The report groups by `(customer, currency)` because `Money` has no `Add`
+/// (D10) — a total mixing SAR and USD would be true in neither. That grouping is
+/// currently free, because an invoice in a currency other than the ledger's is
+/// refused before it is ever issued: multi-currency entries with FX are unbuilt,
+/// and are on the list as such.
+///
+/// This is here rather than a test of the two-row case because the two-row case
+/// is unreachable, and a test that reached it would have to write projection
+/// rows the domain cannot produce — which proves the SQL and pretends about the
+/// system. When multi-currency lands, this test is the one that fails, and the
+/// grouping it documents is already right.
+#[tokio::test]
+async fn owing_in_a_second_currency_is_refused_by_the_ledger() {
+    let fixture = Fixture::new().await;
+
+    owe(
+        &fixture,
+        "SAR1",
+        "Rawabi",
+        "2026-03-01",
+        Some("2026-03-15"),
+        riyals(100),
+    )
+    .await
+    .expect("the ledger's own currency issues");
+
+    let refused = owe(
+        &fixture,
+        "USD1",
+        "Rawabi",
+        "2026-03-01",
+        Some("2026-03-15"),
+        Money::from_minor(5_000, usd()),
+    )
+    .await;
+
+    assert!(
+        refused.is_err(),
+        "an invoice in a currency the ledger does not keep must be refused, got {refused:?}"
+    );
+
+    fixture.project().await;
+    let rows = aged(&fixture, "2026-04-01").await;
+    assert_eq!(rows.len(), 1, "one currency, so one row");
+    assert_eq!(rows[0].currency, sar());
+    assert_eq!(rows[0].total, riyals(100));
+}
+
+/// **A settled invoice leaves the report.**
+#[tokio::test]
+async fn a_paid_invoice_is_no_longer_owed() {
+    let fixture = Fixture::new().await;
+
+    owe(
+        &fixture,
+        "PAID",
+        "Rawabi",
+        "2026-01-01",
+        Some("2026-01-15"),
+        riyals(200),
+    )
+    .await
+    .expect("issues");
+    pay(&fixture, "PAID", "BANK-1", riyals(200))
+        .await
+        .expect("pays");
+    fixture.project().await;
+
+    assert!(
+        aged(&fixture, "2026-04-01").await.is_empty(),
+        "nothing is owed once it is paid"
+    );
+}
+
+/// **Biggest debtor first**, because that is the order the list is worked in.
+#[tokio::test]
+async fn the_largest_debt_comes_first() {
+    let fixture = Fixture::new().await;
+
+    owe(
+        &fixture,
+        "SMALL",
+        "Small Co",
+        "2026-01-01",
+        Some("2026-01-15"),
+        riyals(50),
+    )
+    .await
+    .expect("issues");
+    owe(
+        &fixture,
+        "BIG",
+        "Big Co",
+        "2026-01-01",
+        Some("2026-01-15"),
+        riyals(900),
+    )
+    .await
+    .expect("issues");
+    owe(
+        &fixture,
+        "MID",
+        "Mid Co",
+        "2026-01-01",
+        Some("2026-01-15"),
+        riyals(300),
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let rows = aged(&fixture, "2026-04-01").await;
+    let order: Vec<&str> = rows.iter().map(|r| r.customer.as_str()).collect();
+    assert_eq!(order, vec!["Big Co", "Mid Co", "Small Co"]);
+}

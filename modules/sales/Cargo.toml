@@ -11,6 +11,7 @@ description = "Sales invoicing with Saudi VAT, posting to the ledger."
 workspace = true
 
 [dependencies]
+chrono = { workspace = true }
 # The second module, and the first to depend on another one. See `lib.rs` on why
 # that is deliberate rather than a shortcut.
 ledger = { workspace = true }

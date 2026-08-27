@@ -354,6 +354,12 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [x] Credit notes and cancellation — a `POST`, not a `DELETE`: the invoice
       stays, its journal entry is reversed, and the books show both
 - [x] Statutory gapless numbering, on its own series per document type
+- [x] **Receivables** — `GET /v1/sales/receivables`, aged by due date and falling
+      back to the issue date, grouped by `(customer, currency)`, biggest debtor
+      first. The system could issue and settle invoices but not answer *what does
+      this customer owe*, which is the question an AR clerk asks every morning.
+      Needed no schema change: `invoice_status` already carried `outstanding`,
+      and its own comment already anticipated the report.
 - [ ] Customers as records, quantities and unit prices, partial credit notes
 
 ### 4b · The demo tenant

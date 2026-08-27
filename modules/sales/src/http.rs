@@ -26,6 +26,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_invoices, issue_invoice))
         .routes(routes!(get_invoice))
+        .routes(routes!(receivables))
         .routes(routes!(record_payment))
         .routes(routes!(credit_note))
         // Typed on purpose. The store underneath is key-value; this is not, so
@@ -605,6 +606,112 @@ async fn list_invoices(
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
     Ok(Json(Paged::of(invoices, view)))
+}
+
+/// One customer's debt, split by how late it is.
+#[derive(Debug, Serialize, ToSchema)]
+struct AgedCustomerView {
+    /// As invoices name them. There is no customer record, so two spellings are
+    /// two rows — see the note on `AgedCustomer`.
+    customer: String,
+    currency: String,
+    /// Owed, but not late yet.
+    not_yet_due: i64,
+    days_1_30: i64,
+    days_31_60: i64,
+    days_61_90: i64,
+    over_90: i64,
+    /// Every bucket together, in this currency.
+    total: i64,
+    invoices: i64,
+    /// The due date of the oldest unpaid invoice. What a collections call opens
+    /// with.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    oldest_due: Timestamp,
+}
+
+fn aged_view(row: crate::AgedCustomer) -> AgedCustomerView {
+    AgedCustomerView {
+        customer: row.customer,
+        currency: row.currency.as_str().to_owned(),
+        not_yet_due: row.not_yet_due.minor(),
+        days_1_30: row.days_1_30.minor(),
+        days_31_60: row.days_31_60.minor(),
+        days_61_90: row.days_61_90.minor(),
+        over_90: row.over_90.minor(),
+        total: row.total.minor(),
+        invoices: row.invoices,
+        oldest_due: row.oldest_due,
+    }
+}
+
+/// `?as_of=` on top of the usual paging.
+#[derive(Debug, serde::Deserialize)]
+struct AgedQuery {
+    #[serde(flatten)]
+    page: After,
+    /// Only the date part is used. Absent means today.
+    #[serde(default)]
+    as_of: Option<Timestamp>,
+}
+
+/// **Who owes what, and for how long.**
+///
+/// Aged from the due date, or from the issue date when an invoice carries no
+/// terms — an invoice with no due date was due when it was issued, and treating
+/// those as "not yet due" for ever is how debts stop being chased.
+///
+/// Cancelled invoices owe nothing and do not appear.
+///
+/// Biggest debtor first. A customer trading in two currencies appears once per
+/// currency, because adding them would produce a number that is true in neither.
+#[utoipa::path(
+    get,
+    path = "/v1/sales/receivables",
+    tag = "sales",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("as_of" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Age the debt as at this date. Absent means today. Closing a period needs the figure as at the closing date, not as at whenever the report was run."),
+        ("limit" = Option<i64>, Query, description = "Rows per page. Clamped, not refused."),
+        ("after" = Option<String>, Query, description = "The `next` cursor from the previous page."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
+    ),
+    responses(
+        (status = OK, description = "One page, biggest debtor first. `next` is absent when the list ended.", body = Paged<AgedCustomerView>),
+        (status = BAD_REQUEST, description = "An unreadable cursor", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such tenant, not yours, or the sales module is not enabled here", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "The projection did not reach `consistent_after` in time. Retryable.", body = Problem),
+    ),
+)]
+async fn receivables(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(query): Query<AgedQuery>,
+) -> Result<Json<Paged<AgedCustomerView>>, Problem> {
+    require_module(&tenant, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let after = query.page.cursor(locale)?;
+    let limit = query.page.limit(PAGE, PAGE);
+    // The report's own clock, and the only one in this handler. A read may take
+    // the wall clock — it is a projection that may not (L2).
+    let as_of = query.as_of.unwrap_or_else(chrono::Utc::now);
+
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+
+    let page = crate::receivables(&mut conn, as_of, limit, after.as_ref())
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+
+    Ok(Json(Paged::of(page, aged_view)))
 }
 
 /// One invoice, with its lines, its tax breakdown and its payments.

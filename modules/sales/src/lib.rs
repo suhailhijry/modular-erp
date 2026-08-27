@@ -46,8 +46,9 @@ pub use invoice::{
 };
 pub use posting::{PostingAccounts, entry_for_issue, entry_for_payment};
 pub use projections::{
-    InvoiceDetail, InvoiceLineRow, InvoiceSummary, Invoices, Overpaid, PaymentRow, Sales, TaxRow,
-    VatBand, VatReturn, invoice, invoices, overpaid, projections, vat_return,
+    AgedCustomer, InvoiceDetail, InvoiceLineRow, InvoiceSummary, Invoices, Overpaid, PaymentRow,
+    Sales, TaxRow, VatBand, VatReturn, invoice, invoices, overpaid, projections, receivables,
+    vat_return,
 };
 pub use vat::{TaxBand, TaxError, Totals, Vat, VatCategory, total};
 

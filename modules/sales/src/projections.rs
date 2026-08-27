@@ -656,3 +656,153 @@ pub async fn overpaid(conn: &mut PgConnection) -> Result<Vec<Overpaid>, sqlx::Er
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// Receivables
+// ---------------------------------------------------------------------------
+
+/// What one customer owes, split by how late it is.
+///
+/// # Why this is keyed by customer *and* currency
+///
+/// `Money` has no `Add` (D10) — arithmetic is `checked_add`, which refuses a
+/// currency mismatch. That is not a limitation to work around here, it is the
+/// answer: a customer invoiced in SAR and in USD owes two amounts, and one
+/// number that added them would be a lie in whichever currency it claimed to be.
+/// So the grouping carries the currency and a customer trading in two appears
+/// twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgedCustomer {
+    /// The buyer as invoices name them. Not a foreign key — there is no customer
+    /// record, and an invoice freezes the name it was issued under (L5), so two
+    /// spellings are two rows. That is a real limitation and it is visible here
+    /// rather than hidden behind a join that would quietly merge them.
+    pub customer: String,
+    pub currency: CurrencyCode,
+    /// Due after the date this was asked about. Owed, not late.
+    pub not_yet_due: Money,
+    pub days_1_30: Money,
+    pub days_31_60: Money,
+    pub days_61_90: Money,
+    pub over_90: Money,
+    /// Every bucket together. What the customer owes in this currency.
+    pub total: Money,
+    /// How many invoices make it up.
+    pub invoices: i64,
+    /// The due date of the oldest unpaid one — what a collections call opens
+    /// with, and more use than the bucket it falls in.
+    pub oldest_due: Timestamp,
+}
+
+/// **Who owes what, and for how long.**
+///
+/// The one question an accounts-receivable clerk asks every morning, and until
+/// this existed the system could not answer it: invoices could be listed and
+/// paid, but not summed by the person who owed them.
+///
+/// # Aged from the due date, falling back to the issue date
+///
+/// An invoice with no `due_on` carries no terms, which means it was due when it
+/// was issued. Treating those as "not yet due" for ever is how a ledger fills up
+/// with debts nobody chases.
+///
+/// # `as_of` is a parameter, not the clock
+///
+/// Two reasons, and only the second is about testing. An accountant closing
+/// March needs the ageing **as at 31 March**, not as at whenever the report was
+/// run — a receivables figure that moves after the books close cannot be tied to
+/// them. That it also makes the buckets testable without controlling a clock is
+/// a consequence, not the reason.
+///
+/// Cancelled invoices are already excluded by `invoice_status`, whose own
+/// comment says why: somebody chasing a customer for money that was credited
+/// back to them.
+pub async fn receivables(
+    conn: &mut PgConnection,
+    as_of: Timestamp,
+    limit: i64,
+    after: Option<&Cursor>,
+) -> Result<Page<AgedCustomer>, sqlx::Error> {
+    let (total_before, customer_before) = resume_receivables(after)?;
+    let rows = sqlx::query!(
+        r#"WITH aged AS (
+               SELECT customer,
+                      currency,
+                      outstanding,
+                      COALESCE(due_on, issued_on) AS due,
+                      ($1::timestamptz::date - COALESCE(due_on, issued_on)::date) AS days
+                 FROM proj_sales.invoice_status
+                WHERE outstanding > 0
+           ),
+           totalled AS (
+               SELECT customer,
+                      currency,
+                      COALESCE(sum(outstanding) FILTER (WHERE days <= 0), 0)::BIGINT AS not_yet_due,
+                      COALESCE(sum(outstanding) FILTER (WHERE days BETWEEN 1 AND 30), 0)::BIGINT AS days_1_30,
+                      COALESCE(sum(outstanding) FILTER (WHERE days BETWEEN 31 AND 60), 0)::BIGINT AS days_31_60,
+                      COALESCE(sum(outstanding) FILTER (WHERE days BETWEEN 61 AND 90), 0)::BIGINT AS days_61_90,
+                      COALESCE(sum(outstanding) FILTER (WHERE days > 90), 0)::BIGINT AS over_90,
+                      sum(outstanding)::BIGINT AS total,
+                      count(*)::BIGINT AS invoices,
+                      min(due) AS oldest_due
+                 FROM aged
+                GROUP BY customer, currency
+           )
+           SELECT customer as "customer!", currency as "currency!",
+                  not_yet_due as "not_yet_due!", days_1_30 as "days_1_30!",
+                  days_31_60 as "days_31_60!", days_61_90 as "days_61_90!",
+                  over_90 as "over_90!", total as "total!",
+                  invoices as "invoices!", oldest_due as "oldest_due!"
+             FROM totalled
+            WHERE $3::bigint IS NULL OR (total, customer) < ($3, $4)
+            ORDER BY total DESC, customer DESC
+            LIMIT $2"#,
+        as_of,
+        limit,
+        total_before,
+        customer_before,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let currency = parse_currency(&row.currency)?;
+            Ok(AgedCustomer {
+                customer: row.customer,
+                currency,
+                not_yet_due: Money::from_minor(row.not_yet_due, currency),
+                days_1_30: Money::from_minor(row.days_1_30, currency),
+                days_31_60: Money::from_minor(row.days_31_60, currency),
+                days_61_90: Money::from_minor(row.days_61_90, currency),
+                over_90: Money::from_minor(row.over_90, currency),
+                total: Money::from_minor(row.total, currency),
+                invoices: row.invoices,
+                oldest_due: row.oldest_due,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()
+        .map(|items| {
+            Page::of(items, limit, |row| {
+                Cursor::over(&[&row.total.minor().to_string(), &row.customer])
+            })
+        })
+}
+
+/// The cursor for [`receivables`], which orders by total then customer.
+fn resume_receivables(
+    after: Option<&Cursor>,
+) -> Result<(Option<i64>, Option<String>), sqlx::Error> {
+    let Some(cursor) = after else {
+        return Ok((None, None));
+    };
+    let malformed = || sqlx::Error::Decode(Box::new(erp_types::NotACursor));
+
+    let total = cursor
+        .part(0)
+        .ok_or_else(malformed)?
+        .parse::<i64>()
+        .map_err(|_| malformed())?;
+    let customer = cursor.part(1).ok_or_else(malformed)?.to_owned();
+    Ok((Some(total), Some(customer)))
+}

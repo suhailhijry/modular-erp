@@ -218,6 +218,66 @@
         ],
         "type": "object"
       },
+      "AgedCustomerView": {
+        "description": "One customer's debt, split by how late it is.",
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "customer": {
+            "description": "As invoices name them. There is no customer record, so two spellings are\ntwo rows — see the note on `AgedCustomer`.",
+            "type": "string"
+          },
+          "days_1_30": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "days_31_60": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "days_61_90": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "invoices": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "not_yet_due": {
+            "description": "Owed, but not late yet.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "oldest_due": {
+            "description": "The due date of the oldest unpaid invoice. What a collections call opens\nwith.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "over_90": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Every bucket together, in this currency.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "customer",
+          "currency",
+          "not_yet_due",
+          "days_1_30",
+          "days_31_60",
+          "days_61_90",
+          "over_90",
+          "total",
+          "invoices",
+          "oldest_due"
+        ],
+        "type": "object"
+      },
       "Amount": {
         "description": "An amount, as a client sends it.\n\nMinor units and an explicit currency — never a decimal string, and never a\nfloat. A client that sends `10.50` has already lost the argument about how\nmany decimal places the currency has.",
         "example": {
@@ -2062,6 +2122,85 @@
         "required": [
           "reached",
           "live"
+        ],
+        "type": "object"
+      },
+      "Paged_AgedCustomerView": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "description": "One customer's debt, split by how late it is.",
+              "properties": {
+                "currency": {
+                  "type": "string"
+                },
+                "customer": {
+                  "description": "As invoices name them. There is no customer record, so two spellings are\ntwo rows — see the note on `AgedCustomer`.",
+                  "type": "string"
+                },
+                "days_1_30": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "days_31_60": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "days_61_90": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "invoices": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "not_yet_due": {
+                  "description": "Owed, but not late yet.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "oldest_due": {
+                  "description": "The due date of the oldest unpaid invoice. What a collections call opens\nwith.",
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "over_90": {
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "total": {
+                  "description": "Every bucket together, in this currency.",
+                  "format": "int64",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "customer",
+                "currency",
+                "not_yet_due",
+                "days_1_30",
+                "days_31_60",
+                "days_61_90",
+                "over_90",
+                "total",
+                "invoices",
+                "oldest_due"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
         ],
         "type": "object"
       },
@@ -7173,6 +7312,152 @@
           "sales"
         ]
       }
+    },
+    "/v1/sales/receivables": {
+      "get": {
+        "description": "Aged from the due date, or from the issue date when an invoice carries no\nterms — an invoice with no due date was due when it was issued, and treating\nthose as \"not yet due\" for ever is how debts stop being chased.\n\nCancelled invoices owe nothing and do not appear.\n\nBiggest debtor first. A customer trading in two currencies appears once per\ncurrency, because adding them would produce a number that is true in neither.",
+        "operationId": "receivables",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Age the debt as at this date. Absent means today. Closing a period needs the figure as at the closing date, not as at whenever the report was run.",
+            "in": "query",
+            "name": "as_of",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows per page. Clamped, not refused.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The `next` cursor from the previous page.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_AgedCustomerView"
+                }
+              }
+            },
+            "description": "One page, biggest debtor first. `next` is absent when the list ended."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unreadable cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, not yours, or the sales module is not enabled here"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The projection did not reach `consistent_after` in time. Retryable."
+          }
+        },
+        "summary": "**Who owes what, and for how long.**",
+        "tags": [
+          "sales"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/sessions": {
       "parameters": [

@@ -1323,6 +1323,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("trial_balance", ALL_ROLES),
     ("list_invoices", ALL_ROLES),
     ("get_invoice", ALL_ROLES),
+    // Who owes what. A viewer may see it — chasing a debt is not a privileged
+    // act, and the person who makes the call is rarely the one who can post.
+    ("receivables", ALL_ROLES),
     ("posting_accounts", ALL_ROLES),
     ("books", ALL_ROLES),
     ("vat_rates", ALL_ROLES),
@@ -1445,8 +1448,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        46,
-        "expected forty-six role-scoped operations"
+        47,
+        "expected forty-seven role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
