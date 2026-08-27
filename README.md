@@ -1,84 +1,102 @@
-# ERP
+# Modular multi-tenant ERP
 
-Multi-tenant ERP backend. Rust, Postgres, one database per tenant.
+A BYOC multi-tenant ERP backend. Powered by Rust and Postgres.
 
-## Documents
+## Current Modules
+
+| Module | What it does |
+|---|---|
+| `ledger` | Double-entry accounting. |
+| `sales` | Invoices, credit notes and payments. |
+| `purchases` | Bills and input tax. |
+| `tax_sa` | Saudi VAT returns and ZATCA e-invoicing integration (submodule of sales and purchases). |
+
+Other features:
+
+- An immutable event log for each tenant. Nothing can change the log after a
+  write, enforced at the database level.
+- Disposable projections, replayed at any time.
+- Modular and enforceable localization support for Arabic & English, with the ability to add more languages in the future.
+- Fully self-service-able cloud and SaaS platform.
+- Fully documented REST API, with self-generating OpenAPI spec.
+
+## Why you can choose this system
+
+**Your data stays in your cloud if you want to** Bring Your Own Cloud is the deployment model, meaning if you trust us, we can deploy it for you, otherwise, you can use your own infrastructure if you want to.
+
+**Secure by default** State of art security enforcment, and permission management.
+
+**Source available** The license is the Business Source License 1.1. A customer can read the code before they buy it. A security team can audit it.
+
+## How to run
+
+You need Rust, Postgres 18, Docker and `just`.
+
+1. Copy the database settings into `.env`.
+
+2. Start Redis. The port must be 6379 (in the meantime, will be configurable in the future), because the tests use that port.
+
+   ```bash
+   just redis
+   ```
+
+3. Make the offline query data. Do this again after you change a migration.
+
+   ```bash
+   just prepare
+   ```
+
+4. Run the format check, the lints and the tests.
+
+   ```bash
+   just check
+   ```
+
+To start the whole system in containers, use this command:
+
+```bash
+docker compose up
+```
+
+To make a tenant with data that you can look at, use this command:
+
+```bash
+just demo my-password
+```
+
+## Technologies
 
 | | |
 |---|---|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Decisions, laws, contracts. Read before writing code; update before changing a decision. |
-| [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | Phased build order and current state. |
-| [docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md) | Which database is for what. |
+| Rust | High-performance systems language, chosen for safety and raw performance. |
+| Postgres 18 | Chosen for its long-standing resilience and durability. |
+| Redis | Chosen for caching |
+| `tokio` | The asynchronous runtime. |
+| `axum` and `tower` | The HTTP server and its layers. |
+| `sqlx` | The database driver. It checks each query when it compiles the code. |
+| `utoipa` | Automatic OpenAPI spec from the router |
+| `argon2` | Hashing passwords. |
+| OpenSSL | Certificates and signatures for ZATCA. |
+| `lettre` | For e-mails |
+| Docker | Containers for the whole system, with a standby database. |
 
-## Getting started
+## Performance
 
-```bash
-cargo build --workspace
-```
+I measured each number below on one developer machine, with a release
+build and Postgres 18. Your hardware will probably result in different numbers.
 
-Builds need no database — queries are checked against committed offline data.
+| Measurement | Result | Conditions |
+|---|---|---|
+| Operations each second | 22,169 | 40 tenants, 256 workers |
+| Memory for one API process | 14 MB | After it starts to listen |
+| Time to start an API process | 82 ms | Until it accepts the first request |
+| Open database connections | 95 | 40 active tenants, 4 connections for each |
+| Read model rebuild | 4,096 events each second | 2 projections, 4 lines for each event |
+| Background visits | 3.5 each second | 100 active tenants and 4,900 quiet ones |
+| Migration of 40 tenants | 36 ms | 32 tenants at the same time |
 
-```bash
-cargo test --workspace
-```
+## License
 
-Tests need a reachable Postgres and nothing else. The harness reads
-`DATABASE_URL` from the environment or from `.env` (cargo does not read `.env`
-itself, so the harness does), falling back to
-`postgres://postgres@localhost/postgres`. It uses only the host and credentials,
-creating and dropping its own databases. If it cannot connect, the error names
-what it tried and where the setting came from — see
-[docs/DATABASE_SETUP.md](docs/DATABASE_SETUP.md).
+Business Source License 1.1. See [LICENSE](LICENSE). A source-available license.
 
-```bash
-just check
-```
-
-fmt, clippy and tests — what CI runs. After changing a migration, `just prepare`
-regenerates the offline query data; commit the `.sqlx/` diff alongside it.
-
-## Layout
-
-```
-crates/erp-types      value types — no I/O, WASM-safe, shareable with a frontend
-crates/erp-i18n       message codes and typed arguments; English and Arabic
-crates/erp-testkit    test harness — real Postgres, one database per test
-crates/erp-control    control plane — identities, tenants, memberships, TenantDb
-crates/erp-eventlog   the tenant log: gapless append, aggregates, upcasters, outbox
-crates/erp-projection projection groups, checkpoints, shadow replay and the differ
-crates/erp-worker     background worker — tenant visits, jobs, drain; bin/worker
-crates/erp-api        HTTP surface — sessions, problem+json, extractors; bin/api
-modules/ledger        double-entry accounting — the first module, and declinable
-migrations/control    control-plane schema
-migrations/tenant     per-tenant schema
-```
-
-Crates are added as the phases in `docs/IMPLEMENTATION.md` reach them; the full
-target layout is in architecture §6.
-
-## Three things worth knowing up front
-
-**There is no ambient database pool.** The only route to a tenant's data is a
-`TenantDb`, which has no public constructor — `ControlPlane::enter` is the sole
-source, and it checks identity, tenant status, and membership first. A query
-against the wrong tenant isn't prevented by a `WHERE` clause; it can't be written.
-
-**Money has no `+`.** `Money::checked_add` returns a `Result` because currencies
-are runtime data and mismatches must be handled. Amounts are integer minor units;
-`float_arithmetic` is denied workspace-wide.
-
-**Failures stop, they never degrade.** No swallowed errors, no "log a warning and
-carry on with the feature disabled". In a system of record a loud failure costs
-an incident and a quiet one costs an audit. This is architecture law L6, and
-`unwrap`/`expect`/`panic` are lint-warned outside tests to keep it honest.
-
-**Nothing performs I/O inline.** A command returns events *and* effects, both
-written in one transaction; a worker delivers the effects afterwards. So a
-rolled-back command emails nobody, a crashed one still owes what it promised, and
-rebuilding a read model sends nothing at all.
-
-## History
-
-The prototype this replaces is preserved at tag `f2e8acd`. Its review — including
-four defects reproduced against a live database — is what shaped the decisions in
-`docs/ARCHITECTURE.md`.
+The code becomes available under Apache 2.0 four years after each release.
