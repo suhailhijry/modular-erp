@@ -95,8 +95,8 @@ fn sar() -> CurrencyCode {
 fn registration() -> tax_sa::Registration {
     tax_sa::Registration {
         vat_number: VAT_NUMBER.to_owned(),
-        name: "مركز أقدامي الرياضي".to_owned(),
-        name_latin: Some("Aqdamy Sports Center".to_owned()),
+        name: "مركز الروابي الرياضي".to_owned(),
+        name_latin: Some("Al Rawabi Sports Center".to_owned()),
         scheme: tax_sa::taxpayer::IdScheme::Crn,
         identifier: "1010101010".to_owned(),
         address: tax_sa::taxpayer::Address {
@@ -357,10 +357,10 @@ async fn zatca_accepts_every_compliance_document_this_build_generates() {
 
     let unit = tax_sa::zatca::csr::Unit {
         vat_number: VAT_NUMBER.to_owned(),
-        organization: "مركز أقدامي الرياضي".to_owned(),
+        organization: "مركز الروابي الرياضي".to_owned(),
         branch: "الفرع الرئيسي".to_owned(),
         common_name: "EGS1-DEV002".to_owned(),
-        solution: "Aqdamy System".to_owned(),
+        solution: "ERP System".to_owned(),
         version: "Model1".to_owned(),
         serial: "DEV002".to_owned(),
         address: "الرياض 12211".to_owned(),

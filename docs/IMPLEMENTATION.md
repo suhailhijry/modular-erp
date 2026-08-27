@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 667 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 711 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -531,6 +531,485 @@ the generic `Document` aggregate is right for the real document mix.
 deploy.
 
 ---
+
+---
+
+## Phase 7 — Customers, and the occupancy engine · 4–5 weeks
+
+**Where this comes from.** A working booking ERP was read end to end — a
+Laravel system of roughly 407k lines, 74 aggregates, 863 event classes and 230
+tables, serving salons and spas. It is called *that system* below. The parts
+worth taking are named against it, and so are the parts worth refusing: its own
+comments record its bugs, which is the most useful documentation in it.
+
+**The finding that shapes this phase.** Its reservation aggregate writes the
+same lifecycle three times — `SeatActivated` / `ShowerActivated` /
+`ServiceActivated`, and again for start, end, notes, cancel and restore. That is
+most of its seventy reservation events. But its `slot_occupancy` table is
+already generic: `(resource_type, resource_id, [start, end), owner_type,
+owner_id)`. Somebody found the abstraction, applied it to the write path, and
+never took it back into the domain model. **A seat, a shower, a room, a hall and
+a person who does the work are one concept**, and this phase builds that
+concept once.
+
+### 7a · `modules/crm` — customers as records
+
+The gap the receivables report already exposes: an invoice freezes the buyer's
+name (L5), so two spellings are two rows and nothing can answer "everything for
+this customer". Booking cannot start without it, because a reservation is made
+*by* somebody.
+
+- [ ] `Customer` — name, contacts, addresses, tax registration, the fields ZATCA
+      needs on a B2B invoice
+- [ ] An invoice references a customer **and still freezes what it printed**.
+      Both, not either: the reference is for the customer list, the frozen copy
+      is what the law requires the document to say
+- [ ] Backfill: existing invoices name a customer that no record matches, so the
+      first migration is a reconciliation surface, not a foreign key
+- [ ] Receivables groups by customer id where one exists and by name where none
+      does, and says which
+
+### 7b · The occupancy engine
+
+Not a projection. Occupancy is **write-side state** — the read side can be
+rebuilt, a booking that was accepted cannot be un-accepted. That system says
+the same of its own table — write-side state, never truncated and never rebuilt
+by a replay — and it is right.
+
+- [ ] `Resource` — a person, a place or a thing. Carries a **capacity**
+- [ ] `Claim` — one resource, one half-open interval, and a **quantity**
+- [ ] The conflict test is `SUM(quantity) over overlaps + new > capacity`, not an
+      existence check. That system has no capacity at all, which is why it
+      fits one vertical and nothing else
+- [ ] A guard row per `(resource, date)`, taken with `FOR UPDATE` **in sorted
+      order** before the probe. Unsorted, two multi-resource bookings touching
+      the same two resources in opposite orders deadlock — their bug, recorded
+- [ ] The batch is checked **against itself**. Theirs was not, and the defect
+      it caused is recorded in its own source: one request naming the same
+      resource twice at the same hour found nothing already held, wrote both
+      claims, and double-booked that resource against itself
+- [ ] Times normalised on construction. Theirs: *"comparing those unnormalised is
+      how an overlap check silently passes"*
+- [ ] Release is by owner and idempotent, so a retried handler is harmless (L8)
+- [ ] A reschedule ignores the rows it is about to release, so a booking never
+      conflicts with its own previous position
+
+**Not modelled, deliberately.** Slot granularity — store instants; fifteen-minute
+slots are validation and display, one configuration key. Buffers — a cleaning or
+setup allowance widens the claimed interval at claim time, so the probe stays one
+comparison.
+
+**Exit:** capacity 1 and capacity N both hold under a concurrent test, and the
+engine knows nothing about what a resource is for.
+
+---
+
+## Phase 8 — Reservations, and the verticals that prove it is general · 5–6 weeks
+
+**The test of "generic" is not a design review.** It is whether four businesses
+that share no vocabulary can be configured without a code change. If a hotel
+needs a patch, the engine was salon software with the names filed off.
+
+### 8a · `modules/booking`
+
+- [ ] `Reservation` — a customer, a time, and lines. Each line claims resources
+- [ ] One lifecycle, once: `reserved → confirmed → arrived → in service →
+      completed`, with `cancelled` and `no-show` as ends. That system reached
+      the same list independently, which is a reason to trust it
+- [ ] Typestate, per architecture §4 — a document with consequential states is
+      where it earns its cost
+- [ ] `Availability` as a recurrence: months, weekdays, days, hours, minutes as
+      bit fields plus a date range. Theirs is compact and indexable, and it
+      generalises to opening hours, staff shifts and resource downtime
+- [ ] The customer is claimable as a resource, so "already in another chair"
+      needs no special case
+- [ ] Fungible pools: book the **type**, assign the unit later. A hotel books "a
+      double", assigns room 302 at check-in; a salon books "any stylist"
+
+### 8b · Four fixtures, one engine
+
+- [ ] **Salon** — person plus chair, minutes, capacity 1, a named person
+- [ ] **Restaurant** — table with covers as capacity, a sitting as duration
+- [ ] **Hotel** — room type with N units, nights, assignment deferred
+- [ ] **Class** — instructor plus room, capacity N, many customers in one slot
+- [ ] Each is a blueprint (D8), not a branch in the code. A fixture that needs a
+      code change is the finding, and it stops the phase
+
+### 8c · `modules/packages` — what was paid for in advance
+
+- [ ] Entitlements: a package, a membership, a gift, a coupon — all *the customer
+      has already paid for N of something*
+- [ ] Redemption against a reservation line, and the balance that remains
+- [ ] Deferred revenue: cash on sale, revenue on delivery. This is the accounting
+      that makes prepayment honest, and it posts to `ledger` by subscription
+- [ ] Expiry, and what happens to unredeemed value
+
+### 8d · Pricing, once and pure
+
+- [ ] One `price` function. No database, no settings, no clock — so it is
+      testable and cannot drift with configuration
+- [ ] **Tax-exclusive discounts**: a discount reduces the taxable base and VAT is
+      charged on what remains. This matches how ZATCA models a line allowance
+- [ ] `Money`, never a float. That system's engine takes floating-point
+      amounts, and its own docblock records three implementations that
+      disagreed — every fixed discount differed by exactly the VAT on it
+
+**Exit:** four verticals demonstrable from blueprints, and one pricing path.
+
+---
+
+## Phase 9 — People, and what the Kingdom requires · 5–7 weeks
+
+**Why this is a phase and not a module.** Payroll touches the ledger, attendance
+touches booking, and documents touch the outbox. It is the first thing that uses
+three existing modules at once, which is the real test of whether extension by
+subscription holds.
+
+### 9a · `modules/hr`
+
+- [ ] `Employee`, `Position`, `Department`, `Contract`
+- [ ] Skills: which services a person may perform. Booking reads it to decide who
+      is eligible, so this is why `hr` lands below `booking` and not beside it
+- [ ] Shifts, on Phase 8's recurrence. The same problem, so the same type
+- [ ] Attendance and leave, with balances that accrue
+
+### 9b · Documents that expire
+
+The part that sells. An expired iqama stops a person working, and the alert is
+worth more than the record.
+
+- [ ] Identity documents, work permits, medical certificates, professional
+      licences — each with an expiry
+- [ ] The reminder is an outbox effect (D9) on a date. The mechanism exists;
+      this is a producer for it
+- [ ] Escalation: a document that lapses is not a warning that was ignored, it is
+      a person who may not be rostered. Booking refuses them
+
+### 9c · `modules/payroll`
+
+- [ ] Salary structure: basic, allowances, deductions
+- [ ] A run produces a journal entry, posted to `ledger` by subscription — the
+      direction `tax_sa → sales` already runs
+- [ ] Commission from booking: a person earns on the services they performed,
+      which is where the three modules meet
+
+### 9d · `modules/hr_sa` — a country module, mirroring `tax_sa`
+
+- [ ] **GOSI** contributions, employee and employer shares
+- [ ] **WPS** — the monthly salary file the Ministry mandates. The same shape as
+      the ZATCA submission already built: a generated document, a schema, a
+      transmission, a receipt, a status
+- [ ] **End-of-service benefit** — statutory gratuity by a defined formula over
+      service length. Exact, because `Money` is integer minor units
+
+**Exit:** a payroll run posts, a WPS file validates, and an expiring document
+reaches somebody.
+
+---
+
+## Phase 10 — Reporting that agrees with the books · 3–4 weeks
+
+**The architectural point, stated before the work.** A dashboard mixing sales,
+bookings and payroll looks like it must read three projection groups. L3 forbids
+that, and it is exactly the mistake that system made — its projectors declare
+which other projections they read, and it needed a bespoke check to police the
+rebuild order that created.
+
+**A report module subscribes to the log; it does not read another group.** It
+consumes `sales.invoice_issued`, `booking.reservation_completed`,
+`payroll.run_posted` and maintains its **own** group: one checkpoint, internally
+consistent, L3 satisfied.
+
+### 10a · `modules/reports`
+
+- [ ] Sales: revenue by period, branch and product; tax summary
+- [ ] Booking: utilisation, no-show rate, lead time, revenue per resource-hour
+- [ ] People: headcount, cost, documents about to expire
+- [ ] Cash: takings by method and by person, against what was banked
+
+### 10b · The invariant that makes a report trustworthy
+
+- [ ] A report group reconciles to the trial balance, asserted the way
+      `an_unbalanced_entry_is_refused` is asserted
+- [ ] A discrepancy is a **failure**, not a coloured cell. L6
+- [ ] The warning from that system, taken seriously: its customer statement is
+      built from invoices rather than from the ledger, because the ledger was
+      unfinished and its books were going to be deleted and rebuilt. Two
+      financial truths that disagree is what this section exists to prevent
+
+**Exit:** every figure on a dashboard is derivable from the log, and reconciles.
+
+---
+
+## Phase 11 — Channels, documents, and moving data in and out · 5–6 weeks
+
+**What Phases 7–10 assumed and did not build.** They describe a domain and no way
+to reach anybody in it. The system has exactly **one** effect kind — `email.send`
+— which is the entire outbound surface. For a product sold in this market the
+channel is not plumbing; a reminder that does not arrive is a chair that stays
+empty.
+
+Everything here hangs off machinery that exists. D9 already gives an effect a
+transaction, a retry policy, a lease and a dead letter, and `two_dispatchers_never_deliver_the_same_effect`
+already passes. A channel is a `Handler`, and that is the whole integration.
+
+### 11a · Channels as effects
+
+- [ ] `sms.send`, `push.send`, `whatsapp.send` beside `email.send`
+- [ ] One `Recipient` resolved at send time, never a phone number frozen into an
+      event — a person who changes their number should get the next message
+- [ ] Delivery receipts land back as inbound events (Phase 12), so "sent" and
+      "delivered" stay different words
+- [ ] **Metering.** SMS is billed per segment, and a message that silently
+      becomes three costs three times. Segment counting is part of the handler,
+      and a per-tenant budget refuses rather than overspends (L6)
+- [ ] Push tokens expire. Cleaning them up is scheduled work, not an afterthought
+
+### 11b · Templates that fetch their own data
+
+The system read for Phase 7 has **two** template systems that do not meet: a
+database aggregate whose parameters the caller fills in by hand, and hardcoded
+classes with the copy, the business name and the gendered wording compiled in.
+Changing a reminder's wording there is a deploy. Both problems have one cause —
+a template cannot ask for anything, so somebody must hand it everything.
+
+- [ ] A template names an **audience**, not an address: the client, the employee
+      on the booking, the manager of that branch, an operator. The recipient is a
+      query against the read model at send time
+- [ ] A template declares **bindings** — `{{ booking.starts_at }}`,
+      `{{ customer.name }}` — resolved from projections when it is rendered, so
+      the caller supplies a subject and nothing else
+- [ ] Bindings are declared, so an unresolvable one fails **when the template is
+      saved**, not when a customer is waiting for a message
+- [ ] Arabic and English are the same template with two bodies, per D12. Neither
+      is a translation of a compiled string
+- [ ] Rendering happens in the worker, at send time. A reminder for a booking
+      that moved says the new time
+
+### 11c · Files, and where they actually live
+
+- [ ] `Storage` as a trait: local disk and S3-compatible object storage to start,
+      and the tenant chooses. A self-hosted tenant (D15) keeps its own files, and
+      that is the point rather than a configuration detail
+- [ ] An event stores `(engine, key, checksum, size, media_type)` and **never a
+      URL**. A URL is where a file is today; a key is what it is
+- [ ] The checksum is verified on read. A document that comes back different from
+      what was stored is a failure, not a warning
+- [ ] Attachments are polymorphic — a document belongs to an invoice, a booking,
+      an employee record — and the owner is what authorizes reading it
+
+### 11d · Spreadsheets, both directions
+
+- [ ] Export any list the API can page. It is the same query, a different
+      encoder, so a new list is exportable the day it exists
+- [ ] Large exports are effects, not requests: generate, store (11c), then send a
+      link (11e). A report that takes a minute must not hold a connection
+- [ ] Import with **partial failure as a first-class outcome**. A thousand-row
+      file with three bad rows imports 997 and returns the three, with the row
+      number and what was wrong
+- [ ] An import is a command per row under one idempotency key, so a re-upload of
+      a corrected file does not duplicate the 997
+
+### 11e · Short links for anything
+
+- [ ] A link points at an internal target or an external URL, and anything can
+      make one in a line. SMS is billed by length, which is the practical reason
+- [ ] Optional expiry, optional single use, and a visit record
+- [ ] Infrastructure, not domain (D11) — it holds no business meaning and every
+      module may use it
+
+**Exit:** a booking reminder reaches a customer in Arabic, on SMS, with a link,
+having asked the read model for everything it says.
+
+---
+
+## Phase 12 — Taking money, and letting other systems in · 5–7 weeks
+
+**The distinction this phase exists for.** The system **records** payments. It
+has never **taken** one. Those are different problems: a recorded payment is a
+fact somebody asserts, and a taken payment is a conversation with a third party
+that can time out halfway. Everything here is the second kind.
+
+It is also the first inbound surface. Every integration so far has been the
+system talking; a gateway talks back, and a callback that is trusted without
+being verified is somebody else's command executed under your authority.
+
+### 12a · Payments
+
+- [ ] A card gateway, and **saved cards** — the token is the gateway's, never a
+      card number, and it belongs to a customer rather than to a session
+- [ ] Buy-now-pay-later, which is **not a card gateway wearing different
+      branding**: the provider pays the merchant and collects from the buyer, so
+      the receivable is settled by a third party and the entries differ. Getting
+      this wrong shows up as a debtor who has already paid
+- [ ] Capture is idempotent under retry (L8). A timeout is not a failure — it is
+      an unknown, and the resolution is a query against the gateway, never a
+      second capture
+- [ ] Refunds, partial refunds, and what a refund does to a cleared tax invoice.
+      ZATCA has an opinion (`tax_sa`), and it is a credit note
+- [ ] **Settlement.** A gateway pays out in batches, net of fees, days later. The
+      reconciliation is: this payout equals these payments minus this fee — and
+      it posts to `ledger`. The bank statement matching from Phase 8 is the same
+      machinery pointed at a different source
+- [ ] Fees are an expense, not a smaller revenue. A tenant that nets them cannot
+      answer what it actually sold
+
+### 12b · Inbound webhooks
+
+- [ ] Signature verified before the body is read. An unverified callback is not
+      a slow path, it is a refused one
+- [ ] Delivered more than once, out of order, and replayed by an attacker who
+      kept a copy — so a webhook is a **command with the provider's id as its
+      idempotency key**, and arriving twice does nothing twice
+- [ ] Accepted fast, processed as an effect. A provider that times out retries,
+      and a retry storm is self-inflicted
+- [ ] Providers that go quiet: reconcile by polling what the provider says it
+      sent. A payment confirmed by a webhook nobody received is money the tenant
+      cannot see
+
+### 12c · API keys, in pairs
+
+- [ ] A **public key** identifies and is safe in a mobile app or a browser. A
+      **private key** authenticates, is shown once, and is stored hashed — the
+      same posture as a password
+- [ ] Scopes per key, so an integration that reads bookings cannot post journal
+      entries
+- [ ] Rotation with an overlap window, because a key that cannot be rotated
+      without downtime is a key nobody rotates
+- [ ] Rate limits per key, and this is the primitive
+      [item 5](#5-signup-is-public-unlimited-and-creates-a-database) has been
+      waiting for
+
+### 12d · API version compatibility
+
+Not app version gating. A client — mobile, web, or somebody else's system — was
+**compiled against a stated API version**, and the server decides whether it can
+still be served.
+
+- [ ] A request declares the version it was built against. The server publishes
+      the range it supports and refuses outside it, naming the version to build
+      against — the same shape as `MIGRATION_FLOOR` refusing an old tenant, and
+      the same reasoning as D17's two majors
+- [ ] The refusal is a typed error a client can act on, not a 500
+- [ ] A version inside the range but behind is served, and says so in a header.
+      Deprecation that arrives as a surprise is an outage
+
+### 12e · Signing in without a password
+
+- [ ] One-time codes over SMS, for a market where a phone number is the identity
+      and an email address often is not
+- [ ] Two rate limiters, not one: requesting a code and verifying a code fail
+      differently and must be limited separately
+- [ ] A code is single use, short lived, and constant-time compared
+- [ ] Cookie sessions for a browser and bearer tokens for everything else, over
+      one session model — two authentication surfaces, one authorization answer
+
+**Exit:** a customer pays with a saved card, the webhook confirms it once however
+often it arrives, the payout reconciles to the ledger, and an outdated client is
+told what to build against.
+
+---
+
+## Phase 13 — Real time · 3–4 weeks
+
+**This is a requirement, not a refinement.** A customer books from a phone and
+the schedule on every counter screen must show it, without anybody refreshing.
+Two people looking at the same grid, one of them holding a phone, is how a slot
+gets sold twice — and while Phase 7's guard refuses the second write, a screen
+that still showed the slot as free has already cost a conversation.
+
+Every read in this system is a poll today. `pg_notify` was refused by D4 and
+stays refused; this is the mechanism that replaces the polling it would have
+optimised.
+
+### 13a · The event stream
+
+Designed already, not built. The shape matters more than the transport, and
+three parts of it are not obvious.
+
+- [ ] Server-sent events over the tenant's own log. Not WebSockets: the traffic
+      is one-directional, and SSE reconnects by itself
+- [ ] **It carries a signal, not the data.** *"Group `booking` is queryable
+      through position N."* The client re-fetches through the ordinary API, which
+      already does authorization, localization and paging. A payload stream would
+      need all of that again, in a second dialect — and would make the log a
+      query engine, which L7 forbids
+- [ ] **Published when the projection advances, never when the event is
+      appended.** An event is committed and visible before its projection has
+      applied it; signal on the append and the client re-fetches, reads a lagging
+      read model, sees nothing new, and stops. The hook is the `Advanced` arm
+      after its commit, because that is the moment the guarantee becomes true
+- [ ] **A stream holds no database connection.** Fan-out is the Redis channel
+      `shared.rs` already uses for cache agreement. A per-stream poll would
+      multiply connection demand by open browser tabs, against a budget sized in
+      `pools.rs` for tenants rather than tabs
+- [ ] Opening a stream calls `request_visit`. A quiet tenant has backed off to a
+      six-hour interval, and a stream onto a dormant tenant is silent until
+      somebody gives up
+- [ ] Streams are capped and reconnect. A stream held for hours outlives the
+      authorization checked when it opened, and reconnection re-runs the
+      extractor for free
+
+### 13b · The live grid
+
+- [ ] A booking made anywhere reaches every screen watching that branch and day
+- [ ] Filtered by what the watcher may see — a signal naming a group a viewer has
+      no module for is not sent
+- [ ] The grid reconciles on reconnect rather than trusting a delta it may have
+      missed. `?consistent_after=` already expresses "wait for at least this"
+
+### 13c · Notifications inside the system
+
+- [ ] A notification is a **durable record first** and a live signal second. One
+      that only existed on a socket did not happen for whoever was at lunch
+- [ ] Read state per person, and it survives a rebuild — so it is a projection of
+      an event, not a flag set on a row
+- [ ] The same audiences as Phase 11b: the client, the employee, the manager, an
+      operator. One audience model, four channels — in-system, email, SMS, push —
+      and a preference per person
+
+### 13d · Conversations
+
+- [ ] A thread against a subject: a booking, an invoice, a customer. Not a chat
+      room, which nobody can find afterwards
+- [ ] Inbound messages (Phase 12b) land in the thread, so a customer replying to
+      a reminder is answering a person and not a void
+- [ ] Internal notes and customer-visible messages in one thread, distinguished —
+      the private-note distinction the system read for Phase 7 found necessary
+      enough to build twice
+
+**Exit:** two browsers and a phone agree about a schedule within a second of a
+booking, and nobody polled.
+
+---
+
+## What Phases 7–13 unblock
+
+**Phase 5b finally has its second consumer.** The rule engine was deferred
+because authorization alone could not describe it — one consumer means inventing
+which facts exist. Booking automations (reminders, no-show handling, recall
+follow-ups) and HR document expiry are two more, independent of each other and of
+authorization. The engine can be specified from three working cases instead of
+guessed at from one.
+
+**D14's push path finally attaches.** Architecture §1.14 says of
+`request_visit` that it "pulls a tenant forward, which is where a push path
+attaches when the API can tell a worker directly that a tenant just wrote
+something: polling becomes the floor rather than the mechanism, and nothing
+downstream changes." `ControlPlane::request_visit` and
+`tests/leases.rs` both name the same seam. Phase 13 is that push path, and the sentence
+was written to be collected.
+
+**Item 5 gets its primitive.** Signup is public, unlimited, and creates a
+database, and the missing piece was never a signup-specific one — it was rate
+limiting per caller. Phase 12c builds it for API keys, and signup is the second
+user of it.
+
+**Phase 6's open question gets an answer.** Architecture §8 asks whether the
+generic `Document` aggregate is right, and says to decide from customer
+conversations rather than from the document. A reservation, a service request, a
+leave request and a payroll run are four documents with genuinely different
+workflows — which is the evidence §8 asked for.
 
 ---
 
