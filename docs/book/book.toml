@@ -1,0 +1,16 @@
+[book]
+title = "ERP"
+description = "A backend for many tenants, built on an event log."
+authors = ["ERP"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/suhailhijry/modular-erp"
+edit-url-template = "https://github.com/suhailhijry/modular-erp/edit/main/docs/book/{path}"
+
+[output.html.fold]
+enable = true
+level = 1

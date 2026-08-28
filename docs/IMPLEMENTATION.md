@@ -606,9 +606,9 @@ engine knows nothing about what a resource is for.
 
 ## Phase 8 — Reservations, and the verticals that prove it is general · 5–6 weeks
 
-**The test of "generic" is not a design review.** It is whether four businesses
-that share no vocabulary can be configured without a code change. If a hotel
-needs a patch, the engine was salon software with the names filed off.
+**The criterion for "generic".** Four businesses that share no vocabulary must
+be configurable without a code change. A hotel that needs a patch means the
+engine is still written for one trade.
 
 ### 8a · `modules/booking`
 
@@ -632,8 +632,8 @@ needs a patch, the engine was salon software with the names filed off.
 - [ ] **Restaurant** — table with covers as capacity, a sitting as duration
 - [ ] **Hotel** — room type with N units, nights, assignment deferred
 - [ ] **Class** — instructor plus room, capacity N, many customers in one slot
-- [ ] Each is a blueprint (D8), not a branch in the code. A fixture that needs a
-      code change is the finding, and it stops the phase
+- [ ] Each is a blueprint (D8), not a branch in the code. Stop the phase if a
+      fixture needs a code change, and generalise what it needed
 
 ### 8c · `modules/packages` — what was paid for in advance
 
@@ -675,8 +675,8 @@ subscription holds.
 
 ### 9b · Documents that expire
 
-The part that sells. An expired iqama stops a person working, and the alert is
-worth more than the record.
+An expired iqama stops a person working. The module warns before the date and
+refuses to roster anyone whose document has lapsed.
 
 - [ ] Identity documents, work permits, medical certificates, professional
       licences — each with an expiry

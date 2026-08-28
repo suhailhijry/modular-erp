@@ -1,72 +1,62 @@
-# Modular multi-tenant ERP
+# A Modular multi-tenant ERP Project
 
-A BYOC multi-tenant ERP backend. Powered by Rust and Postgres.
+A project I'm working on to test Rust, and try different architectures and designs. Currently, it's leaning into being a bring-your-own-cloud system, but that may change as I explore more.
 
-## Current Modules
+## Current architecture
 
-| Module | What it does |
+- Each tenant gets their own database in a PostgreSQL cluster (for managed-mode), and optionally their own PostgreSQL instance/cluster when going for self-hosted mode.
+- Custom event-sourcing implementation that uses PostgreSQL as its backing store, with dead-lettering and other features.
+- I tried to isolate the crates as much as possible, with muli-language support, high resilience, durability, and rigorous testing.
+- Self-documenting APIs with utoipa (OpenAPI spec generator)
+
+## Available Modules (much more to add later)
+
+| Module | Role |
 |---|---|
 | `ledger` | Double-entry accounting. |
 | `sales` | Invoices, credit notes and payments. |
 | `purchases` | Bills and input tax. |
 | `tax_sa` | Saudi VAT returns and ZATCA e-invoicing integration (submodule of sales and purchases). |
 
-Other features:
+## Running
 
-- An immutable event log for each tenant. Nothing can change the log after a
-  write, enforced at the database level.
-- Disposable projections, replayed at any time.
-- Modular and enforceable localization support for Arabic & English, with the ability to add more languages in the future.
-- Fully self-service-able cloud and SaaS platform.
-- Fully documented REST API, with self-generating OpenAPI spec.
+You need Rust, Postgres 18, Docker and `just`, I used just to simplify some commands.
 
-## Why you can choose this system
+1. create an `.env` file with the `DATABASE_URL` variable (you can use local url).
 
-**Your data stays in your cloud if you want to** Bring Your Own Cloud is the deployment model, meaning if you trust us, we can deploy it for you, otherwise, you can use your own infrastructure if you want to.
-
-**Secure by default** State of art security enforcment, and permission management.
-
-**Source available** The license is the Business Source License 1.1. A customer can read the code before they buy it. A security team can audit it.
-
-## How to run
-
-You need Rust, Postgres 18, Docker and `just`.
-
-1. Copy the database settings into `.env`.
-
-2. Start Redis. The port must be 6379 (in the meantime, will be configurable in the future), because the tests use that port.
+2. start Redis (make sure it's available on port 6379)
 
    ```bash
    just redis
    ```
 
-3. Make the offline query data. Do this again after you change a migration.
+3. make the offline query data. Do this again after you change a migration.
 
    ```bash
    just prepare
    ```
 
-4. Run the format check, the lints and the tests.
+4. run the format check, the lints and the tests.
 
    ```bash
    just check
    ```
 
-To start the whole system in containers, use this command:
+to start the whole system, use this command:
 
 ```bash
 docker compose up
 ```
 
-To make a tenant with data that you can look at, use this command:
+to create demo tenant to test the apis, use this command:
 
 ```bash
 just demo my-password
 ```
 
-## Technologies
+## Technologies used
 
-| | |
+| Tech | Reason |
 |---|---|
 | Rust | High-performance systems language, chosen for safety and raw performance. |
 | Postgres 18 | Chosen for its long-standing resilience and durability. |
@@ -82,8 +72,7 @@ just demo my-password
 
 ## Performance
 
-I measured each number below on one developer machine, with a release
-build and Postgres 18. Your hardware will probably result in different numbers.
+I measured each number below on one developer machine, with a release mode build and Postgres 18.
 
 | Measurement | Result | Conditions |
 |---|---|---|
@@ -97,6 +86,6 @@ build and Postgres 18. Your hardware will probably result in different numbers.
 
 ## License
 
-Business Source License 1.1. See [LICENSE](LICENSE). A source-available license.
+Business Source License 1.1. See [LICENSE](LICENSE). A source-available license, turning into Apache 2.0 four years after each major release.
 
-The code becomes available under Apache 2.0 four years after each release.
+Contributions are welcome

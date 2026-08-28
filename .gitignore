@@ -1,2 +1,5 @@
 /target
 .env*
+
+# mdBook build output. The source is docs/book/src.
+docs/book/book/
