@@ -158,3 +158,16 @@ clean-databases:
       | xargs -r -I{} psql "{{admin_url}}" -q -c 'DROP DATABASE IF EXISTS "{}" WITH (FORCE)'
     psql "{{base_url}}" -q -c "DELETE FROM tenant WHERE database_name NOT IN (SELECT datname FROM pg_database)" 2>/dev/null || true
     psql "{{base_url}}" -q -c "TRUNCATE audit_entry" -c "DELETE FROM identity WHERE id NOT IN (SELECT identity_id FROM membership)" 2>/dev/null || true
+
+# Build the rustdoc API reference and open it.
+#
+# `--document-private-items` on purpose: half the reasoning in this codebase is
+# in doc comments on things a caller cannot name, and a reference that hides
+# them hides the part worth reading. The book's API chapters are the curated
+# view; this is the exhaustive one.
+docs:
+    cargo doc --workspace --no-deps --document-private-items --open
+
+# Serve the handbook, including the API reference chapters.
+book:
+    mdbook serve docs/book

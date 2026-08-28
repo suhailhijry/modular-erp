@@ -26,6 +26,26 @@
 - [Backup and restore](./restore.md)
 - [Upgrades](./upgrades.md)
 
+# API reference
+
+- [Reading this reference](./api/index.md)
+- [erp-types](./api/erp-types.md)
+- [erp-i18n](./api/erp-i18n.md)
+- [erp-eventlog](./api/erp-eventlog.md)
+- [erp-projection](./api/erp-projection.md)
+- [erp-tenant](./api/erp-tenant.md)
+- [erp-control](./api/erp-control.md)
+- [erp-web](./api/erp-web.md)
+- [erp-worker](./api/erp-worker.md)
+- [erp-api](./api/erp-api.md)
+- [erp-demo](./api/erp-demo.md)
+- [erp-testkit](./api/erp-testkit.md)
+- [ledger](./api/ledger.md)
+- [sales](./api/sales.md)
+- [purchases](./api/purchases.md)
+- [tax_sa](./api/tax_sa.md)
+- [The HTTP API](./api/http.md)
+
 # Ahead
 
 - [What comes next](./roadmap.md)
