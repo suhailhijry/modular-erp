@@ -1025,14 +1025,19 @@ below.
 
 ---
 
-## Phase 9 — People, and what the Kingdom requires · 5–7 weeks
+## Phase 9 — People, and what the Kingdom requires · 7–9 weeks
 
 **Why this is a phase and not a module.** Payroll touches the ledger, attendance
 touches booking, and documents touch the outbox. It is the first thing that uses
 three existing modules at once, which is the real test of whether extension by
 subscription holds.
 
-### 9a · `modules/hr`
+**It is also the first phase that changes who may do what**, which is why it
+grew: §9b makes the org chart an authorization structure, and §9c is the
+decision about which plane that structure is allowed to reach into. Neither is
+payroll, and both have to be settled before `Employee` has a field.
+
+### 9a · `modules/hr` — the org chart
 
 - [ ] `Employee`, `Position`, `Department`, `Contract`
 - [ ] Skills: which services a person may perform. Booking reads it to decide who
@@ -1040,7 +1045,137 @@ subscription holds.
 - [ ] Shifts, on Phase 8's recurrence. The same problem, so the same type
 - [ ] Attendance and leave, with balances that accrue
 
-### 9b · Documents that expire
+**The org is a tree, and it is the point.** Employees are not a flat list with a
+`manager_id` decoration; the reporting line is the structure, and everything
+below depends on being able to walk it. So: one `reports_to` edge per employee,
+a single root per tenant, and **cycles refused at the command** — not because a
+cycle is untidy but because the claim union below would not terminate.
+
+- [ ] `Employee::reports_to`, and `Reparented` as an event of its own. Moving a
+      person moves everything they carry, which makes it the operation an
+      auditor asks about — and an `Amended` that quietly changed a parent would
+      not answer them
+- [ ] A cycle is refused. `A → B → A` is not a rare input: it is what two
+      well-meaning edits a week apart produce
+
+### 9b · Claims, and why they travel upward
+
+**The rule the owner asked for: a manager automatically holds everything their
+reports hold.** Formally, for each node in the tree:
+
+```text
+claims(node) = own(node) ∪ ⋃ claims(child) for each child
+```
+
+The reason is operational and good: a manager has to be able to cover for anyone
+beneath them, and nobody should have to remember that giving a new clerk a
+permission also means giving it to their supervisor. Granting downward is the
+arrangement that produces the support ticket *"the branch manager cannot approve
+what her own cashier can"*.
+
+**Every consequence below follows from that one line, and each is a decision
+rather than an accident.**
+
+- [ ] **The root holds the union of every claim in the company.** That is the
+      definition, not a defect — but it means the org chart *is* the
+      authorization model and the top node is a superuser by construction.
+      Either that is intended, or somebody has to be able to sit outside the
+      tree, and the plan should say which before the aggregate exists
+- [ ] **A grant at a leaf is not a local act.** Giving a junior something
+      powerful is the cheapest way to escalate every ancestor, silently. The
+      screen that grants a claim must name who else just gained it; a grant that
+      shows only the person being granted is the interface that makes this
+      design dangerous rather than convenient
+- [ ] **Segregation of duties breaks, and this is the part that fails an audit.**
+      The control every accounting system is measured on is that the person who
+      raises an invoice is not the person who approves its payment. Under a
+      bottom-up union their shared manager holds both, automatically, the moment
+      the org chart says so.
+
+      So a claim must be markable **non-propagating**, and the segregation
+      claims must use it. Without that escape hatch the design cannot pass a
+      Saudi statutory audit, and it is cheaper to build the flag now than to
+      discover it in a customer's first year
+- [ ] **It cannot be computed on demand.** A subtree walk per check puts the org
+      chart in the middle of whatever command is asking. The effective set is
+      maintained when the org changes — `Reparented`, a claim granted, a claim
+      revoked — and read as a single row when it is needed. §9c settles *where*
+      that maintained set lives, and it is not a projection
+
+### 9c · Which plane the claims live on — **decided: they do not leave the tenant**
+
+Authorization today is *control-plane*: `Access { role, overrides }` per identity
+per tenant, four coarse `Capability` values, checked by `Allowed<C>` at the edge
+and cached across nodes in Redis. Employees are *tenant-plane*. A hierarchy in
+one granting permissions checked in the other crosses the boundary that D15 and
+the two-plane split exist to keep clean — so it does not.
+
+- [x] **Decided (a): hr claims are domain claims.** They answer *"may you approve
+      this leave request, discount beyond ten percent, sign off this timesheet"*,
+      and are checked **inside module commands** where the decision is made.
+      `Capability` and `Allowed<C>` are untouched: the platform keeps answering
+      *"may you reach this endpoint at all"*, and `hr` answers *"may you do this
+      particular thing"*
+- [ ] **Two lines that must stay true**, and the ones to write a test against:
+      no `hr` type appears in `erp-control` or `erp-web`, and no org-chart event
+      invalidates a session. If either breaks, (a) has quietly become (b)
+
+**What it buys.** No plane is crossed. Nothing has to invalidate a session cache
+when somebody is promoted — `shared.rs` warns that a stale *logout* is the one
+thing that cache must not serve, and a stale *promotion* would have joined it. A
+tenant's own org chart cannot widen what the platform believes about that tenant.
+
+**Rejected: (b), the claims feeding the control-plane role.** It needs an
+employee → identity mapping and a tenant-wide session invalidation on every
+re-parent, and it puts a customer-editable tree in front of the platform's own
+authorization. It is also the harder direction to leave: claims that turn out to
+belong at the edge can be promoted later, whereas a control-plane hierarchy
+shipped first cannot be quietly demoted.
+
+**Where the effective claim set lives, which (a) settles.** Not in a projection.
+A command that has to know *"may this person approve this"* cannot read a read
+model that may be a second behind — the same reason `sales` checks a customer
+against the log rather than `proj_crm`, and the same reason a claim revoked a
+moment ago must already bite.
+
+But the union is a subtree walk, and loading every employee aggregate to compute
+one inside a command is not viable either.
+
+- [ ] So the effective set is **write-side state in the tenant migration chain**,
+      maintained in the same transaction as the org events that change it —
+      exactly the shape `occupancy_claim` takes in Phase 7b, and in
+      `migrations/tenant/` for the same reason: `rebuild_schema` must not be able
+      to reach it. A projection alongside it is still worth having for the
+      screen that *displays* who holds what; it is simply not what a command
+      reads
+
+### 9d · Branch scoping, now that branches exist
+
+Phase 16 built the dimension. Everything in `hr` carries it: `Employee`,
+`Department`, `Position`, `Contract`, shifts and attendance.
+
+- [ ] **A record's branch is not the request's branch, and conflating them is
+      the bug waiting here.** Phase 16's branch travels in `Metadata` and means
+      *where this request happened*; `Employee.branch` means *where this person
+      works*. They differ legitimately and often — an Olaya manager visiting
+      Malaz records attendance for a Malaz shift — and a report that read one
+      where it meant the other would be wrong in a way nobody notices for a
+      quarter
+- [ ] **A filter, not a wall.** `ledger::post_entry_in` *refuses* a document
+      dated to a branch that is not open; `hr` reads must **default** to the
+      caller's branch and widen on an explicit parameter. It cannot be a wall:
+      payroll, the org chart and an end-of-service calculation are company-wide
+      by nature, and a boundary that refused them would make the feature
+      unusable in the first month
+- [ ] Every list endpoint states which of the two it is. "Scoped by default,
+      crossable on request" is a promise a reader has to be able to check per
+      endpoint rather than infer
+- [ ] **Claims carry their branch up the tree.** The union of §9b is over
+      `(claim, branch)` pairs, not bare claims — a regional manager over two
+      branches accumulates both, and collapsing them to a bare claim would grant
+      a branch manager authority in a branch they have never seen
+
+### 9e · Documents that expire
 
 An expired iqama stops a person working. The module warns before the date and
 refuses to roster anyone whose document has lapsed.
@@ -1052,7 +1187,7 @@ refuses to roster anyone whose document has lapsed.
 - [ ] Escalation: a document that lapses is not a warning that was ignored, it is
       a person who may not be rostered. Booking refuses them
 
-### 9c · `modules/payroll`
+### 9f · `modules/payroll`
 
 - [ ] Salary structure: basic, allowances, deductions
 - [ ] A run produces a journal entry, posted to `ledger` by subscription — the
@@ -1060,7 +1195,7 @@ refuses to roster anyone whose document has lapsed.
 - [ ] Commission from booking: a person earns on the services they performed,
       which is where the three modules meet
 
-### 9d · `modules/hr_sa` — a country module, mirroring `tax_sa`
+### 9g · `modules/hr_sa` — a country module, mirroring `tax_sa`
 
 - [ ] **GOSI** contributions, employee and employer shares
 - [ ] **WPS** — the monthly salary file the Ministry mandates. The same shape as
@@ -1071,6 +1206,13 @@ refuses to roster anyone whose document has lapsed.
 
 **Exit:** a payroll run posts, a WPS file validates, and an expiring document
 reaches somebody.
+
+**And the org half, which is a separate claim and needs its own:** a branch
+manager holds every claim her cashiers hold without anyone granting it twice; a
+claim marked non-propagating stops at the person it was given to, so the invoice
+raiser and the payment approver still cannot be the same authority; re-parenting
+a department moves its claims and says so in the log; and a company-wide payroll
+run reads every branch while a branch manager's employee list defaults to one.
 
 ---
 
@@ -1605,6 +1747,18 @@ which facts exist. Booking automations (reminders, no-show handling, recall
 follow-ups) and HR document expiry are two more, independent of each other and of
 authorization. The engine can be specified from three working cases instead of
 guessed at from one.
+
+**And a fourth, which is the one that will shape it.** §9b's claim union is a
+rule over facts the engine would have to name anyway — *who reports to whom*,
+*which branch*, *is this claim propagating*. It arrives with a concrete question
+already asked, which is exactly what the deferral was waiting for.
+
+It also carries the sharpest constraint of the four, and §9c is what sets it. The
+claims are checked **inside commands**, not at the edge, so the engine is not on
+the hot path of every request — but it is inside a transaction that is holding a
+connection, which is a worse place to be slow than it looks. Whatever the engine
+evaluates for a claim has to have been settled when the org changed, not when
+somebody asked.
 
 **D14's push path finally attaches.** Architecture §1.14 says of
 `request_visit` that it "pulls a tenant forward, which is where a push path
