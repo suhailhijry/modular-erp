@@ -43,13 +43,13 @@ use erp_i18n::{Composite, StaticCatalog};
 pub use consistency::{Consistency, nudge};
 pub use error::ApiError;
 pub use extract::{
-    Allowed, Authenticated, Capability, Language, ManageAccounts, ManageTenant, PostEntries, Read,
-    Tenant,
+    Allowed, Authenticated, Capability, IdempotencyKey, Language, ManageAccounts, ManageTenant,
+    PostEntries, Read, Tenant,
 };
 pub use problem::Problem;
 pub use state::AppState;
 pub use wire::{
-    After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module,
+    After, Amount, Json, Paged, Query, bad_request, creating, metadata, parse_id, require_module,
 };
 
 /// This crate's own messages — about the request, not the domain.

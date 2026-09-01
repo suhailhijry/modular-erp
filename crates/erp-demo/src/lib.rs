@@ -392,59 +392,66 @@ async fn seed_customers(app: &axum::Router, slug: &str, token: &str) -> Result<u
     let customers = [
         // The two that appear on more than one invoice. Referencing them is
         // what makes receivables show one row each instead of one per spelling.
-        serde_json::json!({
-            "id": "CUST-0001",
-            "name": "مجموعة الفيصلية",
-            "name_latin": "Al Faisaliah Group",
-            "kind": "company",
-            "phone": "+966500000001",
-            "email": "ap@faisaliah.example",
-            "vat_number": {
-                "vat_number": "310122393500003",
-                "scheme": "CRN",
-                "identifier": "1010101010"
-            },
-            "address": {
-                "street": "طريق الملك فهد",
-                "building": "2322",
-                "district": "العليا",
-                "city": "الرياض",
-                "postal_code": "12211",
-                "country": "SA"
-            },
-            "registered_on": "2026-01-05T00:00:00Z"
-        }),
-        serde_json::json!({
-            "id": "CUST-0002",
-            "name": "نجد للخدمات اللوجستية",
-            "name_latin": "Najd Logistics",
-            "kind": "company",
-            "phone": "+966500000002",
-            "vat_number": {
-                "vat_number": "311234567800003",
-                "scheme": "CRN",
-                "identifier": "2020202020"
-            },
-            "registered_on": "2026-01-12T00:00:00Z"
-        }),
+        (
+            "CUST-0001",
+            serde_json::json!({
+                "name": "مجموعة الفيصلية",
+                "name_latin": "Al Faisaliah Group",
+                "kind": "company",
+                "phone": "+966500000001",
+                "email": "ap@faisaliah.example",
+                "vat_number": {
+                    "vat_number": "310122393500003",
+                    "scheme": "CRN",
+                    "identifier": "1010101010"
+                },
+                "address": {
+                    "street": "طريق الملك فهد",
+                    "building": "2322",
+                    "district": "العليا",
+                    "city": "الرياض",
+                    "postal_code": "12211",
+                    "country": "SA"
+                },
+                "registered_on": "2026-01-05T00:00:00Z"
+            }),
+        ),
+        (
+            "CUST-0002",
+            serde_json::json!({
+                "name": "نجد للخدمات اللوجستية",
+                "name_latin": "Najd Logistics",
+                "kind": "company",
+                "phone": "+966500000002",
+                "vat_number": {
+                    "vat_number": "311234567800003",
+                    "scheme": "CRN",
+                    "identifier": "2020202020"
+                },
+                "registered_on": "2026-01-12T00:00:00Z"
+            }),
+        ),
         // A company with no Saudi VAT registration, which is why its invoice is
         // zero-rated and simplified. `kind` is still `company`; not every
         // company is registered here.
-        serde_json::json!({
-            "id": "CUST-0003",
-            "name": "Gulf Freight DMCC",
-            "kind": "company",
-            "email": "accounts@gulffreight.example",
-            "registered_on": "2026-02-01T00:00:00Z"
-        }),
+        (
+            "CUST-0003",
+            serde_json::json!({
+                "name": "Gulf Freight DMCC",
+                "kind": "company",
+                "email": "accounts@gulffreight.example",
+                "registered_on": "2026-02-01T00:00:00Z"
+            }),
+        ),
     ];
 
-    for customer in &customers {
-        post(
+    for (name, customer) in &customers {
+        create(
             app,
             slug,
             "/v1/crm/customers",
-            Some(token),
+            token,
+            name,
             customer,
             StatusCode::CREATED,
         )
@@ -466,14 +473,14 @@ async fn seed_customers(app: &axum::Router, slug: &str, token: &str) -> Result<u
 /// and the one movement that touches every part of the recognition arithmetic.
 async fn seed_prepaid(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
     // A ten-session package, two of them used.
-    post(
+    create(
         app,
         slug,
         "/v1/prepaid/entitlements",
-        Some(token),
+        token,
+        "PKG-0001",
         &serde_json::json!({
-            "id": "PKG-0001",
-            "customer": "CUST-0001",
+            "customer": demo_id("CUST-0001"),
             "what": "استشارة",
             "uses": 10,
             "value": { "minor": 500_000, "currency": "SAR" },
@@ -487,7 +494,10 @@ async fn seed_prepaid(app: &axum::Router, slug: &str, token: &str) -> Result<usi
         post(
             app,
             slug,
-            "/v1/prepaid/entitlements/PKG-0001/redemptions",
+            &format!(
+                "/v1/prepaid/entitlements/{}/redemptions",
+                demo_id("PKG-0001")
+            ),
             Some(token),
             &serde_json::json!({ "reference": visit, "uses": 1, "at": "2026-02-10T00:00:00Z" }),
             StatusCode::OK,
@@ -497,14 +507,14 @@ async fn seed_prepaid(app: &axum::Router, slug: &str, token: &str) -> Result<usi
 
     // An annual membership, frozen for a month and resumed, then recognised
     // through the middle of the year.
-    post(
+    create(
         app,
         slug,
         "/v1/prepaid/subscriptions",
-        Some(token),
+        token,
+        "SUB-0001",
         &serde_json::json!({
-            "id": "SUB-0001",
-            "customer": "CUST-0002",
+            "customer": demo_id("CUST-0002"),
             "plan": "اشتراك سنوي",
             "price": { "minor": 1_200_000, "currency": "SAR" },
             "from": "2026-01-01T00:00:00Z",
@@ -517,7 +527,7 @@ async fn seed_prepaid(app: &axum::Router, slug: &str, token: &str) -> Result<usi
     post(
         app,
         slug,
-        "/v1/prepaid/subscriptions/SUB-0001/freeze",
+        &format!("/v1/prepaid/subscriptions/{}/freeze", demo_id("SUB-0001")),
         Some(token),
         &serde_json::json!({ "why": "سفر", "at": "2026-03-01T00:00:00Z" }),
         StatusCode::OK,
@@ -526,7 +536,7 @@ async fn seed_prepaid(app: &axum::Router, slug: &str, token: &str) -> Result<usi
     delete(
         app,
         slug,
-        "/v1/prepaid/subscriptions/SUB-0001/freeze",
+        &format!("/v1/prepaid/subscriptions/{}/freeze", demo_id("SUB-0001")),
         token,
         StatusCode::OK,
     )
@@ -534,7 +544,10 @@ async fn seed_prepaid(app: &axum::Router, slug: &str, token: &str) -> Result<usi
     post(
         app,
         slug,
-        "/v1/prepaid/subscriptions/SUB-0001/recognition",
+        &format!(
+            "/v1/prepaid/subscriptions/{}/recognition",
+            demo_id("SUB-0001")
+        ),
         Some(token),
         &serde_json::json!({ "at": "2026-06-30T00:00:00Z" }),
         StatusCode::OK,
@@ -572,14 +585,14 @@ async fn seed_loyalty(app: &axum::Router, slug: &str, token: &str) -> Result<(),
         StatusCode::NO_CONTENT,
     )
     .await?;
-    post(
+    create(
         app,
         slug,
         "/v1/prepaid/cards",
-        Some(token),
+        token,
+        "CARD-0001",
         &serde_json::json!({
-            "id": "CARD-0001",
-            "customer": "CUST-0001",
+            "customer": demo_id("CUST-0001"),
             "mechanic": "points",
             "at": "2026-01-20T00:00:00Z"
         }),
@@ -589,7 +602,7 @@ async fn seed_loyalty(app: &axum::Router, slug: &str, token: &str) -> Result<(),
     post(
         app,
         slug,
-        "/v1/prepaid/cards/CARD-0001/earnings",
+        &format!("/v1/prepaid/cards/{}/earnings", demo_id("CARD-0001")),
         Some(token),
         &serde_json::json!({
             "reference": "INV-0001",
@@ -603,7 +616,7 @@ async fn seed_loyalty(app: &axum::Router, slug: &str, token: &str) -> Result<(),
     post(
         app,
         slug,
-        "/v1/prepaid/cards/CARD-0001/redemptions",
+        &format!("/v1/prepaid/cards/{}/redemptions", demo_id("CARD-0001")),
         Some(token),
         &serde_json::json!({
             "reference": "RWD-0001",
@@ -661,11 +674,16 @@ async fn seed_diary(
         }),
     ];
     for bookable in &bookables {
-        post(
+        // A resource keeps the name the business gave it — the diary books
+        // `chair-1` — so the id stays in the body. The key only tells a retry
+        // from a different resource claiming a name that is taken.
+        let name = bookable["id"].as_str().unwrap_or_default().to_owned();
+        create(
             app,
             slug,
             "/v1/booking/resources",
-            Some(token),
+            token,
+            &name,
             bookable,
             StatusCode::CREATED,
         )
@@ -750,14 +768,14 @@ async fn seed_appointments(
         ),
     ];
     for (id, customer, what, from, until, who, chair) in appointments {
-        post(
+        create(
             app,
             slug,
             "/v1/booking/reservations",
-            Some(token),
+            token,
+            id,
             &serde_json::json!({
-                "id": id,
-                "customer": customer,
+                "customer": demo_id(customer),
                 "customer_name": customer_name(customer),
                 "lines": [{
                     "what": what,
@@ -782,7 +800,7 @@ async fn seed_appointments(
         post(
             app,
             slug,
-            &format!("/v1/booking/reservations/{id}/stage"),
+            &format!("/v1/booking/reservations/{}/stage", demo_id(id)),
             Some(token),
             &serde_json::json!({ "stage": stage, "why": why }),
             StatusCode::OK,
@@ -801,14 +819,14 @@ async fn seed_appointments(
 /// are the same code, and one tenant holding both is that claim shown rather
 /// than asserted.
 async fn seed_stay(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
-    post(
+    create(
         app,
         slug,
         "/v1/booking/reservations",
-        Some(token),
+        token,
+        "BK-0006",
         &serde_json::json!({
-            "id": "BK-0006",
-            "customer": "CUST-0003",
+            "customer": demo_id("CUST-0003"),
             "customer_name": customer_name("CUST-0003"),
             "lines": [{
                 "what": "إقامة ليلتين",
@@ -823,7 +841,10 @@ async fn seed_stay(app: &axum::Router, slug: &str, token: &str) -> Result<(), De
     put(
         app,
         slug,
-        "/v1/booking/reservations/BK-0006/lines/0/unit",
+        &format!(
+            "/v1/booking/reservations/{}/lines/0/unit",
+            demo_id("BK-0006")
+        ),
         token,
         &serde_json::json!({ "unit": "room-201" }),
         StatusCode::OK,
@@ -900,13 +921,13 @@ async fn seed_opening_balances(
     ];
 
     for (id, occurred_on, memo, lines) in &entries {
-        post(
+        create(
             app,
             slug,
             "/v1/ledger/entries",
-            Some(token),
+            token,
+            id,
             &serde_json::json!({
-                "id": id,
                 "occurred_on": occurred_on,
                 "memo": memo,
                 "lines": lines,
@@ -1043,13 +1064,13 @@ async fn seed_bills(app: &axum::Router, slug: &str, token: &str) -> Result<usize
     ];
 
     for (id, supplier, vat_number, reference, billed_on, lines) in &bills {
-        post(
+        create(
             app,
             slug,
             "/v1/purchases/bills",
-            Some(token),
+            token,
+            id,
             &serde_json::json!({
-                "id": id,
                 "supplier": { "name": supplier, "vat_number": vat_number },
                 "reference": reference,
                 "billed_on": billed_on,
@@ -1065,7 +1086,7 @@ async fn seed_bills(app: &axum::Router, slug: &str, token: &str) -> Result<usize
     post(
         app,
         slug,
-        "/v1/purchases/bills/ap-2201/payments",
+        &format!("/v1/purchases/bills/{}/payments", demo_id("ap-2201")),
         Some(token),
         &serde_json::json!({
             "reference": "TRF-90218",
@@ -1084,12 +1105,12 @@ async fn seed_bills(app: &axum::Router, slug: &str, token: &str) -> Result<usize
 ///
 /// The demo's whole point here: two invoices to Al Faisaliah name the same
 /// record, so receivables shows one row for them rather than one per spelling.
-fn reference(customer: &str) -> &'static str {
-    match customer {
+fn reference(customer: &str) -> String {
+    demo_id(match customer {
         "Najd Logistics" => "CUST-0002",
         "Gulf Freight DMCC" => "CUST-0003",
         _ => "CUST-0001",
-    }
+    })
 }
 
 /// Five invoices across three customers, spanning every VAT treatment.
@@ -1165,13 +1186,13 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
     };
 
     for (id, issued_on, customer, vat_number, lines) in &invoices {
-        post(
+        create(
             app,
             slug,
             "/v1/sales/invoices",
-            Some(token),
+            token,
+            id,
             &serde_json::json!({
-                "id": id,
                 "customer": {
                     // **The reference and the copy, both.** The record is what
                     // groups a customer's debt; the name and address below are
@@ -1219,7 +1240,7 @@ async fn seed_payments(app: &axum::Router, slug: &str, token: &str) -> Result<us
         post(
             app,
             slug,
-            &format!("/v1/sales/invoices/{invoice}/payments"),
+            &format!("/v1/sales/invoices/{}/payments", demo_id(invoice)),
             Some(token),
             &serde_json::json!({
                 "reference": reference,
@@ -1242,15 +1263,15 @@ async fn seed_payments(app: &axum::Router, slug: &str, token: &str) -> Result<us
 /// and obvious from a screen.
 async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
     // An invoice raised against the wrong customer, and put right.
-    post(
+    create(
         app,
         slug,
         "/v1/sales/invoices",
-        Some(token),
+        token,
+        "crm-4544",
         &serde_json::json!({
-            "id": "crm-4544",
             "customer": {
-                "id": "CUST-0002",
+                "id": demo_id("CUST-0002"),
                 "name": "Najd Logistics",
                 "vat_number": "311234567800003"
             },
@@ -1269,7 +1290,7 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
     post(
         app,
         slug,
-        "/v1/sales/invoices/crm-4544/credit-note",
+        &format!("/v1/sales/invoices/{}/credit-note", demo_id("crm-4544")),
         Some(token),
         &serde_json::json!({
             "id": "crm-4544-void",
@@ -1281,13 +1302,13 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
     .await?;
 
     // And a journal entry posted for the wrong amount, reversed.
-    post(
+    create(
         app,
         slug,
         "/v1/ledger/entries",
-        Some(token),
+        token,
+        "UTILITIES-2026-02",
         &serde_json::json!({
-            "id": "UTILITIES-2026-02",
             "occurred_on": "2026-02-28T00:00:00Z",
             "memo": "February utilities — wrong amount",
             "lines": [
@@ -1299,13 +1320,16 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
     )
     .await?;
 
-    post(
+    create(
         app,
         slug,
-        "/v1/ledger/entries/UTILITIES-2026-02/reversal",
-        Some(token),
+        &format!(
+            "/v1/ledger/entries/{}/reversal",
+            demo_id("UTILITIES-2026-02")
+        ),
+        token,
+        "UTILITIES-2026-02-R",
         &serde_json::json!({
-            "id": "UTILITIES-2026-02-R",
             "occurred_on": "2026-03-02T00:00:00Z",
             "memo": "Reversing the February utilities entry",
         }),
@@ -1447,6 +1471,45 @@ async fn confirmation_link(state: &AppState, email: &str) -> Result<String, Demo
             path: "outbox".to_owned(),
             body: format!("the confirmation email to {email} carries no {MARKER} link"),
         })
+}
+
+/// The id a demo record is created under, from a name that reads in the source.
+///
+/// A create now takes its identity from `Idempotency-Key`, which must be a
+/// UUID — a value a human would choose collides with another human's, which is
+/// the whole reason the API stopped accepting one. So the demo derives a UUID
+/// from a name it can still write out: `demo_id("PKG-0001")` is the same UUID
+/// on every run, which is what lets the demo's own tests assert against it.
+#[must_use]
+pub fn demo_id(name: &str) -> String {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
+}
+
+/// A `POST` that **creates** something, carrying the key that names it.
+///
+/// Separate from [`post`] because only creates take one: a movement is already
+/// idempotent on the reference in its own body.
+async fn create(
+    app: &axum::Router,
+    slug: &str,
+    path: &str,
+    token: &str,
+    name: &str,
+    body: &serde_json::Value,
+    expected: StatusCode,
+) -> Result<serde_json::Value, DemoError> {
+    let request = Request::post(path)
+        .header(header::HOST, format!("{slug}.localhost"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("idempotency-key", demo_id(name))
+        .body(Body::from(body.to_string()))
+        .map_err(|e| DemoError::Unexpected {
+            path: path.to_owned(),
+            body: e.to_string(),
+        })?;
+
+    send(app, "POST", path, request, expected).await
 }
 
 async fn post(

@@ -145,6 +145,16 @@ pub fn metadata<C: Capability>(tenant: &Allowed<C>) -> Metadata {
     }
 }
 
+/// The metadata a **create** runs under: who did it, and which request it was.
+///
+/// The second half is what `erp_eventlog::try_create` reads to tell a retry from
+/// a different request that reused an identifier. A create that used plain
+/// [`metadata`] would treat every repeat as a retry, which is the silent
+/// document loss this pair exists to prevent — so creates call this one.
+pub fn creating<C: Capability>(tenant: &Allowed<C>, key: &crate::IdempotencyKey) -> Metadata {
+    metadata(tenant).with_fingerprint(key.fingerprint())
+}
+
 pub fn parse_id(raw: &str, locale: Locale) -> Result<AggregateId, Problem> {
     AggregateId::new(raw).map_err(|_| bad_request(crate::messages::INVALID_ID, "id", raw, locale))
 }

@@ -18,6 +18,29 @@ curl -H 'Host: demo.localhost' http://localhost:8080/v1/tenant
 **Authentication** is a bearer token from `POST /v1/sessions`. Sessions last 12
 hours.
 
+**Every create needs an `Idempotency-Key`,** holding a UUID you generate per
+request. It is not a nicety: **it is the identity the record is stored under**,
+which is why nothing here takes an `id` in the body.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  http://localhost:8080/v1/sales/invoices -d '{ … }'
+```
+
+Send the same key again with the same request and you get the same answer,
+having written nothing — which is what a client whose request timed out needs.
+Send it with a *different* request and you get **409**, because two different
+documents were given one name and losing the second silently is the failure this
+replaces.
+
+The identity a human reads is separate and ours: an invoice's `number` comes
+from a gapless statutory series. A key you chose by hand — `INV-0001` — would
+collide with the one another till chose, which is why only a UUID is accepted.
+
+Anything that is not a create keeps its own idempotency: a payment, a redemption
+or an earning is keyed by the `reference` in its body.
+
 **Every error is `application/problem+json`** with a stable `code`. Branch on the
 code, never on `detail`.
 
@@ -240,7 +263,6 @@ password must match; if not, the password becomes that account's.
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/crm/customers -d '{
-    "id":         "CUST-0001",
     "name":       "نجد للاستشارات",
     "name_latin": "Najd Consulting",
     "kind":       "company",
@@ -394,7 +416,6 @@ next booking costs and nothing that was already agreed.
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/booking/reservations -d '{
-    "id":            "BK-0001",
     "customer":      "CUST-0001",
     "customer_name": "سارة",
     "lines": [{
@@ -544,7 +565,6 @@ must sum to zero.
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/ledger/entries -d '{
-    "id":          "JE-2026-0001",
     "occurred_on": "2026-03-01T00:00:00Z",
     "memo":        "Opening balance",
     "lines": [
@@ -563,7 +583,7 @@ Reverse one:
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/ledger/entries/JE-2026-0001/reversal \
-  -d '{"id":"JE-2026-0002","occurred_on":"2026-04-01T00:00:00Z","memo":"Correction"}'
+  -d '{"occurred_on":"2026-04-01T00:00:00Z","memo":"Correction"}'
 ```
 
 Close the books. `closed_before` is the first instant that is **still open**, so
@@ -593,7 +613,6 @@ invoices, because an invoice and its journal entry commit together.
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/sales/invoices -d '{
-    "id":         "INV-0001",
     "issued_on":  "2026-03-01T10:00:00Z",
     "due_on":     "2026-03-31T00:00:00Z",
     "currency":   "SAR",
@@ -680,7 +699,6 @@ ageing as it stood on 31 March.
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/purchases/bills -d '{
-    "id":        "BILL-0001",
     "reference": "SUP-INV-4471",
     "billed_on": "2026-03-05T00:00:00Z",
     "currency":  "SAR",
@@ -870,7 +888,6 @@ this module's whole job is a number that has to be exactly right.
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/prepaid/entitlements -d '{
-    "id":       "PKG-0001",
     "customer": "CUST-0001",
     "what":     "استشارة",
     "uses":     10,
@@ -895,7 +912,7 @@ is held against:
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/prepaid/entitlements -d '{
-    "id": "DEP-0001", "customer": "CUST-0001", "what": "عربون",
+    "customer": "CUST-0001", "what": "عربون",
     "value": {"minor": 15000, "currency": "SAR"},
     "reason": "bought", "against": "BK-0001"
   }'
@@ -929,7 +946,6 @@ refund itself is a credit note in `sales`.
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/prepaid/subscriptions -d '{
-    "id":       "SUB-0001",
     "customer": "CUST-0002",
     "plan":     "اشتراك سنوي",
     "price":    {"minor": 1200000, "currency": "SAR"},
@@ -993,7 +1009,7 @@ and a half.
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/prepaid/cards \
-  -d '{"id":"CARD-0001","customer":"CUST-0001","mechanic":"points"}'
+  -d '{"customer":"CUST-0001","mechanic":"points"}'
 
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/prepaid/cards/CARD-0001/earnings -d '{
@@ -1069,8 +1085,7 @@ answer.
 
 ## What is not here yet
 
-`Idempotency-Key` and `ETag`/`If-Match`. Writes are already idempotent on a
-client-chosen id, which is most of what the first buys.
+`ETag`/`If-Match`. It needs a conflict real enough to shape it.
 
 There is also **no per-caller rate limit** on any endpoint. Signup caps
 confirmations per address, which is what stops it filling one mailbox, and that

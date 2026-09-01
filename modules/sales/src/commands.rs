@@ -16,7 +16,9 @@
 //! effect that leaves this process: emailing the invoice, or clearing it with
 //! ZATCA.
 
-use erp_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
+use erp_eventlog::{
+    Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_create, try_execute,
+};
 use erp_tenant::{CommandError, TenantDb};
 use erp_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
 use ledger::LedgerError;
@@ -298,15 +300,16 @@ async fn issue_in(
         })
     })?;
 
-    let committed = try_execute::<Invoice, _, SalesError>(
+    // **`try_create`, not `try_execute`.** A second issue under a taken id used
+    // to return success carrying the *first* invoice's number, which lost a sale
+    // and told the till it was saved. The kernel now tells a retry from a
+    // different request by the fingerprint the caller put in the metadata.
+    let committed = try_create::<Invoice, _, SalesError>(
         &mut *conn,
         id,
         crate::upcasters(),
         &metadata,
-        |loaded| {
-            if loaded.aggregate.issued {
-                return Ok(Decision::nothing());
-            }
+        |_loaded| {
             Ok(Decision::one(InvoiceEvent::Issued {
                 number: Some(number.clone()),
                 customer: Box::new(draft.customer.clone()),
@@ -684,6 +687,7 @@ fn lift(error: ExecuteError<LedgerError>) -> ExecuteError<SalesError> {
         ExecuteError::Contended { stream, attempts } => {
             ExecuteError::Contended { stream, attempts }
         }
+        ExecuteError::AlreadyExists { stream } => ExecuteError::AlreadyExists { stream },
     }
 }
 

@@ -439,9 +439,9 @@ if committed.at.is_some() {
 
 ### Why two calls and not one
 
-Because the document might not be written. Every command here is idempotent on a
-client-chosen key, so issuing the same invoice twice is a no-op, and a single
-`nextval`-shaped call would burn a number on every retry. A retried request is
+Because the document might not be written. A create is idempotent on the key the
+client sent in `Idempotency-Key`, so re-sending the same request is a no-op, and
+a single `nextval`-shaped call would burn a number on every retry. A retried request is
 the normal case for a client that timed out, so burning one there would put gaps
 in the sequence of a business that did nothing wrong.
 

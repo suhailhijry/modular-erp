@@ -30,8 +30,8 @@ use utoipa_axum::routes;
 use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{Allowed, Language, ManageAccounts, PostEntries, Read};
-use erp_web::{Amount, Json, bad_request, metadata, parse_id, require_module};
+use erp_web::{Allowed, IdempotencyKey, Language, ManageAccounts, PostEntries, Read};
+use erp_web::{Amount, Json, bad_request, creating, metadata, parse_id, require_module};
 use erp_web::{Consistency, nudge};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -97,7 +97,6 @@ struct AccountView {
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({
-    "id": "JE-2026-0001",
     "occurred_on": "2026-08-15T00:00:00Z",
     "memo": "Opening the bank account",
     "lines": [
@@ -106,9 +105,6 @@ struct AccountView {
     ]
 }))]
 struct NewEntry {
-    /// The client's own identifier for the entry. Posting the same one twice is
-    /// a no-op, which is what makes a retried request safe.
-    id: String,
     /// The date the business treats this as happening — not a clock reading.
     #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     occurred_on: Timestamp,
@@ -291,10 +287,11 @@ async fn post_entry(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
     Language(locale): Language,
+    key: IdempotencyKey,
     Json(body): Json<NewEntry>,
 ) -> Result<Json<EntryPosted>, Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
-    let id = parse_id(&body.id, locale)?;
+    let id = key.id().clone();
 
     let mut lines = Vec::with_capacity(body.lines.len());
     for line in &body.lines {
@@ -316,7 +313,7 @@ async fn post_entry(
         body.occurred_on,
         &body.memo,
         balanced,
-        &metadata(&tenant),
+        &creating(&tenant, &key),
     )
     .await
     .map_err(|e| ledger_problem(&e, locale))?;
@@ -327,7 +324,7 @@ async fn post_entry(
     nudge(&state, tenant.db.tenant()).await;
 
     Ok(Json(EntryPosted {
-        id: body.id,
+        id: id.to_string(),
         position: committed.at.map(erp_types::LogPosition::get),
         lines: line_count,
     }))
@@ -335,13 +332,9 @@ async fn post_entry(
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({
-    "id": "JE-2026-0002", "occurred_on": "2026-08-16T00:00:00Z", "memo": "Reverses JE-2026-0001"
+    "occurred_on": "2026-08-16T00:00:00Z", "memo": "Reverses JE-2026-0001"
 }))]
 struct NewReversal {
-    /// The client's own identifier for the *reversing* entry. Sending the same
-    /// one twice is a no-op; a different one against an already-reversed entry
-    /// is refused.
-    id: String,
     /// When the correction is treated as happening. Usually today, not the date
     /// of the mistake — reversing into a closed period is how a filed return
     /// stops matching the books.
@@ -380,12 +373,13 @@ async fn reverse_entry(
     State(state): State<AppState>,
     Language(locale): Language,
     Path(params): Path<std::collections::HashMap<String, String>>,
+    key: IdempotencyKey,
     Json(body): Json<NewReversal>,
 ) -> Result<Json<EntryPosted>, Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
 
     let original = parse_id(params.get("entry").map_or("", String::as_str), locale)?;
-    let reversal = parse_id(&body.id, locale)?;
+    let reversal = key.id().clone();
 
     let committed = crate::reverse_entry(
         &tenant.db,
@@ -393,7 +387,7 @@ async fn reverse_entry(
         &reversal,
         body.occurred_on,
         &body.memo,
-        &metadata(&tenant),
+        &creating(&tenant, &key),
     )
     .await
     .map_err(|e| ledger_problem(&e, locale))?;
@@ -401,7 +395,7 @@ async fn reverse_entry(
     nudge(&state, tenant.db.tenant()).await;
 
     Ok(Json(EntryPosted {
-        id: body.id,
+        id: reversal.to_string(),
         position: committed.at.map(erp_types::LogPosition::get),
         // The reversal has exactly the lines the original had. Reporting the
         // count would mean loading it again to say something the client already
@@ -502,6 +496,14 @@ fn ledger_problem(error: &CommandError<crate::LedgerError>, locale: Locale) -> P
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
             erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
+        ),
+
+        // **The one that must never be silent.** A different request reused an
+        // identifier that is taken; a retry of the request that created it
+        // never reaches here, because the kernel reports those as success.
+        CommandError::Execute(ExecuteError::AlreadyExists { .. }) => (
+            StatusCode::CONFLICT,
+            erp_i18n::Message::new(erp_eventlog::messages::ALREADY_EXISTS),
         ),
 
         other => {

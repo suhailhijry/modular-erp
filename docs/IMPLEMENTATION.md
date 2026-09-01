@@ -1350,6 +1350,63 @@ booking, and nobody polled.
 
 ---
 
+## Out of band — identity moves to `Idempotency-Key`
+
+**Not a phase. A defect found by inspection, fixed before release.**
+
+The API took each record's identity from an `id` in the request body, and that
+identifier was doing two jobs: naming the record, and telling a retry from a new
+request. It did the second badly. `INV-0001` chosen at one till collides with
+`INV-0001` chosen at another, and **five creates resolved that collision by
+ignoring the second write and returning success** — losing a document and
+reporting it saved. The worst of them, `sales::issue_invoice`, handed the second
+till the *first* invoice's statutory number.
+
+- [x] **`erp_eventlog::try_create`**, beside `try_execute`. Empty stream →
+      create. Taken, and the request's fingerprint matches → a retry: nothing is
+      written and the original is reported. Taken, and it differs →
+      `ExecuteError::AlreadyExists`, a 409. The rule is the kernel's, so no
+      module writes it and none can forget it
+- [x] **The fingerprint travels in `Metadata`**, which every command already
+      takes, so **no command signature mentions it**. A create is written
+      exactly as before and gains the rule by calling `try_create`
+- [x] **`erp_web::IdempotencyKey`**, required on every create and refused unless
+      it parses as a UUID. It **is** the aggregate id, so deduplication falls out
+      of the log's own `UNIQUE (stream_domain, stream_id, sequence)`: no keys
+      table, no TTL, no sweeper, no Redis, and idempotency that is permanent
+      rather than lasting a day
+- [x] `id` is gone from every create body. The identity a human reads is the
+      server's — an invoice `number` from a gapless statutory series
+- [x] `TenantDb::create`, the retry loop for creates, mirroring `execute`
+- [x] The five silent no-ops replaced: `sales::issue_invoice`,
+      `purchases::record_bill`, `ledger::post_entry`, `booking::declare_resource`
+      and `booking::reserve`
+- [x] `CrmError::AlreadyExists` and `PrepaidError::AlreadyGranted` /
+      `AlreadyStarted` / `AlreadyOpen` deleted. Four modules had written their
+      own version of one rule; now none has
+
+**Two identities keep their own names, deliberately.** An account code and a
+bookable resource are named by the business and referenced by that name — you
+book `chair-1`, you post to `4000` — so those creates keep the id in the body
+and use the key only as the fingerprint. The rule still applies: a *different*
+resource claiming a taken name is refused rather than swallowed.
+
+**A consequence worth knowing.** A list paginated on `(timestamp, id)` used to
+tie-break in creation order, because clients numbered their own keys
+sequentially. Ids are UUIDs now, so rows sharing a timestamp come back in an
+order that is stable but arbitrary. The cursor's actual guarantee — no row
+skipped, none repeated — is unchanged, and
+`a_list_longer_than_one_page_can_be_read_to_the_end` asserts that rather than the
+sequence it used to assert. If invoice lists should sort by document number
+within a day, that is a separate change to `sales`, and a defensible one.
+
+This reverses the L8 note in `docs/ARCHITECTURE.md` §3, which argued a header
+"buys nothing without a store of keys and prior responses beside it". Right about
+the store, wrong about the conclusion: the store is unnecessary once the key is
+the stream id.
+
+---
+
 ## Phase 15 — `modules/pos` — the counter · 4–5 weeks
 
 **The segment that needs no calendar.** A coffee shop, a restaurant and a retail

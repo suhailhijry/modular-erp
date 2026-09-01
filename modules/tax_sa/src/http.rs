@@ -423,6 +423,14 @@ fn tax_problem(error: &CommandError<TaxError>, locale: Locale) -> Problem {
             erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
         ),
 
+        // **The one that must never be silent.** A different request reused an
+        // identifier that is taken; a retry of the request that created it
+        // never reaches here, because the kernel reports those as success.
+        CommandError::Execute(ExecuteError::AlreadyExists { .. }) => (
+            StatusCode::CONFLICT,
+            erp_i18n::Message::new(erp_eventlog::messages::ALREADY_EXISTS),
+        ),
+
         other => {
             tracing::error!(error = %other, "tax command failed");
             (

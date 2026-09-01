@@ -214,11 +214,6 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 ## `crm`
 
-### `crm.already_exists`
-
-- **en** — Customer {customer} already exists.
-- **ar** — العميل {customer} موجود بالفعل.
-
 ### `crm.archived`
 
 - **en** — Customer {customer} is archived. Restore them first.
@@ -261,6 +256,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 
 ## `eventlog`
+
+### `eventlog.already_exists`
+
+- **en** — Something else already exists under that identifier. This is not the same request that created it, so it has not been saved.
+- **ar** — يوجد شيء آخر بالفعل تحت هذا المعرّف. هذا ليس نفس الطلب الذي أنشأه، فلم يتم الحفظ.
 
 ### `eventlog.concurrent_modification`
 
@@ -452,21 +452,6 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — Subscription {id} is already frozen.
 - **ar** — الاشتراك {id} مجمّد بالفعل.
-
-### `prepaid.already_granted`
-
-- **en** — {id} has already been granted.
-- **ar** — تم منح {id} من قبل.
-
-### `prepaid.already_open`
-
-- **en** — Card {id} is already open.
-- **ar** — البطاقة {id} مفتوحة بالفعل.
-
-### `prepaid.already_started`
-
-- **en** — Subscription {id} has already started.
-- **ar** — بدأ الاشتراك {id} من قبل.
 
 ### `prepaid.amount_out_of_range`
 
@@ -671,6 +656,11 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — The request body could not be read: {reason}
 - **ar** — تعذّرت قراءة محتوى الطلب: {reason}
+
+### `request.missing_idempotency_key`
+
+- **en** — This request needs an `Idempotency-Key` header holding a UUID. It is the identity the record is created under, so it must be generated per request and never reused for a different one.
+- **ar** — هذا الطلب يحتاج ترويسة `Idempotency-Key` تحتوي على UUID. هي الهوية التي يُنشأ بها السجل، فيجب توليدها لكل طلب وعدم إعادة استخدامها لطلب مختلف.
 
 ### `request.module_deprecated`
 

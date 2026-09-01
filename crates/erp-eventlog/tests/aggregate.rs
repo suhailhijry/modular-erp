@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use erp_eventlog::{
     Aggregate, Decision, DomainEvent, ExecuteError, Loaded, Metadata, Upcasters, append_events,
-    execute, integrity, load,
+    execute, integrity, load, try_create,
 };
 use erp_testkit::{Schema, Template};
 use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Sequence};
@@ -504,4 +504,96 @@ async fn an_aggregate_loads_through_the_upcaster_chain() {
         .await
         .expect("loads through the chain");
     assert_eq!(loaded.aggregate.total, 9);
+}
+
+/// **A create under a taken id is refused, and a retry of it is not.**
+///
+/// The failure this guards is the one three modules had independently: ignoring
+/// the second write and returning success, which loses a document and tells the
+/// caller it was saved. The difference between the two cases is the request's
+/// own fingerprint, and nothing about the aggregate.
+#[tokio::test]
+async fn a_second_create_under_one_id_is_refused_unless_it_is_a_retry() {
+    let db = tenant_db().await;
+    let mut conn = db.pool().acquire().await.expect("connection");
+    let make = |by: i64| {
+        move |_: &Loaded<Counter>| {
+            Ok::<_, CounterError>(Decision::one(CounterEvent::Incremented { by }))
+        }
+    };
+
+    let first = try_create::<Counter, _, CounterError>(
+        &mut conn,
+        &id("INV-0001"),
+        &upcasters(),
+        &Metadata::default().with_fingerprint("request-a"),
+        make(5),
+    )
+    .await
+    .expect("the first create lands");
+    assert_eq!(first.events.len(), 1);
+
+    // The same request again: the client timed out and re-sent it. Nothing is
+    // written, and it is not an error.
+    let retried = try_create::<Counter, _, CounterError>(
+        &mut conn,
+        &id("INV-0001"),
+        &upcasters(),
+        &Metadata::default().with_fingerprint("request-a"),
+        make(5),
+    )
+    .await
+    .expect("a retry is not an error");
+    assert!(retried.events.is_empty(), "a retry wrote a second event");
+    assert_eq!(retried.version, first.version);
+
+    // A different request that happened to choose the same id. **This is the
+    // one that used to succeed silently.**
+    let refused = try_create::<Counter, _, CounterError>(
+        &mut conn,
+        &id("INV-0001"),
+        &upcasters(),
+        &Metadata::default().with_fingerprint("request-b"),
+        make(9_000),
+    )
+    .await
+    .expect_err("a different request under a taken id");
+    assert!(matches!(refused, ExecuteError::AlreadyExists { .. }));
+
+    // And it wrote nothing.
+    let held = load::<Counter>(&mut conn, &id("INV-0001"), &upcasters())
+        .await
+        .expect("loads");
+    assert_eq!(
+        held.aggregate.total, 5,
+        "the refused create changed the state"
+    );
+}
+
+/// A caller with no fingerprint gets the old behaviour, which is what a derived
+/// id needs: it cannot collide, so a repeat can only be a retry.
+#[tokio::test]
+async fn an_unfingerprinted_create_treats_a_repeat_as_a_retry() {
+    let db = tenant_db().await;
+    let mut conn = db.pool().acquire().await.expect("connection");
+    let decide = |_: &Loaded<Counter>| {
+        Ok::<_, CounterError>(Decision::one(CounterEvent::Incremented { by: 1 }))
+    };
+
+    for _ in 0..2 {
+        try_create::<Counter, _, CounterError>(
+            &mut conn,
+            &id("si.INV-0001"),
+            &upcasters(),
+            &Metadata::default(),
+            decide,
+        )
+        .await
+        .expect("a derived id repeats harmlessly");
+    }
+
+    let held = load::<Counter>(&mut conn, &id("si.INV-0001"), &upcasters())
+        .await
+        .expect("loads");
+    assert_eq!(held.aggregate.total, 1);
 }

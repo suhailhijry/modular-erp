@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT metadata -> 'extra' ->> $3 FROM event\n          WHERE stream_domain = $1 AND stream_id = $2\n          ORDER BY sequence LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "?column?",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d0388f8ae142b9c80f27c93dd7820a258b1fe56dc768e0b43f578cddf3d97fa4"
+}

@@ -12,7 +12,9 @@
 //! **plausible** — never negative, zero on anything not standard-rated, and
 //! never claimed without a supplier VAT number to evidence it.
 
-use erp_eventlog::{Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_execute};
+use erp_eventlog::{
+    Committed, Decision, ExecuteError, MAX_ATTEMPTS, Metadata, try_create, try_execute,
+};
 use erp_tenant::{CommandError, TenantDb};
 use erp_types::{AggregateId, CurrencyCode, Money, StreamId, Timestamp};
 use ledger::{LedgerError, VatCategory};
@@ -250,15 +252,15 @@ async fn record_in(
         })
     })?;
 
-    let committed = try_execute::<Bill, _, PurchaseError>(
+    // `try_create`, for the reason `sales::issue_invoice` uses it: a second
+    // bill under a taken id used to be swallowed as a retry, which loses a
+    // supplier invoice and reports success.
+    let committed = try_create::<Bill, _, PurchaseError>(
         &mut *conn,
         id,
         crate::upcasters(),
         &metadata,
-        |loaded| {
-            if loaded.aggregate.received {
-                return Ok(Decision::nothing());
-            }
+        |_loaded| {
             Ok(Decision::one(BillEvent::Received {
                 supplier: draft.supplier.clone(),
                 supplier_reference: draft.supplier_reference.trim().to_owned(),
@@ -446,6 +448,7 @@ fn lift(error: ExecuteError<LedgerError>) -> ExecuteError<PurchaseError> {
         ExecuteError::Contended { stream, attempts } => {
             ExecuteError::Contended { stream, attempts }
         }
+        ExecuteError::AlreadyExists { stream } => ExecuteError::AlreadyExists { stream },
     }
 }
 

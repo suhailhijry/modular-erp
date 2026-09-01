@@ -178,9 +178,7 @@ against it, so a code missing from any part is a failing build.
 
 ## What is not here yet
 
-`Idempotency-Key` and `ETag`/`If-Match`. Writes are already idempotent on a
-client-chosen id, which is most of what the first buys, and the other needs a
-conflict real enough to shape it.
+`ETag`/`If-Match`. It needs a conflict real enough to shape it.
 
 ## The API process
 

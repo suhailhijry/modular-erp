@@ -14,7 +14,8 @@
 //! that makes a month-end recognition job safe to run twice.
 
 use erp_eventlog::{
-    Aggregate, Committed, Decision, ExecuteError, Loaded, MAX_ATTEMPTS, Metadata, try_execute,
+    Aggregate, Committed, Decision, ExecuteError, Loaded, MAX_ATTEMPTS, Metadata, try_create,
+    try_execute,
 };
 use erp_tenant::{CommandError, TenantDb};
 use erp_types::{AggregateId, DomainName, Money, StreamId, Timestamp};
@@ -28,8 +29,6 @@ use crate::subscription::{Subscription, SubscriptionEvent};
 pub enum PrepaidError {
     #[error("there is no customer {0}")]
     NoSuchCustomer(String),
-    #[error("{0} has already been granted")]
-    AlreadyGranted(String),
     #[error("there is no package or deposit {0}")]
     NoSuchEntitlement(String),
     #[error("{0} is finished")]
@@ -50,16 +49,12 @@ pub enum PrepaidError {
     OpenValue,
     #[error("there is no card {0}")]
     NoSuchCard(String),
-    #[error("card {0} is already open")]
-    AlreadyOpen(String),
     #[error("no loyalty scheme has been configured")]
     NoScheme,
     #[error("card {0} holds a balance in another currency than the scheme")]
     WrongCurrency(String),
     #[error("there is no subscription {0}")]
     NoSuchSubscription(String),
-    #[error("subscription {0} has already started")]
-    AlreadyStarted(String),
     #[error("a term must end after it starts")]
     NotATerm,
     #[error("subscription {0} is already frozen")]
@@ -93,9 +88,6 @@ impl erp_i18n::Localize for PrepaidError {
             Self::NoSuchCustomer(id) => {
                 Message::new(messages::NO_SUCH_CUSTOMER).with("customer", MessageArg::text(id))
             }
-            Self::AlreadyGranted(id) => {
-                Message::new(messages::ALREADY_GRANTED).with("id", MessageArg::text(id))
-            }
             Self::NoSuchEntitlement(id) => {
                 Message::new(messages::NO_SUCH_ENTITLEMENT).with("id", MessageArg::text(id))
             }
@@ -113,18 +105,12 @@ impl erp_i18n::Localize for PrepaidError {
             Self::NoSuchCard(id) => {
                 Message::new(messages::NO_SUCH_CARD).with("id", MessageArg::text(id))
             }
-            Self::AlreadyOpen(id) => {
-                Message::new(messages::ALREADY_OPEN).with("id", MessageArg::text(id))
-            }
             Self::NoScheme => Message::new(messages::NO_SCHEME),
             Self::WrongCurrency(id) => {
                 Message::new(messages::WRONG_CURRENCY).with("id", MessageArg::text(id))
             }
             Self::NoSuchSubscription(id) => {
                 Message::new(messages::NO_SUCH_SUBSCRIPTION).with("id", MessageArg::text(id))
-            }
-            Self::AlreadyStarted(id) => {
-                Message::new(messages::ALREADY_STARTED).with("id", MessageArg::text(id))
             }
             Self::NotATerm => Message::new(messages::NOT_A_TERM),
             Self::AlreadyFrozen(id) => {
@@ -216,9 +202,10 @@ pub struct Grant {
 
 /// Records something bought now and delivered later, and defers its value.
 ///
-/// Granting the same id twice is refused rather than ignored: an entitlement is
-/// a balance somebody holds, and quietly returning success for a second,
-/// different grant under the same id would lose whichever one arrived second.
+/// A second, *different* grant under a taken id is refused rather than ignored —
+/// an entitlement is a balance somebody holds, and quietly returning success
+/// would lose whichever one arrived second. A retry of the same request is not:
+/// `erp_eventlog::try_create` tells them apart, and this module does not.
 pub async fn grant(
     db: &TenantDb,
     id: &AggregateId,
@@ -254,15 +241,12 @@ pub async fn grant(
             let conn = &mut *tx;
             check_customer(&mut *conn, &grant.customer).await?;
 
-            let committed = try_execute::<Entitlement, _, _>(
+            let committed = try_create::<Entitlement, _, _>(
                 &mut *conn,
                 id,
                 crate::upcasters(),
                 metadata,
-                |loaded: &Loaded<Entitlement>| {
-                    if loaded.aggregate.exists() {
-                        return Err(PrepaidError::AlreadyGranted(id.to_string()));
-                    }
+                |_loaded: &Loaded<Entitlement>| {
                     Ok(Decision::one(EntitlementEvent::Granted {
                         customer: grant.customer.clone(),
                         what: grant.what.clone(),
@@ -572,15 +556,12 @@ pub async fn start_subscription(
             let conn = &mut *tx;
             check_customer(&mut *conn, &term.customer).await?;
 
-            let committed = try_execute::<Subscription, _, _>(
+            let committed = try_create::<Subscription, _, _>(
                 &mut *conn,
                 id,
                 crate::upcasters(),
                 metadata,
-                |loaded: &Loaded<Subscription>| {
-                    if loaded.aggregate.exists() {
-                        return Err(PrepaidError::AlreadyStarted(id.to_string()));
-                    }
+                |_loaded: &Loaded<Subscription>| {
                     Ok(Decision::one(SubscriptionEvent::Started {
                         customer: term.customer.clone(),
                         plan: term.plan.clone(),
@@ -945,15 +926,12 @@ pub async fn open_card(
             let conn = &mut *tx;
             check_customer(&mut *conn, &card.customer).await?;
 
-            let committed = try_execute::<Loyalty, _, _>(
+            let committed = try_create::<Loyalty, _, _>(
                 &mut *conn,
                 id,
                 crate::upcasters(),
                 metadata,
-                |loaded: &Loaded<Loyalty>| {
-                    if loaded.aggregate.exists() {
-                        return Err(PrepaidError::AlreadyOpen(id.to_string()));
-                    }
+                |_loaded: &Loaded<Loyalty>| {
                     Ok(Decision::one(LoyaltyEvent::Opened {
                         customer: card.customer.clone(),
                         mechanic: card.mechanic,
@@ -1283,6 +1261,7 @@ async fn post(
             ExecuteError::Contended { stream, attempts } => {
                 ExecuteError::Contended { stream, attempts }
             }
+            ExecuteError::AlreadyExists { stream } => ExecuteError::AlreadyExists { stream },
         })
 }
 

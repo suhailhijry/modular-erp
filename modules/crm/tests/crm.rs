@@ -295,36 +295,51 @@ async fn archiving_hides_without_losing() {
     fixture.cleanup().await;
 }
 
-/// **Registering an id twice is refused, never ignored.**
+/// **Registering an id twice is refused, never ignored — unless it is a retry.**
 ///
-/// The same call `ledger::open_account` makes: the second caller meant a
-/// different customer, and quietly handing back the first would attach their
-/// next invoice to somebody else.
+/// The two cases are told apart by the request's fingerprint and nothing else,
+/// which is why this is the kernel's rule and not this module's: the second
+/// caller who *meant* a different customer would otherwise be handed the first,
+/// and their next invoice would attach to somebody else.
 #[tokio::test]
-async fn the_same_id_twice_is_a_conflict() {
+async fn the_same_id_twice_is_a_conflict_unless_it_is_a_retry() {
     let fixture = Fixture::new().await;
+    let first = Metadata::default().with_fingerprint("request-a");
+
     register_customer(
         &fixture.db,
         &code("CUST-1"),
         &company(),
         on("2026-01-15"),
-        &Metadata::default(),
+        &first,
     )
     .await
     .expect("registers");
 
+    // The same request again: a client that timed out and re-sent it.
+    register_customer(
+        &fixture.db,
+        &code("CUST-1"),
+        &company(),
+        on("2026-01-15"),
+        &first,
+    )
+    .await
+    .expect("a retry is not an error");
+
+    // A different request that chose the same id.
     let refused = register_customer(
         &fixture.db,
         &code("CUST-1"),
         &person(),
         on("2026-02-01"),
-        &Metadata::default(),
+        &Metadata::default().with_fingerprint("request-b"),
     )
     .await
     .expect_err("the second is refused");
     assert!(matches!(
-        rejection(&refused),
-        Some(CrmError::AlreadyExists(_))
+        refused,
+        CommandError::Execute(ExecuteError::AlreadyExists { .. })
     ));
 
     fixture.project().await;

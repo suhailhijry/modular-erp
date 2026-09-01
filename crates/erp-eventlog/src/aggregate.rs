@@ -79,6 +79,12 @@ pub enum ExecuteError<E> {
     /// aggregate, and the caller should surface it rather than retry forever.
     #[error("gave up after {attempts} attempts; {stream} is under sustained contention")]
     Contended { stream: StreamId, attempts: u32 },
+    /// A create landed on a stream that already exists, under a request that is
+    /// **not** the one that created it.
+    ///
+    /// This is the failure that must never be silent. See [`try_create`].
+    #[error("{stream} already exists, and was created by a different request")]
+    AlreadyExists { stream: StreamId },
 }
 
 impl<E> ExecuteError<E> {
@@ -382,6 +388,113 @@ where
         effects_enqueued,
     })
 }
+
+/// One attempt at creating an aggregate, inside the caller's transaction.
+///
+/// # Why creating is not the same call as changing
+///
+/// Every other command here is a change to something that exists, and a repeat
+/// of one is unambiguous: the same payment reference twice is the same payment.
+/// A **create** is the one shape where a repeated id is ambiguous, because two
+/// different things can be given the same name — and until this existed, each
+/// module answered that on its own. Three of them answered it by ignoring the
+/// second write and returning success, which loses a document and tells the
+/// caller it was saved. That is the failure this function exists to make
+/// impossible, and it is not left to the module because a module cannot be
+/// relied upon to remember it.
+///
+/// So the decision is made here, once, from the request's own fingerprint:
+///
+/// | the stream | the fingerprint | what happens |
+/// |---|---|---|
+/// | empty | — | created |
+/// | exists | matches | **a retry**: nothing is written, the original is reported |
+/// | exists | differs | [`ExecuteError::AlreadyExists`] |
+///
+/// The third row is the whole point. A client whose request timed out re-sends
+/// it and gets its answer; a client that reuses an identifier for something else
+/// is refused loudly rather than silently losing a sale.
+///
+/// # The fingerprint
+///
+/// Taken from the metadata the command was already given —
+/// [`Metadata::with_fingerprint`] puts it there, and the HTTP layer sets it from
+/// `Idempotency-Key`. It travels that way rather than as an argument so that
+/// **no command signature mentions it**: a create is written the same as it
+/// always was, and gains this by calling `try_create` instead of `try_execute`.
+///
+/// It is stored on the creating event, so there is no second table to keep in
+/// step and no expiry — the log already remembers everything, for ever, which is
+/// the property a separate idempotency store spends a TTL trying to approximate.
+///
+/// Metadata with no fingerprint means *this request cannot be fingerprinted*,
+/// and then any repeat is treated as a retry. That is the old behaviour, and it
+/// is what internal callers with derived ids want, because those cannot
+/// collide.
+///
+/// # The caller's obligation
+///
+/// The same as [`try_execute`]: commit on `Ok`, roll back on `Err`.
+pub async fn try_create<A, F, E>(
+    conn: &mut PgConnection,
+    id: &AggregateId,
+    upcasters: &Upcasters,
+    metadata: &Metadata,
+    decide: F,
+) -> Result<Committed<A::Event>, ExecuteError<E>>
+where
+    A: Aggregate,
+    F: Fn(&Loaded<A>) -> Result<Decision<A::Event>, E>,
+{
+    let loaded = load::<A>(&mut *conn, id, upcasters).await?;
+
+    if loaded.version != Sequence::ZERO {
+        let fingerprint = metadata.fingerprint();
+        let stream = StreamId::new(A::domain(), id.clone());
+        return match (fingerprint, created_by(&mut *conn, &stream).await?) {
+            // A retry of the request that created it. Report what is there.
+            (Some(sent), Some(stored)) if sent == stored => Ok(Committed {
+                events: Vec::new(),
+                at: None,
+                version: loaded.version,
+                effects_enqueued: 0,
+            }),
+            // Nothing to compare against, on either side. Every caller that can
+            // collide sends one, so this is a derived id and a retry.
+            (None, _) | (_, None) => Ok(Committed {
+                events: Vec::new(),
+                at: None,
+                version: loaded.version,
+                effects_enqueued: 0,
+            }),
+            // A different request, under a name that is taken.
+            (Some(_), Some(_)) => Err(ExecuteError::AlreadyExists { stream }),
+        };
+    }
+
+    try_execute::<A, _, E>(conn, id, upcasters, metadata, decide).await
+}
+
+/// The fingerprint of the request that created a stream, if it recorded one.
+async fn created_by(
+    conn: &mut PgConnection,
+    stream: &StreamId,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar!(
+        "SELECT metadata -> 'extra' ->> $3 FROM event
+          WHERE stream_domain = $1 AND stream_id = $2
+          ORDER BY sequence LIMIT 1",
+        stream.domain.as_str(),
+        stream.id.as_str(),
+        REQUEST_FINGERPRINT,
+    )
+    .fetch_optional(conn)
+    .await
+    .map(Option::flatten)
+}
+
+/// Where [`try_create`] records what request created a stream.
+pub const REQUEST_FINGERPRINT: &str = "request";
 
 /// Appends typed events to an aggregate's stream.
 ///

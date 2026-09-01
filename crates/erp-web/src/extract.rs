@@ -8,7 +8,7 @@ use erp_i18n::Locale;
 
 use crate::error::ApiError;
 use crate::problem::Problem;
-use erp_types::ModuleId;
+use erp_types::{AggregateId, ModuleId};
 
 use crate::state::AppState;
 
@@ -31,6 +31,91 @@ impl<S: Send + Sync> FromRequestParts<S> for Language {
                 .and_then(|v| v.to_str().ok())
                 .map_or(Locale::DEFAULT, Locale::from_accept_language),
         ))
+    }
+}
+
+/// The identity a write creates its record under, from `Idempotency-Key`.
+///
+/// # Why the client supplies this and does not supply an id
+///
+/// A create needs two things that look like one: a name for the record, and a
+/// way to tell a retry from a new request. This system used to take a single
+/// `id` in the body doing both jobs, and the job it did badly was the second —
+/// because a human picking `INV-0001` on one till collides with a human picking
+/// `INV-0001` on another, and the write that arrived second was silently
+/// dropped as a "retry".
+///
+/// A UUID cannot collide by accident, so making the key a UUID and refusing
+/// anything else removes the failure rather than detecting it. What the business
+/// calls the record is a separate thing the *server* issues — an invoice number
+/// from a gapless series — which is what it always should have been.
+///
+/// # Why a header and not a field
+///
+/// Because it is not part of what is being described. A body says what the
+/// record is; this says which attempt at saying it. Keeping them apart is also
+/// what lets one extractor cover every write instead of every module repeating
+/// a field and the rule that goes with it.
+///
+/// # What it costs to store
+///
+/// Nothing. It **is** the aggregate id, so telling a retry from a repeat falls
+/// out of the event log's own uniqueness constraint — there is no keys table, no
+/// expiry, and idempotency is permanent rather than lasting a day. See
+/// `erp_eventlog::try_create`, which is where the decision is actually made.
+#[derive(Debug, Clone)]
+pub struct IdempotencyKey(pub AggregateId);
+
+impl IdempotencyKey {
+    /// The header a client sends it in.
+    pub const HEADER: &'static str = "idempotency-key";
+
+    /// What the created record is stored under.
+    #[must_use]
+    pub const fn id(&self) -> &AggregateId {
+        &self.0
+    }
+
+    /// What `try_create` compares to tell a retry from a collision.
+    ///
+    /// The key itself. Two requests carrying one key **are** the same request as
+    /// far as this system is concerned, which is what the client promised by
+    /// sending it, and the aggregate id already carries it.
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let locale = Language::from_request_parts(parts, state)
+            .await
+            .map_or(Locale::DEFAULT, |Language(locale)| locale);
+
+        let sent = parts
+            .headers
+            .get(Self::HEADER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+
+        // A UUID and nothing else. Accepting a free-form string would put the
+        // collision back: the whole point is that the caller cannot choose
+        // something another caller would also choose.
+        uuid::Uuid::parse_str(sent)
+            .ok()
+            .and_then(|uuid| AggregateId::new(uuid.to_string()).ok())
+            .map(Self)
+            .ok_or_else(|| {
+                crate::wire::bad_request(
+                    crate::messages::MISSING_IDEMPOTENCY_KEY,
+                    "value",
+                    sent,
+                    locale,
+                )
+            })
     }
 }
 

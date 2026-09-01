@@ -244,6 +244,62 @@ impl TenantDb {
         }
         .into())
     }
+
+    /// Runs a command that **creates** an aggregate, retrying the same way.
+    ///
+    /// The difference from [`Self::execute`] is what happens when the id is
+    /// already taken, and it is the difference between a retry and a lost
+    /// document. See `erp_eventlog::try_create`, which decides it from the
+    /// fingerprint in the metadata — so a create is written exactly like any
+    /// other command, and gains the rule by calling this instead.
+    pub async fn create<A, F, E>(
+        &self,
+        id: &erp_types::AggregateId,
+        upcasters: &erp_eventlog::Upcasters,
+        metadata: &erp_eventlog::Metadata,
+        decide: F,
+    ) -> Result<erp_eventlog::Committed<A::Event>, CommandError<E>>
+    where
+        A: erp_eventlog::Aggregate,
+        F: Fn(&erp_eventlog::Loaded<A>) -> Result<erp_eventlog::Decision<A::Event>, E>,
+    {
+        for attempt in 1..=erp_eventlog::MAX_ATTEMPTS {
+            let mut tx = self.begin().await?;
+
+            match erp_eventlog::try_create::<A, _, E>(&mut tx, id, upcasters, metadata, &decide)
+                .await
+            {
+                Ok(committed) => {
+                    tx.commit()
+                        .await
+                        .map_err(erp_eventlog::ExecuteError::from)?;
+                    return Ok(committed);
+                }
+                Err(e) if e.is_conflict() => {
+                    tx.rollback()
+                        .await
+                        .map_err(erp_eventlog::ExecuteError::from)?;
+                    tracing::debug!(
+                        tenant = %self.tenant,
+                        attempt,
+                        "optimistic concurrency conflict, retrying"
+                    );
+                }
+                Err(e) => {
+                    tx.rollback()
+                        .await
+                        .map_err(erp_eventlog::ExecuteError::from)?;
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Err(erp_eventlog::ExecuteError::Contended {
+            stream: erp_types::StreamId::new(A::domain(), id.clone()),
+            attempts: erp_eventlog::MAX_ATTEMPTS,
+        }
+        .into())
+    }
 }
 
 /// What a command against a tenant can fail with.

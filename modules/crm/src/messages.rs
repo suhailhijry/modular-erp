@@ -6,7 +6,6 @@ pub const NO_NAME: MessageCode = MessageCode::new("crm.no_name");
 pub const NAME_TOO_LONG: MessageCode = MessageCode::new("crm.name_too_long");
 pub const NO_CONTACT: MessageCode = MessageCode::new("crm.no_contact");
 pub const NO_SUCH_CUSTOMER: MessageCode = MessageCode::new("crm.no_such_customer");
-pub const ALREADY_EXISTS: MessageCode = MessageCode::new("crm.already_exists");
 pub const ARCHIVED: MessageCode = MessageCode::new("crm.archived");
 pub const NOT_A_VAT_NUMBER: MessageCode = MessageCode::new("crm.not_a_vat_number");
 pub const PERSON_WITH_VAT_NUMBER: MessageCode = MessageCode::new("crm.person_with_vat_number");
@@ -17,7 +16,6 @@ pub static CODES: &[MessageCode] = &[
     NAME_TOO_LONG,
     NO_CONTACT,
     NO_SUCH_CUSTOMER,
-    ALREADY_EXISTS,
     ARCHIVED,
     NOT_A_VAT_NUMBER,
     PERSON_WITH_VAT_NUMBER,
@@ -78,16 +76,6 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_CUSTOMER,
         Locale::Arabic,
         Template::Simple("لا يوجد عميل {customer}."),
-    ),
-    (
-        ALREADY_EXISTS,
-        Locale::English,
-        Template::Simple("Customer {customer} already exists."),
-    ),
-    (
-        ALREADY_EXISTS,
-        Locale::Arabic,
-        Template::Simple("العميل {customer} موجود بالفعل."),
     ),
     (
         ARCHIVED,

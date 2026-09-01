@@ -19,7 +19,8 @@
 use std::collections::BTreeMap;
 
 use erp_eventlog::{
-    Aggregate, Committed, Decision, ExecuteError, Loaded, MAX_ATTEMPTS, Metadata, try_execute,
+    Aggregate, Committed, Decision, ExecuteError, Loaded, MAX_ATTEMPTS, Metadata, try_create,
+    try_execute,
 };
 use erp_occupancy::{BadSpan, Claim, OccupancyError, Span};
 use erp_tenant::{CommandError, TenantDb};
@@ -247,16 +248,16 @@ pub async fn declare_resource(
         let mut tx = db.begin().await?;
         let outcome = async {
             let conn = &mut *tx;
-            let committed = try_execute::<Resource, _, _>(
+            // A resource keeps the name the business gave it — you book
+            // `CHAIR-1`, not a UUID — so the id stays the caller's. What
+            // `try_create` adds is that re-using that name for a *different*
+            // resource is refused instead of quietly returning the first.
+            let committed = try_create::<Resource, _, _>(
                 &mut *conn,
                 id,
                 crate::upcasters(),
                 metadata,
-                |loaded: &Loaded<Resource>| {
-                    let resource = &loaded.aggregate;
-                    if resource.declared {
-                        return Ok(Decision::nothing());
-                    }
+                |_loaded: &Loaded<Resource>| {
                     Ok::<_, BookingError>(Decision::one(ResourceEvent::Declared {
                         name: details.name.clone(),
                         name_latin: details.name_latin.clone(),
@@ -514,16 +515,12 @@ pub async fn reserve(
             let lines = priced(&mut *conn, &booking.lines).await?;
             check_offered(&mut *conn, &lines).await?;
 
-            let committed = try_execute::<Reservation, _, _>(
+            let committed = try_create::<Reservation, _, _>(
                 &mut *conn,
                 id,
                 crate::upcasters(),
                 metadata,
-                |loaded: &Loaded<Reservation>| {
-                    let reservation = &loaded.aggregate;
-                    if reservation.exists() {
-                        return Ok(Decision::nothing());
-                    }
+                |_loaded: &Loaded<Reservation>| {
                     Ok::<_, BookingError>(Decision::one(ReservationEvent::Reserved {
                         customer: Box::new(booking.customer.clone()),
                         lines: lines.clone(),

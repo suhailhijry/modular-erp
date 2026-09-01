@@ -24,8 +24,10 @@ use utoipa_axum::routes;
 use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module};
-use erp_web::{Allowed, Language, PostEntries, Read};
+use erp_web::{
+    After, Amount, Json, Paged, Query, bad_request, creating, metadata, parse_id, require_module,
+};
+use erp_web::{Allowed, IdempotencyKey, Language, PostEntries, Read};
 use erp_web::{Consistency, nudge};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -61,7 +63,6 @@ static CATALOG: erp_i18n::Composite =
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({
-    "id": "ap-2026-0042",
     "supplier": { "name": "Najd Supplies", "vat_number": "311234567800003" },
     "reference": "NS-8891",
     "billed_on": "2026-02-03T00:00:00Z",
@@ -73,12 +74,6 @@ static CATALOG: erp_i18n::Composite =
     ]
 }))]
 struct NewBill {
-    /// **Your own key for this bill.** Recording the same one twice is a no-op,
-    /// which is what makes a retried request safe.
-    ///
-    /// Not the supplier's number — that is `reference`, and two suppliers can
-    /// both call something `INV-001`.
-    id: String,
     supplier: NewSupplier,
     /// **The supplier's own invoice number.** What a reclaim is evidenced by.
     /// Recording the same one twice for the same supplier is refused: it would
@@ -250,11 +245,12 @@ async fn record_bill(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
     Language(locale): Language,
+    key: IdempotencyKey,
     Json(body): Json<NewBill>,
 ) -> Result<(StatusCode, Json<BillPaymentRecorded>), Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
 
-    let id = parse_id(&body.id, locale)?;
+    let id = key.id().clone();
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
             erp_web::messages::UNKNOWN_CURRENCY,
@@ -299,7 +295,7 @@ async fn record_bill(
         note: body.note,
     };
 
-    let committed = crate::record_bill(&tenant.db, &id, &draft, &metadata(&tenant))
+    let committed = crate::record_bill(&tenant.db, &id, &draft, &creating(&tenant, &key))
         .await
         .map_err(|e| purchase_problem(&e, locale))?;
 
@@ -308,7 +304,7 @@ async fn record_bill(
     Ok((
         StatusCode::CREATED,
         Json(BillPaymentRecorded {
-            id: body.id,
+            id: id.to_string(),
             position: committed.at.map(erp_types::LogPosition::get),
         }),
     ))
@@ -521,6 +517,14 @@ fn purchase_problem(error: &CommandError<PurchaseError>, locale: Locale) -> Prob
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
             erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
+        ),
+
+        // **The one that must never be silent.** A different request reused an
+        // identifier that is taken; a retry of the request that created it
+        // never reaches here, because the kernel reports those as success.
+        CommandError::Execute(ExecuteError::AlreadyExists { .. }) => (
+            StatusCode::CONFLICT,
+            erp_i18n::Message::new(erp_eventlog::messages::ALREADY_EXISTS),
         ),
 
         other => {

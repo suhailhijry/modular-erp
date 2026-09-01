@@ -22,9 +22,11 @@ use utoipa_axum::routes;
 
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{After, Allowed, Amount, Language, ManageAccounts, Paged, PostEntries, Read};
+use erp_web::{
+    After, Allowed, Amount, IdempotencyKey, Language, ManageAccounts, Paged, PostEntries, Read,
+};
 use erp_web::{Consistency, nudge};
-use erp_web::{Json, Query, bad_request, metadata, parse_id, require_module};
+use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
 
 use crate::{
     Card, Earning, Grant, Mechanic, PointsRedemption, PrepaidError, Reason, Redemption, Term,
@@ -71,7 +73,6 @@ static CATALOG: erp_i18n::Composite = erp_i18n::Composite::new(&[
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({
-    "id": "PKG-0001",
     "customer": "CUST-0001",
     "what": "قص",
     "uses": 10,
@@ -79,8 +80,6 @@ static CATALOG: erp_i18n::Composite = erp_i18n::Composite::new(&[
     "reason": "bought"
 }))]
 struct NewEntitlement {
-    /// Your key. Granting the same one twice is refused, not ignored.
-    id: String,
     /// The `crm` record that holds it.
     customer: String,
     /// What it is for, in your own words.
@@ -168,7 +167,6 @@ struct EntitlementRecord {
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({
-    "id": "SUB-0001",
     "customer": "CUST-0001",
     "plan": "سنوي",
     "price": {"minor": 120_000, "currency": "SAR"},
@@ -176,7 +174,6 @@ struct EntitlementRecord {
     "until": "2027-01-01T00:00:00Z"
 }))]
 struct NewSubscription {
-    id: String,
     customer: String,
     plan: String,
     /// **What is deferred, excluding tax**, for this term.
@@ -331,10 +328,11 @@ async fn grant_entitlement(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
     Language(locale): Language,
+    key: IdempotencyKey,
     Json(body): Json<NewEntitlement>,
 ) -> Result<(StatusCode, Json<PrepaidAccepted>), Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
-    let id = parse_id(&body.id, locale)?;
+    let id = key.id().clone();
     let reason: Reason = body.reason.parse().map_err(|e: crate::UnknownReason| {
         bad_request(crate::messages::UNKNOWN_REASON, "value", &e.0, locale)
     })?;
@@ -354,17 +352,14 @@ async fn grant_entitlement(
         at: body.at.unwrap_or_else(chrono::Utc::now),
     };
 
-    let committed = crate::grant(&tenant.db, &id, &grant, &metadata(&tenant))
+    let committed = crate::grant(&tenant.db, &id, &grant, &creating(&tenant, &key))
         .await
         .map_err(|e| problem_for(&e, locale))?;
 
     nudge(&state, tenant.db.tenant()).await;
     Ok((
         StatusCode::CREATED,
-        Json(PrepaidAccepted {
-            id: body.id,
-            position: committed.at.map(erp_types::LogPosition::get),
-        }),
+        Json(accepted(id.to_string(), &committed)),
     ))
 }
 
@@ -373,7 +368,7 @@ async fn grant_entitlement(
     get,
     path = "/v1/prepaid/entitlements/{entitlement}",
     tag = "prepaid",
-    params(("entitlement" = String, Path, description = "The id you granted it under.")),
+    params(("entitlement" = String, Path, description = "The key it was granted under.")),
     responses(
         (status = OK, body = EntitlementRecord),
         (status = NOT_FOUND, description = "No such entitlement, or the projection has not caught up", body = Problem),
@@ -406,7 +401,7 @@ async fn get_entitlement(
     post,
     path = "/v1/prepaid/entitlements/{entitlement}/redemptions",
     tag = "prepaid",
-    params(("entitlement" = String, Path, description = "The id you granted it under.")),
+    params(("entitlement" = String, Path, description = "The key it was granted under.")),
     request_body = NewRedemption,
     responses(
         (status = OK, body = PrepaidAccepted),
@@ -448,7 +443,7 @@ async fn redeem_entitlement(
     post,
     path = "/v1/prepaid/entitlements/{entitlement}/expiry",
     tag = "prepaid",
-    params(("entitlement" = String, Path, description = "The id you granted it under.")),
+    params(("entitlement" = String, Path, description = "The key it was granted under.")),
     request_body = AtAMoment,
     responses(
         (status = OK, description = "Nothing happens if it has not lapsed yet.", body = PrepaidAccepted),
@@ -486,7 +481,7 @@ async fn expire_entitlement(
     post,
     path = "/v1/prepaid/entitlements/{entitlement}/revocation",
     tag = "prepaid",
-    params(("entitlement" = String, Path, description = "The id you granted it under.")),
+    params(("entitlement" = String, Path, description = "The key it was granted under.")),
     request_body = EndingIt,
     responses(
         (status = OK, body = PrepaidAccepted),
@@ -593,10 +588,11 @@ async fn start_subscription(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
     Language(locale): Language,
+    key: IdempotencyKey,
     Json(body): Json<NewSubscription>,
 ) -> Result<(StatusCode, Json<PrepaidAccepted>), Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
-    let id = parse_id(&body.id, locale)?;
+    let id = key.id().clone();
     let term = Term {
         customer: parse_id(&body.customer, locale)?,
         plan: body.plan,
@@ -606,17 +602,14 @@ async fn start_subscription(
         at: body.at.unwrap_or_else(chrono::Utc::now),
     };
 
-    let committed = crate::start_subscription(&tenant.db, &id, &term, &metadata(&tenant))
+    let committed = crate::start_subscription(&tenant.db, &id, &term, &creating(&tenant, &key))
         .await
         .map_err(|e| problem_for(&e, locale))?;
 
     nudge(&state, tenant.db.tenant()).await;
     Ok((
         StatusCode::CREATED,
-        Json(PrepaidAccepted {
-            id: body.id,
-            position: committed.at.map(erp_types::LogPosition::get),
-        }),
+        Json(accepted(id.to_string(), &committed)),
     ))
 }
 
@@ -625,7 +618,7 @@ async fn start_subscription(
     get,
     path = "/v1/prepaid/subscriptions/{subscription}",
     tag = "prepaid",
-    params(("subscription" = String, Path, description = "The id you started it under.")),
+    params(("subscription" = String, Path, description = "The key it was started under.")),
     responses(
         (status = OK, body = SubscriptionRecord),
         (status = NOT_FOUND, description = "No such subscription, or the projection has not caught up", body = Problem),
@@ -661,7 +654,7 @@ async fn get_subscription(
     post,
     path = "/v1/prepaid/subscriptions/{subscription}/recognition",
     tag = "prepaid",
-    params(("subscription" = String, Path, description = "The id you started it under.")),
+    params(("subscription" = String, Path, description = "The key it was started under.")),
     request_body = AtAMoment,
     responses(
         (status = OK, body = PrepaidAccepted),
@@ -699,7 +692,7 @@ async fn recognise_subscription(
     post,
     path = "/v1/prepaid/subscriptions/{subscription}/freeze",
     tag = "prepaid",
-    params(("subscription" = String, Path, description = "The id you started it under.")),
+    params(("subscription" = String, Path, description = "The key it was started under.")),
     request_body = EndingIt,
     responses(
         (status = OK, body = PrepaidAccepted),
@@ -738,7 +731,7 @@ async fn freeze_subscription(
     delete,
     path = "/v1/prepaid/subscriptions/{subscription}/freeze",
     tag = "prepaid",
-    params(("subscription" = String, Path, description = "The id you started it under.")),
+    params(("subscription" = String, Path, description = "The key it was started under.")),
     responses(
         (status = OK, body = PrepaidAccepted),
         (status = NOT_FOUND, description = "No such subscription", body = Problem),
@@ -774,7 +767,7 @@ async fn resume_subscription(
     post,
     path = "/v1/prepaid/subscriptions/{subscription}/renewal",
     tag = "prepaid",
-    params(("subscription" = String, Path, description = "The id you started it under.")),
+    params(("subscription" = String, Path, description = "The key it was started under.")),
     request_body = Renewal,
     responses(
         (status = OK, body = PrepaidAccepted),
@@ -818,7 +811,7 @@ async fn renew_subscription(
     post,
     path = "/v1/prepaid/subscriptions/{subscription}/cancellation",
     tag = "prepaid",
-    params(("subscription" = String, Path, description = "The id you started it under.")),
+    params(("subscription" = String, Path, description = "The key it was started under.")),
     request_body = EndingIt,
     responses(
         (status = OK, body = PrepaidAccepted),
@@ -965,13 +958,10 @@ async fn set_deferral_accounts(
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({
-    "id": "CARD-0001",
     "customer": "CUST-0001",
     "mechanic": "points"
 }))]
 struct NewCard {
-    /// Your key. Opening the same one twice is refused, not ignored.
-    id: String,
     /// The `crm` record that holds it.
     customer: String,
     /// `points`, `stamps` or `visits`. It decides what produces the count and
@@ -1150,10 +1140,11 @@ async fn open_card(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
     Language(locale): Language,
+    key: IdempotencyKey,
     Json(body): Json<NewCard>,
 ) -> Result<(StatusCode, Json<PrepaidAccepted>), Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
-    let id = parse_id(&body.id, locale)?;
+    let id = key.id().clone();
     let mechanic: Mechanic = body.mechanic.parse().map_err(|e: crate::UnknownMechanic| {
         bad_request(crate::messages::UNKNOWN_MECHANIC, "mechanic", &e.0, locale)
     })?;
@@ -1164,12 +1155,15 @@ async fn open_card(
         at: body.at.unwrap_or_else(chrono::Utc::now),
     };
 
-    let committed = crate::open_card(&tenant.db, &id, &card, &metadata(&tenant))
+    let committed = crate::open_card(&tenant.db, &id, &card, &creating(&tenant, &key))
         .await
         .map_err(|e| problem_for(&e, locale))?;
 
     nudge(&state, tenant.db.tenant()).await;
-    Ok((StatusCode::CREATED, Json(accepted(body.id, &committed))))
+    Ok((
+        StatusCode::CREATED,
+        Json(accepted(id.to_string(), &committed)),
+    ))
 }
 
 /// One of them.
@@ -1177,7 +1171,7 @@ async fn open_card(
     get,
     path = "/v1/prepaid/cards/{card}",
     tag = "prepaid",
-    params(("card" = String, Path, description = "The id you opened it under.")),
+    params(("card" = String, Path, description = "The key it was opened under.")),
     responses(
         (status = OK, body = CardRecord),
         (status = NOT_FOUND, description = "No such card, or the projection has not caught up", body = Problem),
@@ -1214,7 +1208,7 @@ async fn get_card(
     post,
     path = "/v1/prepaid/cards/{card}/earnings",
     tag = "prepaid",
-    params(("card" = String, Path, description = "The id you opened it under.")),
+    params(("card" = String, Path, description = "The key it was opened under.")),
     request_body = NewEarning,
     responses(
         (status = OK, body = PrepaidAccepted),
@@ -1260,7 +1254,7 @@ async fn earn_on_card(
     post,
     path = "/v1/prepaid/cards/{card}/redemptions",
     tag = "prepaid",
-    params(("card" = String, Path, description = "The id you opened it under.")),
+    params(("card" = String, Path, description = "The key it was opened under.")),
     request_body = NewPointsRedemption,
     responses(
         (status = OK, body = PrepaidAccepted),
@@ -1307,7 +1301,7 @@ async fn redeem_card_points(
     post,
     path = "/v1/prepaid/cards/{card}/expiry",
     tag = "prepaid",
-    params(("card" = String, Path, description = "The id you opened it under.")),
+    params(("card" = String, Path, description = "The key it was opened under.")),
     request_body = AtAMoment,
     responses(
         (status = OK, body = PrepaidAccepted),
@@ -1514,9 +1508,6 @@ fn problem_for(error: &CommandError<PrepaidError>, locale: Locale) -> Problem {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
                 // The id is taken. A different thing was meant.
-                PrepaidError::AlreadyGranted(_)
-                | PrepaidError::AlreadyStarted(_)
-                | PrepaidError::AlreadyOpen(_) => StatusCode::CONFLICT,
                 // Well-formed, and about something that is not there.
                 PrepaidError::NoSuchCustomer(_)
                 | PrepaidError::NoSuchEntitlement(_)
@@ -1549,6 +1540,14 @@ fn problem_for(error: &CommandError<PrepaidError>, locale: Locale) -> Problem {
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
             erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
+        ),
+
+        // **The one that must never be silent.** A different request reused an
+        // identifier that is taken; a retry of the request that created it
+        // never reaches here, because the kernel reports those as success.
+        CommandError::Execute(ExecuteError::AlreadyExists { .. }) => (
+            StatusCode::CONFLICT,
+            erp_i18n::Message::new(erp_eventlog::messages::ALREADY_EXISTS),
         ),
 
         other => {

@@ -3,7 +3,6 @@
 use erp_i18n::{Locale, MessageCode, Template};
 
 pub const NO_SUCH_CUSTOMER: MessageCode = MessageCode::new("prepaid.no_such_customer");
-pub const ALREADY_GRANTED: MessageCode = MessageCode::new("prepaid.already_granted");
 pub const NO_SUCH_ENTITLEMENT: MessageCode = MessageCode::new("prepaid.no_such_entitlement");
 pub const NOT_LIVE: MessageCode = MessageCode::new("prepaid.not_live");
 pub const LAPSED: MessageCode = MessageCode::new("prepaid.lapsed");
@@ -12,14 +11,12 @@ pub const NOT_A_VALUE: MessageCode = MessageCode::new("prepaid.not_a_value");
 pub const FREE_GRANT_WITH_VALUE: MessageCode = MessageCode::new("prepaid.free_grant_with_value");
 pub const OPEN_VALUE: MessageCode = MessageCode::new("prepaid.open_value");
 pub const NO_SUCH_SUBSCRIPTION: MessageCode = MessageCode::new("prepaid.no_such_subscription");
-pub const ALREADY_STARTED: MessageCode = MessageCode::new("prepaid.already_started");
 pub const NOT_A_TERM: MessageCode = MessageCode::new("prepaid.not_a_term");
 pub const ALREADY_FROZEN: MessageCode = MessageCode::new("prepaid.already_frozen");
 pub const NOT_FROZEN: MessageCode = MessageCode::new("prepaid.not_frozen");
 pub const CANCELLED: MessageCode = MessageCode::new("prepaid.cancelled");
 pub const TERM_NOT_OVER: MessageCode = MessageCode::new("prepaid.term_not_over");
 pub const NO_SUCH_CARD: MessageCode = MessageCode::new("prepaid.no_such_card");
-pub const ALREADY_OPEN: MessageCode = MessageCode::new("prepaid.already_open");
 pub const NO_SCHEME: MessageCode = MessageCode::new("prepaid.no_scheme");
 pub const WRONG_CURRENCY: MessageCode = MessageCode::new("prepaid.wrong_currency");
 pub const UNKNOWN_REASON: MessageCode = MessageCode::new("prepaid.unknown_reason");
@@ -28,7 +25,6 @@ pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("prepaid.amount_ou
 
 pub static CODES: &[MessageCode] = &[
     NO_SUCH_CUSTOMER,
-    ALREADY_GRANTED,
     NO_SUCH_ENTITLEMENT,
     NOT_LIVE,
     LAPSED,
@@ -37,14 +33,12 @@ pub static CODES: &[MessageCode] = &[
     FREE_GRANT_WITH_VALUE,
     OPEN_VALUE,
     NO_SUCH_SUBSCRIPTION,
-    ALREADY_STARTED,
     NOT_A_TERM,
     ALREADY_FROZEN,
     NOT_FROZEN,
     CANCELLED,
     TERM_NOT_OVER,
     NO_SUCH_CARD,
-    ALREADY_OPEN,
     NO_SCHEME,
     WRONG_CURRENCY,
     UNKNOWN_REASON,
@@ -62,16 +56,6 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_CARD,
         Locale::Arabic,
         Template::Simple("لا توجد بطاقة {id}."),
-    ),
-    (
-        ALREADY_OPEN,
-        Locale::English,
-        Template::Simple("Card {id} is already open."),
-    ),
-    (
-        ALREADY_OPEN,
-        Locale::Arabic,
-        Template::Simple("البطاقة {id} مفتوحة بالفعل."),
     ),
     (
         NO_SCHEME,
@@ -114,16 +98,6 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_CUSTOMER,
         Locale::Arabic,
         Template::Simple("لا يوجد عميل {customer}."),
-    ),
-    (
-        ALREADY_GRANTED,
-        Locale::English,
-        Template::Simple("{id} has already been granted."),
-    ),
-    (
-        ALREADY_GRANTED,
-        Locale::Arabic,
-        Template::Simple("تم منح {id} من قبل."),
     ),
     (
         NO_SUCH_ENTITLEMENT,
@@ -210,16 +184,6 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_SUBSCRIPTION,
         Locale::Arabic,
         Template::Simple("لا يوجد اشتراك {id}."),
-    ),
-    (
-        ALREADY_STARTED,
-        Locale::English,
-        Template::Simple("Subscription {id} has already started."),
-    ),
-    (
-        ALREADY_STARTED,
-        Locale::Arabic,
-        Template::Simple("بدأ الاشتراك {id} من قبل."),
     ),
     (
         NOT_A_TERM,

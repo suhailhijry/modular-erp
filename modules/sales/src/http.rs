@@ -18,8 +18,10 @@ use utoipa_axum::routes;
 use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{After, Amount, Json, Paged, Query, bad_request, metadata, parse_id, require_module};
-use erp_web::{Allowed, Language, ManageAccounts, PostEntries, Read};
+use erp_web::{
+    After, Amount, Json, Paged, Query, bad_request, creating, metadata, parse_id, require_module,
+};
+use erp_web::{Allowed, IdempotencyKey, Language, ManageAccounts, PostEntries, Read};
 use erp_web::{Consistency, nudge};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -61,7 +63,6 @@ static CATALOG: erp_i18n::Composite =
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({
-    "id": "INV-2026-0001",
     "customer": { "name": "Al-Faisal Trading", "vat_number": "310000000000003" },
     "issued_on": "2026-08-15T00:00:00Z",
     "due_on": "2026-09-14T00:00:00Z",
@@ -72,13 +73,6 @@ static CATALOG: erp_i18n::Composite =
     "note": ""
 }))]
 struct NewInvoice {
-    /// **Your own key for this invoice, not its number.** Issuing the same one
-    /// twice is a no-op, which is what makes a retried request safe.
-    ///
-    /// The invoice *number* is allocated here, from a gapless statutory series,
-    /// and comes back as `number`. Saudi law requires that sequence to have no
-    /// holes in it, which is not something a client can guarantee.
-    id: String,
     /// Copied onto the invoice as values, never as a reference. A tax invoice
     /// is a legal document; last year's copy must not change when a customer
     /// record does.
@@ -362,11 +356,12 @@ async fn issue_invoice(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
     Language(locale): Language,
+    key: IdempotencyKey,
     Json(body): Json<NewInvoice>,
 ) -> Result<(StatusCode, Json<Issued>), Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
 
-    let id = parse_id(&body.id, locale)?;
+    let id = key.id().clone();
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
         bad_request(
             erp_web::messages::UNKNOWN_CURRENCY,
@@ -441,7 +436,7 @@ async fn issue_invoice(
         note: body.note,
     };
 
-    let committed = crate::issue_invoice(&tenant.db, &id, &draft, &metadata(&tenant))
+    let committed = crate::issue_invoice(&tenant.db, &id, &draft, &creating(&tenant, &key))
         .await
         .map_err(|e| sales_problem(&e, locale))?;
 
@@ -450,7 +445,7 @@ async fn issue_invoice(
     Ok((
         StatusCode::CREATED,
         Json(Issued {
-            id: body.id,
+            id: id.to_string(),
             number: committed.number,
             position: committed.committed.at.map(erp_types::LogPosition::get),
         }),
@@ -1035,6 +1030,14 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
             erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
+        ),
+
+        // **The one that must never be silent.** A different request reused an
+        // identifier that is taken; a retry of the request that created it
+        // never reaches here, because the kernel reports those as success.
+        CommandError::Execute(ExecuteError::AlreadyExists { .. }) => (
+            StatusCode::CONFLICT,
+            erp_i18n::Message::new(erp_eventlog::messages::ALREADY_EXISTS),
         ),
 
         other => {

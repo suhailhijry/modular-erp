@@ -32,6 +32,31 @@ pub struct Metadata {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+impl Metadata {
+    /// Records which request produced this event.
+    ///
+    /// Read back by `try_create` to tell a retry from a different request that
+    /// reused an identifier. It goes in `extra` rather than earning a field
+    /// because only creates consult it, and an event that was not created by
+    /// one should not carry an empty column saying so.
+    #[must_use]
+    pub fn with_fingerprint(mut self, fingerprint: &str) -> Self {
+        self.extra.insert(
+            crate::REQUEST_FINGERPRINT.to_owned(),
+            serde_json::Value::String(fingerprint.to_owned()),
+        );
+        self
+    }
+
+    /// Which request produced this, if it said.
+    #[must_use]
+    pub fn fingerprint(&self) -> Option<&str> {
+        self.extra
+            .get(crate::REQUEST_FINGERPRINT)
+            .and_then(serde_json::Value::as_str)
+    }
+}
+
 /// A stored event, as read back from the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {

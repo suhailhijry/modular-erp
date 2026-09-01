@@ -786,27 +786,42 @@ mechanism, not a query engine.
 ### L8 — Every mutation is idempotent under retry
 
 **Mechanism:** every mutation's identity comes from the **caller**, never from
-the handler. An invoice carries the key the client sent, a payment carries the
-payer's or bank's reference, a chart install names the chart. A retry therefore
-carries the same identity as the attempt it repeats, and the log's
-`UNIQUE (stream_domain, stream_id, sequence)` refuses the second write — so the
-duplicate is stopped by the database rather than by a convention. In projections
-the guarantee comes from L4 instead.
+the handler. A create carries the UUID the client sent in `Idempotency-Key`, a
+payment carries the payer's or bank's reference, a chart install names the chart.
+A retry therefore carries the same identity as the attempt it repeats, and the
+log's `UNIQUE (stream_domain, stream_id, sequence)` refuses the second write — so
+the duplicate is stopped by the database rather than by a convention. In
+projections the guarantee comes from L4 instead.
 
-An earlier draft of this section said the enforcement was a required
-`Idempotency-Key` header. It never was, and on inspection it should not be: a
-header buys nothing without a store of keys and prior responses beside it, and
-that store would exist to reconstruct a property the design already has for free.
-`docs/IMPLEMENTATION.md` had reached the same conclusion — *"the ledger's
-mutations take client-chosen ids, so both are already idempotent — this may turn
-out to be unnecessary"* — and this records the decision rather than leaving it as
-a deferral that reads like an omission.
+**A create is the one shape where a repeated identity is ambiguous**, and it is
+decided in one place: `erp_eventlog::try_create` compares the request's
+fingerprint against the one stored on the creating event. Matching means a
+retry, and it reports the original. Differing means two different things were
+given one name, and the second is refused with `ExecuteError::AlreadyExists`. A
+module does not write that rule and therefore cannot forget it.
+
+**This reverses an earlier decision, and the reason is a defect.** This section
+used to argue that a required `Idempotency-Key` header buys nothing without "a
+store of keys and prior responses beside it". That was right about the store and
+wrong about the conclusion, because the store is unnecessary: the key **is** the
+stream id, so the log already remembers every key, for ever, and there is no
+table and no expiry.
+
+What it missed is worse. Identity was taken from a field in the body, where a
+human picks it — and `INV-0001` chosen at one till collides with `INV-0001`
+chosen at another. **Five creates resolved that collision by ignoring the second
+write and returning success**, which loses a document and tells the caller it was
+saved: `sales::issue_invoice`, `purchases::record_bill`, `ledger::post_entry`,
+`booking::declare_resource` and `booking::reserve`. A UUID from a header cannot
+collide by accident, which removes the failure rather than detecting it.
 
 **Asserted by:** the per-endpoint repeat tests — `installing_a_chart_twice_changes_nothing`,
 `the_same_supplier_invoice_cannot_be_recorded_twice`, `opening_the_same_code_twice_is_refused`,
 `recording_the_same_verdict_twice_writes_nothing`, `an_entry_cannot_be_reversed_twice` —
-and by `crates/erp-api/tests/idempotence.rs`, which refuses a write path that
-mints its own identity. That is the failure mode: a handler that generates an id
+by `a_second_create_under_one_id_is_refused_unless_it_is_a_retry` in
+`crates/erp-eventlog/tests/aggregate.rs`, which is the rule itself, and by
+`crates/erp-api/tests/idempotence.rs`, which refuses a write path that mints its
+own identity. That is the failure mode: a handler that generates an id
 makes its own retries indistinguishable from new requests, and for a payment that
 means taking the money twice.
 

@@ -36,8 +36,6 @@ pub enum CrmError {
     NoContact,
     #[error("customer {0} does not exist")]
     NoSuchCustomer(String),
-    #[error("customer {0} already exists")]
-    AlreadyExists(String),
     #[error("customer {0} is archived")]
     Archived(String),
     #[error("{0} is not a Saudi VAT number")]
@@ -59,9 +57,6 @@ impl erp_i18n::Localize for CrmError {
             Self::NoContact => Message::new(messages::NO_CONTACT),
             Self::NoSuchCustomer(id) => {
                 Message::new(messages::NO_SUCH_CUSTOMER).with("customer", MessageArg::text(id))
-            }
-            Self::AlreadyExists(id) => {
-                Message::new(messages::ALREADY_EXISTS).with("customer", MessageArg::text(id))
             }
             Self::Archived(id) => {
                 Message::new(messages::ARCHIVED).with("customer", MessageArg::text(id))
@@ -142,12 +137,11 @@ pub async fn register_customer(
 ) -> Outcome {
     details.check().map_err(rejected)?;
     let details = details.clone();
-    let key = id.to_string();
 
-    db.execute::<Customer, _, CrmError>(id, crate::upcasters(), metadata, move |loaded| {
-        if loaded.aggregate.exists() {
-            return Err(CrmError::AlreadyExists(key.clone()));
-        }
+    // **`create`, not `execute`.** A second registration under a taken id is
+    // refused by the kernel unless it is a retry of the request that made it —
+    // see `erp_eventlog::try_create`. That rule is not this module's to state.
+    db.create::<Customer, _, CrmError>(id, crate::upcasters(), metadata, move |_loaded| {
         Ok(Decision::one(CustomerEvent::Registered {
             name: details.name.trim().to_owned(),
             name_latin: details.name_latin.clone(),

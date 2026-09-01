@@ -53,6 +53,13 @@ pub const UNSUPPORTED_MEDIA_TYPE: MessageCode = MessageCode::new("request.unsupp
 /// 400. The query string is missing something, or carries something unreadable.
 pub const INVALID_QUERY: MessageCode = MessageCode::new("request.invalid_query");
 pub const INVALID_CURSOR: MessageCode = MessageCode::new("request.invalid_cursor");
+/// A write arrived without `Idempotency-Key`, or with one that is not a UUID.
+/// 400.
+///
+/// Required on every write: it is the identity the created record is stored
+/// under, and a value a human chose collides with another human's.
+pub const MISSING_IDEMPOTENCY_KEY: MessageCode =
+    MessageCode::new("request.missing_idempotency_key");
 
 pub static CODES: &[MessageCode] = &[
     UNKNOWN_CURRENCY,
@@ -89,6 +96,7 @@ pub static CODES: &[MessageCode] = &[
     UNSUPPORTED_MEDIA_TYPE,
     INVALID_QUERY,
     INVALID_CURSOR,
+    MISSING_IDEMPOTENCY_KEY,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -304,6 +312,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Locale::Arabic,
         Template::Simple(
             "{after} ليس مؤشر صفحة من هذه الواجهة. أعد إرسال قيمة `next` من الاستجابة السابقة، أو اتركه فارغًا للبدء من الأول.",
+        ),
+    ),
+    (
+        MISSING_IDEMPOTENCY_KEY,
+        Locale::English,
+        Template::Simple(
+            "This request needs an `Idempotency-Key` header holding a UUID. It is the identity the record is created under, so it must be generated per request and never reused for a different one.",
+        ),
+    ),
+    (
+        MISSING_IDEMPOTENCY_KEY,
+        Locale::Arabic,
+        Template::Simple(
+            "هذا الطلب يحتاج ترويسة `Idempotency-Key` تحتوي على UUID. هي الهوية التي يُنشأ بها السجل، فيجب توليدها لكل طلب وعدم إعادة استخدامها لطلب مختلف.",
         ),
     ),
     (

@@ -25,9 +25,9 @@ use utoipa_axum::routes;
 
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{After, Allowed, Language, ManageTenant, Paged, PostEntries, Read};
+use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Read};
 use erp_web::{Consistency, nudge};
-use erp_web::{Json, Query, bad_request, metadata, parse_id, require_module};
+use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
 
 use crate::{Availability, BookingError, Details, Draft, DraftLine, Held, Kind, Stage};
 
@@ -282,7 +282,6 @@ struct NewReservationLine {
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({
-    "id": "BK-0001",
     "customer": "CUST-0001",
     "customer_name": "سارة",
     "lines": [{
@@ -293,9 +292,6 @@ struct NewReservationLine {
     }]
 }))]
 struct NewReservation {
-    /// Your key for this booking. Taking the same one twice is a no-op, and
-    /// takes no capacity the second time.
-    id: String,
     /// The `crm` record, when there is one. A walk-in has none.
     customer: Option<String>,
     /// What the diary prints. Frozen, so a customer changing their name next
@@ -474,9 +470,13 @@ async fn declare_bookable(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
+    key: IdempotencyKey,
     Json(body): Json<NewBookable>,
 ) -> Result<(StatusCode, Json<BookingAccepted>), Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
+    // **The id stays the caller's here.** A resource is named by the business
+    // and booked by that name; the key is only what tells a retry from a
+    // different resource claiming a name that is taken.
     let id = parse_id(&body.id, locale)?;
     let details = Details {
         name: body.name,
@@ -490,7 +490,7 @@ async fn declare_bookable(
         &id,
         &details,
         chrono::Utc::now(),
-        &metadata(&tenant),
+        &creating(&tenant, &key),
     )
     .await
     .map_err(|e| problem_for(&e, locale))?;
@@ -806,10 +806,11 @@ async fn take_reservation(
     tenant: Allowed<PostEntries>,
     State(state): State<AppState>,
     Language(locale): Language,
+    key: IdempotencyKey,
     Json(body): Json<NewReservation>,
 ) -> Result<(StatusCode, Json<BookingAccepted>), Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
-    let id = parse_id(&body.id, locale)?;
+    let id = key.id().clone();
     let customer = body
         .customer
         .as_deref()
@@ -827,7 +828,7 @@ async fn take_reservation(
         at: body.at.unwrap_or_else(chrono::Utc::now),
     };
 
-    let committed = crate::reserve(&tenant.db, &id, &draft, &metadata(&tenant))
+    let committed = crate::reserve(&tenant.db, &id, &draft, &creating(&tenant, &key))
         .await
         .map_err(|e| problem_for(&e, locale))?;
 
@@ -835,7 +836,7 @@ async fn take_reservation(
     Ok((
         StatusCode::CREATED,
         Json(BookingAccepted {
-            id: body.id,
+            id: id.to_string(),
             position: committed.at.map(erp_types::LogPosition::get),
         }),
     ))
@@ -1463,6 +1464,14 @@ fn problem_for(error: &CommandError<BookingError>, locale: Locale) -> Problem {
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
             erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
+        ),
+
+        // **The one that must never be silent.** A different request reused an
+        // identifier that is taken; a retry of the request that created it
+        // never reaches here, because the kernel reports those as success.
+        CommandError::Execute(ExecuteError::AlreadyExists { .. }) => (
+            StatusCode::CONFLICT,
+            erp_i18n::Message::new(erp_eventlog::messages::ALREADY_EXISTS),
         ),
 
         other => {

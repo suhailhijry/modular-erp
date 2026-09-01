@@ -183,7 +183,12 @@ async fn every_module_is_enabled_and_answering() {
 
     // A loyalty card, whose liability is the only one here computed as a
     // fraction of a sale rather than the whole of one.
-    let card = demo.get("/v1/prepaid/cards/CARD-0001").await;
+    let card = demo
+        .get(&format!(
+            "/v1/prepaid/cards/{}",
+            erp_demo::demo_id("CARD-0001")
+        ))
+        .await;
     assert_eq!(card["counts"], 60, "a hundred earned, forty spent");
     assert_eq!(card["lifetime"], 100, "spending points cost a rank");
     assert_eq!(
@@ -191,7 +196,12 @@ async fn every_module_is_enabled_and_answering() {
         "9.09 deferred against a hundred riyals, less the 3.60 honoured"
     );
 
-    let membership = demo.get("/v1/prepaid/subscriptions/SUB-0001").await;
+    let membership = demo
+        .get(&format!(
+            "/v1/prepaid/subscriptions/{}",
+            erp_demo::demo_id("SUB-0001")
+        ))
+        .await;
     assert!(
         membership["recognised"]["minor"]
             .as_i64()
@@ -210,7 +220,12 @@ async fn every_module_is_enabled_and_answering() {
         "a freeze did not move the term"
     );
 
-    let stay = demo.get("/v1/booking/reservations/BK-0006").await;
+    let stay = demo
+        .get(&format!(
+            "/v1/booking/reservations/{}",
+            erp_demo::demo_id("BK-0006")
+        ))
+        .await;
     assert_eq!(
         stay["lines"][0]["unit"], "room-201",
         "the pooled booking never had a unit assigned to it"

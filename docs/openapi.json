@@ -2332,7 +2332,6 @@
           "billed_on": "2026-02-03T00:00:00Z",
           "currency": "SAR",
           "due_on": "2026-03-05T00:00:00Z",
-          "id": "ap-2026-0042",
           "lines": [
             {
               "account": "5100",
@@ -2365,10 +2364,6 @@
               "null"
             ]
           },
-          "id": {
-            "description": "**Your own key for this bill.** Recording the same one twice is a no-op,\nwhich is what makes a retried request safe.\n\nNot the supplier's number — that is `reference`, and two suppliers can\nboth call something `INV-001`.",
-            "type": "string"
-          },
           "lines": {
             "items": {
               "$ref": "#/components/schemas/NewBillLine"
@@ -2387,7 +2382,6 @@
           }
         },
         "required": [
-          "id",
           "supplier",
           "reference",
           "billed_on",
@@ -2514,7 +2508,6 @@
       "NewCard": {
         "example": {
           "customer": "CUST-0001",
-          "id": "CARD-0001",
           "mechanic": "points"
         },
         "properties": {
@@ -2529,17 +2522,12 @@
             "description": "The `crm` record that holds it.",
             "type": "string"
           },
-          "id": {
-            "description": "Your key. Opening the same one twice is refused, not ignored.",
-            "type": "string"
-          },
           "mechanic": {
             "description": "`points`, `stamps` or `visits`. It decides what produces the count and\nnothing after that — the accounting is the same for all three.",
             "type": "string"
           }
         },
         "required": [
-          "id",
           "customer",
           "mechanic"
         ],
@@ -2609,7 +2597,6 @@
       },
       "NewCustomerRecord": {
         "example": {
-          "id": "CUST-0001",
           "kind": "company",
           "name": "نجد للاستشارات",
           "name_latin": "Najd Consulting",
@@ -2636,10 +2623,6 @@
               "string",
               "null"
             ]
-          },
-          "id": {
-            "description": "Your key for this customer. Registering the same one twice is refused.",
-            "type": "string"
           },
           "kind": {
             "description": "`person` or `company`. Only a company may carry a VAT number.",
@@ -2680,7 +2663,6 @@
           }
         },
         "required": [
-          "id",
           "name",
           "kind"
         ],
@@ -2760,7 +2742,6 @@
       "NewEntitlement": {
         "example": {
           "customer": "CUST-0001",
-          "id": "PKG-0001",
           "reason": "bought",
           "uses": 10,
           "value": {
@@ -2795,10 +2776,6 @@
               "null"
             ]
           },
-          "id": {
-            "description": "Your key. Granting the same one twice is refused, not ignored.",
-            "type": "string"
-          },
           "reason": {
             "description": "`bought`, `gifted_by_customer`, `granted_by_business` or\n`free_from_coupon`. The last two carry no value: nobody paid, so there\nis nothing to defer.",
             "type": "string"
@@ -2822,7 +2799,6 @@
           }
         },
         "required": [
-          "id",
           "customer",
           "what",
           "value",
@@ -2832,7 +2808,6 @@
       },
       "NewEntry": {
         "example": {
-          "id": "JE-2026-0001",
           "lines": [
             {
               "account": "1000",
@@ -2853,10 +2828,6 @@
           "occurred_on": "2026-08-15T00:00:00Z"
         },
         "properties": {
-          "id": {
-            "description": "The client's own identifier for the entry. Posting the same one twice is\na no-op, which is what makes a retried request safe.",
-            "type": "string"
-          },
           "lines": {
             "description": "Must sum to zero, in one currency. An unbalanced set is a 400 carrying\nthe difference.",
             "items": {
@@ -2874,7 +2845,6 @@
           }
         },
         "required": [
-          "id",
           "occurred_on",
           "lines"
         ],
@@ -2966,7 +2936,6 @@
             "vat_number": "310000000000003"
           },
           "due_on": "2026-09-14T00:00:00Z",
-          "id": "INV-2026-0001",
           "issued_on": "2026-08-15T00:00:00Z",
           "lines": [
             {
@@ -3000,10 +2969,6 @@
               "null"
             ]
           },
-          "id": {
-            "description": "**Your own key for this invoice, not its number.** Issuing the same one\ntwice is a no-op, which is what makes a retried request safe.\n\nThe invoice *number* is allocated here, from a gapless statutory series,\nand comes back as `number`. Saudi law requires that sequence to have no\nholes in it, which is not something a client can guarantee.",
-            "type": "string"
-          },
           "issued_on": {
             "description": "The tax point. A date the business chose, not a clock reading.",
             "format": "date-time",
@@ -3021,7 +2986,6 @@
           }
         },
         "required": [
-          "id",
           "customer",
           "issued_on",
           "currency",
@@ -3214,7 +3178,6 @@
         "example": {
           "customer": "CUST-0001",
           "customer_name": "سارة",
-          "id": "BK-0001",
           "lines": [
             {
               "from": "2026-09-02T07:00:00Z",
@@ -3257,10 +3220,6 @@
               "null"
             ]
           },
-          "id": {
-            "description": "Your key for this booking. Taking the same one twice is a no-op, and\ntakes no capacity the second time.",
-            "type": "string"
-          },
           "lines": {
             "items": {
               "$ref": "#/components/schemas/NewReservationLine"
@@ -3272,7 +3231,6 @@
           }
         },
         "required": [
-          "id",
           "customer_name",
           "lines"
         ],
@@ -3322,15 +3280,10 @@
       },
       "NewReversal": {
         "example": {
-          "id": "JE-2026-0002",
           "memo": "Reverses JE-2026-0001",
           "occurred_on": "2026-08-16T00:00:00Z"
         },
         "properties": {
-          "id": {
-            "description": "The client's own identifier for the *reversing* entry. Sending the same\none twice is a no-op; a different one against an already-reversed entry\nis refused.",
-            "type": "string"
-          },
           "memo": {
             "type": "string"
           },
@@ -3341,7 +3294,6 @@
           }
         },
         "required": [
-          "id",
           "occurred_on"
         ],
         "type": "object"
@@ -3350,7 +3302,6 @@
         "example": {
           "customer": "CUST-0001",
           "from": "2026-01-01T00:00:00Z",
-          "id": "SUB-0001",
           "plan": "سنوي",
           "price": {
             "currency": "SAR",
@@ -3373,9 +3324,6 @@
             "format": "date-time",
             "type": "string"
           },
-          "id": {
-            "type": "string"
-          },
           "plan": {
             "type": "string"
           },
@@ -3390,7 +3338,6 @@
           }
         },
         "required": [
-          "id",
           "customer",
           "plan",
           "price",
@@ -11227,7 +11174,7 @@
         "operationId": "get_card",
         "parameters": [
           {
-            "description": "The id you opened it under.",
+            "description": "The key it was opened under.",
             "in": "path",
             "name": "card",
             "required": true,
@@ -11338,7 +11285,7 @@
         "operationId": "earn_on_card",
         "parameters": [
           {
-            "description": "The id you opened it under.",
+            "description": "The key it was opened under.",
             "in": "path",
             "name": "card",
             "required": true,
@@ -11475,7 +11422,7 @@
         "operationId": "expire_card_points",
         "parameters": [
           {
-            "description": "The id you opened it under.",
+            "description": "The key it was opened under.",
             "in": "path",
             "name": "card",
             "required": true,
@@ -11611,7 +11558,7 @@
         "operationId": "redeem_card_points",
         "parameters": [
           {
-            "description": "The id you opened it under.",
+            "description": "The key it was opened under.",
             "in": "path",
             "name": "card",
             "required": true,
@@ -12005,7 +11952,7 @@
         "operationId": "get_entitlement",
         "parameters": [
           {
-            "description": "The id you granted it under.",
+            "description": "The key it was granted under.",
             "in": "path",
             "name": "entitlement",
             "required": true,
@@ -12115,7 +12062,7 @@
         "operationId": "expire_entitlement",
         "parameters": [
           {
-            "description": "The id you granted it under.",
+            "description": "The key it was granted under.",
             "in": "path",
             "name": "entitlement",
             "required": true,
@@ -12251,7 +12198,7 @@
         "operationId": "redeem_entitlement",
         "parameters": [
           {
-            "description": "The id you granted it under.",
+            "description": "The key it was granted under.",
             "in": "path",
             "name": "entitlement",
             "required": true,
@@ -12387,7 +12334,7 @@
         "operationId": "revoke_entitlement",
         "parameters": [
           {
-            "description": "The id you granted it under.",
+            "description": "The key it was granted under.",
             "in": "path",
             "name": "entitlement",
             "required": true,
@@ -13201,7 +13148,7 @@
         "operationId": "get_subscription",
         "parameters": [
           {
-            "description": "The id you started it under.",
+            "description": "The key it was started under.",
             "in": "path",
             "name": "subscription",
             "required": true,
@@ -13312,7 +13259,7 @@
         "operationId": "cancel_subscription",
         "parameters": [
           {
-            "description": "The id you started it under.",
+            "description": "The key it was started under.",
             "in": "path",
             "name": "subscription",
             "required": true,
@@ -13434,7 +13381,7 @@
         "operationId": "resume_subscription",
         "parameters": [
           {
-            "description": "The id you started it under.",
+            "description": "The key it was started under.",
             "in": "path",
             "name": "subscription",
             "required": true,
@@ -13538,7 +13485,7 @@
         "operationId": "freeze_subscription",
         "parameters": [
           {
-            "description": "The id you started it under.",
+            "description": "The key it was started under.",
             "in": "path",
             "name": "subscription",
             "required": true,
@@ -13675,7 +13622,7 @@
         "operationId": "recognise_subscription",
         "parameters": [
           {
-            "description": "The id you started it under.",
+            "description": "The key it was started under.",
             "in": "path",
             "name": "subscription",
             "required": true,
@@ -13811,7 +13758,7 @@
         "operationId": "renew_subscription",
         "parameters": [
           {
-            "description": "The id you started it under.",
+            "description": "The key it was started under.",
             "in": "path",
             "name": "subscription",
             "required": true,

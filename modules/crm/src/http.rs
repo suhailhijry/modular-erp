@@ -16,9 +16,9 @@ use utoipa_axum::routes;
 
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{After, Allowed, Language, ManageTenant, Paged, Read};
+use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, Read};
 use erp_web::{Consistency, nudge};
-use erp_web::{Json, Query, bad_request, metadata, parse_id, require_module};
+use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
 
 use crate::{Address, Contact, CrmError, CustomerKind, Details, TaxRegistration};
 
@@ -62,7 +62,6 @@ struct CustomerTaxRegistration {
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({
-    "id": "CUST-0001",
     "name": "نجد للاستشارات",
     "name_latin": "Najd Consulting",
     "kind": "company",
@@ -70,8 +69,6 @@ struct CustomerTaxRegistration {
     "vat_number": { "vat_number": "399999999900003", "scheme": "CRN", "identifier": "1010101010" }
 }))]
 struct NewCustomerRecord {
-    /// Your key for this customer. Registering the same one twice is refused.
-    id: String,
     name: String,
     name_latin: Option<String>,
     /// `person` or `company`. Only a company may carry a VAT number.
@@ -228,10 +225,11 @@ async fn register_customer(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,
     Language(locale): Language,
+    key: IdempotencyKey,
     Json(body): Json<NewCustomerRecord>,
 ) -> Result<(StatusCode, Json<CustomerRegistered>), Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
-    let id = parse_id(&body.id, locale)?;
+    let id = key.id().clone();
     let details = details(
         body.name,
         body.name_latin,
@@ -248,7 +246,7 @@ async fn register_customer(
         &id,
         &details,
         body.registered_on.unwrap_or_else(chrono::Utc::now),
-        &metadata(&tenant),
+        &creating(&tenant, &key),
     )
     .await
     .map_err(|e| problem_for(&e, locale))?;
@@ -257,7 +255,7 @@ async fn register_customer(
     Ok((
         StatusCode::CREATED,
         Json(CustomerRegistered {
-            id: body.id,
+            id: id.to_string(),
             position: committed.at.map(erp_types::LogPosition::get),
         }),
     ))
@@ -496,7 +494,6 @@ fn problem_for(error: &CommandError<CrmError>, locale: Locale) -> Problem {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
                 // The id is taken. A different customer was meant.
-                CrmError::AlreadyExists(_) => StatusCode::CONFLICT,
                 // Well-formed, and about somebody who is not there.
                 CrmError::NoSuchCustomer(_) => StatusCode::NOT_FOUND,
                 // Well-formed, and refused on the state of the record.
@@ -513,6 +510,14 @@ fn problem_for(error: &CommandError<CrmError>, locale: Locale) -> Problem {
         CommandError::Execute(ExecuteError::Contended { .. }) => (
             StatusCode::CONFLICT,
             erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
+        ),
+
+        // **The one that must never be silent.** A different request reused an
+        // identifier that is taken; a retry of the request that created it
+        // never reaches here, because the kernel reports those as success.
+        CommandError::Execute(ExecuteError::AlreadyExists { .. }) => (
+            StatusCode::CONFLICT,
+            erp_i18n::Message::new(erp_eventlog::messages::ALREADY_EXISTS),
         ),
 
         other => {

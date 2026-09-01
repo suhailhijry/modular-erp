@@ -26,6 +26,15 @@ struct Fixture {
     control: Arc<ControlPlane>,
     db: TestDb,
 }
+/// The id a create is stored under, from a name that reads in the test.
+///
+/// A create takes its identity from `Idempotency-Key` and nothing else, and the
+/// header must be a UUID — a value a human would pick collides with another
+/// human's, which is the whole reason the API stopped accepting one in the body.
+/// Deriving it from a name keeps the tests readable and the ids stable.
+fn idem(name: &str) -> String {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
+}
 
 impl Fixture {
     async fn new() -> Self {
@@ -400,9 +409,9 @@ impl Fixture {
                 Request::post("/v1/sales/invoices")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", idem(id))
                     .body(Body::from(
                         serde_json::json!({
-                            "id": id,
                             "customer": { "name": "Rawabi" },
                             "issued_on": "2026-03-01T00:00:00Z",
                             "currency": "SAR",
@@ -828,9 +837,12 @@ async fn a_signed_in_user_can_keep_books() {
 
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
     let post = |path: &str, body: serde_json::Value| {
+        // The key is derived from the body, so each distinct request carries a
+        // distinct one and a repeat of the same request is a retry.
         Request::post(path)
             .header(header::AUTHORIZATION, format!("Bearer {token}"))
             .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", idem(&body.to_string()))
             .body(Body::from(body.to_string()))
             .unwrap()
     };
@@ -851,7 +863,6 @@ async fn a_signed_in_user_can_keep_books() {
         .send(post(
             "/v1/ledger/entries",
             serde_json::json!({
-                "id": "inv-1",
                 "occurred_on": "2026-01-15T00:00:00Z",
                 "memo": "Invoice 1",
                 "lines": [
@@ -913,9 +924,9 @@ async fn an_unbalanced_entry_is_refused_with_the_difference() {
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::ACCEPT_LANGUAGE, "ar")
+                .header("idempotency-key", idem("inv-1"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "inv-1",
                         "occurred_on": "2026-01-15T00:00:00Z",
                         "lines": [
                             { "account": "1000", "amount": { "minor": 15000, "currency": "SAR" } },
@@ -955,9 +966,9 @@ async fn posting_to_an_unknown_account_is_unprocessable() {
             Request::post("/v1/ledger/entries")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", idem("inv-1"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "inv-1",
                         "occurred_on": "2026-01-15T00:00:00Z",
                         "lines": [
                             { "account": "9998", "amount": { "minor": 100, "currency": "SAR" } },
@@ -2451,6 +2462,7 @@ async fn a_client_can_read_the_write_it_just_made() {
             Request::post("/v1/ledger/entries")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", idem("inv-1"))
                 .body(Body::from(
                     serde_json::json!({
                         "id": "inv-1",
@@ -2643,9 +2655,9 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
     let (status, issued, _) = fixture
         .send(
             bearer(Request::post("/v1/sales/invoices"))
+                .header("idempotency-key", idem("INV-1"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "INV-1",
                         "customer": { "name": "Rawabi", "vat_number": "310000000000003" },
                         "issued_on": "2026-03-01T00:00:00Z",
                         "currency": "SAR",
@@ -2660,9 +2672,9 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{issued}");
-    // The client chose the *key*; the statutory number is ours, and Saudi law
-    // requires the series it comes from to have no holes in it.
-    assert_eq!(issued["id"], "INV-1", "the key comes back as sent");
+    // The key is the record's identity; the statutory number is ours, and its
+    // series may have no holes in it.
+    assert_eq!(issued["id"], idem("INV-1"), "the key comes back as sent");
     assert_eq!(issued["number"], "INV-00001", "{issued}");
     let position = issued["position"].as_i64().expect("a log position");
 
@@ -2673,7 +2685,8 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
     let (status, invoice, _) = fixture
         .send(
             bearer(Request::get(format!(
-                "/v1/sales/invoices/INV-1?consistent_after={position}"
+                "/v1/sales/invoices/{}?consistent_after={position}",
+                idem("INV-1")
             )))
             .body(Body::empty())
             .unwrap(),
@@ -2700,20 +2713,38 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
     assert_eq!(balance("4000").await, -150_000, "revenue");
     assert_eq!(balance("2100").await, -15_000, "VAT payable");
 
-    // And the money arrives.
+    payment_settles_the_receivable(&mut fixture, &token, tenant).await;
+    fixture.cleanup().await;
+}
+
+/// The money arrives and the receivable clears.
+///
+/// Split out from the test above for the reason `drawn_down_every_way` is split
+/// out of `prepaid`'s canary: it is a separate claim. The first half is that an
+/// invoice posts to the books; this is that a payment settles it.
+async fn payment_settles_the_receivable(fixture: &mut Fixture, token: &str, tenant: TenantId) {
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+
     let (status, paid, _) = fixture
         .send(
-            bearer(Request::post("/v1/sales/invoices/INV-1/payments"))
-                .body(Body::from(
-                    serde_json::json!({
-                        "reference": "wire-77",
-                        "amount": { "minor": 165_000, "currency": "SAR" },
-                        "received_on": "2026-03-20T00:00:00Z",
-                        "account": "1010"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
+            bearer(Request::post(format!(
+                "/v1/sales/invoices/{}/payments",
+                idem("INV-1")
+            )))
+            .body(Body::from(
+                serde_json::json!({
+                    "reference": "wire-77",
+                    "amount": { "minor": 165_000, "currency": "SAR" },
+                    "received_on": "2026-03-20T00:00:00Z",
+                    "account": "1010"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{paid}");
@@ -2732,12 +2763,10 @@ async fn a_signed_in_user_can_invoice_a_customer_and_take_payment() {
     assert_eq!(invoices[0]["paid"], 165_000);
 
     assert_eq!(
-        fixture.ledger_balance(&token, "acme", "1100").await,
+        fixture.ledger_balance(token, "acme", "1100").await,
         0,
         "the receivable is settled"
     );
-
-    fixture.cleanup().await;
 }
 
 /// A module a tenant did not buy is not there — a 404, not a 403, so the
@@ -2831,9 +2860,9 @@ async fn an_unknown_vat_treatment_is_refused() {
             Request::post("/v1/sales/invoices")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", idem("INV-9"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "INV-9",
                         "customer": { "name": "Rawabi" },
                         "issued_on": "2026-03-01T00:00:00Z",
                         "currency": "SAR",
@@ -2869,9 +2898,9 @@ async fn an_invoice_the_chart_cannot_take_is_unprocessable() {
             Request::post("/v1/sales/invoices")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", idem("INV-8"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "INV-8",
                         "customer": { "name": "Rawabi" },
                         "issued_on": "2026-03-01T00:00:00Z",
                         "currency": "SAR",
@@ -2939,9 +2968,9 @@ async fn a_tenant_can_turn_a_module_on_after_signing_up() {
     let (status, body, _) = fixture
         .send(
             bearer(Request::post("/v1/sales/invoices"))
+                .header("idempotency-key", idem("INV-LATE"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "INV-LATE",
                         "customer": { "name": "Rawabi" },
                         "issued_on": "2026-03-01T00:00:00Z",
                         "currency": "SAR",
@@ -2990,9 +3019,9 @@ async fn turning_a_module_off_hides_it_without_losing_anything() {
     let (status, _, _) = fixture
         .send(
             bearer(Request::post("/v1/sales/invoices"))
+                .header("idempotency-key", idem("INV-KEEP"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "INV-KEEP",
                         "customer": { "name": "Rawabi" },
                         "issued_on": "2026-03-01T00:00:00Z",
                         "currency": "SAR",
@@ -4084,9 +4113,9 @@ async fn a_tenant_can_configure_where_sales_post() {
     let (status, body, _) = fixture
         .send(
             bearer(Request::post("/v1/sales/invoices"))
+                .header("idempotency-key", idem("INV-CONFIGURED"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "INV-CONFIGURED",
                         "customer": { "name": "Rawabi" },
                         "issued_on": "2026-03-01T00:00:00Z",
                         "currency": "SAR",
@@ -4398,9 +4427,9 @@ async fn an_entry_posted_in_error_can_be_reversed_over_http() {
     let (status, body, _) = fixture
         .send(
             bearer(Request::post("/v1/ledger/entries"))
+                .header("idempotency-key", idem("E-OOPS"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "E-OOPS",
                         "occurred_on": "2026-03-01T00:00:00Z",
                         "memo": "wrong amount",
                         "lines": [
@@ -4419,16 +4448,19 @@ async fn an_entry_posted_in_error_can_be_reversed_over_http() {
     assert_eq!(fixture.ledger_balance(&token, "acme", "1000").await, 50_000);
 
     let reverse = |id: &'static str| {
-        bearer(Request::post("/v1/ledger/entries/E-OOPS/reversal"))
-            .body(Body::from(
-                serde_json::json!({
-                    "id": id,
-                    "occurred_on": "2026-03-05T00:00:00Z",
-                    "memo": "correcting E-OOPS"
-                })
-                .to_string(),
-            ))
-            .unwrap()
+        bearer(Request::post(format!(
+            "/v1/ledger/entries/{}/reversal",
+            idem("E-OOPS")
+        )))
+        .header("idempotency-key", idem(id))
+        .body(Body::from(
+            serde_json::json!({
+                "occurred_on": "2026-03-05T00:00:00Z",
+                "memo": "correcting E-OOPS"
+            })
+            .to_string(),
+        ))
+        .unwrap()
     };
 
     let (status, body, _) = fixture.send(reverse("E-OOPS-R")).await;
@@ -4446,16 +4478,16 @@ async fn an_entry_posted_in_error_can_be_reversed_over_http() {
     let (status, body, _) = fixture.send(reverse("E-OOPS-R2")).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "ledger.already_reversed");
-    assert_eq!(body["args"]["by"]["value"], "E-OOPS-R");
+    assert_eq!(body["args"]["by"]["value"], idem("E-OOPS-R"));
 
     // Reversing something that was never posted is about the tenant's state,
     // not the request's shape.
     let (status, body, _) = fixture
         .send(
             bearer(Request::post("/v1/ledger/entries/NOPE/reversal"))
+                .header("idempotency-key", idem("NOPE-R"))
                 .body(Body::from(
-                    serde_json::json!({ "id": "NOPE-R", "occurred_on": "2026-03-05T00:00:00Z" })
-                        .to_string(),
+                    serde_json::json!({ "occurred_on": "2026-03-05T00:00:00Z" }).to_string(),
                 ))
                 .unwrap(),
         )
@@ -4486,16 +4518,19 @@ async fn an_invoice_can_be_credited_and_stops_being_owed() {
     assert_eq!(fixture.ledger_balance(&token, "acme", "1100").await, 11_500);
 
     let credit = |id: &'static str| {
-        Request::post("/v1/sales/invoices/INV-OOPS/credit-note")
-            .header(header::AUTHORIZATION, format!("Bearer {token}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "id": id, "reason": "wrong customer", "on": "2026-03-05T00:00:00Z"
-                })
-                .to_string(),
-            ))
-            .unwrap()
+        Request::post(format!(
+            "/v1/sales/invoices/{}/credit-note",
+            idem("INV-OOPS")
+        ))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "id": id, "reason": "wrong customer", "on": "2026-03-05T00:00:00Z"
+            })
+            .to_string(),
+        ))
+        .unwrap()
     };
 
     let (status, body, _) = fixture.send(credit("CN-1")).await;
@@ -4555,9 +4590,9 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     let (status, body, _) = fixture
         .send(
             bearer(Request::post("/v1/sales/invoices"))
+                .header("idempotency-key", idem("INV-VAT"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "INV-VAT",
                         "customer": { "name": "Rawabi" },
                         "issued_on": "2026-02-10T00:00:00Z",
                         "currency": "SAR",
@@ -5164,9 +5199,9 @@ async fn a_tenant_files_output_tax_less_input_tax() {
     let (status, issued, _) = fixture
         .send(
             bearer(Request::post("/v1/sales/invoices"))
+                .header("idempotency-key", idem("crm-1"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "crm-1",
                         "customer": { "name": "Rawabi", "vat_number": "310000000000003" },
                         "issued_on": "2026-02-10T00:00:00Z",
                         "currency": "SAR",
@@ -5185,9 +5220,9 @@ async fn a_tenant_files_output_tax_less_input_tax() {
     let (status, recorded, _) = fixture
         .send(
             bearer(Request::post("/v1/purchases/bills"))
+                .header("idempotency-key", idem("ap-1"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "ap-1",
                         "supplier": { "name": "Najd Supplies", "vat_number": "311234567800003" },
                         "reference": "NS-8891",
                         "billed_on": "2026-02-14T00:00:00Z",
@@ -5272,9 +5307,9 @@ async fn a_return_for_a_tenant_with_one_side_reports_the_other_as_nothing() {
     let (status, issued, _) = fixture
         .send(
             bearer(Request::post("/v1/sales/invoices"))
+                .header("idempotency-key", idem("crm-1"))
                 .body(Body::from(
                     serde_json::json!({
-                        "id": "crm-1",
                         "customer": { "name": "Rawabi" },
                         "issued_on": "2026-02-10T00:00:00Z",
                         "currency": "SAR",
@@ -5493,9 +5528,9 @@ async fn zatca_documents_say_which_obligation_they_fall_under() {
     // One invoice to a business, one receipt to a consumer.
     let invoice = |id: &str, buyer: serde_json::Value, net: i64| {
         bearer(Request::post("/v1/sales/invoices"))
+            .header("idempotency-key", idem(id))
             .body(Body::from(
                 serde_json::json!({
-                    "id": id,
                     "customer": buyer,
                     "issued_on": "2026-02-10T00:00:00Z",
                     "currency": "SAR",
@@ -5611,6 +5646,7 @@ async fn the_zatca_standing_separates_late_from_merely_waiting() {
         let (status, body, _) = fixture
             .send(
                 bearer(Request::post("/v1/sales/invoices"))
+                    .header("idempotency-key", idem(id))
                     .body(Body::from(
                         serde_json::json!({
                             "id": id,
@@ -6012,9 +6048,9 @@ async fn a_list_longer_than_one_page_can_be_read_to_the_end() {
         let (status, body, _) = fixture
             .send(
                 bearer(Request::post("/v1/sales/invoices"))
+                    .header("idempotency-key", idem(&format!("inv-{n}")))
                     .body(Body::from(
                         serde_json::json!({
-                            "id": format!("inv-{n}"),
                             "customer": { "name": "زبون" },
                             "issued_on": format!("2026-02-{day:02}T00:00:00Z"),
                             "currency": "SAR",
@@ -6060,16 +6096,32 @@ async fn a_list_longer_than_one_page_can_be_read_to_the_end() {
 
     assert_eq!(seen.len(), 5, "paging lost or repeated rows: {seen:?}");
 
-    // Newest first, and the two sharing a tax point are both there.
+    // **Newest tax point first, and every row exactly once.**
+    //
+    // Within one tax point the order is the cursor's second part, which is the
+    // id — and an id is a UUID now, so it is stable but no longer creation
+    // order. That is what the cursor actually promises: rows sharing a
+    // timestamp are separated so none is skipped or repeated. Asserting the
+    // exact sequence within a day would be asserting an accident of how the
+    // client used to number its own keys.
+    let (later, earlier) = seen.split_at(3);
+    let mut later = later.to_vec();
+    let mut earlier = earlier.to_vec();
+    later.sort();
+    earlier.sort();
     assert_eq!(
-        seen,
+        later,
         vec![
-            "INV-00005".to_owned(),
-            "INV-00004".to_owned(),
             "INV-00003".to_owned(),
-            "INV-00002".to_owned(),
-            "INV-00001".to_owned()
-        ]
+            "INV-00004".to_owned(),
+            "INV-00005".to_owned()
+        ],
+        "the three sharing the later tax point came first"
+    );
+    assert_eq!(
+        earlier,
+        vec!["INV-00001".to_owned(), "INV-00002".to_owned()],
+        "the two sharing the earlier tax point came last"
     );
 
     // A cursor from somewhere else is refused rather than silently starting

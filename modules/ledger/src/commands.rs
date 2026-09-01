@@ -261,17 +261,12 @@ pub async fn post_entry_in(
     }
 
     let memo = memo.trim().to_owned();
-    erp_eventlog::try_execute::<JournalEntry, _, LedgerError>(
+    erp_eventlog::try_create::<JournalEntry, _, LedgerError>(
         conn,
         id,
         crate::upcasters(),
         metadata,
-        |loaded| {
-            if loaded.aggregate.posted {
-                // Already done. A no-op rather than an error, so a retried
-                // request succeeds instead of confusing the caller.
-                return Ok(Decision::nothing());
-            }
+        |_loaded| {
             Ok(Decision::one(JournalEntryEvent::Posted {
                 occurred_on,
                 memo: memo.clone(),

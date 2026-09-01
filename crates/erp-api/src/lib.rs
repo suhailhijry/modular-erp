@@ -35,9 +35,7 @@
 //!
 //! # What is not here yet
 //!
-//! `Idempotency-Key` and `ETag`/`If-Match`. Writes are already idempotent on a
-//! client-chosen id, which is most of what the first buys; the other needs a
-//! conflict real enough to shape it.
+//! `ETag`/`If-Match`. It needs a conflict real enough to shape it.
 
 mod catalog;
 mod invitations;
