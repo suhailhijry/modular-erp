@@ -867,7 +867,7 @@ both `rank_points` and `walaa_points`. Its `ClientPackage.type` records
 bought / gifted-by-client / gifted-by-business / free-from-coupon, which is what
 makes "who actually paid for this" answerable a year later.
 
-### 9a · The two recognition models, which are not interchangeable
+### 14a · The two recognition models, which are not interchangeable
 
 This is the part that is an accounting error if it is got wrong, and Rekaz
 splits its own product along the same line, which is evidence the distinction is
@@ -882,61 +882,146 @@ real and not theoretical.
 | Loyalty points | yes | when redeemed, or expired as breakage |
 | **Coupon** | **no** | never. No consideration was received |
 
-- [ ] A gym subscription recognises monthly whether or not the member appears.
+- [x] A gym subscription recognises monthly whether or not the member appears.
       A ten-session package recognises per session. Treating them alike
-      misstates revenue every month in one direction or the other
-- [ ] A coupon is a discount at the point of sale and **not** a liability.
-      That system has a full coupon model and no coupon liability account, which
-      is correct and worth not undoing
+      misstates revenue every month in one direction or the other. Two
+      aggregates, `Entitlement` and `Subscription`, and the split is the reason
+- [x] A coupon is a discount at the point of sale and **not** a liability.
+      `Reason::was_paid_for` is the whole of it: a grant nobody paid for carries
+      no value, posts nothing, and recognises nothing when it is delivered
 
-### 9b · Packages and subscriptions
+### 14b · Packages and subscriptions
 
-- [ ] `Package` — N of a service, redeemed against a reservation line, with the
-      balance that remains
-- [ ] `Subscription` — a period, a price, a renewal, and **freeze**. A member
-      pauses for travel or injury; the expiry extends and recognition pauses
-      with it. Rekaz's own copy concedes that freeze rules are policy-dependent,
-      so this is configuration and not a constant
-- [ ] Expiry: `none | days | months` from purchase or from activation, and what
-      happens to unredeemed value. IFRS 15 calls the write-off breakage and
-      allows recognising it in proportion to redemption
-- [ ] `type` on every grant: bought, gifted by a customer, granted by the
+- [x] `Package` — N of a service, with the balance that remains. **A deposit is
+      the same aggregate**: it differs in being an amount rather than a count
+      and in naming what it is held against, and in nothing else. Redeeming
+      against a reservation line is an opaque id; `prepaid` does not know what
+      a booking is
+- [x] `Subscription` — a period, a price, a renewal, and **freeze**. Freezing
+      earns everything up to that moment and stops the clock; resuming pushes
+      the term out by exactly the time it was stopped for. How *long* a freeze
+      may run is not decided here, because Rekaz's own copy concedes those
+      rules are policy-dependent
+- [x] Expiry, and breakage. An entitlement carries an expiry instant rather than
+      `none | days | months`: the rule that produced the date belongs to
+      whoever sold it, and storing the date is what makes a replay reproduce
+      the decision instead of recomputing it
+- [x] `type` on every grant: bought, gifted by a customer, granted by the
       business, free from a coupon. It decides the accounting, not the wording
-- [ ] Entry validation: is this subscription live *right now*. A gym door asks
-      this, and Rekaz sells biometric readers against it
+- [x] Entry validation: `Subscription::admits` answers *is this live right now*
+      from state rather than from a projection that may be a second behind,
+      which is what a gym door needs
 
-### 9c · Loyalty, in three mechanics
+### 14c · Loyalty, in three mechanics
 
 Rekaz rewards by **points, stamps, or visits**, ties rewards to specific
 services, and puts the card in Apple Wallet. Stamps are the coffee-shop punch
 card and are not a points balance with a different label.
 
-- [ ] Points — a balance earned at a rate, redeemed at a value
-- [ ] Stamps — N of a specific thing buys one free. The café mechanic
-- [ ] Visits — count of attendances, independent of spend
-- [ ] Tiers, which that system calls `Membership`: points_start, points_end, an
+- [x] Points — a balance earned at a rate, redeemed at a value
+- [x] Stamps — N of a specific thing buys one free. The café mechanic
+- [x] Visits — count of attendances, independent of spend
+- [x] Tiers, which that system calls `Membership`: points_start, points_end, an
       earning rate. Easy to misread as a gym membership; it is a rank
-- [ ] **Open question, needs an accountant and not this document.** IFRS 15
-      treats points as a separate performance obligation, so part of the
-      original sale price is allocated to them at the time of sale and deferred.
-      The common SMB shortcut accrues a liability at redemption value instead.
-      Saudi requires IFRS. The rigorous treatment changes the aggregate, so
-      decide before building and not after
 
-### 9d · One ledger integration
+**Both open questions were answered by the owner, and this is what was built.**
 
-- [ ] Every shape posts through `ledger::post_entry_in`, in the same
-      transaction as its own event, exactly as `sales` does. Sale is
-      Dr cash / Cr deferred revenue; delivery is Dr deferred revenue / Cr revenue
-- [ ] The chart templates gain the liability accounts. `ledger::CHARTS` already
-      ships VAT and Zakat in every template for the same reason: an account a
-      Saudi business needs on day one is not an advanced option
-- [ ] The invariant, asserted continuously like the trial balance: **the
-      deferred revenue balance equals the sum of unredeemed value.** If those
-      disagree the pipeline is broken, and it is the same class of canary
+- [x] **IFRS 15, and no shortcut.** The answer was *always IFRS, without
+      shortcuts*, so `Scheme` has no setting that selects the other treatment
+      and there is no code path for it. What is deferred is a fraction of the
+      sale by relative standalone selling price —
+      `spend × (count × worth) / (spend + count × worth)` — and not the reward's
+      face value. A hundred riyals awarding a hundred points worth ten halalas
+      defers **9.09 and not 10.00**, which is the difference the shortcut hides.
+      `points_defer_a_fraction_of_the_sale_and_not_the_reward` is that number,
+      asserted against the ledger
 
-**Exit:** a gym sells a frozen-then-resumed annual membership, a café gives a
-tenth coffee free, and both reconcile to the trial balance.
+- [x] **Multi-purpose vouchers are disallowed for now, and it is a guard rather
+      than a note.** The claim "every shape here is single-purpose" was until
+      now only in the docs: nothing stopped a caller granting an amount with no
+      uses and nothing to hold it against, which is exactly an open-value gift
+      card. `grant` now refuses that shape (`PrepaidError::OpenValue`), so what
+      keeps this module out of tax is a check and not a hope.
+      `an_amount_that_names_no_purpose_is_refused` grants the refused shape and
+      the allowed one — a deposit, which differs by naming the booking it
+      secures — one after the other
+
+**Three divergences from what this section assumed, and the reasons.**
+
+- **One aggregate for the three mechanics, not three.** They differ in what
+  produces the count — a rate on spend, a named item, an attendance — and in
+  nothing after it. `Mechanic` is fixed at open and read by the business;
+  nothing branches on it. Rekaz models them separately and pays for it in three
+  earning paths and three balances. The same lesson packages and deposits
+  taught in 14b
+
+- **`earn` does not need the sale, only its price.** The allocation is a
+  fraction of the transaction price, so the caller passes `spend`; `from` is an
+  opaque id and a reconciliation surface, exactly as `against` is for a deposit.
+  A tighter coupling would make `prepaid` depend on `sales`, which siblings may
+  not do. The cost is that the invoice and the deferral are two transactions —
+  the module's existing bargain, and `a_liability_agrees_with_the_ledger` is
+  what catches a pair that came apart
+
+- **A rank is read from `lifetime`, which never decreases.** Spending points
+  does not cost a rank, and neither does breakage: what was earned was earned.
+  The movement that *crosses* a threshold earns at the old rate and the next one
+  at the new, because any other reading makes the award depend on itself
+
+- **There is no default scheme.** Account codes have a conventional value every
+  chart ships; what a point is worth does not. A tenant who has not configured
+  one cannot earn (`PrepaidError::NoScheme`) rather than earning against a
+  number nobody chose (L6)
+
+- **A card survives its own breakage.** Points running out is not the end of the
+  card — it can earn again the next day — which is the one place this aggregate
+  is not shaped like `Entitlement`
+
+**What the answers leave open, recorded rather than guessed at.** If open-value
+cards are ever wanted, the classification is a property of the *product* and not
+a tenant setting, and the sale has to settle its own tax question first: the
+refusal above is where that decision lands, and `Reason::Bought` still assumes
+the sale carried its own tax.
+
+### 14d · One ledger integration
+
+- [x] Every shape posts through `ledger::post_entry_in`, in the same
+      transaction as its own event, exactly as `sales` does
+- [x] The chart templates gain the liability account, `2400 Deferred revenue`,
+      in every template for the reason VAT and Zakat are in every template
+- [x] The invariant: **the deferred revenue balance equals the sum of
+      unredeemed value.** `a_liability_agrees_with_the_ledger` asserts it after
+      grants, redemptions, recognition, a freeze, a resume, a renewal, a
+      revocation and a cancellation
+
+**This module posts the deferral, not the sale — a divergence, and the reason is
+ZATCA.** The plan said *"sale is Dr cash / Cr deferred revenue"*. That skips the
+tax invoice, and a Saudi business selling a gym year cannot skip one: it is a
+supply, it needs an invoice, and the invoice has to be cleared or reported.
+`sales` already does all of that. So the sale is an ordinary invoice and `sales`
+posts it; `prepaid` adds the fact that the revenue is not earned yet, with
+Dr revenue / Cr deferred at the grant and the reverse as it is delivered.
+
+Two things follow. **No tax anywhere in this module**, so there is no second
+opinion to keep consistent. And **the reclassification is visible** — an auditor
+sees revenue booked and then deferred, which is what happened, rather than a
+sale that never appeared in the sales ledger.
+
+**A bug the canary was blind to, found by a different test.** `renew_subscription`
+posted the release of the term that ended and never the deferral of the term
+that began, so the read model carried a liability the books did not. The canary
+had not renewed anything; it does now.
+
+**Recognition is a cumulative total, never a sum of instalments.** Each step
+computes what *should* have been earned by a date and posts the difference, so
+running a month-end job twice posts nothing the second time, and
+`Money::apportioned` being exact at `n/n` means the last day of a term brings
+the liability to exactly zero. Summing instalments would strand a halala on
+almost every term, in the account that is supposed to be the canary.
+
+**Exit:** a gym sells a frozen-then-resumed annual membership and it reconciles
+to the trial balance. The café's tenth coffee is 14c and waits on the answer
+below.
 
 ---
 

@@ -47,6 +47,7 @@
 - [purchases](./api/purchases.md)
 - [tax_sa](./api/tax_sa.md)
 - [booking](./api/booking.md)
+- [prepaid](./api/prepaid.md)
 - [The HTTP API](./api/http.md)
 
 # Ahead

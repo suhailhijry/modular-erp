@@ -446,6 +446,124 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **ar** — {n} مجموعة بلغت حدّها الأقصى.
 
 
+## `prepaid`
+
+### `prepaid.already_frozen`
+
+- **en** — Subscription {id} is already frozen.
+- **ar** — الاشتراك {id} مجمّد بالفعل.
+
+### `prepaid.already_granted`
+
+- **en** — {id} has already been granted.
+- **ar** — تم منح {id} من قبل.
+
+### `prepaid.already_open`
+
+- **en** — Card {id} is already open.
+- **ar** — البطاقة {id} مفتوحة بالفعل.
+
+### `prepaid.already_started`
+
+- **en** — Subscription {id} has already started.
+- **ar** — بدأ الاشتراك {id} من قبل.
+
+### `prepaid.amount_out_of_range`
+
+- **en** — That amount is too large to record.
+- **ar** — هذا المبلغ أكبر من أن يُسجَّل.
+
+### `prepaid.cancelled`
+
+- **en** — Subscription {id} has been cancelled.
+- **ar** — تم إلغاء الاشتراك {id}.
+
+### `prepaid.free_grant_with_value`
+
+- **en** — Nobody paid for this, so it carries no value. A coupon is a discount, not a balance.
+- **ar** — لم يدفع أحد مقابل هذا، فلا قيمة له. القسيمة خصم وليست رصيدًا.
+
+### `prepaid.lapsed`
+
+- **en** — {id} expired on {on}.
+- **ar** — انتهت صلاحية {id} في {on}.
+
+### `prepaid.no_scheme`
+
+- **en** — No loyalty scheme has been configured, so there is nothing to earn against.
+- **ar** — لم يتم إعداد برنامج ولاء، فلا شيء يُكتسب مقابله.
+
+### `prepaid.no_such_card`
+
+- **en** — There is no card {id}.
+- **ar** — لا توجد بطاقة {id}.
+
+### `prepaid.no_such_customer`
+
+- **en** — There is no customer {customer}.
+- **ar** — لا يوجد عميل {customer}.
+
+### `prepaid.no_such_entitlement`
+
+- **en** — There is no package or deposit {id}.
+- **ar** — لا توجد باقة أو عربون باسم {id}.
+
+### `prepaid.no_such_subscription`
+
+- **en** — There is no subscription {id}.
+- **ar** — لا يوجد اشتراك {id}.
+
+### `prepaid.not_a_term`
+
+- **en** — A term must end after it starts.
+- **ar** — يجب أن تنتهي المدة بعد بدايتها.
+
+### `prepaid.not_a_value`
+
+- **en** — An amount here must be more than nothing.
+- **ar** — يجب أن يكون المبلغ هنا أكبر من صفر.
+
+### `prepaid.not_frozen`
+
+- **en** — Subscription {id} is not frozen.
+- **ar** — الاشتراك {id} غير مجمّد.
+
+### `prepaid.not_live`
+
+- **en** — {id} is finished and cannot be used again.
+- **ar** — انتهى {id} ولا يمكن استخدامه مرة أخرى.
+
+### `prepaid.nothing_left`
+
+- **en** — Only {left} is left on {id}, and {wanted} was asked for.
+- **ar** — لم يتبق سوى {left} في {id}، والمطلوب {wanted}.
+
+### `prepaid.open_value`
+
+- **en** — An amount must either count uses or name what it is held against. A card spendable on anything is not supported.
+- **ar** — المبلغ يجب أن يحدّد عدد الاستخدامات أو ما هو محجوز مقابله. البطاقة القابلة للصرف على أي شيء غير مدعومة.
+
+### `prepaid.term_not_over`
+
+- **en** — The current term of {id} runs until {until} and cannot be renewed yet.
+- **ar** — تستمر مدة {id} الحالية حتى {until} ولا يمكن تجديدها بعد.
+
+### `prepaid.unknown_mechanic`
+
+- **en** — {mechanic} is not a way a card counts.
+- **ar** — {mechanic} ليست طريقة عدّ لبطاقة.
+
+### `prepaid.unknown_reason`
+
+- **en** — {value} is not a way something is granted.
+- **ar** — {value} ليست طريقة يُمنح بها شيء.
+
+### `prepaid.wrong_currency`
+
+- **en** — Card {id} holds a balance in another currency than the scheme.
+- **ar** — البطاقة {id} تحمل رصيدًا بعملة غير عملة البرنامج.
+
+
 ## `provisioning`
 
 ### `provisioning.no_capacity`

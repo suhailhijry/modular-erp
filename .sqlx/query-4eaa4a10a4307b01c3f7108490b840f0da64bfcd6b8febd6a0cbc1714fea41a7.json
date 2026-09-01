@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", customer as \"customer!\", mechanic as \"mechanic!\",\n                  counts as \"counts!\", lifetime as \"lifetime!\",\n                  deferred as \"deferred!\", currency, opened_on as \"opened_on!\"\n             FROM proj_prepaid.card WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.card",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "customer!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.card",
+            "name": "customer"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "mechanic!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.card",
+            "name": "mechanic"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "counts!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.card",
+            "name": "counts"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "lifetime!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.card",
+            "name": "lifetime"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "deferred!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.card",
+            "name": "deferred"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.card",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "opened_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.card",
+            "name": "opened_on"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "4eaa4a10a4307b01c3f7108490b840f0da64bfcd6b8febd6a0cbc1714fea41a7"
+}

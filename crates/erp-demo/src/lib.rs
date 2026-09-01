@@ -82,6 +82,8 @@ pub struct Seeded {
     pub bookables: usize,
     /// Appointments in the diary, across every stage a screen has to draw.
     pub reservations: usize,
+    /// Packages and gym memberships sold, and therefore deferred.
+    pub prepaid: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -198,6 +200,10 @@ pub async fn seed(
     // log with nothing to read them.
     let (bookables, reservations) = seed_diary(&app, slug, &token).await?;
 
+    // What has been paid for and not yet delivered. After the customers, and
+    // before the last projection run.
+    let prepaid = seed_prepaid(&app, slug, &token).await?;
+
     let colleague = seed_colleague(&app, slug, &token, password).await?;
 
     // Drive the projections, so the demo has something to show the moment it
@@ -246,6 +252,7 @@ pub async fn seed(
         zatca_documents,
         bookables,
         reservations,
+        prepaid,
     })
 }
 
@@ -253,6 +260,7 @@ pub async fn seed(
 pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<(), DemoError> {
     let db = control.enter_for_maintenance(tenant).await?;
     advance::<booking::Booking>(&db, &booking::projections(), booking::upcasters()).await?;
+    advance::<prepaid::Prepaid>(&db, &prepaid::projections(), prepaid::upcasters()).await?;
     advance::<crm::Crm>(&db, &crm::projections(), crm::upcasters()).await?;
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
     advance::<sales::Sales>(&db, &sales::projections(), sales::upcasters()).await?;
@@ -443,6 +451,170 @@ async fn seed_customers(app: &axum::Router, slug: &str, token: &str) -> Result<u
         .await?;
     }
     Ok(customers.len())
+}
+
+/// What customers have already paid for.
+///
+/// # Why both shapes are here
+///
+/// Because the claim `prepaid` makes is that they are not interchangeable: a
+/// package earns per session delivered, a membership earns as the time passes.
+/// A demo with only one of them demonstrates half an accounting model, and it
+/// is the half that hides the mistake.
+///
+/// The membership is frozen and resumed, which is the phase's exit criterion
+/// and the one movement that touches every part of the recognition arithmetic.
+async fn seed_prepaid(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    // A ten-session package, two of them used.
+    post(
+        app,
+        slug,
+        "/v1/prepaid/entitlements",
+        Some(token),
+        &serde_json::json!({
+            "id": "PKG-0001",
+            "customer": "CUST-0001",
+            "what": "استشارة",
+            "uses": 10,
+            "value": { "minor": 500_000, "currency": "SAR" },
+            "reason": "bought",
+            "at": "2026-01-20T00:00:00Z"
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+    for visit in ["VISIT-0001", "VISIT-0002"] {
+        post(
+            app,
+            slug,
+            "/v1/prepaid/entitlements/PKG-0001/redemptions",
+            Some(token),
+            &serde_json::json!({ "reference": visit, "uses": 1, "at": "2026-02-10T00:00:00Z" }),
+            StatusCode::OK,
+        )
+        .await?;
+    }
+
+    // An annual membership, frozen for a month and resumed, then recognised
+    // through the middle of the year.
+    post(
+        app,
+        slug,
+        "/v1/prepaid/subscriptions",
+        Some(token),
+        &serde_json::json!({
+            "id": "SUB-0001",
+            "customer": "CUST-0002",
+            "plan": "اشتراك سنوي",
+            "price": { "minor": 1_200_000, "currency": "SAR" },
+            "from": "2026-01-01T00:00:00Z",
+            "until": "2027-01-01T00:00:00Z",
+            "at": "2026-01-01T00:00:00Z"
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+    post(
+        app,
+        slug,
+        "/v1/prepaid/subscriptions/SUB-0001/freeze",
+        Some(token),
+        &serde_json::json!({ "why": "سفر", "at": "2026-03-01T00:00:00Z" }),
+        StatusCode::OK,
+    )
+    .await?;
+    delete(
+        app,
+        slug,
+        "/v1/prepaid/subscriptions/SUB-0001/freeze",
+        token,
+        StatusCode::OK,
+    )
+    .await?;
+    post(
+        app,
+        slug,
+        "/v1/prepaid/subscriptions/SUB-0001/recognition",
+        Some(token),
+        &serde_json::json!({ "at": "2026-06-30T00:00:00Z" }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    seed_loyalty(app, slug, token).await?;
+    Ok(3)
+}
+
+/// A loyalty card, earned on and spent from.
+///
+/// # Why the demo awards points against a real sale price
+///
+/// Because IFRS 15 makes the points a **separate performance obligation**, so
+/// what is deferred is a fraction of the sale and not the reward's face value:
+/// a hundred riyals awarding a hundred points worth ten halalas each defers
+/// 9.09, not 10. A demo that awarded points against nothing would show a
+/// balance and hide the only part of this that is an accounting decision.
+///
+/// There is no scheme by default and there could not be one — what a point is
+/// worth is a business decision — so the demo configures it first, which is
+/// also the path a real tenant takes.
+async fn seed_loyalty(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
+    put(
+        app,
+        slug,
+        "/v1/prepaid/loyalty-scheme",
+        token,
+        &serde_json::json!({
+            "worth": { "minor": 10, "currency": "SAR" },
+            "rate_bp": 10_000,
+            "tiers": [{ "name": "ذهبي", "from": 500, "rate_bp": 15_000 }]
+        }),
+        StatusCode::NO_CONTENT,
+    )
+    .await?;
+    post(
+        app,
+        slug,
+        "/v1/prepaid/cards",
+        Some(token),
+        &serde_json::json!({
+            "id": "CARD-0001",
+            "customer": "CUST-0001",
+            "mechanic": "points",
+            "at": "2026-01-20T00:00:00Z"
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+    post(
+        app,
+        slug,
+        "/v1/prepaid/cards/CARD-0001/earnings",
+        Some(token),
+        &serde_json::json!({
+            "reference": "INV-0001",
+            "spend": { "minor": 10_000, "currency": "SAR" },
+            "from": "INV-0001",
+            "at": "2026-02-10T00:00:00Z"
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+    post(
+        app,
+        slug,
+        "/v1/prepaid/cards/CARD-0001/redemptions",
+        Some(token),
+        &serde_json::json!({
+            "reference": "RWD-0001",
+            "count": 40,
+            "at": "2026-03-01T00:00:00Z"
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    Ok(())
 }
 
 /// A rota and a day's diary.
@@ -1209,6 +1381,28 @@ async fn put(
         })?;
 
     send(app, "PUT", path, request, expected).await
+}
+
+/// For the routes where removing something *is* the operation: resuming a
+/// frozen subscription is a `DELETE` on its freeze, and putting a withdrawn
+/// resource back is a `DELETE` on its withdrawal.
+async fn delete(
+    app: &axum::Router,
+    slug: &str,
+    path: &str,
+    token: &str,
+    expected: StatusCode,
+) -> Result<serde_json::Value, DemoError> {
+    let request = Request::delete(path)
+        .header(header::HOST, format!("{slug}.localhost"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .map_err(|e| DemoError::Unexpected {
+            path: path.to_owned(),
+            body: e.to_string(),
+        })?;
+
+    send(app, "DELETE", path, request, expected).await
 }
 
 /// The confirmation token, read out of the mailbox.

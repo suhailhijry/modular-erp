@@ -1,0 +1,160 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", customer as \"customer!\", plan as \"plan!\",\n                  price as \"price!\", recognised as \"recognised!\",\n                  outstanding as \"outstanding!\", currency as \"currency!\",\n                  starts_at as \"starts_at!\", ends_at as \"ends_at!\",\n                  frozen_since, cancelled_at, cancelled_why\n             FROM proj_prepaid.subscription WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "customer!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "customer"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "plan!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "plan"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "price!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "price"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "recognised!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "recognised"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "outstanding!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "outstanding"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "starts_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "starts_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "ends_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "ends_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "frozen_since",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "frozen_since"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "cancelled_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "cancelled_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "cancelled_why",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.subscription",
+            "name": "cancelled_why"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "e22d965fd1eff7eea9d28e882d83055a79f1a00acfd111adeb5b844ceeeeb1a8"
+}

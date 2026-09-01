@@ -1,0 +1,172 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", customer as \"customer!\", what as \"what!\",\n                  uses_granted, uses_left,\n                  deferred as \"deferred!\", outstanding as \"outstanding!\",\n                  currency as \"currency!\", reason as \"reason!\", against,\n                  expires_at, closed, granted_on as \"granted_on!\"\n             FROM proj_prepaid.entitlement WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "customer!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "customer"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "what!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "what"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "uses_granted",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "uses_granted"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "uses_left",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "uses_left"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "deferred!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "deferred"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "outstanding!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "outstanding"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "reason!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "against",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "against"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "closed",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "closed"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "granted_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_prepaid.entitlement",
+            "name": "granted_on"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "9d78a2ef8a92cc1097ff8f0cebe274a53a5f3dd32d071cff15771670e38e436e"
+}

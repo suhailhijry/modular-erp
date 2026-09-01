@@ -1718,6 +1718,18 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // The diary and the rota. A viewer may read both: knowing who is booked in
     // at ten is what everyone on a shop floor needs, and it is the screen most
     // of these businesses live on.
+    // What a customer has already paid for. A viewer may read it: the person
+    // at the counter has to be able to say "you have three sessions left"
+    // without being able to sell them a fourth.
+    ("list_entitlements", ALL_ROLES),
+    ("get_entitlement", ALL_ROLES),
+    ("list_subscriptions", ALL_ROLES),
+    ("get_subscription", ALL_ROLES),
+    ("outstanding", ALL_ROLES),
+    ("deferral_accounts", ALL_ROLES),
+    ("list_cards", ALL_ROLES),
+    ("get_card", ALL_ROLES),
+    ("loyalty_scheme", ALL_ROLES),
     ("list_bookables", ALL_ROLES),
     // What the hours cost. A viewer may read the tariff for the same reason
     // they may read the VAT rate: it is on every quote they give a customer.
@@ -1743,6 +1755,23 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("pay_bill", &["owner", "accountant", "clerk"]),
     // Taking a booking, moving it along, and picking the room. This is the
     // receptionist's whole job, and the reason a clerk exists as a role.
+    // Selling a package and delivering a session both post to the ledger, so
+    // they sit with the other recording work. A clerk at a counter does this
+    // all day.
+    ("grant_entitlement", &["owner", "accountant", "clerk"]),
+    ("redeem_entitlement", &["owner", "accountant", "clerk"]),
+    ("expire_entitlement", &["owner", "accountant", "clerk"]),
+    ("revoke_entitlement", &["owner", "accountant", "clerk"]),
+    ("start_subscription", &["owner", "accountant", "clerk"]),
+    ("recognise_subscription", &["owner", "accountant", "clerk"]),
+    ("freeze_subscription", &["owner", "accountant", "clerk"]),
+    ("resume_subscription", &["owner", "accountant", "clerk"]),
+    ("renew_subscription", &["owner", "accountant", "clerk"]),
+    ("cancel_subscription", &["owner", "accountant", "clerk"]),
+    ("open_card", &["owner", "accountant", "clerk"]),
+    ("earn_on_card", &["owner", "accountant", "clerk"]),
+    ("redeem_card_points", &["owner", "accountant", "clerk"]),
+    ("expire_card_points", &["owner", "accountant", "clerk"]),
     ("take_reservation", &["owner", "accountant", "clerk"]),
     ("move_reservation", &["owner", "accountant", "clerk"]),
     ("reschedule_reservation", &["owner", "accountant", "clerk"]),
@@ -1752,6 +1781,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("open_account", &["owner", "accountant"]),
     ("install_chart", &["owner", "accountant"]),
     ("set_posting_accounts", &["owner", "accountant"]),
+    // Where a liability is held is the shape of the books, not a day's work.
+    ("set_deferral_accounts", &["owner", "accountant"]),
+    ("set_loyalty_scheme", &["owner", "accountant"]),
     // Declaring the numbers final is the accountant's call, and not
     // something a clerk posting entries should be able to do to them.
     ("close_books", &["owner", "accountant"]),
@@ -1866,8 +1898,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        69,
-        "expected sixty-nine role-scoped operations"
+        94,
+        "expected ninety-four role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

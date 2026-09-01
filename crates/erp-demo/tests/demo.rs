@@ -166,6 +166,50 @@ async fn every_module_is_enabled_and_answering() {
         demo.seeded.bookables,
         "booking has its rota"
     );
+    // Both recognition models, in one tenant, because the claim `prepaid` makes
+    // is that they are not interchangeable.
+    let held = demo.get("/v1/prepaid/entitlements").await["items"].clone();
+    assert_eq!(
+        held.as_array().expect("a list").len(),
+        1,
+        "prepaid has its packages"
+    );
+    let package = &held.as_array().expect("a list")[0];
+    assert_eq!(package["uses_left"], 8, "two of ten sessions were used");
+    assert_eq!(
+        package["outstanding"]["minor"], 400_000,
+        "the package earned two sessions"
+    );
+
+    // A loyalty card, whose liability is the only one here computed as a
+    // fraction of a sale rather than the whole of one.
+    let card = demo.get("/v1/prepaid/cards/CARD-0001").await;
+    assert_eq!(card["counts"], 60, "a hundred earned, forty spent");
+    assert_eq!(card["lifetime"], 100, "spending points cost a rank");
+    assert_eq!(
+        card["deferred"]["minor"], 549,
+        "9.09 deferred against a hundred riyals, less the 3.60 honoured"
+    );
+
+    let membership = demo.get("/v1/prepaid/subscriptions/SUB-0001").await;
+    assert!(
+        membership["recognised"]["minor"]
+            .as_i64()
+            .is_some_and(|earned| earned > 0),
+        "the membership earned nothing"
+    );
+    assert!(
+        membership["outstanding"]["minor"]
+            .as_i64()
+            .is_some_and(|owed| owed > 0),
+        "the membership earned the whole year at once"
+    );
+    // The freeze pushed the term past its original end.
+    assert_ne!(
+        membership["ends_at"], "2027-01-01T00:00:00Z",
+        "a freeze did not move the term"
+    );
+
     let stay = demo.get("/v1/booking/reservations/BK-0006").await;
     assert_eq!(
         stay["lines"][0]["unit"], "room-201",
@@ -382,6 +426,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
     let reports = vec![
         replay!(pool, booking, booking::Booking, "reservation"),
         replay!(pool, crm, crm::Crm, "customer"),
+        replay!(pool, prepaid, prepaid::Prepaid, "entitlement"),
         replay!(pool, ledger, ledger::Ledger, "account"),
         replay!(pool, sales, sales::Sales, "invoice"),
         replay!(pool, purchases, purchases::Purchases, "bill"),

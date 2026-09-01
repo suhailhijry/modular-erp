@@ -19,6 +19,7 @@ booking = { workspace = true }
 crm = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }
+prepaid = { workspace = true }
 purchases = { workspace = true }
 tax_sa = { workspace = true }
 # For the module catalogue, so `migrator refresh <name>` and the API cannot

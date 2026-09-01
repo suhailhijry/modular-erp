@@ -280,8 +280,33 @@ impl Money {
     /// differing by exactly the tax on it. One rule, one place, and the tax
     /// tests in `sales` are what keep it honest.
     pub fn scaled_by(self, basis_points: i32) -> Result<Self, MoneyError> {
-        let product = i128::from(self.minor) * i128::from(basis_points);
-        let rounded = div_round_half_away(product, BASIS);
+        self.apportioned(i64::from(basis_points), 10_000)
+    }
+
+    /// The share of this amount that `numerator / denominator` represents,
+    /// **rounding halves away from zero**. The same policy as
+    /// [`Self::scaled_by`], which is written in terms of this.
+    ///
+    /// # What it is for, and the property that matters
+    ///
+    /// Recognising revenue over a period: four months into a year of a 1,200
+    /// riyal membership is `apportioned(122, 365)`. The reason it takes the
+    /// fraction rather than a rate in basis points is that a rate would round
+    /// the *fraction* first — 122/365 is 33.4247%, which is 3342 basis points
+    /// and 0.0047% of a year thrown away every time it is asked.
+    ///
+    /// **Apportioning by the whole gives back the whole.** `apportioned(n, n)`
+    /// is exactly `self`, so a caller who recognises cumulative amounts and
+    /// posts the difference cannot strand a halala in a liability account at
+    /// the end of a period. That is the property the deferred-revenue canary
+    /// rests on, and it is why recognition is written as a cumulative total
+    /// rather than as a sum of instalments.
+    pub fn apportioned(self, numerator: i64, denominator: i64) -> Result<Self, MoneyError> {
+        if denominator == 0 {
+            return Err(MoneyError::DivideByZero);
+        }
+        let product = i128::from(self.minor) * i128::from(numerator);
+        let rounded = div_round_half_away(product, i128::from(denominator));
         i64::try_from(rounded)
             .map(|minor| Self::from_minor(minor, self.currency))
             .map_err(|_| MoneyError::Overflow {
@@ -311,15 +336,20 @@ impl Money {
     }
 }
 
-/// One ten-thousandth. See [`Money::scaled_by`].
-const BASIS: i128 = 10_000;
-
 /// `numerator / denominator`, rounding halves away from zero.
 ///
-/// `denominator` is always [`BASIS`]; it is a parameter so the property test
-/// can vary it.
+/// The one rounding rule in the workspace: [`Money::scaled_by`] and
+/// [`Money::apportioned`] are both written in terms of it.
 fn div_round_half_away(numerator: i128, denominator: i128) -> i128 {
-    let sign = if numerator < 0 { -1 } else { 1 };
+    // The sign of the quotient, which is the sign of both operands together.
+    // `scaled_by` only ever passes a positive denominator; `apportioned` takes
+    // one from a caller, and a negative one has to come out the right way round
+    // rather than flipping the answer's sign silently.
+    let sign = if (numerator < 0) == (denominator < 0) {
+        1
+    } else {
+        -1
+    };
     let magnitude = numerator.unsigned_abs();
     let denominator = denominator.unsigned_abs();
     // `(2n + d) / 2d` is `n/d` rounded half up, without a division producing a
@@ -376,6 +406,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **Apportioning by the whole gives back the whole**, which is what stops
+    /// a halala being stranded in a liability at the end of a period.
+    #[test]
+    fn apportioning_by_the_whole_is_exact() {
+        let sar = CurrencyCode::new("SAR").unwrap_or_else(|_| unreachable!("a real code"));
+        for minor in [1_i64, 7, 99, 100_000, 120_000, 999_983] {
+            let whole = Money::from_minor(minor, sar);
+            for denominator in [3_i64, 7, 30, 365, 366] {
+                assert_eq!(
+                    whole.apportioned(denominator, denominator),
+                    Ok(whole),
+                    "{minor} apportioned {denominator}/{denominator}"
+                );
+            }
+        }
+    }
+
+    /// A year of a 1,200 riyal membership, recognised as cumulative totals.
+    /// The last day has to bring it to exactly the price.
+    #[test]
+    fn recognising_cumulatively_over_a_period_ends_on_the_price() {
+        let sar = CurrencyCode::new("SAR").unwrap_or_else(|_| unreachable!("a real code"));
+        let price = Money::from_minor(120_000, sar);
+        let mut previous = Money::zero(sar);
+        let mut posted = Money::zero(sar);
+        for day in 1..=365_i64 {
+            let cumulative = price
+                .apportioned(day, 365)
+                .unwrap_or_else(|e| unreachable!("{e}"));
+            let step = cumulative
+                .checked_sub(previous)
+                .unwrap_or_else(|e| unreachable!("{e}"));
+            posted = posted
+                .checked_add(step)
+                .unwrap_or_else(|e| unreachable!("{e}"));
+            previous = cumulative;
+        }
+        assert_eq!(
+            posted, price,
+            "a year of recognition did not come to the price"
+        );
+    }
+
+    #[test]
+    fn apportioning_by_nothing_is_refused_rather_than_guessed() {
+        let sar = CurrencyCode::new("SAR").unwrap_or_else(|_| unreachable!("a real code"));
+        assert_eq!(
+            Money::from_minor(100, sar).apportioned(1, 0),
+            Err(MoneyError::DivideByZero)
+        );
     }
 
     /// The two callers that matter: 15% tax, and a 25% peak uplift.

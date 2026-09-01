@@ -827,6 +827,227 @@ curl -s "${AUTH[@]}" http://localhost:8080/v1/tax_sa/zatca
 A document's status is `unregistered`, `pending`, `cleared`, `reported` or
 `refused`.
 
+## Prepaid
+
+What the customer has already paid for. Three shapes, one liability account, and
+**no tax anywhere** — the sale was invoiced by `sales`, and this records that the
+revenue is not earned yet.
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/prepaid/entitlements` | Packages, courses and deposits | Read |
+| `POST /v1/prepaid/entitlements` | Grant one, and defer its value | PostEntries |
+| `GET /v1/prepaid/entitlements/{entitlement}` | One, with what is left | Read |
+| `POST /v1/prepaid/entitlements/{entitlement}/redemptions` | Draw it down | PostEntries |
+| `POST /v1/prepaid/entitlements/{entitlement}/expiry` | Write off what lapsed | PostEntries |
+| `POST /v1/prepaid/entitlements/{entitlement}/revocation` | Take it back | PostEntries |
+| `GET /v1/prepaid/subscriptions` | Terms paid in advance | Read |
+| `POST /v1/prepaid/subscriptions` | Start one | PostEntries |
+| `GET /v1/prepaid/subscriptions/{subscription}` | One, with what is earned | Read |
+| `POST /v1/prepaid/subscriptions/{subscription}/recognition` | Earn time up to a moment | PostEntries |
+| `POST /v1/prepaid/subscriptions/{subscription}/freeze` | Stop the clock | PostEntries |
+| `DELETE /v1/prepaid/subscriptions/{subscription}/freeze` | Start it again | PostEntries |
+| `POST /v1/prepaid/subscriptions/{subscription}/renewal` | End the term and begin another | PostEntries |
+| `POST /v1/prepaid/subscriptions/{subscription}/cancellation` | End it | PostEntries |
+| `GET /v1/prepaid/cards` | Loyalty cards | Read |
+| `POST /v1/prepaid/cards` | Open one | PostEntries |
+| `GET /v1/prepaid/cards/{card}` | One, with counts and rank | Read |
+| `POST /v1/prepaid/cards/{card}/earnings` | Award counts against a sale | PostEntries |
+| `POST /v1/prepaid/cards/{card}/redemptions` | Spend them | PostEntries |
+| `POST /v1/prepaid/cards/{card}/expiry` | Lapse them as breakage | PostEntries |
+| `GET /v1/prepaid/outstanding` | What every customer is owed, per currency | Read |
+| `GET /v1/prepaid/posting-accounts` | What this posts to | Read |
+| `PUT /v1/prepaid/posting-accounts` | Choose | ManageAccounts |
+| `GET /v1/prepaid/loyalty-scheme` | What a count is worth, and what earns one | Read |
+| `PUT /v1/prepaid/loyalty-scheme` | Choose | ManageAccounts |
+
+Amounts are minor units and a currency: `{"minor": 30000, "currency": "SAR"}` is
+three hundred riyals. A decimal string is a float somewhere in every client, and
+this module's whole job is a number that has to be exactly right.
+
+### A package
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/entitlements -d '{
+    "id":       "PKG-0001",
+    "customer": "CUST-0001",
+    "what":     "استشارة",
+    "uses":     10,
+    "value":    {"minor": 500000, "currency": "SAR"},
+    "reason":   "bought",
+    "at":       "2026-01-20T00:00:00Z"
+  }'
+```
+
+`value` is **what is deferred, excluding tax**. The tax was settled on the
+invoice `sales` issued; sending a gross figure here overstates the liability by
+the VAT.
+
+`reason` is `bought`, `gifted_by_customer`, `granted_by_business` or
+`free_from_coupon`. The last two carry no value and are refused with
+`prepaid.free_grant_with_value` if you send one — nobody paid, so there is
+nothing to defer and nothing to recognise later.
+
+A deposit is the same endpoint with an amount instead of a count, naming what it
+is held against:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/entitlements -d '{
+    "id": "DEP-0001", "customer": "CUST-0001", "what": "عربون",
+    "value": {"minor": 15000, "currency": "SAR"},
+    "reason": "bought", "against": "BK-0001"
+  }'
+```
+
+**An amount with neither `uses` nor `against` is refused** with
+`prepaid.open_value`. That shape is a card spendable on anything — a
+multi-purpose voucher — and what it buys is not known when it is sold, so neither
+is the rate it should have been taxed at.
+
+Draw it down:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/entitlements/PKG-0001/redemptions \
+  -d '{"reference":"VISIT-0001","uses":1,"at":"2026-02-10T00:00:00Z"}'
+```
+
+The same `reference` twice is a no-op. Each use is worth what is left divided by
+what is left to use, so the last session takes the remainder and the liability
+closes at exactly zero — three sessions of 100 riyals is 33.33, 33.34, 33.33 and
+not a stranded halala.
+
+Expiry and revocation both clear the liability, and they are not the same event.
+Expiry **recognises** it, because the obligation to deliver has gone and what was
+held against it is earned. Revocation does not: nothing was delivered, and the
+refund itself is a credit note in `sales`.
+
+### A subscription
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/subscriptions -d '{
+    "id":       "SUB-0001",
+    "customer": "CUST-0002",
+    "plan":     "اشتراك سنوي",
+    "price":    {"minor": 1200000, "currency": "SAR"},
+    "from":     "2026-01-01T00:00:00Z",
+    "until":    "2027-01-01T00:00:00Z"
+  }'
+```
+
+`until` is exclusive, like every interval in this system.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/subscriptions/SUB-0001/recognition \
+  -d '{"at":"2026-06-30T00:00:00Z"}'
+```
+
+**Recognition is a cumulative total, not an instalment.** It earns everything up
+to `at` and posts the difference from what was already earned, so running a
+month-end job twice recognises nothing the second time, and the last day of the
+term lands on exactly the price with no rounding drift.
+
+Freeze and resume:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/subscriptions/SUB-0001/freeze \
+  -d '{"why":"سفر","at":"2026-03-01T00:00:00Z"}'
+
+curl -sX DELETE "${AUTH[@]}" \
+  http://localhost:8080/v1/prepaid/subscriptions/SUB-0001/freeze
+```
+
+Freezing earns everything up to that moment and stops the clock; resuming pushes
+`ends_at` out by exactly the time it was stopped for. Removing the freeze *is*
+the operation, which is why it is a `DELETE`.
+
+A renewal ends the current term and begins another. The old term is recognised
+**in full** first — a term that ended was delivered, however few times the member
+turned up — and the new term's price is deferred in the same transaction.
+
+### A loyalty card
+
+There is no default scheme and there could not be one: what a point is worth is a
+business decision. Configure it before anything can be earned, or every earning
+is refused with `prepaid.no_scheme`.
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/loyalty-scheme -d '{
+    "worth":   {"minor": 10, "currency": "SAR"},
+    "rate_bp": 10000,
+    "tiers":   [{"name": "ذهبي", "from": 2000, "rate_bp": 15000}]
+  }'
+```
+
+`worth` is what one count is worth when it is redeemed, and it is the standalone
+selling price the allocation below is computed from. `rate_bp` is counts per
+major unit spent in basis points: `10000` is one point per riyal, `15000` is one
+and a half.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/cards \
+  -d '{"id":"CARD-0001","customer":"CUST-0001","mechanic":"points"}'
+
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/cards/CARD-0001/earnings -d '{
+    "reference": "INV-0001",
+    "spend":     {"minor": 10000, "currency": "SAR"},
+    "from":      "INV-0001"
+  }'
+```
+
+`mechanic` is `points`, `stamps` or `visits`. It decides what produces the count
+and nothing after that — the accounting is identical for all three. Omit `count`
+for points and it is computed from the scheme's rate at the card's rank; send it
+for stamps and visits, which count their own.
+
+`spend` is what was paid, excluding tax, and it is required because of what this
+endpoint actually does. Under IFRS 15 the points are a **separate performance
+obligation**, so part of that sale is allocated to them and deferred:
+
+```text
+allocated = spend × (count × worth) / (spend + count × worth)
+```
+
+A hundred riyals awarding a hundred points worth ten halalas each defers
+**9.09, not 10.00**. The common shortcut accrues the reward's face value instead;
+Saudi requires IFRS, so there is no setting here that selects it.
+
+`from` is opaque and unchecked — a reconciliation surface, not a foreign key.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/prepaid/cards/CARD-0001/redemptions \
+  -d '{"reference":"RWD-0001","count":40,"toward":"INV-0002"}'
+
+curl -s "${AUTH[@]}" http://localhost:8080/v1/prepaid/cards/CARD-0001
+# {"counts":60,"lifetime":100,"deferred":{"minor":549,"currency":"SAR"},…}
+```
+
+`counts` is what can be spent; `lifetime` is everything ever earned and **never
+decreases**, because it is what a rank is read from and spending points does not
+cost a rank. Neither does breakage — and a card survives its own expiry, unlike
+an entitlement: the balance goes and the card can earn again tomorrow.
+
+### The number that has to reconcile
+
+```bash
+curl -s "${AUTH[@]}" http://localhost:8080/v1/prepaid/outstanding
+# {"outstanding":[{"minor":549,"currency":"SAR"}]}
+```
+
+Every unredeemed entitlement, every unearned subscription month and every
+unhonoured count, per currency. **It must equal the deferred revenue account's
+balance in the ledger.** If it does not, the pipeline is broken rather than the
+arithmetic.
+
 ## Status codes
 
 | Code | When |

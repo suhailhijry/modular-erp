@@ -151,6 +151,16 @@ static SERVICES: &[TemplateAccount] = &[
         "الزكاة المستحقة",
         AccountKind::Liability,
     ),
+    // Money taken for something not yet delivered: a ten-session package, a
+    // gym year, a deposit. In every template for the reason VAT and Zakat are:
+    // a business that sells a package on its first day needs this on its first
+    // day, so it is not an advanced option. See `modules/prepaid`.
+    account(
+        "2400",
+        "Deferred revenue",
+        "إيرادات مؤجلة",
+        AccountKind::Liability,
+    ),
     account("3000", "Owner's capital", "رأس المال", AccountKind::Equity),
     account(
         "3100",
@@ -239,6 +249,16 @@ static RETAIL: &[TemplateAccount] = &[
         "2300",
         "Zakat payable",
         "الزكاة المستحقة",
+        AccountKind::Liability,
+    ),
+    // Money taken for something not yet delivered: a ten-session package, a
+    // gym year, a deposit. In every template for the reason VAT and Zakat are:
+    // a business that sells a package on its first day needs this on its first
+    // day, so it is not an advanced option. See `modules/prepaid`.
+    account(
+        "2400",
+        "Deferred revenue",
+        "إيرادات مؤجلة",
         AccountKind::Liability,
     ),
     account("3000", "Owner's capital", "رأس المال", AccountKind::Equity),

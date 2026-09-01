@@ -245,6 +245,12 @@ async fn rebuild(
                 owned.iter().map(AsRef::as_ref).collect();
             rebuild_swap::<sales::Sales>(&pool, sql, &refs, upcasters, 500).await?
         }
+        "prepaid" => {
+            let owned = prepaid::projections();
+            let refs: Vec<&dyn Projection<Group = prepaid::Prepaid>> =
+                owned.iter().map(std::convert::AsRef::as_ref).collect();
+            rebuild_swap::<prepaid::Prepaid>(&pool, sql, &refs, upcasters, 500).await?
+        }
         "purchases" => {
             let owned = purchases::projections();
             let refs: Vec<&dyn Projection<Group = purchases::Purchases>> =
@@ -393,7 +399,15 @@ mod tests {
     /// in `bin/worker`.
     #[test]
     fn every_module_can_be_rebuilt() {
-        const REBUILDABLE: &[&str] = &["booking", "crm", "ledger", "sales", "purchases", "tax_sa"];
+        const REBUILDABLE: &[&str] = &[
+            "booking",
+            "crm",
+            "ledger",
+            "prepaid",
+            "sales",
+            "purchases",
+            "tax_sa",
+        ];
 
         for (name, setup) in erp_api::modules() {
             assert!(

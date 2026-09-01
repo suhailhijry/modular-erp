@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT currency as \"currency!\", SUM(owed)::BIGINT as \"owed!\"\n             FROM (\n                 SELECT currency, outstanding AS owed\n                   FROM proj_prepaid.entitlement WHERE closed IS NULL\n                 UNION ALL\n                 SELECT currency, outstanding\n                   FROM proj_prepaid.subscription\n                 UNION ALL\n                 -- Cards that have never earned have no currency and no\n                 -- liability; every other row is one of both.\n                 SELECT currency, deferred\n                   FROM proj_prepaid.card WHERE currency IS NOT NULL\n             ) AS held\n            GROUP BY currency\n            ORDER BY currency",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "owed!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "47d7288130db7dd4de5609a3d83b67bea8da5115c880adc18b93e1e0e98da94d"
+}
