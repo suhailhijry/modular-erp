@@ -359,6 +359,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
     let pool = demo.tenant_pool().await;
 
     let reports = vec![
+        replay!(pool, crm, crm::Crm, "customer"),
         replay!(pool, ledger, ledger::Ledger, "account"),
         replay!(pool, sales, sales::Sales, "invoice"),
         replay!(pool, purchases, purchases::Purchases, "bill"),

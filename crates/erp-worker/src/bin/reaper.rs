@@ -1,4 +1,4 @@
-//! Destroys demo tenants whose time is up.
+//! Destroys demo tenants whose time is up, and forgets signups nobody answered.
 //!
 //! ```text
 //! CONTROL_DATABASE_URL=… PRIMARY_CLUSTER_URL=… cargo run --bin reaper
@@ -15,9 +15,19 @@
 //! demos never runs it, and one that wants to look before it deletes runs it by
 //! hand.
 //!
-//! Exits non-zero if the sweep itself failed. An individual tenant that could
-//! not be destroyed is logged and retried on the next run — one unreachable
-//! cluster must not keep every other expired demo alive.
+//! # Why the signup sweep rides along
+//!
+//! Same shape and the same schedule: fleet-level tidying with no tenant behind
+//! it, cheap, and pointless to run often. An unanswered signup holds a password
+//! hash and an address somebody typed, and neither is worth keeping a day after
+//! the link stopped working.
+//!
+//! It runs **first**, and unconditionally: it touches only the control plane,
+//! so it cannot be held up by a cluster the demo sweep cannot reach.
+//!
+//! Exits non-zero if a sweep itself failed. An individual tenant that could not
+//! be destroyed is logged and retried on the next run — one unreachable cluster
+//! must not keep every other expired demo alive.
 
 use std::sync::Arc;
 
@@ -54,6 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         pool,
         TenantPools::new(clusters, PoolConfig::default()),
     ));
+
+    let forgotten = control.sweep_signups().await?;
+    tracing::info!(forgotten, "unanswered signups swept");
 
     let reaped = control.reap_expired_demos(PER_RUN).await?;
     tracing::info!(reaped, "demo sweep finished");

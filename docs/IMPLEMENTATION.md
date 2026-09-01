@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 711 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 717 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -192,8 +192,10 @@ modules can say what shape they need.
 - [x] `ModuleSetup`: a module *describes* itself — install SQL, seed SQL,
       projection groups, event versions, dependencies — rather than the control
       plane knowing what a ledger is
-- [x] **`POST /v1/signups`** — one request, and the caller has a working system
-      they are already logged into, with the ledger installed and usable
+- [x] **`POST /v1/signups`** — a request, a confirmation email, and then
+      `POST /v1/signups/{token}`, which is where the caller gets a working
+      system they are already logged into with the ledger installed and usable.
+      Two calls since item 5; nothing is built by the first
 - [ ] A sweeper for tenants stuck in `provisioning` *(not needed while signup
       compensates synchronously; needed the moment a step goes async)*
 
@@ -534,6 +536,44 @@ deploy.
 
 ---
 
+## Build order
+
+**Phase numbers below are historical.** They record the order things were
+designed in, and the cross-references in this document depend on them, so they
+stay. What follows is the order the work is actually done in, which is a
+different thing and changes as the market answers back.
+
+It changed once already, after reading Rekaz's 73 tools and Qoyod's, Wafeq's and
+Daftra's pricing. The finding that reordered it is one line long: **three of
+Rekaz's tools are accounting integrations, to Qoyod, Odoo and Daftra.** Nobody
+builds three of those with a ledger of their own. So the competitor with the
+booking product has no books, and the competitors with books have no booking,
+and a salon today buys both and reconciles them by hand.
+
+That is the wedge, and everything below is ordered by how directly it serves it.
+
+| | what | why it is here | serves |
+|---|---|---|---|
+| 1 | **7a · `modules/crm`** | Nothing else can start. A booking is made *by* somebody, a package belongs to somebody, points accrue to somebody | everyone |
+| 2 | **7b · the occupancy engine** | The one piece with no substitute. Write-side state, capacity, guards | appointments |
+| 3 | **8a–8b · `modules/booking`** | The half of the wedge the accounting vendors do not have | salons, clinics, gyms, studios |
+| 4 | **14 · `modules/prepaid`** | Deferred revenue, and the five shapes that share it | wellness, gyms, academies |
+| 5 | **15 · `modules/pos`** | A coffee shop cannot open without a till. Unlocks a whole segment that needs no booking at all | cafés, restaurants, retail |
+| 6 | **16 · branches** | Does not exist today. Blocks per-branch reporting and the segments that have more than one | multi-site anything |
+| 7 | **17 · the booking site** | How a customer actually reaches the business | appointments |
+| 8 | **18 · marketing** | Segments and campaigns over the log | growth |
+| 9 | **19 · `modules/inventory`** | Restaurants and retail count stock | restaurants, retail |
+| | *then* | Phases 10–13 as written: reports, channels, payments, real time | |
+
+**Two products share one spine.** Appointment businesses need CRM, occupancy,
+booking and prepaid. Counter businesses need CRM, POS, inventory and loyalty and
+never touch a calendar. Both need the ledger and ZATCA, which exist. Ordering
+appointments first is a judgement that salons, clinics and gyms are the larger
+and better-served segment; if the first ten sales conversations say otherwise,
+POS moves to position 3 and nothing else changes.
+
+---
+
 ## Phase 7 — Customers, and the occupancy engine · 4–5 weeks
 
 **Where this comes from.** A working booking ERP was read end to end — a
@@ -632,22 +672,27 @@ engine is still written for one trade.
 - [ ] **Restaurant** — table with covers as capacity, a sitting as duration
 - [ ] **Hotel** — room type with N units, nights, assignment deferred
 - [ ] **Class** — instructor plus room, capacity N, many customers in one slot
+- [ ] **Gym** — no slot at all: a subscription and a door. The fixture that
+      proves occupancy is optional, because a gym member does not book
+- [ ] **Ticketed slot** — a museum sells 500 places at 10:00 with no named
+      resource. Pure capacity, nobody assigned. Rekaz lists museums, event
+      ticketing and horse stables; this is the shape all three need
 - [ ] Each is a blueprint (D8), not a branch in the code. Stop the phase if a
       fixture needs a code change, and generalise what it needed
 
-### 8c · `modules/packages` — what was paid for in advance
+### 8c · moved
 
-- [ ] Entitlements: a package, a membership, a gift, a coupon — all *the customer
-      has already paid for N of something*
-- [ ] Redemption against a reservation line, and the balance that remains
-- [ ] Deferred revenue: cash on sale, revenue on delivery. This is the accounting
-      that makes prepayment honest, and it posts to `ledger` by subscription
-- [ ] Expiry, and what happens to unredeemed value
+Packages grew into [Phase 14 · `modules/prepaid`](#phase-14--modulesprepaid--everything-the-customer-has-already-paid-for--56-weeks)
+once it became clear that packages, subscriptions, gift cards, deposits and
+loyalty points are one accounting problem wearing five names.
 
 ### 8d · Pricing, once and pure
 
 - [ ] One `price` function. No database, no settings, no clock — so it is
       testable and cannot drift with configuration
+- [ ] **Time-based pricing.** Peak and off-peak, which Rekaz sells and every
+      salon wants. It is an argument to `price`, resolved from configuration at
+      the moment of booking and frozen onto the line (L5), never read again
 - [ ] **Tax-exclusive discounts**: a discount reduces the taxable base and VAT is
       charged on what remains. This matches how ZATCA models a line allowance
 - [ ] `Money`, never a float. That system's engine takes floating-point
@@ -655,6 +700,104 @@ engine is still written for one trade.
       disagreed — every fixed discount differed by exactly the VAT on it
 
 **Exit:** four verticals demonstrable from blueprints, and one pricing path.
+
+---
+
+## Phase 14 — `modules/prepaid` — everything the customer has already paid for · 5–6 weeks
+
+**One module, six aggregates, one liability.** Packages, subscriptions, gift
+cards, wallets, deposits and loyalty points are the same accounting problem:
+money received now for value delivered later. Building them as separate modules
+would write deferred revenue five times, and law L3 would then forbid the one
+screen every one of these businesses wants: *what does this customer have with
+us?* Tables in different projection groups never read each other, so four
+modules means four reads at four checkpoints that can disagree with each other
+while somebody is taking money against the answer.
+
+The name is `prepaid` and not `entitlements` because `entitlement` already means
+something here: the control plane's table of which **modules** a tenant has
+switched on. Two meanings for one word in a codebase that renamed itself to
+avoid exactly that.
+
+**Where the shape comes from.** That system's chart of accounts had worked most
+of this out already: `deferred_revenue` and `loyalty_liability` as liabilities,
+with `loyalty_earned`, `loyalty_granted`, `loyalty_redeemed` and
+`loyalty_expired` as unconstrained counterparts. Its `ServicePackage` carries
+`expiration_type` (none/days/months), `expires_after`, `activation_count` and
+both `rank_points` and `walaa_points`. Its `ClientPackage.type` records
+bought / gifted-by-client / gifted-by-business / free-from-coupon, which is what
+makes "who actually paid for this" answerable a year later.
+
+### 9a · The two recognition models, which are not interchangeable
+
+This is the part that is an accounting error if it is got wrong, and Rekaz
+splits its own product along the same line, which is evidence the distinction is
+real and not theoretical.
+
+| shape | liability | revenue recognised |
+|---|---|---|
+| Package (10 sessions) | yes | when each session is **delivered** |
+| Subscription (monthly gym) | yes | **ratably over the period**, attended or not |
+| Gift card / wallet | yes | when spent |
+| Deposit against a booking | yes | when the booking is served, or forfeited |
+| Loyalty points | yes | when redeemed, or expired as breakage |
+| **Coupon** | **no** | never. No consideration was received |
+
+- [ ] A gym subscription recognises monthly whether or not the member appears.
+      A ten-session package recognises per session. Treating them alike
+      misstates revenue every month in one direction or the other
+- [ ] A coupon is a discount at the point of sale and **not** a liability.
+      That system has a full coupon model and no coupon liability account, which
+      is correct and worth not undoing
+
+### 9b · Packages and subscriptions
+
+- [ ] `Package` — N of a service, redeemed against a reservation line, with the
+      balance that remains
+- [ ] `Subscription` — a period, a price, a renewal, and **freeze**. A member
+      pauses for travel or injury; the expiry extends and recognition pauses
+      with it. Rekaz's own copy concedes that freeze rules are policy-dependent,
+      so this is configuration and not a constant
+- [ ] Expiry: `none | days | months` from purchase or from activation, and what
+      happens to unredeemed value. IFRS 15 calls the write-off breakage and
+      allows recognising it in proportion to redemption
+- [ ] `type` on every grant: bought, gifted by a customer, granted by the
+      business, free from a coupon. It decides the accounting, not the wording
+- [ ] Entry validation: is this subscription live *right now*. A gym door asks
+      this, and Rekaz sells biometric readers against it
+
+### 9c · Loyalty, in three mechanics
+
+Rekaz rewards by **points, stamps, or visits**, ties rewards to specific
+services, and puts the card in Apple Wallet. Stamps are the coffee-shop punch
+card and are not a points balance with a different label.
+
+- [ ] Points — a balance earned at a rate, redeemed at a value
+- [ ] Stamps — N of a specific thing buys one free. The café mechanic
+- [ ] Visits — count of attendances, independent of spend
+- [ ] Tiers, which that system calls `Membership`: points_start, points_end, an
+      earning rate. Easy to misread as a gym membership; it is a rank
+- [ ] **Open question, needs an accountant and not this document.** IFRS 15
+      treats points as a separate performance obligation, so part of the
+      original sale price is allocated to them at the time of sale and deferred.
+      The common SMB shortcut accrues a liability at redemption value instead.
+      Saudi requires IFRS. The rigorous treatment changes the aggregate, so
+      decide before building and not after
+
+### 9d · One ledger integration
+
+- [ ] Every shape posts through `ledger::post_entry_in`, in the same
+      transaction as its own event, exactly as `sales` does. Sale is
+      Dr cash / Cr deferred revenue; delivery is Dr deferred revenue / Cr revenue
+- [ ] The chart templates gain the liability accounts. `ledger::CHARTS` already
+      ships VAT and Zakat in every template for the same reason: an account a
+      Saudi business needs on day one is not an advanced option
+- [ ] The invariant, asserted continuously like the trial balance: **the
+      deferred revenue balance equals the sum of unredeemed value.** If those
+      disagree the pipeline is broken, and it is the same class of canary
+
+**Exit:** a gym sells a frozen-then-resumed annual membership, a café gives a
+tenth coffee free, and both reconcile to the trial balance.
 
 ---
 
@@ -983,6 +1126,109 @@ booking, and nobody polled.
 
 ---
 
+## Phase 15 — `modules/pos` — the counter · 4–5 weeks
+
+**The segment that needs no calendar.** A coffee shop, a restaurant and a retail
+shop never take a booking, and until this exists there is nothing to sell them.
+It is also the cheapest phase to be confident about, because the hard half is
+already built: every till transaction is a ZATCA **simplified** invoice, and
+this system builds, hashes, chains, signs and reports those today.
+
+- [ ] `Sale` — lines of products and services, discounts, a tender, a receipt.
+      One aggregate, and it posts to `ledger` in its own transaction like every
+      other document
+- [ ] `Shift` — open, count, sell, count, close. The cash-drawer domain: an
+      opening float, takings by tender, a declared count, and **the variance**,
+      which is the number a manager actually reads
+- [ ] A sale is a simplified invoice unless the buyer gives a VAT number, and
+      then it is standard and needs clearing before the customer walks away with
+      it. `zatca::Kind::of` already decides this and stays the only place it is
+      decided
+- [ ] Returns and refunds against a sale, which for a cleared document is a
+      credit note and not an edit
+- [ ] **Offline is deliberately out of scope for now.** A till that queues sales
+      locally and reconciles later is a second write path with its own ordering
+      problem, and L1 is not negotiable. Revisit when a customer loses money to
+      it, not before
+
+**Exit:** a café opens a shift, sells forty coffees, closes with a variance of
+zero, and every receipt is reported to ZATCA within the day.
+
+---
+
+## Phase 16 — Branches · 2–3 weeks
+
+**They do not exist.** The only `branch` in this codebase is a free-text string
+on the ZATCA EGS certificate. There is no entity, no scoping, no reporting
+dimension. Every competitor meters them (Qoyod charges SAR 40 each, Rekaz caps
+them at five even on its top tier), which makes unlimited branches a real
+differentiator and means the concept has to exist first.
+
+- [ ] `Branch` — a place, with an address and its own opening hours
+- [ ] A dimension on every document: a sale, a booking, a shift, an invoice
+- [ ] Resources belong to a branch, which is what makes "book at Olaya" work
+- [ ] A person may be scoped to one, which is `roles.rs`'s own worked example of
+      what the rule engine is for: *"a bookkeeper allowed to post only to their
+      own branch"*
+- [ ] ZATCA: a branch that issues its own documents may need its own EGS unit,
+      its own certificate and its own chain. `taxpayer_id()` is one stream per
+      tenant today and its doc comment already names this as the shape that
+      would change it
+
+**Exit:** a two-branch salon reports each separately and both reconcile to one
+trial balance.
+
+---
+
+## Phase 17 — The booking site · 4–5 weeks
+
+**How a customer actually reaches the business.** Rekaz sells a branded booking
+site with a custom domain, and a branded iOS app at SAR 9,200 a year. That price
+is the market telling you what a public presence is worth.
+
+- [ ] A public, unauthenticated booking page per tenant, Arabic and English.
+      The tenant is already a subdomain, so `salon.erp.com` is most of the way
+      there
+- [ ] Custom domains, which means ACME certificate automation and a verification
+      flow. The infrastructure half of this is larger than the product half
+- [ ] An embed snippet and a plain link, because Rekaz is right that the real
+      distribution is an Instagram bio and a WhatsApp profile
+- [ ] Deposits at booking, which is the honest answer to no-shows and is a
+      `prepaid` liability like everything else
+- [ ] **A public surface changes the threat model.** Signup was the only
+      unauthenticated write path and it took two rounds to make safe; this adds
+      a second one, per tenant, taking money. Rate limiting per caller
+      (Phase 12c) stops being deferrable at this point
+
+---
+
+## Phase 18 — Marketing · 3–4 weeks
+
+- [ ] **Segments**, and the architectural constraint that shapes them: a segment
+      like *"booked in the last 90 days and spent over 5,000"* spans booking and
+      sales, and **L3 forbids reading across projection groups**. So marketing
+      subscribes to the log and maintains its own group, exactly as Phase 10
+      specifies for reports. That is what stops the campaign list disagreeing
+      with the invoice list
+- [ ] **Campaigns** — a segment, a template, a channel and a schedule. Every one
+      of those exists after Phase 11; a campaign is the thing that composes them
+- [ ] Tracking pixels: Meta, TikTok, Snapchat, Google Ads, GTM, Analytics,
+      Clarity. Client-side and cheap, and the whole list is table stakes here
+- [ ] Reviews, and the request that asks for one after a visit
+- [ ] Abandoned bookings, which is the retargeting case that actually pays
+
+---
+
+## Phase 19 — `modules/inventory` · 3–4 weeks
+
+- [ ] Products, quantities, and stock movements as events
+- [ ] Consumption on sale, so a POS line depletes stock
+- [ ] Counts and the discrepancy a count finds, which is the number that matters
+- [ ] Cost of goods sold, posted to `ledger`. Without it a restaurant's margin
+      is a guess
+
+---
+
 ## What Phases 7–13 unblock
 
 **Phase 5b finally has its second consumer.** The rule engine was deferred
@@ -1000,10 +1246,11 @@ downstream changes." `ControlPlane::request_visit` and
 `tests/leases.rs` both name the same seam. Phase 13 is that push path, and the sentence
 was written to be collected.
 
-**Item 5 gets its primitive.** Signup is public, unlimited, and creates a
-database, and the missing piece was never a signup-specific one — it was rate
-limiting per caller. Phase 12c builds it for API keys, and signup is the second
-user of it.
+**Item 5 gets its primitive.** Item 5 is closed — signup builds nothing until the
+address answers — but the piece it deferred is still outstanding, and it was
+never a signup-specific one: rate limiting per caller. `REQUEST_INTERVAL` caps
+mail per address and cannot do more than that. Phase 12c builds the real one for
+API keys, and signup is the second user of it.
 
 **Phase 6's open question gets an answer.** Architecture §8 asks whether the
 generic `Document` aggregate is right, and says to decide from customer
@@ -1148,7 +1395,51 @@ when it happens" is a bad plan for the day it happens.
 
 `docs/RUNNING.md` covers running it by hand, which is a different question.
 
-### 5. Signup is public, unlimited, and creates a database
+### 5. ~~Signup is public, unlimited, and creates a database~~ — done
+
+Was: one unauthenticated request ran `CREATE DATABASE` and a full migration
+chain, so a shell loop from the open internet cost the attacker one HTTP request
+and cost the operator a disk.
+
+**Signup is two calls with a mailbox in between now.** `POST /v1/signups` writes
+one `pending_signup` row and one outbox effect and answers `202`; nothing else
+happens until `POST /v1/signups/{token}`, which is where the account, the tenant,
+the database and the session are built. The email is the same producer the
+invitation flow uses, which is the other half of why item 1 came first.
+
+The second half of the finding was not in the original text and is the worse of
+the two. Signing up wrote an **authenticator** under whatever address was named,
+with a password of the attacker's choosing, so signing up as `ceo@bigcorp.example`
+locked the real owner out of ever signing up: they would have to prove a password
+they never set. Nothing is written to `authenticator` now until the address
+answers; the hash waits in `pending_signup` and moves across on confirmation.
+
+Six tests, each falsified by breaking the code it covers:
+
+| what it pins | broken by |
+|---|---|
+| a request builds no tenant, no database, no authenticator, and hands back no token | returning the token; registering the login early |
+| a link works once | unclaiming on success |
+| an unissued token is refused | (paired with the above, which proves the route can succeed) |
+| one address gets one message a minute | dropping the interval check |
+| a name taken meanwhile does not burn the link | dropping the unclaim on failure |
+| the mail is written in the language of the form | rendering in the default locale |
+
+**What is deliberately still missing: a rate limit.** `REQUEST_INTERVAL` caps mail
+per *address*, which is what stops the new flow being a way to fill one mailbox,
+and it is all this endpoint can do alone. Limiting per *caller* needs a notion of
+caller that does not exist yet, and Phase 12c builds it for API keys — the
+sequencing this document already described, unchanged.
+
+**Also deliberately still missing: the slug is not reserved.** A unique index on
+a pending slug reads like the kinder behaviour and would make squatting free, one
+throwaway address per name. So the name is checked when it is requested and again
+when it is confirmed, and first to *confirm* wins. `a_name_taken_while_you_were_reading_your_mail_does_not_burn_the_link`
+pins the case that creates.
+
+The original finding follows.
+
+#### The original finding
 
 `POST /v1/signups` is `security()` — unauthenticated by definition, which is
 correct. What is on the API is `RequestBodyLimitLayer`, `TimeoutLayer` and

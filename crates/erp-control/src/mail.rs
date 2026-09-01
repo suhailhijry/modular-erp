@@ -106,3 +106,19 @@ pub fn invitation_messages(company: &str, link: &str) -> (Message, Message) {
             .with("link", MessageArg::text(link.to_owned())),
     )
 }
+
+/// The signup confirmation email, as the two messages it is made of.
+///
+/// A free function beside [`invitation_messages`] and for the same reason: it
+/// needs the link, and the link needs the public domain, which is a deployment
+/// fact the control plane does not have and should not learn.
+#[must_use]
+pub fn signup_messages(company: &str, link: &str) -> (Message, Message) {
+    (
+        Message::new(crate::messages::SIGNUP_SUBJECT)
+            .with("company", MessageArg::text(company.to_owned())),
+        Message::new(crate::messages::SIGNUP_BODY)
+            .with("company", MessageArg::text(company.to_owned()))
+            .with("link", MessageArg::text(link.to_owned())),
+    )
+}

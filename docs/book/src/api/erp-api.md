@@ -27,7 +27,7 @@ a module has to be able to name it.
 | [`routes.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/routes.rs) | `router`, `openapi`, health, the OpenAPI conventions |
 | [`modules.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/modules.rs) | `REGISTERED`, `available`, `mounted`, dependency checks |
 | [`catalog.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/catalog.rs) | The complete message catalog |
-| [`signup.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/signup.rs) | `POST /v1/signups` |
+| [`signup.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/signup.rs) | `POST /v1/signups` and `POST /v1/signups/{token}` |
 | [`members.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/members.rs) | `/v1/members` |
 | [`invitations.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/invitations.rs) | `/v1/invitations` and `/v1/join/{token}` |
 | [`bin/api.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/bin/api.rs) | The API process |
@@ -209,9 +209,10 @@ The timeout answers 504 and not 408, because the request was fine and the server
 was slow.
 
 **There is no rate limit here**, and signup is unauthenticated by design. That is
-a known gap: every call that gets past validation runs `CREATE DATABASE` and a
-full migration chain. The primitive it needs is per-caller rate limiting, and the
-roadmap chapter says where it sits.
+still a gap, but a smaller one than it was: `POST /v1/signups` builds nothing
+until the address answers, so a call that gets past validation costs one row and
+one email instead of a database. `REQUEST_INTERVAL` caps that per address. The
+per-caller limiter is Phase 12c's, and the roadmap chapter says where it sits.
 
 Generate a sealing key with:
 

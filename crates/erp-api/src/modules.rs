@@ -56,6 +56,11 @@ struct Registered {
 /// nothing could check while the set was a `match` arm.
 const REGISTERED: &[Registered] = &[
     Registered {
+        name: "crm",
+        setup: crm::setup,
+        http: crm::http::routes,
+    },
+    Registered {
         name: "ledger",
         setup: ledger::setup,
         http: ledger::http::routes,
@@ -611,5 +616,66 @@ mod tests {
         for (name, setup) in available() {
             assert_eq!(name, setup.module.as_str());
         }
+    }
+}
+
+#[cfg(test)]
+mod schema_names {
+    use super::REGISTERED;
+    use std::collections::BTreeMap;
+
+    /// **No two modules may name a wire type the same thing.**
+    ///
+    /// `utoipa` collects every schema into one `components/schemas` map keyed by
+    /// the bare Rust type name, and a second module using a name **silently
+    /// replaces the first**. There is no warning and no error: the document
+    /// simply describes one of them for both.
+    ///
+    /// That is exactly how `crm`'s `AddressBody` overwrote `tax_sa`'s, which was
+    /// found by a *contract* test noticing that a ZATCA registration was sending
+    /// an `additional` field the document no longer mentioned. Finding a name
+    /// collision through an unrelated semantic mismatch is luck, and this is the
+    /// test that stops relying on it.
+    #[test]
+    fn no_two_modules_claim_the_same_schema_name() {
+        // Keyed by name, holding every *distinct definition* seen under it.
+        // A type shared from `erp-web` or `erp-i18n` appears in several modules
+        // with one definition, which is correct and must pass. Two different
+        // shapes under one name is the bug.
+        let mut owners: BTreeMap<String, BTreeMap<String, Vec<&str>>> = BTreeMap::new();
+        for module in REGISTERED {
+            let (_, document) = (module.http)().split_for_parts();
+            let Some(components) = document.components else {
+                continue;
+            };
+            for (name, schema) in &components.schemas {
+                let shape = serde_json::to_string(schema).unwrap_or_default();
+                owners
+                    .entry(name.clone())
+                    .or_default()
+                    .entry(shape)
+                    .or_default()
+                    .push(module.name);
+            }
+        }
+
+        let clashes: Vec<_> = owners
+            .iter()
+            .filter(|(_, shapes)| shapes.len() > 1)
+            .map(|(name, shapes)| (name, shapes.values().collect::<Vec<_>>()))
+            .collect();
+        assert!(
+            clashes.is_empty(),
+            "these names describe different shapes in different modules, and the \
+             document keeps only one of each: {clashes:?}"
+        );
+
+        // Non-vacuity: a run that found no schemas at all would pass this and
+        // mean nothing.
+        assert!(
+            owners.len() > 20,
+            "expected the modules to declare a real set of schemas, found {}",
+            owners.len()
+        );
     }
 }

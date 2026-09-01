@@ -43,6 +43,20 @@ pub const NOT_PERMITTED: MessageCode = MessageCode::new("access.not_permitted");
 pub const ALREADY_A_MEMBER: MessageCode = MessageCode::new("members.already_a_member");
 pub const NOT_A_MEMBER: MessageCode = MessageCode::new("members.not_a_member");
 pub const INVITATION_NOT_VALID: MessageCode = MessageCode::new("invitations.not_valid");
+
+/// No live confirmation link for that token. Wrong, expired, cancelled and
+/// already-used all render as this one, for the same reason
+/// [`INVITATION_NOT_VALID`] does.
+pub const SIGNUP_NOT_VALID: MessageCode = MessageCode::new("signups.not_valid");
+/// A confirmation went to this address moments ago, so the next one waits.
+/// Answered as a 429.
+///
+/// Carries the seconds. "Too soon" with no number is a page people reload.
+pub const SIGNUP_TOO_SOON: MessageCode = MessageCode::new("signups.too_soon");
+/// The subject line of a signup confirmation.
+pub const SIGNUP_SUBJECT: MessageCode = MessageCode::new("mail.signup_subject");
+/// The body of a signup confirmation.
+pub const SIGNUP_BODY: MessageCode = MessageCode::new("mail.signup_body");
 pub const LAST_OWNER: MessageCode = MessageCode::new("members.last_owner");
 
 /// Every code this crate can produce. The completeness test walks this list.
@@ -71,6 +85,10 @@ pub static CODES: &[MessageCode] = &[
     NOT_A_MEMBER,
     INVITATION_NOT_VALID,
     LAST_OWNER,
+    SIGNUP_NOT_VALID,
+    SIGNUP_TOO_SOON,
+    SIGNUP_SUBJECT,
+    SIGNUP_BODY,
 ];
 
 // ---------------------------------------------------------------------------
@@ -316,6 +334,76 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
              افتح هذا الرابط لقبول الدعوة واختيار كلمة مرور:\n{link}\n\n\
              يعمل الرابط مرة واحدة ثم ينتهي. إن لم تكن تتوقع هذه الرسالة \
              فتجاهلها — لا يحدث شيء حتى تفتحها.",
+        ),
+    ),
+    (
+        SIGNUP_NOT_VALID,
+        Locale::English,
+        Template::Simple(
+            "That confirmation link is not valid. It may have expired, or been used already.",
+        ),
+    ),
+    (
+        SIGNUP_NOT_VALID,
+        Locale::Arabic,
+        Template::Simple("رابط التأكيد غير صالح. ربما انتهت صلاحيته أو استُخدم من قبل."),
+    ),
+    // Plural on the seconds, and Arabic uses every category for it: a wait of
+    // 2 seconds, 3 seconds and 11 seconds take three different forms, which is
+    // the whole reason `Plural` exists.
+    (
+        SIGNUP_TOO_SOON,
+        Locale::English,
+        Template::Plural {
+            zero: None,
+            one: Some("A confirmation is already on its way. Try again in a second."),
+            two: None,
+            few: None,
+            many: None,
+            other: "A confirmation is already on its way. Try again in {seconds} seconds.",
+        },
+    ),
+    (
+        SIGNUP_TOO_SOON,
+        Locale::Arabic,
+        Template::Plural {
+            zero: Some("رسالة التأكيد في طريقها إليك. أعد المحاولة الآن."),
+            one: Some("رسالة التأكيد في طريقها إليك. أعد المحاولة بعد ثانية."),
+            two: Some("رسالة التأكيد في طريقها إليك. أعد المحاولة بعد ثانيتين."),
+            few: Some("رسالة التأكيد في طريقها إليك. أعد المحاولة بعد {seconds} ثوانٍ."),
+            many: Some("رسالة التأكيد في طريقها إليك. أعد المحاولة بعد {seconds} ثانية."),
+            other: "رسالة التأكيد في طريقها إليك. أعد المحاولة بعد {seconds} ثانية.",
+        },
+    ),
+    (
+        SIGNUP_SUBJECT,
+        Locale::English,
+        Template::Simple("Confirm your address to create {company}"),
+    ),
+    (
+        SIGNUP_SUBJECT,
+        Locale::Arabic,
+        Template::Simple("أكِّد بريدك لإنشاء {company}"),
+    ),
+    (
+        SIGNUP_BODY,
+        Locale::English,
+        Template::Simple(
+            "Somebody asked to create {company} with this address.\n\n\
+             Open this link to confirm it and finish setting up:\n{link}\n\n\
+             The link works once and expires within a day. Nothing has been \
+             created yet, so if this was not you, ignore this message and \
+             nothing will be.",
+        ),
+    ),
+    (
+        SIGNUP_BODY,
+        Locale::Arabic,
+        Template::Simple(
+            "طلب أحدهم إنشاء {company} بهذا البريد.\n\n\
+             افتح هذا الرابط لتأكيده وإكمال الإعداد:\n{link}\n\n\
+             يعمل الرابط مرة واحدة وتنتهي صلاحيته خلال يوم. لم يُنشأ شيء بعد، \
+             فإن لم تكن أنت من طلب ذلك فتجاهل الرسالة ولن يُنشأ شيء.",
         ),
     ),
 ];

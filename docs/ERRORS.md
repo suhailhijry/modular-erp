@@ -64,6 +64,54 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **ar** — انتهت جلستك. يُرجى تسجيل الدخول مرة أخرى.
 
 
+## `crm`
+
+### `crm.already_exists`
+
+- **en** — Customer {customer} already exists.
+- **ar** — العميل {customer} موجود بالفعل.
+
+### `crm.archived`
+
+- **en** — Customer {customer} is archived. Restore them first.
+- **ar** — العميل {customer} مؤرشف. استعده أولًا.
+
+### `crm.name_too_long`
+
+- **en** — A name may not be longer than {n} characters.
+- **ar** — لا يمكن أن يتجاوز الاسم {n} حرف.
+
+### `crm.no_contact`
+
+- **en** — A customer needs a phone number or an email address.
+- **ar** — يحتاج العميل إلى رقم جوال أو بريد إلكتروني.
+
+### `crm.no_name`
+
+- **en** — A customer needs a name.
+- **ar** — يحتاج العميل إلى اسم.
+
+### `crm.no_such_customer`
+
+- **en** — There is no customer {customer}.
+- **ar** — لا يوجد عميل {customer}.
+
+### `crm.not_a_vat_number`
+
+- **en** — {value} is not a Saudi VAT number. It is fifteen digits beginning and ending with 3.
+- **ar** — {value} ليس رقم تسجيل ضريبي سعودي. يتكون من خمسة عشر رقمًا يبدأ وينتهي بالرقم ٣.
+
+### `crm.person_with_vat_number`
+
+- **en** — A person does not hold a VAT registration. Record them as a company.
+- **ar** — الفرد لا يملك تسجيلًا ضريبيًا. سجّله كمنشأة.
+
+### `crm.unknown_kind`
+
+- **en** — A customer is a person or a company.
+- **ar** — العميل إما فرد أو منشأة.
+
+
 ## `eventlog`
 
 ### `eventlog.concurrent_modification`
@@ -169,6 +217,26 @@ The link works once and expires. If you were not expecting this, ignore this mes
 
 - **en** — You have been invited to {company}
 - **ar** — تمت دعوتك إلى {company}
+
+### `mail.signup_body`
+
+- **en** — Somebody asked to create {company} with this address.
+
+Open this link to confirm it and finish setting up:
+{link}
+
+The link works once and expires within a day. Nothing has been created yet, so if this was not you, ignore this message and nothing will be.
+- **ar** — طلب أحدهم إنشاء {company} بهذا البريد.
+
+افتح هذا الرابط لتأكيده وإكمال الإعداد:
+{link}
+
+يعمل الرابط مرة واحدة وتنتهي صلاحيته خلال يوم. لم يُنشأ شيء بعد، فإن لم تكن أنت من طلب ذلك فتجاهل الرسالة ولن يُنشأ شيء.
+
+### `mail.signup_subject`
+
+- **en** — Confirm your address to create {company}
+- **ar** — أكِّد بريدك لإنشاء {company}
 
 
 ## `members`
@@ -502,6 +570,19 @@ The link works once and expires. If you were not expecting this, ignore this mes
 
 - **en** — This invoice is in {expected}, but the payment is in {found}.
 - **ar** — هذه الفاتورة بعملة {expected}، لكن الدفعة بعملة {found}.
+
+
+## `signups`
+
+### `signups.not_valid`
+
+- **en** — That confirmation link is not valid. It may have expired, or been used already.
+- **ar** — رابط التأكيد غير صالح. ربما انتهت صلاحيته أو استُخدم من قبل.
+
+### `signups.too_soon`
+
+- **en** — A confirmation is already on its way. Try again in {seconds} seconds.
+- **ar** — رسالة التأكيد في طريقها إليك. أعد المحاولة بعد {seconds} ثانية.
 
 
 ## `system`

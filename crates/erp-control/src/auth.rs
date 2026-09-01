@@ -80,38 +80,62 @@ pub struct Session {
     pub expires_at: Timestamp,
 }
 
-/// A one-time link, such as an invitation.
+/// A one-time link.
 ///
-/// A separate type from [`SessionToken`] rather than a reuse of it: they are
-/// both opaque strings and they are not interchangeable, and the compiler is
-/// the cheapest place to find that out. `Debug` is redacted for the same reason
-/// — an invitation link in a log line is a working way into a tenant.
-#[derive(Clone)]
-pub struct InvitationToken(String);
+/// Each one is a separate type from [`SessionToken`] and from the others, never
+/// a reuse: they are all opaque strings, none is interchangeable with another,
+/// and the compiler is the cheapest place to find that out. A signup link
+/// presented where an invitation link belongs would otherwise look up cleanly
+/// against the wrong table and answer `NotValid`, which is a correct-looking
+/// refusal for the wrong reason.
+///
+/// `Debug` is redacted on all of them. A one-time link in a log line is a
+/// working credential, and log lines outlive the links they mention.
+macro_rules! link_token {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Clone)]
+        pub struct $name(String);
 
-impl InvitationToken {
-    /// Mints one, returning it with what should be stored.
-    pub(crate) fn mint() -> Result<(Self, Vec<u8>), AuthError> {
-        let token = hex(&random_bytes()?);
-        let digest = SessionToken::digest(&token);
-        Ok((Self(token), digest))
-    }
+        impl $name {
+            /// Mints one, returning it with what should be stored.
+            pub(crate) fn mint() -> Result<(Self, Vec<u8>), AuthError> {
+                let token = hex(&random_bytes()?);
+                let digest = SessionToken::digest(&token);
+                Ok((Self(token), digest))
+            }
 
-    /// What to look a presented token up by.
-    pub(crate) fn digest_of(token: &str) -> Vec<u8> {
-        SessionToken::digest(token)
-    }
+            /// What to look a presented token up by.
+            pub(crate) fn digest_of(token: &str) -> Vec<u8> {
+                SessionToken::digest(token)
+            }
 
-    #[must_use]
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
+            #[must_use]
+            pub fn expose(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($name), "(***)"))
+            }
+        }
+    };
 }
 
-impl std::fmt::Debug for InvitationToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("InvitationToken(***)")
-    }
+link_token! {
+    /// The link that takes somebody into a tenant they were invited to.
+    InvitationToken
+}
+
+link_token! {
+    /// The link that proves a signup's email address.
+    ///
+    /// Worth more than it looks: holding it is what turns a request into an
+    /// account, a tenant and a database, so it is treated exactly as an
+    /// invitation link is.
+    SignupToken
 }
 
 /// 32 bytes from the OS. The one random source in this file.
@@ -182,7 +206,28 @@ impl crate::ControlPlane {
         handle: String,
         password: String,
     ) -> Result<(), AuthError> {
-        let secret = hash_password(&password)?;
+        self.register_hashed_login(identity, handle, hash_password(&password)?)
+            .await
+    }
+
+    /// [`Self::register_login`] with the hashing already done.
+    ///
+    /// For a flow that hashed the password earlier and has kept it somewhere
+    /// other than `authenticator` since — which today means exactly one:
+    /// `pending_signup` holds the hash until the address proves itself, because
+    /// writing it here any sooner would claim the handle for an address nobody
+    /// has answered from. See `migrations/control/0010_signups.sql`.
+    ///
+    /// `secret` must be a PHC string from [`hash_password`]. Nothing checks
+    /// that, which is why this is not public: a caller that passed a plaintext
+    /// would store a password that verifies against nothing, and the account
+    /// would be unopenable rather than open.
+    pub(crate) async fn register_hashed_login(
+        &self,
+        identity: IdentityId,
+        handle: String,
+        secret: String,
+    ) -> Result<(), AuthError> {
         let handle = handle.trim().to_lowercase();
 
         let inserted = sqlx::query!(

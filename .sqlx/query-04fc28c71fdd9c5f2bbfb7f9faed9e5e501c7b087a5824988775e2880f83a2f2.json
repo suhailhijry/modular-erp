@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pending_signup SET cancelled_at = now()\n              WHERE handle = $1 AND confirmed_at IS NULL AND cancelled_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "04fc28c71fdd9c5f2bbfb7f9faed9e5e501c7b087a5824988775e2880f83a2f2"
+}

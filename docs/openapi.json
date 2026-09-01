@@ -278,6 +278,60 @@
         ],
         "type": "object"
       },
+      "AmendCustomerRecord": {
+        "description": "The same fields without the id, which cannot change.",
+        "properties": {
+          "address": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CustomerAddress"
+              }
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_latin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vat_number": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CustomerTaxRegistration"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
       "Amount": {
         "description": "An amount, as a client sends it.\n\nMinor units and an explicit currency — never a decimal string, and never a\nfloat. A client that sends `10.50` has already lost the argument about how\nmany decimal places the currency has.",
         "example": {
@@ -299,6 +353,17 @@
           "minor",
           "currency"
         ],
+        "type": "object"
+      },
+      "ArchiveCustomerRecord": {
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "BandView": {
@@ -392,6 +457,25 @@
           "vat",
           "vat_rate",
           "tax"
+        ],
+        "type": "object"
+      },
+      "BillPaymentRecorded": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "description": "Where it landed in the log. A client that wants to read its own write\nback passes this as `?consistent_after=`.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -752,6 +836,206 @@
           "submit_to",
           "compliance_documents",
           "next"
+        ],
+        "type": "object"
+      },
+      "CustomerAddress": {
+        "properties": {
+          "building": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "city": {
+            "type": "string"
+          },
+          "country": {
+            "description": "ISO 3166-1 alpha-2.",
+            "type": "string"
+          },
+          "district": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "postal_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "street": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "street",
+          "city",
+          "country"
+        ],
+        "type": "object"
+      },
+      "CustomerRecord": {
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_latin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "registered_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "vat_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "registered_on",
+          "archived"
+        ],
+        "type": "object"
+      },
+      "CustomerRecordDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CustomerRecord"
+          },
+          {
+            "properties": {
+              "archived_why": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "building": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "city": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "country": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "district": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id_scheme": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "identifier": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "postal_code": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "street": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "CustomerRegistered": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "description": "The log position this landed at. Pass it to a read as\n`?consistent_after=` to see it in a list.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "CustomerTaxRegistration": {
+        "properties": {
+          "identifier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheme": {
+            "description": "ZATCA's `schemeID`, usually `CRN`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vat_number": {
+            "description": "Fifteen digits, beginning and ending with 3.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "vat_number"
         ],
         "type": "object"
       },
@@ -1708,6 +1992,85 @@
         ],
         "type": "object"
       },
+      "NewCustomerRecord": {
+        "example": {
+          "id": "CUST-0001",
+          "kind": "company",
+          "name": "نجد للاستشارات",
+          "name_latin": "Najd Consulting",
+          "phone": "+966500000000",
+          "vat_number": {
+            "identifier": "1010101010",
+            "scheme": "CRN",
+            "vat_number": "399999999900003"
+          }
+        },
+        "properties": {
+          "address": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CustomerAddress"
+              }
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Your key for this customer. Registering the same one twice is refused.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`person` or `company`. Only a company may carry a VAT number.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_latin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "registered_on": {
+            "description": "When they became a customer. Defaults to now.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vat_number": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CustomerTaxRegistration"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind"
+        ],
+        "type": "object"
+      },
       "NewDiscount": {
         "properties": {
           "amount": {
@@ -1761,7 +2124,7 @@
           "lines": {
             "description": "Must sum to zero, in one currency. An unbalanced set is a 400 carrying\nthe difference.",
             "items": {
-              "$ref": "#/components/schemas/NewLine"
+              "$ref": "#/components/schemas/NewEntryLine"
             },
             "type": "array"
           },
@@ -1778,6 +2141,29 @@
           "id",
           "occurred_on",
           "lines"
+        ],
+        "type": "object"
+      },
+      "NewEntryLine": {
+        "properties": {
+          "account": {
+            "description": "An account code from `GET /v1/ledger/accounts`.",
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount",
+            "description": "Positive debits, negative credits."
+          },
+          "memo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "account",
+          "amount"
         ],
         "type": "object"
       },
@@ -1890,7 +2276,7 @@
           "lines": {
             "description": "At least one line that comes to something.",
             "items": {
-              "$ref": "#/components/schemas/NewLine"
+              "$ref": "#/components/schemas/NewInvoiceLine"
             },
             "type": "array"
           },
@@ -1907,26 +2293,25 @@
         ],
         "type": "object"
       },
-      "NewLine": {
+      "NewInvoiceLine": {
         "properties": {
-          "account": {
-            "description": "An account code from `GET /v1/ledger/accounts`.",
+          "description": {
             "type": "string"
           },
-          "amount": {
-            "$ref": "#/components/schemas/Amount",
-            "description": "Positive debits, negative credits."
+          "net": {
+            "description": "Minor units, in the invoice's currency. Excluding tax.",
+            "format": "int64",
+            "type": "integer"
           },
-          "memo": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "vat": {
+            "description": "`standard`, `zero` or `exempt`. The *rate* is not a client's to choose —\nit is statutory, and resolved here. Zero-rated and exempt are both 0%\nand mean different things on a return, so both are kept.",
+            "type": "string"
           }
         },
         "required": [
-          "account",
-          "amount"
+          "description",
+          "net",
+          "vat"
         ],
         "type": "object"
       },
@@ -2299,6 +2684,77 @@
         ],
         "type": "object"
       },
+      "Paged_CustomerRecord": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "archived": {
+                  "type": "boolean"
+                },
+                "email": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "name_latin": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "phone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "registered_on": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "vat_number": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "kind",
+                "registered_on",
+                "archived"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "Paged_DocumentView": {
         "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
         "properties": {
@@ -2542,6 +2998,26 @@
         ],
         "type": "object"
       },
+      "PaymentRecorded": {
+        "description": "Something recorded against a document, which is not a document itself.\n\nA payment carries no statutory number: the invoice it settles is the numbered\nthing, and a receipt references that.",
+        "properties": {
+          "id": {
+            "description": "The invoice it was recorded against.",
+            "type": "string"
+          },
+          "position": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "PaymentView": {
         "properties": {
           "account": {
@@ -2664,26 +3140,6 @@
         },
         "required": [
           "standard"
-        ],
-        "type": "object"
-      },
-      "Recorded": {
-        "description": "Something recorded against a document, which is not a document itself.\n\nA payment carries no statutory number: the invoice it settles is the numbered\nthing, and a receipt references that.",
-        "properties": {
-          "id": {
-            "description": "The invoice it was recorded against.",
-            "type": "string"
-          },
-          "position": {
-            "format": "int64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id"
         ],
         "type": "object"
       },
@@ -2882,7 +3338,7 @@
             "type": "string"
           },
           "token": {
-            "description": "Ready to use — signing up logs you in.",
+            "description": "Ready to use — confirming logs you in.",
             "type": "string"
           }
         },
@@ -2912,7 +3368,7 @@
             "type": "string"
           },
           "email": {
-            "description": "The first user's login.",
+            "description": "The first user's login. A confirmation goes here, and nothing is created\nuntil it comes back.",
             "type": "string"
           },
           "modules": {
@@ -2935,6 +3391,28 @@
           "company",
           "email",
           "password"
+        ],
+        "type": "object"
+      },
+      "SignupRequested": {
+        "description": "What a request produced, which is deliberately not much.\n\nNo token, and no identifier for the pending request. Both would be a way to\nconfirm without the mailbox, which is the whole thing this endpoint exists\nto require. What comes back is what a page needs to say \"check your email\"\nand to know when the link stops working.",
+        "properties": {
+          "email": {
+            "description": "Where the confirmation went. Echoed back lowercased and trimmed, which\nis the form it was stored in.",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "slug",
+          "expires_at"
         ],
         "type": "object"
       },
@@ -3149,6 +3627,701 @@
           }
         }
       ]
+    },
+    "/v1/crm/customers": {
+      "get": {
+        "operationId": "list_customers",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From a previous page's `next`.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows per page. Clamped, never refused.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Include archived customers.",
+            "in": "query",
+            "name": "archived",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_CustomerRecord"
+                }
+              }
+            },
+            "description": "One page. `next` is absent when the list ended."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unreadable cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable crm"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "Customers, most recently registered first.",
+        "tags": [
+          "crm"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "register_customer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewCustomerRecord"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerRegistered"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A missing name, no way to contact them, or a VAT number that is not one"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable crm"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That id is already a customer"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "Record a customer.",
+        "tags": [
+          "crm"
+        ]
+      }
+    },
+    "/v1/crm/customers/{customer}": {
+      "get": {
+        "operationId": "get_customer",
+        "parameters": [
+          {
+            "description": "The id you registered them under.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerRecordDetail"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such customer, or the projection has not caught up"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "One customer, with everything on the record.",
+        "tags": [
+          "crm"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "operationId": "amend_customer",
+        "parameters": [
+          {
+            "description": "The id you registered them under.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AmendCustomerRecord"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerRegistered"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A missing name, no way to contact them, or a VAT number that is not one"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such customer"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "They are archived"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "Change what is known about a customer.",
+        "tags": [
+          "crm"
+        ]
+      }
+    },
+    "/v1/crm/customers/{customer}/archive": {
+      "delete": {
+        "operationId": "restore_customer",
+        "parameters": [
+          {
+            "description": "The id you registered them under.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerRegistered"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such customer"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "Put them back.",
+        "tags": [
+          "crm"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "archive_customer",
+        "parameters": [
+          {
+            "description": "The id you registered them under.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveCustomerRecord"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerRegistered"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such customer"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "Take a customer out of the lists, keeping every document they are on.",
+        "tags": [
+          "crm"
+        ]
+      }
     },
     "/v1/health": {
       "get": {
@@ -6054,11 +7227,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Recorded"
+                  "$ref": "#/components/schemas/BillPaymentRecorded"
                 }
               }
             },
-            "description": "Recorded, or already recorded under this key."
+            "description": "BillPaymentRecorded, or already recorded under this key."
           },
           "400": {
             "content": {
@@ -6334,11 +7507,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Recorded"
+                  "$ref": "#/components/schemas/BillPaymentRecorded"
                 }
               }
             },
-            "description": "Recorded, or already recorded under this reference."
+            "description": "BillPaymentRecorded, or already recorded under this reference."
           },
           "400": {
             "content": {
@@ -7019,11 +8192,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Recorded"
+                  "$ref": "#/components/schemas/PaymentRecorded"
                 }
               }
             },
-            "description": "Recorded, or already recorded under this reference."
+            "description": "PaymentRecorded, or already recorded under this reference."
           },
           "400": {
             "content": {
@@ -7619,7 +8792,7 @@
         }
       ],
       "post": {
-        "description": "Creates the company, its database, its first owner, and a session — in one\noperation that compensates if any part of it fails. The response is a\nworking bearer token: signing up logs you in.",
+        "description": "Sends a confirmation to the address and **creates nothing**. No account, no\ncompany, no database: those are what `POST /v1/signups/{token}` builds, and\nthis endpoint is unauthenticated, so anything it built would be built for\nanybody who could reach it.\n\nAn address that already has an account has to give that account's password.\nWithout it, naming somebody else's address would be a way to post mail\nthrough us.",
         "operationId": "sign_up",
         "requestBody": {
           "content": {
@@ -7632,15 +8805,15 @@
           "required": true
         },
         "responses": {
-          "201": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SignedUp"
+                  "$ref": "#/components/schemas/SignupRequested"
                 }
               }
             },
-            "description": "Created."
+            "description": "A confirmation is on its way. Nothing exists yet."
           },
           "400": {
             "content": {
@@ -7692,6 +8865,16 @@
             },
             "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A confirmation went to this address moments ago. Retryable, and the message says when."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -7705,6 +8888,84 @@
         },
         "security": [],
         "summary": "Register a new tenant.",
+        "tags": [
+          "signup"
+        ]
+      }
+    },
+    "/v1/signups/{token}": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Creates the company, its database, its first owner, and a session — in one\noperation that compensates if any part of it fails. The response is a\nworking bearer token: confirming logs you in.\n\nThere is deliberately no `GET` beside this. `/v1/join/{token}` has one\nbecause whoever opens an invitation did not write it and has to be told what\nthey are joining; whoever opens this one filled the form in themselves, and\nconfirming does the thing they asked for.",
+        "operationId": "confirm_signup",
+        "parameters": [
+          {
+            "description": "From the confirmation link.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignedUp"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such token, or a spent or expired one — the same answer for all three"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The slug was taken while the link sat in a mailbox. The link still works; ask for another name."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "Confirm an address, and get the system that was asked for.",
         "tags": [
           "signup"
         ]

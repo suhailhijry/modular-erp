@@ -470,6 +470,14 @@ async fn zatca_environment(
 fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
     vec![
         Arc::new(
+            ProjectionJob::<crm::Crm>::new(
+                crm::projections(),
+                Arc::new(crm::upcasters().clone()),
+                200,
+            )
+            .for_module(crm::module_id()),
+        ),
+        Arc::new(
             ProjectionJob::<ledger::Ledger>::new(
                 ledger::projections(),
                 Arc::new(ledger::upcasters().clone()),

@@ -116,11 +116,11 @@ struct NewEntry {
     memo: String,
     /// Must sum to zero, in one currency. An unbalanced set is a 400 carrying
     /// the difference.
-    lines: Vec<NewLine>,
+    lines: Vec<NewEntryLine>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-struct NewLine {
+struct NewEntryLine {
     /// An account code from `GET /v1/ledger/accounts`.
     account: String,
     /// Positive debits, negative credits.

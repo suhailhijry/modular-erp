@@ -92,7 +92,7 @@ struct NewInvoice {
     /// ISO 4217. Every line is in this currency.
     currency: String,
     /// At least one line that comes to something.
-    lines: Vec<NewLine>,
+    lines: Vec<NewInvoiceLine>,
     /// What comes off the whole invoice, printed as its own figure rather than
     /// folded into a smaller total.
     ///
@@ -156,7 +156,7 @@ struct NewAddress {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-struct NewLine {
+struct NewInvoiceLine {
     description: String,
     /// Minor units, in the invoice's currency. Excluding tax.
     net: i64,
@@ -205,7 +205,7 @@ struct Issued {
 /// A payment carries no statutory number: the invoice it settles is the numbered
 /// thing, and a receipt references that.
 #[derive(Debug, Serialize, ToSchema)]
-struct Recorded {
+struct PaymentRecorded {
     /// The invoice it was recorded against.
     id: String,
     position: Option<i64>,
@@ -459,7 +459,7 @@ async fn issue_invoice(
     ),
     request_body = NewPayment,
     responses(
-        (status = OK, description = "Recorded, or already recorded under this reference.", body = Recorded),
+        (status = OK, description = "PaymentRecorded, or already recorded under this reference.", body = PaymentRecorded),
         (status = BAD_REQUEST, description = "A non-positive amount, or an unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -475,7 +475,7 @@ async fn record_payment(
     Language(locale): Language,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewPayment>,
-) -> Result<Json<Recorded>, Problem> {
+) -> Result<Json<PaymentRecorded>, Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
 
     let raw = params.get("invoice").map_or("", String::as_str);
@@ -498,7 +498,7 @@ async fn record_payment(
 
     nudge(&state, tenant.db.tenant()).await;
 
-    Ok(Json(Recorded {
+    Ok(Json(PaymentRecorded {
         id: raw.to_owned(),
         position: committed.at.map(erp_types::LogPosition::get),
     }))

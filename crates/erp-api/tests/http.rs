@@ -82,6 +82,66 @@ impl Fixture {
         identity.id
     }
 
+    /// The confirmation token for the last email promised to an address.
+    ///
+    /// **The mailbox**, and the only stand-in for one these tests have. The
+    /// token exists nowhere else on purpose: an API that handed it back would
+    /// let a caller confirm their own signup, which is the whole thing
+    /// `POST /v1/signups` now refuses to do.
+    async fn confirmation(&self, email: &str) -> String {
+        let body: String = sqlx::query_scalar(
+            "SELECT payload ->> 'body' FROM outbox
+              WHERE kind = 'email.send' AND payload ->> 'to' = $1
+              ORDER BY id DESC LIMIT 1",
+        )
+        .bind(email)
+        .fetch_one(self.control.pool())
+        .await
+        .unwrap_or_else(|e| panic!("a confirmation was promised to {email}: {e}"));
+
+        body.split_once("/v1/signups/")
+            .map(|(_, rest)| {
+                rest.split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .filter(|token| !token.is_empty())
+            .unwrap_or_else(|| panic!("no confirmation link in the message to {email}: {body}"))
+    }
+
+    /// Signs up and confirms, the way a person with a mailbox does.
+    ///
+    /// Returns the confirmation's body, which is what the old one-shot signup
+    /// used to answer with — so a test that only wants a working tenant reads
+    /// the same fields it always did.
+    async fn signup(&self, request: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let email = request["email"].as_str().expect("an email").to_owned();
+
+        let (status, body, _) = self
+            .send(
+                Request::post("/v1/signups")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await;
+        if status != StatusCode::ACCEPTED {
+            return (status, body);
+        }
+
+        let token = self.confirmation(&email).await;
+        let (status, body, _) = self
+            .send(
+                Request::post(format!("/v1/signups/{token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await;
+        (status, body)
+    }
+
     async fn provision(&mut self, slug: &str) -> TenantId {
         let tenant = self
             .control
@@ -956,22 +1016,14 @@ async fn the_ledger_is_behind_the_same_tenant_check_as_everything_else() {
 async fn signing_up_gives_you_a_working_system() {
     let fixture = Fixture::new().await;
 
-    let (status, body, _) = fixture
-        .send(
-            Request::post("/v1/signups")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "slug": "acme",
-                        "company": "Acme Trading",
-                        "email": "owner@acme.test",
-                        "password": "correct horse battery staple",
-                        "modules": ["ledger"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
+    let (status, body) = fixture
+        .signup(serde_json::json!({
+            "slug": "acme",
+            "company": "Acme Trading",
+            "email": "owner@acme.test",
+            "password": "correct horse battery staple",
+            "modules": ["ledger"]
+        }))
         .await;
 
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -1098,24 +1150,360 @@ async fn a_taken_name_is_a_conflict() {
     let fixture = Fixture::new().await;
 
     let signup = |email: &str| {
+        serde_json::json!({
+            "slug": "acme", "company": "Acme",
+            "email": email, "password": "correct horse battery staple"
+        })
+    };
+
+    let (first, _) = fixture.signup(signup("a@acme.test")).await;
+    assert_eq!(first, StatusCode::CREATED);
+
+    // Refused at the *request*, before any mail: the name is gone, and finding
+    // that out after a round trip through a mailbox would be worse.
+    let (second, body, _) = fixture
+        .send(
+            Request::post("/v1/signups")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(signup("b@acme.test").to_string()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(second, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "provisioning.slug_taken");
+
+    fixture.cleanup().await;
+}
+
+/// **The whole of item 5, as one assertion.**
+///
+/// A request that gets past validation used to run `CREATE DATABASE` and a full
+/// migration chain, from an unauthenticated endpoint. So the thing to check is
+/// not that signup still works — the test above does that — but that the
+/// expensive, irreversible half of it *has not happened yet* when the request
+/// comes back.
+///
+/// Three ways of asking the same question, because one of them alone would be
+/// satisfied by a half-measure: no tenant row, no database on the cluster, and
+/// no authenticator claiming the address.
+#[tokio::test]
+async fn a_signup_request_builds_nothing_until_the_address_answers() {
+    let fixture = Fixture::new().await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/signups")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "slug": "acme", "company": "Acme Trading",
+                        "email": "owner@acme.test",
+                        "password": "correct horse battery staple",
+                        "modules": ["ledger"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["email"], "owner@acme.test");
+    assert!(
+        body.get("token").is_none(),
+        "the response must not carry the confirmation token: a caller that had \
+         it could confirm its own signup, which is the whole thing this refuses"
+    );
+
+    // No tenant.
+    let tenants: i64 = sqlx::query_scalar("SELECT count(*) FROM tenant")
+        .fetch_one(fixture.control.pool())
+        .await
+        .expect("tenants are countable");
+    assert_eq!(tenants, 0, "a request must not register a tenant");
+
+    // And no claim on the address, which was the other half: signing up as
+    // somebody else's address used to lock them out of ever signing up.
+    let logins: i64 = sqlx::query_scalar("SELECT count(*) FROM authenticator WHERE handle = $1")
+        .bind("owner@acme.test")
+        .fetch_one(fixture.control.pool())
+        .await
+        .expect("authenticators are countable");
+    assert_eq!(logins, 0, "a request must not claim the login handle");
+
+    // What it *did* do: promise exactly one email, in the same transaction.
+    let promised: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM outbox WHERE payload ->> 'to' = $1")
+            .bind("owner@acme.test")
+            .fetch_one(fixture.control.pool())
+            .await
+            .expect("effects are countable");
+    assert_eq!(promised, 1, "one confirmation, promised and not sent");
+
+    // **And now the disk, which is the cost item 5 was actually about.**
+    //
+    // Named after the tenant, so it can only be asked about once there is one —
+    // which is the assertion. Scoping it to this tenant's own id is also what
+    // makes it isolated: `datname LIKE 'erp_tenant_%'` would count every other
+    // test sharing the cluster and answer a different question.
+    let link = fixture.confirmation("owner@acme.test").await;
+    let (status, confirmed, _) = fixture
+        .send(
+            Request::post(format!("/v1/signups/{link}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{confirmed}");
+
+    let tenant: TenantId = confirmed["tenant"]
+        .as_str()
+        .expect("a tenant id")
+        .parse()
+        .expect("it parses");
+    let database = format!("erp_tenant_{}", tenant.as_uuid().simple());
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(&database)
+            .fetch_one(fixture.control.pool())
+            .await
+            .expect("pg_database is readable");
+    assert!(
+        exists,
+        "{database} should exist once the address answered, and not before"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Confirming builds the lot, and the link is spent when it has.
+#[tokio::test]
+async fn a_confirmation_link_works_once() {
+    let fixture = Fixture::new().await;
+
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/signups")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "slug": "acme", "company": "Acme Trading",
+                        "email": "owner@acme.test",
+                        "password": "correct horse battery staple",
+                        "modules": ["ledger"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let link = fixture.confirmation("owner@acme.test").await;
+    let confirm = || {
+        Request::post(format!("/v1/signups/{link}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture.send(confirm()).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["slug"], "acme");
+    assert_eq!(body["modules"][0], "ledger");
+
+    // The session works, which is the part that says provisioning finished.
+    let token = body["token"].as_str().expect("a token").to_owned();
+    let (status, tenant, _) = fixture
+        .send(
+            Request::get("/v1/tenant")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{tenant}");
+
+    // Twice does not build twice. A second click on the same link in a mail
+    // client, or a browser retrying, must not produce a second company.
+    let (status, body, _) = fixture.send(confirm()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "signups.not_valid");
+
+    let tenants: i64 = sqlx::query_scalar("SELECT count(*) FROM tenant")
+        .fetch_one(fixture.control.pool())
+        .await
+        .expect("tenants are countable");
+    assert_eq!(tenants, 1, "one link, one company");
+
+    fixture.cleanup().await;
+}
+
+/// A token nobody issued is the same answer as one already spent.
+#[tokio::test]
+async fn an_unissued_confirmation_token_is_not_found() {
+    let fixture = Fixture::new().await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post(format!("/v1/signups/{}", "0".repeat(64)))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "signups.not_valid");
+    fixture.cleanup().await;
+}
+
+/// **The vector this flow would have introduced while closing a bigger one.**
+///
+/// Deferring provisioning behind an email makes `POST /v1/signups` a way to
+/// send mail to any address somebody names. The interval caps that per address,
+/// which is all this endpoint can do until there is a notion of caller to limit
+/// (Phase 12c).
+#[tokio::test]
+async fn a_second_request_to_the_same_address_is_refused_for_a_minute() {
+    let fixture = Fixture::new().await;
+
+    let request = |slug: &str| {
         Request::post("/v1/signups")
             .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT_LANGUAGE, "en")
             .body(Body::from(
                 serde_json::json!({
-                    "slug": "acme", "company": "Acme",
-                    "email": email, "password": "correct horse battery staple"
+                    "slug": slug, "company": "Acme",
+                    "email": "owner@acme.test",
+                    "password": "correct horse battery staple"
                 })
                 .to_string(),
             ))
             .unwrap()
     };
 
-    let (first, _, _) = fixture.send(signup("a@acme.test")).await;
-    assert_eq!(first, StatusCode::CREATED);
+    let (status, _, _) = fixture.send(request("acme")).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
 
-    let (second, body, _) = fixture.send(signup("b@acme.test")).await;
-    assert_eq!(second, StatusCode::CONFLICT);
+    let (status, body, _) = fixture.send(request("acme-two")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["code"], "signups.too_soon");
+    assert!(
+        body["detail"].as_str().expect("prose").contains("second"),
+        "the refusal has to say when to come back: {body}"
+    );
+
+    // And it did not send a second one, which is the point.
+    let promised: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM outbox WHERE payload ->> 'to' = $1")
+            .bind("owner@acme.test")
+            .fetch_one(fixture.control.pool())
+            .await
+            .expect("effects are countable");
+    assert_eq!(promised, 1, "one address, one message a minute");
+
+    fixture.cleanup().await;
+}
+
+/// A slug taken while the link sat in a mailbox is a 409, and the link survives.
+///
+/// The name is deliberately not reserved — see `0010_signups.sql` — so this is
+/// the case that trade-off creates, and the requirement is that it is
+/// recoverable rather than that it cannot happen.
+#[tokio::test]
+async fn a_name_taken_while_you_were_reading_your_mail_does_not_burn_the_link() {
+    let mut fixture = Fixture::new().await;
+
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/signups")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "slug": "acme", "company": "Acme Trading",
+                        "email": "owner@acme.test",
+                        "password": "correct horse battery staple"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let link = fixture.confirmation("owner@acme.test").await;
+
+    // Somebody else takes the name in the meantime.
+    fixture.provision("acme").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post(format!("/v1/signups/{link}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "provisioning.slug_taken");
+
+    // **Unclaimed.** A failure that burned the link would turn a recoverable
+    // error into a support ticket, so the row is still live and still theirs.
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pending_signup
+          WHERE handle = $1 AND confirmed_at IS NULL AND cancelled_at IS NULL",
+    )
+    .bind("owner@acme.test")
+    .fetch_one(fixture.control.pool())
+    .await
+    .expect("pending signups are countable");
+    assert_eq!(live, 1, "a failed confirmation must not spend the link");
+
+    fixture.cleanup().await;
+}
+
+/// The confirmation is written in the language the form was in.
+///
+/// It has to be decided at request time and stored: the person has no account,
+/// so there is no preference to look up when a worker picks the row up, and by
+/// then the only signal there ever was is gone.
+#[tokio::test]
+async fn the_confirmation_is_written_in_the_language_of_the_form() {
+    let fixture = Fixture::new().await;
+
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/signups")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT_LANGUAGE, "ar")
+                .body(Body::from(
+                    serde_json::json!({
+                        "slug": "acme", "company": "أكمي",
+                        "email": "owner@acme.test",
+                        "password": "correct horse battery staple"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (locale, subject): (String, String) = sqlx::query_as(
+        "SELECT payload ->> 'locale', payload ->> 'subject' FROM outbox
+          WHERE payload ->> 'to' = $1",
+    )
+    .bind("owner@acme.test")
+    .fetch_one(fixture.control.pool())
+    .await
+    .expect("a message was promised");
+
+    assert_eq!(locale, "arabic", "the form was in Arabic");
+    assert!(
+        subject.contains("أكمي"),
+        "the subject names the company, in Arabic: {subject}"
+    );
 
     fixture.cleanup().await;
 }
@@ -1163,21 +1551,13 @@ async fn the_chart_catalogue_needs_no_credential_and_speaks_arabic() {
 async fn a_new_tenant_can_start_from_a_template() {
     let fixture = Fixture::new().await;
 
-    let (_, signed_up, _) = fixture
-        .send(
-            Request::post("/v1/signups")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "slug": "acme", "company": "Acme Trading",
-                        "email": "owner@acme.test",
-                        "password": "correct horse battery staple",
-                        "modules": ["ledger"]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
+    let (_, signed_up) = fixture
+        .signup(serde_json::json!({
+            "slug": "acme", "company": "Acme Trading",
+            "email": "owner@acme.test",
+            "password": "correct horse battery staple",
+            "modules": ["ledger"]
+        }))
         .await;
     let token = signed_up["token"].as_str().expect("a token").to_owned();
 
@@ -1319,6 +1699,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("tenant", ALL_ROLES),
     ("list_members", ALL_ROLES),
     ("list_modules", ALL_ROLES),
+    ("list_customers", ALL_ROLES),
+    ("get_customer", ALL_ROLES),
     ("list_accounts", ALL_ROLES),
     ("trial_balance", ALL_ROLES),
     ("list_invoices", ALL_ROLES),
@@ -1378,6 +1760,12 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("remove_member", OWNER),
     ("set_module_role", OWNER),
     ("clear_module_role", OWNER),
+    // A customer record is tenant data about who the business deals with, so
+    // it sits with members and modules and not with the books.
+    ("register_customer", OWNER),
+    ("amend_customer", OWNER),
+    ("archive_customer", OWNER),
+    ("restore_customer", OWNER),
     ("enable_module", OWNER),
     ("disable_module", OWNER),
     ("list_invitations", OWNER),
@@ -1448,8 +1836,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        47,
-        "expected forty-seven role-scoped operations"
+        53,
+        "expected fifty-three role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -3405,22 +3793,17 @@ async fn signing_up_again_with_your_own_address_gives_you_a_second_tenant() {
     let first = fixture.provision("acme").await;
     fixture.join(owner, first).await;
 
-    let (status, body, _) = fixture
-        .send(
-            Request::post("/v1/signups")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "slug": "second",
-                        "company": "Second Company",
-                        "email": "owner@acme.test",
-                        "password": "hunter2hunter2",
-                        "modules": []
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
+    // Their own password, still, and still checked — at the *request*, because
+    // by the time the link is opened there is no password left to check it
+    // against.
+    let (status, body) = fixture
+        .signup(serde_json::json!({
+            "slug": "second",
+            "company": "Second Company",
+            "email": "owner@acme.test",
+            "password": "hunter2hunter2",
+            "modules": []
+        }))
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 

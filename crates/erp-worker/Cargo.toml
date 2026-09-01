@@ -15,6 +15,7 @@ erp-control = { workspace = true }
 erp-eventlog = { workspace = true }
 erp-projection = { workspace = true }
 erp-types = { workspace = true }
+crm = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }
 purchases = { workspace = true }

@@ -35,9 +35,10 @@ mod placement;
 mod pools;
 mod provision;
 pub mod shared;
+mod signup;
 
 pub use auth::{
-    AuthError, InvitationToken, SESSION_LIFETIME, Session, SessionToken, hash_password,
+    AuthError, InvitationToken, SESSION_LIFETIME, Session, SessionToken, SignupToken, hash_password,
 };
 /// Re-exported so the control plane's callers are unchanged by the split.
 ///
@@ -60,6 +61,9 @@ pub use model::{
 pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
 pub use pools::{ClusterRegistry, PoolConfig, TenantPools};
 pub use provision::SignedUp as ProvisionedTenant;
+pub use signup::{
+    Confirmed, PendingSignup, REQUEST_INTERVAL, SIGNUP_LIFETIME, SignupError, SignupRequest,
+};
 
 use erp_i18n::{Composite, Localize, Message, MessageArg, StaticCatalog};
 

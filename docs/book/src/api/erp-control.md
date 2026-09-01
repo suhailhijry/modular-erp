@@ -31,7 +31,8 @@ must support cross-tenant reporting, none of which an event log helps with.
 | [`auth.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/auth.rs) | Passwords, sessions, `SessionToken`, `InvitationToken` |
 | [`members.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/members.rs) | Adding, removing and re-roling people |
 | [`invitations.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/invitations.rs) | Invite links and acceptance |
-| [`provision.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/provision.rs) | Signup, module install, refresh, demo reaping |
+| [`provision.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/provision.rs) | Provisioning, module install, refresh, demo reaping |
+| [`signup.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/signup.rs) | The two halves of signing up, and the mailbox between them |
 | [`pools.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/pools.rs) | `ClusterRegistry`, `PoolConfig`, `TenantPools` |
 | [`placement.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/placement.rs) | Which cluster a new tenant lands on |
 | [`fleet.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/fleet.rs) | Fleet migration, the migration floor, the deploy gates |
@@ -171,7 +172,10 @@ pub struct SessionToken(String);       // Debug redacted
 impl SessionToken { pub fn expose(&self) -> &str; }
 
 pub struct Session { … }               // Serializable; carries no token
-pub struct InvitationToken(String);    // Debug redacted, and a different type
+
+// One-time links, from the `link_token!` macro. Each a distinct type.
+pub struct InvitationToken(String);    // Debug redacted
+pub struct SignupToken(String);        // Debug redacted
 
 pub fn hash_password(password: &str) -> Result<String, AuthError>;
 
@@ -190,6 +194,11 @@ impl ControlPlane {
     pub async fn sweep_sessions(&self) -> Result<u64, AuthError>;
 }
 ```
+
+`register_hashed_login` is the same insert with the hashing already done. It is
+`pub(crate)` and has exactly one caller: `confirm_signup`, moving the hash out of
+`pending_signup`. A caller that passed a plaintext would store a password that
+verifies against nothing, and the account would be unopenable instead of open.
 
 Both token types redact their `Debug`. A token in a log line is a working
 credential, and log lines outlive the sessions they mention. They are two types and not one. Both are opaque strings, both
@@ -396,6 +405,84 @@ is something this crate can know: the public domain is a deployment fact.
 Accepting is granting somebody access to something, and a link that does not say
 what is a link people click without reading.
 
+## Signing up
+
+Two calls with a mailbox in between. An unauthenticated endpoint that built a
+database was one HTTP request away from a disk, and one that wrote an
+authenticator was one request away from taking somebody's address for good.
+
+```text
+  POST /v1/signups            ──►  pending_signup + an email          202
+                                         │
+                                   the mailbox
+                                         │
+  POST /v1/signups/{token}    ──►  identity, tenant, database, session 201
+```
+
+```rust
+pub const SIGNUP_LIFETIME: Duration = Duration::from_hours(24);
+pub const REQUEST_INTERVAL: Duration = Duration::from_mins(1);
+
+pub struct SignupRequest {
+    pub email: String,
+    pub password: String,
+    pub slug: String,
+    pub company: String,
+    pub modules: Vec<ModuleSetup>,
+}
+
+pub struct PendingSignup { … }    // never carries the token
+pub struct Confirmed { … }        // tenant, identity, session
+pub enum SignupError { NotValid, TooSoon { .. }, Access(..), Auth(..) }
+
+pub async fn request_signup(&self, request: SignupRequest, confirm_base: &str,
+    locale: Locale) -> Result<(PendingSignup, SignupToken), SignupError>;
+
+pub async fn pending_signup_modules(&self, token: &str)
+    -> Result<Vec<String>, SignupError>;
+
+pub async fn confirm_signup(&self, token: &str, modules: Vec<ModuleSetup>)
+    -> Result<Confirmed, SignupError>;
+
+pub async fn sweep_signups(&self) -> Result<u64, AccessError>;
+```
+
+`request_signup` builds **nothing**. One row, one outbox effect, and a token the
+caller should put in a link and forget. It checks two things first: that the slug
+is free, so a name that is gone is refused at the form and not after a round trip
+through a mailbox; and that an address which already has an account can prove it,
+because otherwise naming a stranger's address would be a way to post mail through
+us.
+
+The password hash waits in `pending_signup` until the address answers. Writing it
+to `authenticator` any sooner *is* the handle claim: signing up as
+`ceo@bigcorp.example` used to lock the real owner out of ever signing up, because
+they would have to prove a password they never set.
+
+`confirm_signup` claims the row in one `UPDATE … WHERE confirmed_at IS NULL`
+before anything is built, so two clicks cannot both provision. A failure
+**unclaims** it, because provisioning can fail on a slug somebody took meanwhile
+and burning the link over that turns a recoverable error into a support ticket.
+
+`pending_signup_modules` exists because the stored names have to become
+`ModuleSetup`s and only the composition root knows how. That resolution is not a
+formality: a module withdrawn between the request and the click is refused rather
+than installed from a description nothing offers any more.
+
+### What this deliberately does not do
+
+**Rate limit.** `REQUEST_INTERVAL` caps mail per *address*, which is what stops
+the new flow being a way to fill one mailbox. Limiting per *caller* needs a
+notion of caller that does not exist yet, and Phase 12c builds it for API keys.
+
+**Reserve the slug.** A unique index on a pending slug would make squatting free,
+one throwaway address per name. So first to *confirm* wins, and confirming costs
+a mailbox.
+
+**Offer a `GET` beside the confirmation.** `/v1/join/{token}` has one because
+whoever opens an invitation did not write it. Whoever opens this one filled the
+form in themselves, and confirming does the thing they asked for.
+
 ## Provisioning
 
 ```rust
@@ -426,6 +513,9 @@ is idempotent**, so recover and retry are the same operation. And **a failure
 compensates**: `provision` drops the database and the row on its way out, which
 frees the name, and the person who just failed to sign up is exactly the person
 about to try that name again.
+
+`sign_up` is what `confirm_signup` calls once the address is proved. It is no
+longer reachable from the API on its own.
 
 ### Why sign_up is one method
 

@@ -1,6 +1,6 @@
 # How it is tested
 
-Around 711 tests run on every build, against a real Postgres. There are no
+Around 717 tests run on every build, against a real Postgres. There are no
 database mocks, because a mock of Postgres would be a model of what we believe
 Postgres does.
 

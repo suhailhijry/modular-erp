@@ -1,0 +1,122 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, kind as \"kind!\",\n                  phone, email, vat_number,\n                  registered_on as \"registered_on!\",\n                  (archived_at IS NOT NULL) as \"archived!\"\n             FROM proj_crm.customer\n            WHERE ($4 OR archived_at IS NULL)\n              AND ($2::timestamptz IS NULL OR (registered_on, id) < ($2, $3))\n            ORDER BY registered_on DESC, id DESC\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_crm.customer",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_crm.customer",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name_latin",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_crm.customer",
+            "name": "name_latin"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_crm.customer",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "phone",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_crm.customer",
+            "name": "phone"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "email",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_crm.customer",
+            "name": "email"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "vat_number",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_crm.customer",
+            "name": "vat_number"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "registered_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_crm.customer",
+            "name": "registered_on"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "archived!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "057a675cda64ec14fafb095de6b5015f90208d42b2f373b0e3ee10e45a7a7bda"
+}

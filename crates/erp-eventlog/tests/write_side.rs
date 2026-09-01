@@ -31,8 +31,9 @@ use std::path::{Path, PathBuf};
 const LOADS: [&str; 3] = ["erp_eventlog::load", "aggregate::load", "load_since"];
 
 /// Paths that may. Matched as suffixes.
-const ALLOWED: [&str; 4] = [
+const ALLOWED: [&str; 5] = [
     // Command handling. This is the whole point of the write model.
+    "modules/crm/src/commands.rs",
     "modules/ledger/src/commands.rs",
     "modules/sales/src/commands.rs",
     "modules/purchases/src/commands.rs",

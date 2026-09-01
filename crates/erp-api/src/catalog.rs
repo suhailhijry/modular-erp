@@ -23,6 +23,7 @@ use erp_i18n::Composite;
 /// crate can name: every module.
 pub static CATALOG: Composite = Composite::new(&[
     &erp_web::CATALOG,
+    &crm::CATALOG,
     &ledger::CATALOG,
     &sales::CATALOG,
     &purchases::CATALOG,

@@ -221,6 +221,12 @@ async fn rebuild(
     let sql = setup.install_sql;
 
     let reached = match setup.module.as_str() {
+        "crm" => {
+            let owned = crm::projections();
+            let refs: Vec<&dyn Projection<Group = crm::Crm>> =
+                owned.iter().map(AsRef::as_ref).collect();
+            rebuild_swap::<crm::Crm>(&pool, sql, &refs, upcasters, 500).await?
+        }
         "ledger" => {
             let owned = ledger::projections();
             let refs: Vec<&dyn Projection<Group = ledger::Ledger>> =
@@ -381,7 +387,7 @@ mod tests {
     /// in `bin/worker`.
     #[test]
     fn every_module_can_be_rebuilt() {
-        const REBUILDABLE: &[&str] = &["ledger", "sales", "purchases", "tax_sa"];
+        const REBUILDABLE: &[&str] = &["crm", "ledger", "sales", "purchases", "tax_sa"];
 
         for (name, setup) in erp_api::modules() {
             assert!(

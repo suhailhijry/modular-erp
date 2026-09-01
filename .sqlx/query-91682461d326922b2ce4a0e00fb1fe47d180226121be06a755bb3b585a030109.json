@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT modules FROM pending_signup\n              WHERE token_hash = $1\n                AND confirmed_at IS NULL AND cancelled_at IS NULL\n                AND expires_at > now()",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "modules",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "pending_signup",
+            "name": "modules"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "91682461d326922b2ce4a0e00fb1fe47d180226121be06a755bb3b585a030109"
+}

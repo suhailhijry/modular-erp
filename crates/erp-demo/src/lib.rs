@@ -73,6 +73,8 @@ pub struct Seeded {
     /// calculation rather than a business.
     pub filed: usize,
     pub journal_entries: usize,
+    /// Customers on the record, which is what the invoices below are *for*.
+    pub customers: usize,
     /// ZATCA documents built and waiting to be cleared or reported. Every
     /// invoice and every credit note is one.
     pub zatca_documents: usize,
@@ -151,7 +153,7 @@ pub async fn seed(
 ) -> Result<Seeded, DemoError> {
     let app = router(state.clone());
 
-    let signed_up = sign_up(&app, slug, password).await?;
+    let signed_up = sign_up(state, &app, slug, password).await?;
     let tenant = signed_up.tenant;
     let token = signed_up.token.clone();
 
@@ -160,6 +162,10 @@ pub async fn seed(
     // cleared retrospectively — so a demo that registers afterwards is a demo
     // of a business that lost its first quarter.
     register_with_zatca(&app, slug, &token).await?;
+
+    // **Before the invoices**, because an invoice is issued to somebody. The
+    // document still freezes what it printed (L5); this is the record beside it.
+    let customers = seed_customers(&app, slug, &token).await?;
 
     install_chart(&app, slug, &token).await?;
     let journal_entries = seed_opening_balances(&app, slug, &token).await?;
@@ -226,6 +232,7 @@ pub async fn seed(
         bills,
         filed,
         journal_entries,
+        customers,
         zatca_documents,
     })
 }
@@ -233,6 +240,7 @@ pub async fn seed(
 /// Runs every projection group to the head of the log.
 pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<(), DemoError> {
     let db = control.enter_for_maintenance(tenant).await?;
+    advance::<crm::Crm>(&db, &crm::projections(), crm::upcasters()).await?;
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
     advance::<sales::Sales>(&db, &sales::projections(), sales::upcasters()).await?;
     advance::<purchases::Purchases>(&db, &purchases::projections(), purchases::upcasters()).await?;
@@ -280,9 +288,30 @@ struct SignedUp {
     token: String,
 }
 
-async fn sign_up(app: &axum::Router, slug: &str, password: &str) -> Result<SignedUp, DemoError> {
+/// Signs up, opens the confirmation, and comes back logged in.
+///
+/// # The one thing here that is not a customer doing customer things
+///
+/// Signup takes two calls with an email in between, and the token is only ever
+/// in that email — deliberately, because a token the API handed back would let
+/// anybody confirm their own signup and the whole endpoint would be back where
+/// it started (see `erp-control/src/signup.rs`).
+///
+/// So something has to open the mailbox. [`confirmation_link`] is that
+/// something: one `SELECT` against the control plane's outbox, reading the
+/// message a person would have read. It is the only place in this crate that
+/// touches a database, and it is here rather than as a back door in the product
+/// because a back door built for a seeder is a back door.
+///
+/// Both HTTP calls are still made, in order, exactly as a customer makes them.
+async fn sign_up(
+    state: &AppState,
+    app: &axum::Router,
+    slug: &str,
+    password: &str,
+) -> Result<SignedUp, DemoError> {
     let email = format!("owner@{slug}.example");
-    let body = post(
+    post(
         app,
         slug,
         "/v1/signups",
@@ -294,6 +323,17 @@ async fn sign_up(app: &axum::Router, slug: &str, password: &str) -> Result<Signe
             "password": password,
             "modules": modules(),
         }),
+        StatusCode::ACCEPTED,
+    )
+    .await?;
+
+    let token = confirmation_link(state, &email).await?;
+    let body = post(
+        app,
+        slug,
+        &format!("/v1/signups/{token}"),
+        None,
+        &serde_json::json!({}),
         StatusCode::CREATED,
     )
     .await?;
@@ -319,6 +359,59 @@ async fn sign_up(app: &axum::Router, slug: &str, password: &str) -> Result<Signe
         email,
         token,
     })
+}
+
+/// Two customers: one a company that can take a standard invoice, one a walk-in.
+///
+/// The pair matters. `zatca::Kind::of` reads the buyer's VAT number to decide
+/// whether a document is cleared before it is handed over or reported within the
+/// day, so a demo with only one kind of customer demonstrates only one of the
+/// two obligations.
+async fn seed_customers(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    let customers = [
+        serde_json::json!({
+            "id": "CUST-0001",
+            "name": "نجد للاستشارات",
+            "name_latin": "Najd Consulting",
+            "kind": "company",
+            "phone": "+966500000001",
+            "email": "hello@najd.example",
+            "vat_number": {
+                "vat_number": "399999999900003",
+                "scheme": "CRN",
+                "identifier": "1010101010"
+            },
+            "address": {
+                "street": "طريق الملك فهد",
+                "building": "2322",
+                "district": "العليا",
+                "city": "الرياض",
+                "postal_code": "12211",
+                "country": "SA"
+            },
+            "registered_on": "2026-01-05T00:00:00Z"
+        }),
+        serde_json::json!({
+            "id": "CUST-0002",
+            "name": "سارة العتيبي",
+            "kind": "person",
+            "phone": "+966500000002",
+            "registered_on": "2026-02-11T00:00:00Z"
+        }),
+    ];
+
+    for customer in &customers {
+        post(
+            app,
+            slug,
+            "/v1/crm/customers",
+            Some(token),
+            customer,
+            StatusCode::CREATED,
+        )
+        .await?;
+    }
+    Ok(customers.len())
 }
 
 async fn install_chart(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
@@ -837,6 +930,50 @@ async fn put(
         })?;
 
     send(app, "PUT", path, request, expected).await
+}
+
+/// The confirmation token, read out of the mailbox.
+///
+/// The email is an outbox effect in the control plane, so this is what a mail
+/// client would have been handed. It looks for the link this build writes and
+/// takes what follows it, which is the token and nothing else.
+///
+/// Fails loudly when there is no message or no link in it. A seeder that
+/// shrugged here would carry on and fail somewhere unrelated, which is the
+/// failure mode `send` exists to refuse (L6).
+async fn confirmation_link(state: &AppState, email: &str) -> Result<String, DemoError> {
+    const MARKER: &str = "/v1/signups/";
+
+    let body: Option<String> = sqlx::query_scalar(
+        "SELECT payload ->> 'body' FROM outbox
+          WHERE kind = 'email.send' AND payload ->> 'to' = $1
+          ORDER BY id DESC LIMIT 1",
+    )
+    .bind(email)
+    .fetch_optional(state.control.pool())
+    .await
+    .map_err(|e| DemoError::Unexpected {
+        path: "outbox".to_owned(),
+        body: e.to_string(),
+    })?;
+
+    let body = body.ok_or_else(|| DemoError::Unexpected {
+        path: "outbox".to_owned(),
+        body: format!("no confirmation email was promised to {email}"),
+    })?;
+
+    body.split_once(MARKER)
+        .map(|(_, rest)| {
+            rest.split(|c: char| c.is_whitespace())
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| DemoError::Unexpected {
+            path: "outbox".to_owned(),
+            body: format!("the confirmation email to {email} carries no {MARKER} link"),
+        })
 }
 
 async fn post(

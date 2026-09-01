@@ -147,7 +147,7 @@ struct NewBillPayment {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct Recorded {
+struct BillPaymentRecorded {
     id: String,
     /// Where it landed in the log. A client that wants to read its own write
     /// back passes this as `?consistent_after=`.
@@ -236,7 +236,7 @@ fn view(summary: crate::BillSummary) -> BillView {
     params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = NewBill,
     responses(
-        (status = CREATED, description = "Recorded, or already recorded under this key.", body = Recorded),
+        (status = CREATED, description = "BillPaymentRecorded, or already recorded under this key.", body = BillPaymentRecorded),
         (status = BAD_REQUEST, description = "No lines, mixed currencies, negative tax, tax on an untaxed line, or tax without the supplier's VAT number", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -251,7 +251,7 @@ async fn record_bill(
     State(state): State<AppState>,
     Language(locale): Language,
     Json(body): Json<NewBill>,
-) -> Result<(StatusCode, Json<Recorded>), Problem> {
+) -> Result<(StatusCode, Json<BillPaymentRecorded>), Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
 
     let id = parse_id(&body.id, locale)?;
@@ -307,7 +307,7 @@ async fn record_bill(
 
     Ok((
         StatusCode::CREATED,
-        Json(Recorded {
+        Json(BillPaymentRecorded {
             id: body.id,
             position: committed.at.map(erp_types::LogPosition::get),
         }),
@@ -325,7 +325,7 @@ async fn record_bill(
     ),
     request_body = NewBillPayment,
     responses(
-        (status = OK, description = "Recorded, or already recorded under this reference.", body = Recorded),
+        (status = OK, description = "BillPaymentRecorded, or already recorded under this reference.", body = BillPaymentRecorded),
         (status = BAD_REQUEST, description = "A non-positive amount, or an unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -341,7 +341,7 @@ async fn pay_bill(
     Language(locale): Language,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewBillPayment>,
-) -> Result<Json<Recorded>, Problem> {
+) -> Result<Json<BillPaymentRecorded>, Problem> {
     require_module(&tenant, &crate::module_id(), locale)?;
 
     let raw = params.get("bill").map_or("", String::as_str);
@@ -364,7 +364,7 @@ async fn pay_bill(
 
     nudge(&state, tenant.db.tenant()).await;
 
-    Ok(Json(Recorded {
+    Ok(Json(BillPaymentRecorded {
         id: raw.to_owned(),
         position: committed.at.map(erp_types::LogPosition::get),
     }))

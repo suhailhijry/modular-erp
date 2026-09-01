@@ -9,9 +9,16 @@ test the system has.
 ## Why this is a client, not a script
 
 Every step goes through the public HTTP API. Sign up, install a chart, issue an
-invoice, take a payment. Nothing here reaches into a database or calls a command
-directly, and that is the point: a demo built out of internal calls can be
-perfect while the API a customer would use is broken.
+invoice, take a payment. A demo built out of internal calls can be perfect while
+the API a customer would use is broken.
+
+**One exception, and it is a mailbox.** Signing up takes two calls with a
+confirmation email in between, and the token is only ever in that email. An API
+that handed it back would let anybody confirm their own signup, which is exactly
+what `POST /v1/signups` refuses. So `confirmation_link` runs one `SELECT` against
+the control plane's outbox and reads the message a person would have read. Both
+HTTP calls are still made, in order, the way a customer makes them. It lives here and not as a back door in the product, because a back door built
+for a seeder is a back door.
 
 So it doubles as an integration test. `tests/demo.rs` runs it and then asserts
 the three things that are hard to check any other way:
@@ -46,6 +53,11 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId)
 pub async fn get(app: &axum::Router, slug: &str, path: &str, token: &str)
     -> Result<serde_json::Value, DemoError>;
 ```
+
+`seed` also holds the private `confirmation_link`, which is the mailbox above.
+It fails loudly when there is no message or no link in it: a seeder that shrugged
+would carry on and fail somewhere unrelated, which is the failure mode `get`
+exists to refuse.
 
 `modules()` reads from `erp_api::modules` and lists nothing of its own, so "the
 demo has every module enabled" is true because it cannot be false. A module added

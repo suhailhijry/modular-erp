@@ -37,6 +37,7 @@ fn no_session_scoped_set_outside_a_ddl_path() {
         // A projection rebuild, which drops and recreates a schema.
         "crates/erp-projection/src/shadow.rs",
         // Each module's test-only `install`, which mirrors provisioning.
+        "modules/crm/src/lib.rs",
         "modules/ledger/src/lib.rs",
         "modules/sales/src/lib.rs",
         "modules/purchases/src/lib.rs",

@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT created_at,\n                    EXTRACT(EPOCH FROM now() - created_at)::BIGINT AS \"age!\"\n               FROM pending_signup\n              WHERE handle = $1 AND confirmed_at IS NULL AND cancelled_at IS NULL\n                FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pending_signup",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "age!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "f6e92e24b374cbaf550a89ab2dd01c2ee0cdfef863b537b4d93eba4847d63cc4"
+}

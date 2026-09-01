@@ -1,6 +1,6 @@
 # The HTTP API
 
-Fifty-six operations across forty-one paths. Everything below is generated from
+Fifty-seven operations across forty-two paths. Everything below is generated from
 the same router that serves the requests, so `docs/openapi.json` and this chapter
 cannot describe a route the server does not have.
 
@@ -72,8 +72,10 @@ In practice the wait is short, because every write nudges the worker.
 
 ### POST /v1/signups
 
-Unauthenticated. Creates an account, a tenant, its database, its modules, and a
-session.
+Unauthenticated, and it **creates nothing**. It records the request and sends a
+confirmation to the address; the account, the tenant and the database are what
+the confirmation builds. An unauthenticated endpoint that built a database was
+one HTTP request away from a disk.
 
 ```bash
 curl -sX POST http://localhost:8080/v1/signups \
@@ -85,13 +87,43 @@ curl -sX POST http://localhost:8080/v1/signups \
     "company":  "Acme Trading",
     "modules":  ["ledger", "sales", "purchases", "tax_sa"]
   }'
+# 202 {"email":"owner@acme.test","slug":"acme","expires_at":"…"}
 ```
 
 `modules` is optional and defaults to none. Dependencies are checked here:
 `sales` without `ledger` is refused with `request.module_requires`, and `tax_sa`
-without either of sales or purchases with `request.module_requires_one_of`.
+without either of sales or purchases with `request.module_requires_one_of`. The
+slug is checked here too, so a name that is gone is a 409 at the form.
 
-The tenant comes back as `provisioning` and is enterable within a few seconds.
+An address that **already has an account** must give that account's password.
+Without that, naming a stranger's address would be a way to post mail through us.
+
+The response carries no token, deliberately: a caller that had one could confirm
+its own signup, which is the whole thing this endpoint refuses to allow.
+
+One address gets one confirmation a minute. A second request inside that window
+is `429 signups.too_soon`, and the message says how long to wait.
+
+### POST /v1/signups/{token}
+
+The token comes from the link in the email. This is where everything is built,
+and the response is a working bearer token: confirming logs you in.
+
+```bash
+curl -sX POST http://localhost:8080/v1/signups/$TOKEN
+# 201 {"tenant":"…","slug":"acme","token":"…","expires_at":"…","modules":[…]}
+```
+
+The link works once. A second use is `404 signups.not_valid`, which is also the
+answer for a token that never existed and for one that expired, since links last
+a day.
+
+If the name was taken while the link sat in a mailbox, this is `409
+provisioning.slug_taken` and **the link still works**. Ask for another name.
+
+There is deliberately no `GET` beside this. `/v1/join/{token}` has one because
+whoever opens an invitation did not write it and has to be told what they are
+joining; whoever opens this one filled the form in themselves.
 
 ### POST /v1/sessions
 
@@ -529,15 +561,19 @@ A document's status is `unregistered`, `pending`, `cleared`, `reported` or
 | 415 | A body without `Content-Type: application/json` |
 | 422 | Valid JSON, refused on the state of things |
 | 500 | A bug. The detail goes to the log and never to the caller |
+| 429 | A confirmation went to this address moments ago. Retryable; the message says when |
 | 503 | The connection budget is exhausted, or a read is not caught up. Retryable |
 | 504 | The request took longer than 30 seconds |
 
-A 409 and a 503 are worth retrying. A 422 is not: re-asking gets the same answer.
+A 409, a 429 and a 503 are worth retrying. A 422 is not: re-asking gets the same
+answer.
 
 ## What is not here yet
 
 `Idempotency-Key` and `ETag`/`If-Match`. Writes are already idempotent on a
 client-chosen id, which is most of what the first buys.
 
-There is also **no rate limit** on any endpoint, including signup. That is a
-known gap and the roadmap says where the fix sits.
+There is also **no per-caller rate limit** on any endpoint. Signup caps
+confirmations per address, which is what stops it filling one mailbox, and that
+is as far as an endpoint with no notion of caller can go. Phase 12c builds the
+real limiter with API keys.
