@@ -31,8 +31,15 @@ use std::path::{Path, PathBuf};
 const LOADS: [&str; 3] = ["erp_eventlog::load", "aggregate::load", "load_since"];
 
 /// Paths that may. Matched as suffixes.
-const ALLOWED: [&str; 5] = [
+const ALLOWED: [&str; 6] = [
     // Command handling. This is the whole point of the write model.
+    //
+    // `booking` loads more than the others and each one is a decision made from
+    // history: whether a resource exists and is in service before a claim is
+    // taken against it, and what a reservation now holds so the whole claim set
+    // can be rebuilt from what the events actually said. Both are inside the
+    // transaction that writes; neither answers a query.
+    "modules/booking/src/commands.rs",
     "modules/crm/src/commands.rs",
     "modules/ledger/src/commands.rs",
     "modules/sales/src/commands.rs",

@@ -546,6 +546,59 @@ async fn a_claim_for_none_of_something_is_refused() {
     assert!(matches!(refused, OccupancyError::NothingClaimed));
 }
 
+/// **The same owner asking twice for the same thing holds two of it.**
+///
+/// A booking whose three lines each take one place in the same class at the
+/// same hour is one owner holding three. Before this, it was a primary-key
+/// violation reaching a receptionist as "duplicate key value violates unique
+/// constraint" — for a booking that was perfectly legal. Found by
+/// `booking::one_customer_may_take_several_places_in_the_same_hour`.
+#[tokio::test]
+async fn one_owner_asking_twice_for_the_same_span_holds_two_of_it() {
+    let db = tenant_db().await;
+    let mut tx = db.pool().begin().await.expect("transaction");
+    declare(&mut tx, &id("class-1000"), 10)
+        .await
+        .expect("declared");
+
+    take(
+        &mut tx,
+        &id("res-1"),
+        &[
+            Claim::one(id("class-1000"), span("10", "11")),
+            Claim::one(id("class-1000"), span("10", "11")),
+            Claim::one(id("class-1000"), span("10", "11")),
+        ],
+    )
+    .await
+    .expect("three places for one family");
+    assert_eq!(
+        free(&mut tx, &id("class-1000"), span("10", "11"))
+            .await
+            .expect("free reads"),
+        7,
+        "three places asked for, and not three rows fighting over one key"
+    );
+
+    // Still counted, so the capacity is still the limit.
+    take(
+        &mut tx,
+        &id("res-2"),
+        &[Claim::many(id("class-1000"), span("10", "11"), 8)],
+    )
+    .await
+    .expect_err("seven left, eight asked for");
+
+    // And releasing takes the whole accumulated row with it.
+    assert_eq!(release(&mut tx, &id("res-1")).await.expect("released"), 1);
+    assert_eq!(
+        free(&mut tx, &id("class-1000"), span("10", "11"))
+            .await
+            .expect("free reads"),
+        10
+    );
+}
+
 /// **The exit criterion, and the reason the guard rows exist.**
 ///
 /// Two bookings arrive at the same instant for the last place. The probe is a

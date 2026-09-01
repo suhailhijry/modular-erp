@@ -288,6 +288,30 @@
         ],
         "type": "object"
       },
+      "AmendBookable": {
+        "description": "The same fields without the id, which cannot change.",
+        "properties": {
+          "capacity": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_latin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "capacity"
+        ],
+        "type": "object"
+      },
       "AmendCustomerRecord": {
         "description": "The same fields without the id, which cannot change.",
         "properties": {
@@ -374,6 +398,21 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "AssignUnit": {
+        "example": {
+          "unit": "room-302"
+        },
+        "properties": {
+          "unit": {
+            "description": "The resource picked out of the pool this line booked.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
         "type": "object"
       },
       "BandView": {
@@ -587,6 +626,110 @@
           "outstanding",
           "payments",
           "note"
+        ],
+        "type": "object"
+      },
+      "BookableDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/BookableRecord"
+          },
+          {
+            "properties": {
+              "declared_on": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "hours": {
+                "items": {
+                  "$ref": "#/components/schemas/OpeningHours"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "hours",
+              "declared_on"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "BookableRecord": {
+        "properties": {
+          "capacity": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_latin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "withdrawn": {
+            "type": "boolean"
+          },
+          "withdrawn_why": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "capacity",
+          "withdrawn"
+        ],
+        "type": "object"
+      },
+      "BookedResource": {
+        "description": "A resource a line takes, and how much of it.",
+        "properties": {
+          "quantity": {
+            "description": "Defaults to one, which is what a stylist and a chair are.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "resource": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource"
+        ],
+        "type": "object"
+      },
+      "BookingAccepted": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "description": "The log position this landed at. Pass it to a read as\n`?consistent_after=` to see it in the diary.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -1734,6 +1877,25 @@
         ],
         "type": "object"
       },
+      "MoveReservation": {
+        "example": {
+          "stage": "arrived"
+        },
+        "properties": {
+          "stage": {
+            "description": "`reserved`, `confirmed`, `arrived`, `in_service`, `completed`,\n`cancelled` or `no_show`. Moving to the stage it is already in is a\nno-op.",
+            "type": "string"
+          },
+          "why": {
+            "description": "Why. Kept and shown, and it is what a cancellation reason goes in.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stage"
+        ],
+        "type": "object"
+      },
       "NewAccount": {
         "example": {
           "code": "1100",
@@ -1944,6 +2106,47 @@
           "amount",
           "paid_on",
           "account"
+        ],
+        "type": "object"
+      },
+      "NewBookable": {
+        "example": {
+          "capacity": 1,
+          "id": "stylist-noura",
+          "kind": "person",
+          "name": "نورة",
+          "name_latin": "Noura"
+        },
+        "properties": {
+          "capacity": {
+            "description": "How many can be held at once. One stylist, six covers at a table, eight\nrooms of a type, five hundred places in a museum slot.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "description": "Your key for this resource. Declaring the same one twice is a no-op.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`person`, `place` or `thing`. Display only — no rule branches on it.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_latin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "capacity"
         ],
         "type": "object"
       },
@@ -2394,6 +2597,105 @@
         ],
         "type": "object"
       },
+      "NewReservation": {
+        "example": {
+          "customer": "CUST-0001",
+          "customer_name": "سارة",
+          "id": "BK-0001",
+          "lines": [
+            {
+              "from": "2026-09-02T07:00:00Z",
+              "takes": [
+                {
+                  "resource": "stylist-noura"
+                },
+                {
+                  "resource": "chair-1"
+                }
+              ],
+              "until": "2026-09-02T08:00:00Z",
+              "what": "قص وتصفيف"
+            }
+          ]
+        },
+        "properties": {
+          "at": {
+            "description": "When the booking was taken. Defaults to now.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customer": {
+            "description": "The `crm` record, when there is one. A walk-in has none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customer_name": {
+            "description": "What the diary prints. Frozen, so a customer changing their name next\nyear does not rewrite last year's calendar.",
+            "type": "string"
+          },
+          "customer_phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "description": "Your key for this booking. Taking the same one twice is a no-op, and\ntakes no capacity the second time.",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/NewReservationLine"
+            },
+            "type": "array"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "customer_name",
+          "lines"
+        ],
+        "type": "object"
+      },
+      "NewReservationLine": {
+        "properties": {
+          "from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "takes": {
+            "description": "Everything this line takes at once — the stylist *and* the chair.",
+            "items": {
+              "$ref": "#/components/schemas/BookedResource"
+            },
+            "type": "array"
+          },
+          "until": {
+            "description": "Exclusive, so a line ending at 11:00 and one starting at 11:00 are\nback to back and do not clash.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "what": {
+            "description": "What the business calls it. Never looked at by any rule here.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "what",
+          "from",
+          "until",
+          "takes"
+        ],
+        "type": "object"
+      },
       "NewReversal": {
         "example": {
           "id": "JE-2026-0002",
@@ -2524,6 +2826,82 @@
         "required": [
           "reached",
           "live"
+        ],
+        "type": "object"
+      },
+      "OpeningHours": {
+        "description": "One window in a timetable.",
+        "example": {
+          "closes_at": 1260,
+          "opens_at": 540,
+          "weekdays": [
+            6,
+            7,
+            1,
+            2,
+            3
+          ]
+        },
+        "properties": {
+          "closes_at": {
+            "description": "Minutes past local midnight, exclusive. `1020` is 17:00, and a booking\nmay run right up to it.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "days": {
+            "description": "1 to 31. Empty means every day of the month.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "from": {
+            "description": "The first day these hours apply. Absent means they always have.",
+            "format": "date",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "months": {
+            "description": "1 is January. Empty means every month.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "opens_at": {
+            "description": "Minutes past local midnight. `540` is 09:00.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "until": {
+            "description": "The last day, **inclusive**. Absent means they always will.",
+            "format": "date",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "weekdays": {
+            "description": "1 is Monday, 7 is Sunday. Empty means every day of the week.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "opens_at",
+          "closes_at"
         ],
         "type": "object"
       },
@@ -2693,6 +3071,66 @@
                 "outstanding",
                 "payments",
                 "note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Paged_BookableRecord": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "capacity": {
+                  "format": "int32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "name_latin": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "withdrawn": {
+                  "type": "boolean"
+                },
+                "withdrawn_why": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "kind",
+                "capacity",
+                "withdrawn"
               ],
               "type": "object"
             },
@@ -3025,6 +3463,78 @@
         ],
         "type": "object"
       },
+      "Paged_ReservationRecord": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "customer": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "customer_name": {
+                  "type": "string"
+                },
+                "customer_phone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ends_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "stage": {
+                  "type": "string"
+                },
+                "stage_why": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "starts_at": {
+                  "format": "date-time",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "customer_name",
+                "stage",
+                "starts_at",
+                "ends_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "PaymentRecorded": {
         "description": "Something recorded against a document, which is not a document itself.\n\nA payment carries no statutory number: the invoice it settles is the numbered\nthing, and a receipt references that.",
         "properties": {
@@ -3249,6 +3759,143 @@
           "code",
           "category",
           "message"
+        ],
+        "type": "object"
+      },
+      "RescheduleReservation": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lines": {
+            "description": "The whole set, replacing what was there. Assignments are dropped: a\nline that moved has to be given a unit again at its new hour.",
+            "items": {
+              "$ref": "#/components/schemas/NewReservationLine"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "lines"
+        ],
+        "type": "object"
+      },
+      "ReservationRecord": {
+        "properties": {
+          "customer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customer_name": {
+            "type": "string"
+          },
+          "customer_phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ends_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "type": "string"
+          },
+          "stage_why": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "starts_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "customer_name",
+          "stage",
+          "starts_at",
+          "ends_at"
+        ],
+        "type": "object"
+      },
+      "ReservationRecordDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReservationRecord"
+          },
+          {
+            "properties": {
+              "lines": {
+                "items": {
+                  "$ref": "#/components/schemas/ReservationRecordLine"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "lines"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ReservationRecordLine": {
+        "properties": {
+          "from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "line": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "takes": {
+            "items": {
+              "$ref": "#/components/schemas/BookedResource"
+            },
+            "type": "array"
+          },
+          "unit": {
+            "description": "The unit picked out of the pool, once one has been.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "what": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "line",
+          "what",
+          "from",
+          "until",
+          "takes"
         ],
         "type": "object"
       },
@@ -3551,6 +4198,21 @@
         ],
         "type": "object"
       },
+      "Timetable": {
+        "properties": {
+          "hours": {
+            "description": "Every window this resource is offered in. **An empty list means always**,\nwhich is what a hotel room and a museum slot want.",
+            "items": {
+              "$ref": "#/components/schemas/OpeningHours"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "hours"
+        ],
+        "type": "object"
+      },
       "TrialBalanceView": {
         "properties": {
           "balances": {
@@ -3585,6 +4247,18 @@
           "balances"
         ],
         "type": "object"
+      },
+      "WithdrawBookable": {
+        "properties": {
+          "why": {
+            "description": "Out for repair, on leave, sold. Shown next to it on the calendar.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -3605,6 +4279,1613 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/booking/reservations": {
+      "get": {
+        "operationId": "list_reservations",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From a previous page's `next`.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows per page. Clamped, never refused.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Only bookings that have not finished by then.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only bookings that start before then.",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only bookings in this stage.",
+            "in": "query",
+            "name": "stage",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_ReservationRecord"
+                }
+              }
+            },
+            "description": "One page. `next` is absent when the list ended."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unreadable cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "The diary: bookings that overlap a window, earliest first.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "take_reservation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewReservation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No lines, no name, or a time that ends before it starts"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such customer or resource, or the tenant did not enable booking"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Nothing free then, or the resource is not open then"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Take a booking.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/reservations/{reservation}": {
+      "get": {
+        "operationId": "get_reservation",
+        "parameters": [
+          {
+            "description": "The id you booked it under.",
+            "in": "path",
+            "name": "reservation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReservationRecordDetail"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such booking, or the projection has not caught up"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "One booking and its lines.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/booking/reservations/{reservation}/lines": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "reschedule_reservation",
+        "parameters": [
+          {
+            "description": "The id you booked it under.",
+            "in": "path",
+            "name": "reservation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RescheduleReservation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No lines, or a time that ends before it starts"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such booking or resource"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Nothing free then, the resource is not open then, or the booking is already over"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Move a booking in time, or onto different resources.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/reservations/{reservation}/lines/{line}/unit": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "assign_unit",
+        "parameters": [
+          {
+            "description": "The id you booked it under.",
+            "in": "path",
+            "name": "reservation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Which line, counting from zero.",
+            "in": "path",
+            "name": "line",
+            "required": true,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignUnit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such booking, line or unit"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That unit is taken then, or the booking is already over"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Pick a unit out of the pool a line booked.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/reservations/{reservation}/stage": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "move_reservation",
+        "parameters": [
+          {
+            "description": "The id you booked it under.",
+            "in": "path",
+            "name": "reservation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveReservation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a stage"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such booking"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A move the lifecycle does not allow"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Move a booking along its lifecycle.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/resources": {
+      "get": {
+        "operationId": "list_bookables",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From a previous page's `next`.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows per page. Clamped, never refused.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Include what is out of service.",
+            "in": "query",
+            "name": "withdrawn",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_BookableRecord"
+                }
+              }
+            },
+            "description": "One page. `next` is absent when the list ended."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unreadable cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "Everything that can be booked, people first.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "declare_bookable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewBookable"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A missing name, or a kind that is not one"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Record something that can be booked.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/resources/{resource}": {
+      "get": {
+        "operationId": "get_bookable",
+        "parameters": [
+          {
+            "description": "The id you declared it under.",
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookableDetail"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource, or the projection has not caught up"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "One resource, with the timetable it is offered on.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "operationId": "amend_bookable",
+        "parameters": [
+          {
+            "description": "The id you declared it under.",
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AmendBookable"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A missing name"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Change a resource's name or how much of it there is.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/resources/{resource}/availability": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "set_opening_hours",
+        "parameters": [
+          {
+            "description": "The id you declared it under.",
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Timetable"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A window that closes before it opens, or a month that is not one"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Set the whole timetable a resource is offered on.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/resources/{resource}/withdrawal": {
+      "delete": {
+        "operationId": "restore_bookable",
+        "parameters": [
+          {
+            "description": "The id you declared it under.",
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Put it back, at the capacity it had.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "withdraw_bookable",
+        "parameters": [
+          {
+            "description": "The id you declared it under.",
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawBookable"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such resource"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Take a resource out of service. Bookings already against it stand.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
     "/v1/catalogue": {
       "get": {
         "description": "Unauthenticated, and on the **apex** — a signup form and a pricing page both\nneed this before anyone has an account, and before there is a subdomain to\nask from. It is product information, not data.\n\n`/v1/catalogue` rather than `/v1/modules` because that is now what a tenant's\nown list is called. The two collided the moment the tenant moved to the\nsubdomain, and the router refused to start — correctly: a path has to name\none thing, because nothing routes on the host.",

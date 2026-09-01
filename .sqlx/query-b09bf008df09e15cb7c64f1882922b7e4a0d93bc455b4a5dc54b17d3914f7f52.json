@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO occupancy_claim (resource, owner, starts_at, ends_at, quantity)\n             VALUES ($1, $2, $3, $4, $5)\n             ON CONFLICT (owner, resource, starts_at, ends_at) DO UPDATE\n                SET quantity = occupancy_claim.quantity + EXCLUDED.quantity",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b09bf008df09e15cb7c64f1882922b7e4a0d93bc455b4a5dc54b17d3914f7f52"
+}

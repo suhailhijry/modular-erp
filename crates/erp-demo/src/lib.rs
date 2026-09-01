@@ -78,6 +78,10 @@ pub struct Seeded {
     /// ZATCA documents built and waiting to be cleared or reported. Every
     /// invoice and every credit note is one.
     pub zatca_documents: usize,
+    /// Stylists, chairs and rooms on the rota.
+    pub bookables: usize,
+    /// Appointments in the diary, across every stage a screen has to draw.
+    pub reservations: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -188,6 +192,12 @@ pub async fn seed(
     project(&state.control, tenant).await?;
     let filed = seed_filing(&app, slug, &token).await?;
 
+    // The diary. After the customers, because a booking is made *by* somebody
+    // and the reference is what stops two spellings being two people — and
+    // **before the last projection run**, or the rota and the day are in the
+    // log with nothing to read them.
+    let (bookables, reservations) = seed_diary(&app, slug, &token).await?;
+
     let colleague = seed_colleague(&app, slug, &token, password).await?;
 
     // Drive the projections, so the demo has something to show the moment it
@@ -234,12 +244,15 @@ pub async fn seed(
         journal_entries,
         customers,
         zatca_documents,
+        bookables,
+        reservations,
     })
 }
 
 /// Runs every projection group to the head of the log.
 pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<(), DemoError> {
     let db = control.enter_for_maintenance(tenant).await?;
+    advance::<booking::Booking>(&db, &booking::projections(), booking::upcasters()).await?;
     advance::<crm::Crm>(&db, &crm::projections(), crm::upcasters()).await?;
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
     advance::<sales::Sales>(&db, &sales::projections(), sales::upcasters()).await?;
@@ -430,6 +443,234 @@ async fn seed_customers(app: &axum::Router, slug: &str, token: &str) -> Result<u
         .await?;
     }
     Ok(customers.len())
+}
+
+/// A rota and a day's diary.
+///
+/// # Why the demo books a salon and a hotel at once
+///
+/// Because the claim this module makes is that they are the same code. A
+/// stylist at capacity one and a room type at capacity three, in one tenant,
+/// with one of the rooms assigned and the rest still a pool, is that claim
+/// shown rather than asserted. If it ever needs a branch in `booking` to hold
+/// both, this is where it stops working.
+///
+/// Every stage a screen has to draw is in here for the reason the invoices
+/// are: a diary in which everything is `reserved` demonstrates one cell of a
+/// calendar and nothing about the day.
+async fn seed_diary(
+    app: &axum::Router,
+    slug: &str,
+    token: &str,
+) -> Result<(usize, usize), DemoError> {
+    let bookables = [
+        serde_json::json!({
+            "id": "noura", "name": "نورة", "name_latin": "Noura",
+            "kind": "person", "capacity": 1
+        }),
+        serde_json::json!({
+            "id": "hind", "name": "هند", "name_latin": "Hind",
+            "kind": "person", "capacity": 1
+        }),
+        serde_json::json!({
+            "id": "chair-1", "name": "كرسي ١", "kind": "place", "capacity": 1
+        }),
+        serde_json::json!({
+            "id": "chair-2", "name": "كرسي ٢", "kind": "place", "capacity": 1
+        }),
+        // A pool: three of them, booked by the type. `room-201` below is one of
+        // the units, and it is what "assign the unit later" gives out.
+        serde_json::json!({
+            "id": "suite", "name": "جناح", "name_latin": "Suite",
+            "kind": "place", "capacity": 3
+        }),
+        serde_json::json!({
+            "id": "room-201", "name": "٢٠١", "kind": "place", "capacity": 1
+        }),
+    ];
+    for bookable in &bookables {
+        post(
+            app,
+            slug,
+            "/v1/booking/resources",
+            Some(token),
+            bookable,
+            StatusCode::CREATED,
+        )
+        .await?;
+    }
+
+    // Sunday to Thursday, nine to nine. The Saudi working week, and the reason
+    // the rule names weekdays at all: Friday and Saturday are the weekend here,
+    // so a rota that ran Monday to Friday would be somebody else's calendar.
+    for person in ["noura", "hind"] {
+        put(
+            app,
+            slug,
+            &format!("/v1/booking/resources/{person}/availability"),
+            token,
+            &serde_json::json!({
+                "hours": [{ "weekdays": [7, 1, 2, 3, 4], "opens_at": 540, "closes_at": 1260 }]
+            }),
+            StatusCode::OK,
+        )
+        .await?;
+    }
+
+    let reservations = seed_appointments(app, slug, token).await?;
+    Ok((bookables.len(), reservations))
+}
+
+/// A Wednesday, as it reads at two in the afternoon.
+///
+/// Split from the rota above only because it was one function of a hundred and
+/// sixty lines. The two halves are a setup and a day.
+async fn seed_appointments(
+    app: &axum::Router,
+    slug: &str,
+    token: &str,
+) -> Result<usize, DemoError> {
+    let appointments = [
+        (
+            "BK-0001",
+            "CUST-0001",
+            "قص وتصفيف",
+            "07:00",
+            "08:00",
+            "noura",
+            "chair-1",
+        ),
+        (
+            "BK-0002",
+            "CUST-0002",
+            "صبغة",
+            "08:00",
+            "10:00",
+            "hind",
+            "chair-2",
+        ),
+        (
+            "BK-0003",
+            "CUST-0001",
+            "قص",
+            "10:00",
+            "10:45",
+            "noura",
+            "chair-1",
+        ),
+        (
+            "BK-0004",
+            "CUST-0003",
+            "حلاقة",
+            "11:00",
+            "11:30",
+            "hind",
+            "chair-2",
+        ),
+        (
+            "BK-0005",
+            "CUST-0002",
+            "علاج بالكيراتين",
+            "12:00",
+            "14:00",
+            "noura",
+            "chair-1",
+        ),
+    ];
+    for (id, customer, what, from, until, who, chair) in appointments {
+        post(
+            app,
+            slug,
+            "/v1/booking/reservations",
+            Some(token),
+            &serde_json::json!({
+                "id": id,
+                "customer": customer,
+                "customer_name": customer_name(customer),
+                "lines": [{
+                    "what": what,
+                    "from": format!("2026-04-15T{from}:00Z"),
+                    "until": format!("2026-04-15T{until}:00Z"),
+                    "takes": [{ "resource": who }, { "resource": chair }]
+                }]
+            }),
+            StatusCode::CREATED,
+        )
+        .await?;
+    }
+
+    // The day as it actually reads at two in the afternoon: one finished, one
+    // in the chair, one waiting, one that never came, one still to come.
+    for (id, stage, why) in [
+        ("BK-0001", "completed", ""),
+        ("BK-0002", "in_service", ""),
+        ("BK-0003", "arrived", ""),
+        ("BK-0004", "no_show", "لم تحضر"),
+    ] {
+        post(
+            app,
+            slug,
+            &format!("/v1/booking/reservations/{id}/stage"),
+            Some(token),
+            &serde_json::json!({ "stage": stage, "why": why }),
+            StatusCode::OK,
+        )
+        .await?;
+    }
+
+    seed_stay(app, slug, token).await?;
+    Ok(appointments.len() + 1)
+}
+
+/// The hotel half: a suite booked by the type, and one unit given out.
+///
+/// In the same tenant as the salon above, on purpose. The claim this module
+/// makes is that a stylist at capacity one and a room type at capacity three
+/// are the same code, and one tenant holding both is that claim shown rather
+/// than asserted.
+async fn seed_stay(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
+    post(
+        app,
+        slug,
+        "/v1/booking/reservations",
+        Some(token),
+        &serde_json::json!({
+            "id": "BK-0006",
+            "customer": "CUST-0003",
+            "customer_name": customer_name("CUST-0003"),
+            "lines": [{
+                "what": "إقامة ليلتين",
+                "from": "2026-04-15T12:00:00Z",
+                "until": "2026-04-17T08:00:00Z",
+                "takes": [{ "resource": "suite" }]
+            }]
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+    put(
+        app,
+        slug,
+        "/v1/booking/reservations/BK-0006/lines/0/unit",
+        token,
+        &serde_json::json!({ "unit": "room-201" }),
+        StatusCode::OK,
+    )
+    .await?;
+    Ok(())
+}
+
+/// What the diary prints beside a booking.
+///
+/// The frozen copy, and it has to be: `proj_booking` may not read `proj_crm`
+/// (L3). Written out here rather than read back over HTTP because the demo is
+/// what a client would send, and a client has the name in the form already.
+fn customer_name(customer: &str) -> &'static str {
+    match customer {
+        "CUST-0001" => "مجموعة الفيصلية",
+        "CUST-0002" => "نجد للخدمات اللوجستية",
+        _ => "Gulf Freight DMCC",
+    }
 }
 
 async fn install_chart(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {

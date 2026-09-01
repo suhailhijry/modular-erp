@@ -93,10 +93,45 @@ pub const MAX_SPAN_DAYS: i64 = 366;
 ///
 /// [`Timestamp`] is already UTC, so there is no timezone to normalise. A
 /// tenant's local day is a display concern and this crate never sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// # It survives the log boundary as a proof, not as two numbers
+///
+/// `#[serde(try_from = ...)]`, which is architecture §4's proof-carrying
+/// constructor: a span decoded out of an event goes through [`Span::new`] again,
+/// so a bad migration or a hand-edited payload surfaces as a decode error
+/// instead of a booking whose interval nothing in this crate would have
+/// accepted.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "Ends", into = "Ends")]
 pub struct Span {
     from: Timestamp,
     until: Timestamp,
+}
+
+/// The two ends on the wire. Private: the only way to hold a pair of instants
+/// that has not been checked is to be inside this module.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Ends {
+    from: Timestamp,
+    until: Timestamp,
+}
+
+impl TryFrom<Ends> for Span {
+    type Error = BadSpan;
+
+    fn try_from(ends: Ends) -> Result<Self, Self::Error> {
+        Self::new(ends.from, ends.until)
+    }
+}
+
+impl From<Span> for Ends {
+    fn from(span: Span) -> Self {
+        Self {
+            from: span.from,
+            until: span.until,
+        }
+    }
 }
 
 /// Why an interval is not one.
@@ -329,9 +364,19 @@ pub async fn take(
             });
         }
 
+        // **A repeat accumulates.** A booking whose three lines each take one
+        // place in the same class at the same hour is one owner holding three,
+        // and it arrives here as three claims because that is how it was
+        // written down. Summing is what that means; the alternative was a
+        // primary-key violation reaching a receptionist as "duplicate key
+        // value violates unique constraint", for a booking that was perfectly
+        // legal. The capacity check above already ran against the rows written
+        // earlier in this batch, so the sum cannot exceed what was allowed.
         sqlx::query!(
             "INSERT INTO occupancy_claim (resource, owner, starts_at, ends_at, quantity)
-             VALUES ($1, $2, $3, $4, $5)",
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (owner, resource, starts_at, ends_at) DO UPDATE
+                SET quantity = occupancy_claim.quantity + EXCLUDED.quantity",
             resource,
             owner.as_str(),
             claim.span.from,

@@ -56,6 +56,11 @@ struct Registered {
 /// nothing could check while the set was a `match` arm.
 const REGISTERED: &[Registered] = &[
     Registered {
+        name: "booking",
+        setup: booking::setup,
+        http: booking::http::routes,
+    },
+    Registered {
         name: "crm",
         setup: crm::setup,
         http: crm::http::routes,

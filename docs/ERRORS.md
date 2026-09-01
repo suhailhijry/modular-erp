@@ -64,6 +64,119 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **ar** — انتهت جلستك. يُرجى تسجيل الدخول مرة أخرى.
 
 
+## `booking`
+
+### `booking.backwards_dates`
+
+- **en** — The last day these hours apply is before the first.
+- **ar** — آخر يوم تسري فيه هذه الساعات يسبق أولها.
+
+### `booking.cannot_move`
+
+- **en** — A booking cannot go from {from} to {to}.
+- **ar** — لا يمكن نقل الحجز من {from} إلى {to}.
+
+### `booking.invalid_reference`
+
+- **en** — {reference} cannot be used as a reference.
+- **ar** — لا يمكن استخدام {reference} كمرجع.
+
+### `booking.no_name`
+
+- **en** — A booking needs a name to put in the diary.
+- **ar** — يحتاج الحجز إلى اسم يظهر في المفكرة.
+
+### `booking.no_such_customer`
+
+- **en** — There is no customer {customer}.
+- **ar** — لا يوجد عميل {customer}.
+
+### `booking.no_such_line`
+
+- **en** — This booking has no line {line}.
+- **ar** — لا يحتوي هذا الحجز على البند {line}.
+
+### `booking.no_such_reservation`
+
+- **en** — There is no booking {reservation}.
+- **ar** — لا يوجد حجز {reservation}.
+
+### `booking.no_such_resource`
+
+- **en** — There is nothing bookable called {resource}.
+- **ar** — لا يوجد شيء قابل للحجز باسم {resource}.
+
+### `booking.not_a_day_of_the_month`
+
+- **en** — {value} is not a day of any month.
+- **ar** — {value} ليس يومًا في أي شهر.
+
+### `booking.not_a_month`
+
+- **en** — {value} is not a month.
+- **ar** — {value} ليس شهرًا.
+
+### `booking.not_a_time_of_day`
+
+- **en** — A time of day is minutes past midnight, from 0 to {most}.
+- **ar** — وقت اليوم هو عدد الدقائق بعد منتصف الليل، من 0 إلى {most}.
+
+### `booking.not_a_weekday`
+
+- **en** — {value} is not a weekday. Monday is 1 and Sunday is 7.
+- **ar** — {value} ليس يومًا من أيام الأسبوع. الاثنين هو 1 والأحد هو 7.
+
+### `booking.not_a_window`
+
+- **en** — Opening hours must close after they open. A window that runs past midnight is two windows.
+- **ar** — يجب أن تنتهي ساعات العمل بعد بدايتها. النافذة التي تتجاوز منتصف الليل هي نافذتان.
+
+### `booking.not_an_offset`
+
+- **en** — A timezone offset is minutes from UTC, between -{limit} and {limit}.
+- **ar** — فرق التوقيت هو عدد الدقائق عن التوقيت العالمي، بين -{limit} و {limit}.
+
+### `booking.not_offered`
+
+- **en** — {resource} is not open at that time.
+- **ar** — {resource} غير متاح في ذلك الوقت.
+
+### `booking.nothing_to_book`
+
+- **en** — A booking needs at least one thing being booked.
+- **ar** — يحتاج الحجز إلى خدمة واحدة على الأقل.
+
+### `booking.over`
+
+- **en** — This booking is already {stage}, and nothing more can happen to it.
+- **ar** — هذا الحجز {stage} بالفعل، ولا يمكن تغييره بعد ذلك.
+
+### `booking.reserved_name`
+
+- **en** — Names beginning with "customer." are kept for customers' own diaries.
+- **ar** — الأسماء التي تبدأ بـ "customer." محجوزة لمفكرات العملاء.
+
+### `booking.resource_has_no_name`
+
+- **en** — Give it a name people will recognise on the calendar.
+- **ar** — امنحه اسمًا يتعرف عليه الناس في التقويم.
+
+### `booking.unknown_kind`
+
+- **en** — {value} is not a person, a place or a thing.
+- **ar** — {value} ليس شخصًا ولا مكانًا ولا شيئًا.
+
+### `booking.unknown_stage`
+
+- **en** — {value} is not a stage a booking can be in.
+- **ar** — {value} ليست مرحلة يمكن أن يكون الحجز فيها.
+
+### `booking.withdrawn`
+
+- **en** — {resource} is out of service.
+- **ar** — {resource} خارج الخدمة.
+
+
 ## `crm`
 
 ### `crm.already_exists`
@@ -255,6 +368,39 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — That person is not a member of this tenant.
 - **ar** — هذا الشخص ليس عضوًا لدى هذا المستأجر.
+
+
+## `occupancy`
+
+### `occupancy.empty_span`
+
+- **en** — A booking has to end after it starts.
+- **ar** — يجب أن ينتهي الحجز بعد بدايته.
+
+### `occupancy.internal_error`
+
+- **en** — Something went wrong on our side. The problem has been recorded.
+- **ar** — حدث خطأ لدينا. تم تسجيل المشكلة.
+
+### `occupancy.no_such_resource`
+
+- **en** — There is nothing here called {resource}.
+- **ar** — لا يوجد مورد باسم {resource}.
+
+### `occupancy.nothing_claimed`
+
+- **en** — A booking has to be for at least one place.
+- **ar** — يجب أن يكون الحجز لمكان واحد على الأقل.
+
+### `occupancy.overbooked`
+
+- **en** — {resource} is already holding {held} of {capacity} at that time, so {wanted} more will not fit.
+- **ar** — {resource} محجوز بمقدار {held} من {capacity} في ذلك الوقت، ولا يتسع لـ {wanted} إضافية.
+
+### `occupancy.span_too_long`
+
+- **en** — A booking may not run longer than {n} days.
+- **ar** — لا يمكن أن يمتد الحجز أكثر من {n} يوم.
 
 
 ## `ops`

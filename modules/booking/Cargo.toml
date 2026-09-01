@@ -1,0 +1,43 @@
+[package]
+name = "booking"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Reservations: who is booked with whom, when, and what that takes."
+
+[lints]
+workspace = true
+
+[dependencies]
+# `erp-occupancy` is the engine underneath. It answers "does one more fit"; this
+# crate answers "what is being booked, by whom, and is it offered then". The
+# split is deliberate and load-bearing — see the crate docs.
+erp-occupancy = { workspace = true }
+# `crm` for the customer reference, read from the log and never from `proj_crm`.
+crm = { workspace = true }
+erp-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+erp-i18n = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

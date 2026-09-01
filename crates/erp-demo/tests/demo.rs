@@ -151,6 +151,27 @@ async fn every_module_is_enabled_and_answering() {
         "sales has its invoices"
     );
 
+    let diary = demo.get("/v1/booking/reservations").await["items"].clone();
+    assert_eq!(
+        diary.as_array().expect("a list").len(),
+        demo.seeded.reservations,
+        "booking has its diary"
+    );
+    // A rota that draws only one kind of thing demonstrates only one trade, and
+    // the claim this module makes is that a stylist and a room type are the
+    // same code. Both are in there, and one of the rooms has been given out.
+    let rota = demo.get("/v1/booking/resources").await["items"].clone();
+    assert_eq!(
+        rota.as_array().expect("a list").len(),
+        demo.seeded.bookables,
+        "booking has its rota"
+    );
+    let stay = demo.get("/v1/booking/reservations/BK-0006").await;
+    assert_eq!(
+        stay["lines"][0]["unit"], "room-201",
+        "the pooled booking never had a unit assigned to it"
+    );
+
     demo.cleanup().await;
 }
 
@@ -359,6 +380,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
     let pool = demo.tenant_pool().await;
 
     let reports = vec![
+        replay!(pool, booking, booking::Booking, "reservation"),
         replay!(pool, crm, crm::Crm, "customer"),
         replay!(pool, ledger, ledger::Ledger, "account"),
         replay!(pool, sales, sales::Sales, "invoice"),

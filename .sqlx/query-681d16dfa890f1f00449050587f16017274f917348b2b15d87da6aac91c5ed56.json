@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT line as \"line!\", what as \"what!\",\n                  starts_at as \"starts_at!\", ends_at as \"ends_at!\",\n                  takes as \"takes!\", unit\n             FROM proj_booking.reservation_line\n            WHERE reservation_id = $1\n            ORDER BY line",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "line!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation_line",
+            "name": "line"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "what!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation_line",
+            "name": "what"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "starts_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation_line",
+            "name": "starts_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "ends_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation_line",
+            "name": "ends_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "takes!",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation_line",
+            "name": "takes"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "unit",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation_line",
+            "name": "unit"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "681d16dfa890f1f00449050587f16017274f917348b2b15d87da6aac91c5ed56"
+}

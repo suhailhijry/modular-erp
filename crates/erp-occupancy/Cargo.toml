@@ -17,6 +17,7 @@ workspace = true
 erp-i18n = { workspace = true }
 erp-types = { workspace = true, features = ["sqlx"] }
 chrono = { workspace = true }
+serde = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 

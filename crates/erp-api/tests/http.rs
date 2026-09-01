@@ -1715,6 +1715,13 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("filed_returns", ALL_ROLES),
     ("list_bills", ALL_ROLES),
     ("get_bill", ALL_ROLES),
+    // The diary and the rota. A viewer may read both: knowing who is booked in
+    // at ten is what everyone on a shop floor needs, and it is the screen most
+    // of these businesses live on.
+    ("list_bookables", ALL_ROLES),
+    ("get_bookable", ALL_ROLES),
+    ("list_reservations", ALL_ROLES),
+    ("get_reservation", ALL_ROLES),
     // Where the business stands with ZATCA, and the documents themselves.
     // Reading, so everyone — a clerk at a till needs to see that the receipt
     // they just handed over has been reported.
@@ -1731,6 +1738,12 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("credit_note", &["owner", "accountant", "clerk"]),
     ("record_bill", &["owner", "accountant", "clerk"]),
     ("pay_bill", &["owner", "accountant", "clerk"]),
+    // Taking a booking, moving it along, and picking the room. This is the
+    // receptionist's whole job, and the reason a clerk exists as a role.
+    ("take_reservation", &["owner", "accountant", "clerk"]),
+    ("move_reservation", &["owner", "accountant", "clerk"]),
+    ("reschedule_reservation", &["owner", "accountant", "clerk"]),
+    ("assign_unit", &["owner", "accountant", "clerk"]),
     // Changing the shape of the books. Not a clerk's job — they post into
     // the chart, they do not restructure it.
     ("open_account", &["owner", "accountant"]),
@@ -1762,6 +1775,14 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("clear_module_role", OWNER),
     // A customer record is tenant data about who the business deals with, so
     // it sits with members and modules and not with the books.
+    // Who works here, what rooms there are and when they are open is the shape
+    // of the business, not a day's work in it. A clerk books into the rota;
+    // they do not write it.
+    ("declare_bookable", OWNER),
+    ("amend_bookable", OWNER),
+    ("set_opening_hours", OWNER),
+    ("withdraw_bookable", OWNER),
+    ("restore_bookable", OWNER),
     ("register_customer", OWNER),
     ("amend_customer", OWNER),
     ("archive_customer", OWNER),
@@ -1836,8 +1857,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        53,
-        "expected fifty-three role-scoped operations"
+        66,
+        "expected sixty-six role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -1862,6 +1883,12 @@ async fn every_role_against_every_endpoint() {
                 .replace("{module}", "none")
                 .replace("{entry}", "JE-1")
                 .replace("{invoice}", "INV-1")
+                .replace("{resource}", "chair-1")
+                .replace("{reservation}", "BK-1")
+                // A number, because this one is parsed. Leaving it as the
+                // template is how `assign_unit` was found answering a 400 that
+                // was not `problem+json`.
+                .replace("{line}", "0")
                 .replace("{invitation}", "01a00000-0000-7000-8000-000000000000");
 
             let request = Request::builder()

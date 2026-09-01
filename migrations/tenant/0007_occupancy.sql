@@ -104,10 +104,17 @@ CREATE TABLE occupancy_claim (
     quantity  INTEGER NOT NULL CHECK (quantity >= 1 AND quantity <= 65535),
     taken_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    -- One owner cannot hold the same resource from the same instant twice.
-    -- Wanting two places is `quantity = 2`, which is one row. This also gives
-    -- release the index it needs for free.
-    PRIMARY KEY (owner, resource, starts_at)
+    -- One owner holds one resource over one interval, in some quantity.
+    --
+    -- The whole interval and not just the start: a booking with a one-hour line
+    -- and a two-hour line on the same room, both starting at ten, is odd but it
+    -- is not wrong, and a key that stopped at `starts_at` would refuse it with
+    -- a constraint violation nobody could read.
+    --
+    -- **Wanting two places is `quantity = 2`, which is one row**, and
+    -- `erp_occupancy::take` is what turns a repeat into that — see its
+    -- `ON CONFLICT`. This also gives release the index it needs for free.
+    PRIMARY KEY (owner, resource, starts_at, ends_at)
 );
 
 -- What the probe reads: everything on this resource that has not finished yet.

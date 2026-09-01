@@ -1,0 +1,129 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", customer_id, customer_name as \"customer_name!\",\n                  customer_phone, stage as \"stage!\", stage_why,\n                  starts_at as \"starts_at!\", ends_at as \"ends_at!\", note\n             FROM proj_booking.reservation\n            WHERE ($2::timestamptz IS NULL OR ends_at > $2)\n              AND ($3::timestamptz IS NULL OR starts_at < $3)\n              AND ($4::text IS NULL OR stage = $4)\n              AND ($5::timestamptz IS NULL OR (starts_at, id) > ($5, $6))\n            ORDER BY starts_at, id\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "customer_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "customer_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "customer_name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "customer_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "customer_phone",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "customer_phone"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "stage!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "stage"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "stage_why",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "stage_why"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "starts_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "starts_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "ends_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "ends_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "note",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "note"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "7a4805fb65fc55498fd69969c01a7b21d8182d5cfda0f1514df1fdeffd868348"
+}

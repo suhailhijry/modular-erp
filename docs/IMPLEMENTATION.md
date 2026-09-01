@@ -687,23 +687,59 @@ engine is still written for one trade.
 
 ### 8a · `modules/booking`
 
-- [ ] `Reservation` — a customer, a time, and lines. Each line claims resources
-- [ ] One lifecycle, once: `reserved → confirmed → arrived → in service →
+- [x] `Reservation` — a customer, a time, and lines. Each line claims resources
+- [x] One lifecycle, once: `reserved → confirmed → arrived → in service →
       completed`, with `cancelled` and `no-show` as ends. That system reached
-      the same list independently, which is a reason to trust it
-- [ ] Typestate, per architecture §4 — a document with consequential states is
-      where it earns its cost
-- [ ] `Availability` as a recurrence: months, weekdays, days, hours, minutes as
-      bit fields plus a date range. Theirs is compact and indexable, and it
-      generalises to opening hours, staff shifts and resource downtime
-- [ ] The customer is claimable as a resource, so "already in another chair"
-      needs no special case
-- [ ] Fungible pools: book the **type**, assign the unit later. A hotel books "a
-      double", assigns room 302 at check-in; a salon books "any stylist"
-- [ ] Add `erp_occupancy::CATALOG` to `erp_api::CATALOG`. It is deliberately not
-      there yet: its codes exist and nothing can produce one until a route
-      surfaces an `Overbooked`, and `docs/ERRORS.md` is generated from what the
-      API can actually answer with
+      the same list independently, which is a reason to trust it.
+      `ReservationEvent::Moved` is the single event that walks it, and skipping
+      forwards is allowed — a walk-in arrives without ever being confirmed
+- [x] Typestate, per architecture §4. **As an exhaustive `match` on a pair of
+      stages, not phantom types.** Every command starts from a `load`, so the
+      stage is only ever known at run time and phantom types would buy one
+      boundary check that is this same match with seven zero-sized types on top.
+      What the match does buy is real: an eighth stage is a compile error in the
+      one place the rules live. Nothing else in this codebase carries phantom
+      typestate either, and `Permit<C>` is where it earns its keep
+- [x] `Availability` as a recurrence — **and this is the second place the plan
+      was wrong.** The specified shape was cron: months, weekdays, days, hours
+      and minutes as bit fields. Cron cannot say "half past nine". Its hours and
+      minutes are independent sets, so "open 09:30 to 17:00" needs minutes
+      `{30..59} ∪ {0..29}`, which is every minute and therefore also matches
+      09:05. There is no assignment of those two fields that means what a salon
+      means. The calendar half stays as bit fields, which is what made theirs
+      compact and indexable; the clock half became the interval it actually is,
+      half-open like everything else here
+- [x] The customer is claimable as a resource, so "already in another chair"
+      needs no special case. Held at capacity one under a reserved `customer.`
+      prefix, in the same engine as every chair. **Once per distinct span, not
+      once per line** — four seats at one showing is one person at one time and
+      must be allowed; a haircut at ten and a massage at half past is one person
+      in two places and must not be
+- [x] Fungible pools: book the **type**, assign the unit later. The pool holds
+      the count and the unit holds the identity, so assigning takes a second
+      claim on a different resource and nothing is counted twice
+- [x] Add `erp_occupancy::CATALOG` to `erp_api::CATALOG`
+
+**Local time, and the ceiling on it.** A rota is local and an instant is not, so
+`booking.calendar` is a fixed offset defaulting to `+03:00`. Exact for Saudi
+Arabia and the Gulf, which have no daylight saving. A market that does needs
+`chrono-tz` and a zone name, and that is a change to `calendar.rs` and to
+nothing else.
+
+**A defect the tests found in 7b.** `occupancy_claim` was keyed on
+`(owner, resource, starts_at)`, which made a legal booking impossible: three
+lines of one reservation each taking one place in the same class at the same
+hour is one owner holding three, and it arrived as a primary-key violation
+reading `duplicate key value violates unique constraint`. The key now includes
+`ends_at` and a repeat accumulates through `ON CONFLICT DO UPDATE`. Covered by
+`one_owner_asking_twice_for_the_same_span_holds_two_of_it`.
+
+**No money, deliberately.** A reservation carries no price, no tax and no ledger
+posting. Pricing is 8d and one pure function; invoicing a completed booking is
+after that. A number on a line now would mean writing the pricing rules twice.
+
+**Exit:** the diary and the rota over HTTP, the engine holding what the diary
+says, and a replay reproducing both.
 
 ### 8b · Four fixtures, one engine
 

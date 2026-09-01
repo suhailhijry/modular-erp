@@ -23,6 +23,11 @@ use erp_i18n::Composite;
 /// crate can name: every module.
 pub static CATALOG: Composite = Composite::new(&[
     &erp_web::CATALOG,
+    // Not a module. `booking` surfaces the occupancy engine's refusals — "that
+    // stylist is already holding one of one" is the most common thing this API
+    // says no to — so its codes have to render from here like any other.
+    &erp_occupancy::CATALOG,
+    &booking::CATALOG,
     &crm::CATALOG,
     &ledger::CATALOG,
     &sales::CATALOG,

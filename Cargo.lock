@@ -245,6 +245,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "booking"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "crm",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-occupancy",
+ "erp-projection",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -523,11 +551,13 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "booking",
  "chrono",
  "crm",
  "erp-control",
  "erp-eventlog",
  "erp-i18n",
+ "erp-occupancy",
  "erp-projection",
  "erp-testkit",
  "erp-types",
@@ -582,6 +612,7 @@ name = "erp-demo"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "booking",
  "crm",
  "erp-api",
  "erp-control",
@@ -640,6 +671,7 @@ dependencies = [
  "erp-i18n",
  "erp-testkit",
  "erp-types",
+ "serde",
  "sqlx",
  "thiserror",
  "tokio",
@@ -726,6 +758,7 @@ name = "erp-worker"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "booking",
  "chrono",
  "crm",
  "erp-api",

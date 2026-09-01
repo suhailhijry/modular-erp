@@ -14,6 +14,7 @@ workspace = true
 # The third composition root, after `bin/api` and `bin/worker` — and the only
 # one that has to know *every* module, because "every module enabled" is what it
 # is for.
+booking = { workspace = true }
 crm = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }
