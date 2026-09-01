@@ -24,6 +24,7 @@ pub const NOT_A_WEEKDAY: MessageCode = MessageCode::new("booking.not_a_weekday")
 pub const UNKNOWN_STAGE: MessageCode = MessageCode::new("booking.unknown_stage");
 pub const UNKNOWN_KIND: MessageCode = MessageCode::new("booking.unknown_kind");
 pub const NOT_AN_OFFSET: MessageCode = MessageCode::new("booking.not_an_offset");
+pub const NO_SUCH_TRADE: MessageCode = MessageCode::new("booking.no_such_trade");
 
 pub static CODES: &[MessageCode] = &[
     NOTHING_TO_BOOK,
@@ -48,6 +49,7 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_STAGE,
     UNKNOWN_KIND,
     NOT_AN_OFFSET,
+    NO_SUCH_TRADE,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -269,6 +271,16 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_AN_OFFSET,
         Locale::English,
         Template::Simple("A timezone offset is minutes from UTC, between -{limit} and {limit}."),
+    ),
+    (
+        NO_SUCH_TRADE,
+        Locale::English,
+        Template::Simple("There is no ready-made rota called {trade}."),
+    ),
+    (
+        NO_SUCH_TRADE,
+        Locale::Arabic,
+        Template::Simple("لا توجد قائمة موارد جاهزة باسم {trade}."),
     ),
     (
         NOT_AN_OFFSET,

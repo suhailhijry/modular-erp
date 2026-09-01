@@ -42,6 +42,11 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(move_reservation))
         .routes(routes!(reschedule_reservation))
         .routes(routes!(assign_unit))
+        // Unauthenticated on purpose, like `ledger::list_charts`: a signup form
+        // needs to show a salon what a salon gets before anybody has an
+        // account. It is product information, not data.
+        .routes(routes!(list_trades))
+        .routes(routes!(fit_out))
 }
 
 /// This module's own failures plus everything any route can produce.
@@ -149,6 +154,54 @@ struct BookableDetail {
     hours: Vec<OpeningHours>,
     #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     declared_on: Timestamp,
+}
+
+/// One thing a trade would declare.
+#[derive(Debug, Serialize, ToSchema)]
+struct TradeResourceView {
+    id: &'static str,
+    name: &'static str,
+    kind: &'static str,
+    /// How many can be held at once. One stylist, six covers, five hundred
+    /// tickets in a slot.
+    capacity: u16,
+}
+
+/// A ready-made rota.
+#[derive(Debug, Serialize, ToSchema)]
+struct TradeView {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    /// Everything it would declare, so a signup form can show it before
+    /// anybody commits to anything.
+    resources: Vec<TradeResourceView>,
+    /// Opening hours, as minutes past local midnight.
+    hours: Vec<TradeHoursView>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct TradeHoursView {
+    /// ISO weekdays, Monday as 1. Empty means every day.
+    weekdays: Vec<u8>,
+    opens_at: u16,
+    closes_at: u16,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({"trade": "salon"}))]
+struct FitOut {
+    /// The trade's id, from `GET /v1/booking/trades`.
+    trade: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct FittedOutView {
+    declared: usize,
+    /// Already there, and left exactly as they were. Not a failure — fitting
+    /// out twice is meant to be harmless.
+    skipped: usize,
+    scheduled: usize,
 }
 
 /// A resource a line takes, and how much of it.
@@ -952,6 +1005,103 @@ async fn assign_unit(
     Ok(Json(BookingAccepted {
         id,
         position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+/// Ready-made rotas, in the caller's language.
+///
+/// Unauthenticated: a signup form needs to show the choices before anyone has
+/// an account. Everything a trade declares is renameable and withdrawable
+/// afterwards, so this is a starting point rather than a commitment.
+#[utoipa::path(
+    get,
+    path = "/v1/booking/trades",
+    tag = "booking",
+    security(),
+    responses((status = OK, body = Vec<TradeView>)),
+)]
+async fn list_trades(Language(locale): Language) -> Json<Vec<TradeView>> {
+    Json(
+        crate::TRADES
+            .iter()
+            .map(|t| TradeView {
+                id: t.id,
+                name: t.name(locale),
+                description: t.description(locale),
+                resources: t
+                    .resources
+                    .iter()
+                    .map(|r| TradeResourceView {
+                        id: r.id,
+                        name: r.name(locale),
+                        kind: r.kind.as_str(),
+                        capacity: r.capacity,
+                    })
+                    .collect(),
+                hours: t
+                    .hours
+                    .iter()
+                    .map(|h| TradeHoursView {
+                        weekdays: h.weekdays.to_vec(),
+                        opens_at: h.opens_at,
+                        closes_at: h.closes_at,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    )
+}
+
+/// Fit the tenant out for a trade: declare its rota and set its hours.
+///
+/// Safe to run twice. Anything already there is left as it is, including a name
+/// somebody changed.
+#[utoipa::path(
+    post,
+    path = "/v1/booking/fit-out",
+    tag = "booking",
+    request_body = FitOut,
+    responses(
+        (status = OK, body = FittedOutView),
+        (status = BAD_REQUEST, description = "No trade by that name", body = Problem),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn fit_out(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Json(body): Json<FitOut>,
+) -> Result<Json<FittedOutView>, Problem> {
+    require_module(&tenant, &crate::module_id(), locale)?;
+    let trade = crate::trade(&body.trade).ok_or_else(|| {
+        Problem::new(
+            StatusCode::BAD_REQUEST,
+            &erp_i18n::Message::new(crate::messages::NO_SUCH_TRADE)
+                .with("trade", erp_i18n::MessageArg::text(body.trade.clone())),
+            locale,
+            &CATALOG,
+        )
+    })?;
+
+    let fitted = crate::fit_out(
+        &tenant.db,
+        trade,
+        locale,
+        chrono::Utc::now(),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(FittedOutView {
+        declared: fitted.declared,
+        skipped: fitted.skipped,
+        scheduled: fitted.scheduled,
     }))
 }
 

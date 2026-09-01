@@ -29,6 +29,7 @@ use crate::availability::{Availability, BadRule, any_covers};
 use crate::calendar::Calendar;
 use crate::reservation::{Customer, Line, Reservation, ReservationEvent, Stage};
 use crate::resource::{Kind, Resource, ResourceEvent};
+use crate::trades::{FittedOut, Trade};
 
 /// The prefix under which a customer is held as a resource.
 ///
@@ -413,6 +414,71 @@ where
         }
     }
     contended(id, Resource::domain())
+}
+
+/// Fits out a tenant for a trade: the rota a salon, a hotel or a museum starts
+/// with.
+///
+/// **A blueprint is a list of commands (D8).** This runs `declare_resource` and
+/// `schedule_resource`, the same two a person clicking through the screens
+/// would run, so a trade cannot produce anything the domain would refuse.
+///
+/// Running it twice is safe. A resource already there is counted as skipped and
+/// keeps whatever it has been renamed to, which is what makes the button
+/// harmless to press again.
+///
+/// # Why this takes a locale
+///
+/// The names are what a person reads on a calendar all day, and the first
+/// market is Saudi Arabia. A rota installed in English that has to be renamed
+/// five times is not a starting point.
+pub async fn fit_out(
+    db: &TenantDb,
+    trade: &Trade,
+    locale: erp_i18n::Locale,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<FittedOut, Refusal> {
+    let timetable = trade
+        .timetable()
+        .map_err(|e| rejected(BookingError::Rule(e)))?;
+    let mut fitted = FittedOut::default();
+
+    for template in trade.resources {
+        let id = AggregateId::new(template.id)
+            .map_err(|_| rejected(BookingError::InvalidReference(template.id.to_owned())))?;
+        let details = Details {
+            name: template.name(locale).to_owned(),
+            // The Latin spelling beside the Arabic one, and nothing beside the
+            // English one — a name and its own duplicate is not two names.
+            name_latin: match locale {
+                erp_i18n::Locale::Arabic => Some(template.name_en.to_owned()),
+                erp_i18n::Locale::English => None,
+            },
+            kind: template.kind,
+            capacity: template.capacity,
+        };
+
+        let declared = declare_resource(db, &id, &details, at, metadata).await?;
+        if declared.at.is_some() {
+            fitted.declared += 1;
+        } else {
+            fitted.skipped += 1;
+        }
+
+        // A trade with no hours leaves everything always open, which is what a
+        // hotel and a museum's own storeroom want. A resource that does not
+        // keep the trade's hours is one that is offered whenever, and that is
+        // an empty rule set rather than a rule saying so.
+        if template.keeps_hours && !timetable.is_empty() {
+            let scheduled = schedule_resource(db, &id, &timetable, at, metadata).await?;
+            if scheduled.at.is_some() {
+                fitted.scheduled += 1;
+            }
+        }
+    }
+
+    Ok(fitted)
 }
 
 // ------------------------------------------------------------- reservations

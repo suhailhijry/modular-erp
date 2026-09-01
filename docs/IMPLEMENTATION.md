@@ -741,19 +741,52 @@ after that. A number on a line now would mean writing the pricing rules twice.
 **Exit:** the diary and the rota over HTTP, the engine holding what the diary
 says, and a replay reproducing both.
 
-### 8b · Four fixtures, one engine
+### 8b · Six fixtures, one engine
 
-- [ ] **Salon** — person plus chair, minutes, capacity 1, a named person
-- [ ] **Restaurant** — table with covers as capacity, a sitting as duration
-- [ ] **Hotel** — room type with N units, nights, assignment deferred
-- [ ] **Class** — instructor plus room, capacity N, many customers in one slot
-- [ ] **Gym** — no slot at all: a subscription and a door. The fixture that
-      proves occupancy is optional, because a gym member does not book
-- [ ] **Ticketed slot** — a museum sells 500 places at 10:00 with no named
-      resource. Pure capacity, nobody assigned. Rekaz lists museums, event
-      ticketing and horse stables; this is the shape all three need
-- [ ] Each is a blueprint (D8), not a branch in the code. Stop the phase if a
-      fixture needs a code change, and generalise what it needed
+Written as `modules/booking/src/trades.rs` — six `const` blueprints — and
+`modules/booking/tests/fixtures.rs`, which fits a tenant out from each one and
+books the thing that is characteristic of that trade.
+
+- [x] **Salon** — person plus chair, minutes, capacity 1, a named person. Two
+      stylists and two chairs refuse the third booking without anybody writing
+      "a salon has two chairs" in the code
+- [x] **Restaurant** — table with covers as capacity, a sitting as duration.
+      Four at a table for six leaves two, a party of four will not sit at a
+      table for two, and the later sitting takes the same table
+- [x] **Hotel** — room type with N units, nights, assignment deferred. Booking
+      the type leaves every room untouched; check-in claims one, and the pool is
+      not charged twice
+- [x] **Class** — instructor plus room, capacity N, many customers in one slot
+- [x] **Gym** — no slot at all. The rota holds the classes and nothing for the
+      floor, the door or the changing rooms, and the diary of a gym operating
+      normally is empty. The membership itself is Phase 14
+- [x] **Ticketed slot** — a museum sells 500 places at 10:00 with no named
+      resource. A family of four, a coach party of two hundred, and nothing
+      assigned to anybody
+- [x] Each is a blueprint (D8), not a branch in the code
+
+**No code change was needed.** All six compiled and passed against `booking` as
+8a left it. Nothing in the module reads a trade's id, so a seventh trade is an
+entry in `TRADES` and no code at all.
+
+**What the class fixture found.** Written first with one customer booked twelve
+times, and refused on the second: `customer.c1 holds 1 of 1 then`. Not a bug —
+the "already in another chair" rule doing its job — but it pins down what a
+class booking may look like. **Twelve places is either twelve customers, or one
+customer on one booking.** A parent bringing four children is one reservation
+with four places; twelve strangers are twelve reservations. What is refused is
+one person holding twelve *separate simultaneous* bookings, and it has to be:
+a system that allowed it would have nothing left to catch the salon
+double-booking with, because they are the same query.
+
+**Where the six came from.** Rekaz sells to salons, clinics, gyms, studios,
+museums, event ticketing and horse stables. Those seven need four shapes between
+them: capacity one with a named person, capacity N in one slot, a pool of
+interchangeable units, and pure capacity with nobody assigned. Restaurants add
+covers-as-capacity and the gym adds the case where there is no slot at all.
+
+**Exit:** six trades demonstrable from blueprints, and `fit_out` is the same two
+commands a person clicking through the screens would run.
 
 ### 8c · moved
 

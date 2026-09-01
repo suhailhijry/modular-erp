@@ -203,6 +203,10 @@ fn only_the_deliberately_public_routes_are_public() {
         ("post", "/v1/signups/{token}"),
         ("get", "/v1/catalogue"),
         ("get", "/v1/ledger/charts"),
+        // Same argument as the charts above: a signup form has to show a salon
+        // what a salon gets before anybody has an account. Product information,
+        // not tenant data — nothing here reads a database.
+        ("get", "/v1/booking/trades"),
         // The token in the path is the credential.
         ("get", "/v1/join/{token}"),
         ("post", "/v1/join/{token}"),

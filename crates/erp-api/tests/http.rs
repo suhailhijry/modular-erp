@@ -1778,6 +1778,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Who works here, what rooms there are and when they are open is the shape
     // of the business, not a day's work in it. A clerk books into the rota;
     // they do not write it.
+    // Fitting a tenant out for a trade declares its whole rota at once, which
+    // is the same decision as declaring one by hand and sits in the same place.
+    ("fit_out", OWNER),
     ("declare_bookable", OWNER),
     ("amend_bookable", OWNER),
     ("set_opening_hours", OWNER),
@@ -1857,8 +1860,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        66,
-        "expected sixty-six role-scoped operations"
+        67,
+        "expected sixty-seven role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

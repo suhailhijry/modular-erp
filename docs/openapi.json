@@ -1393,6 +1393,44 @@
         ],
         "type": "object"
       },
+      "FitOut": {
+        "example": {
+          "trade": "salon"
+        },
+        "properties": {
+          "trade": {
+            "description": "The trade's id, from `GET /v1/booking/trades`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trade"
+        ],
+        "type": "object"
+      },
+      "FittedOutView": {
+        "properties": {
+          "declared": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "scheduled": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skipped": {
+            "description": "Already there, and left exactly as they were. Not a failure — fitting\nout twice is meant to be harmless.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "declared",
+          "skipped",
+          "scheduled"
+        ],
+        "type": "object"
+      },
       "FullDocumentView": {
         "allOf": [
           {
@@ -4213,6 +4251,98 @@
         ],
         "type": "object"
       },
+      "TradeHoursView": {
+        "properties": {
+          "closes_at": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "opens_at": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "weekdays": {
+            "description": "ISO weekdays, Monday as 1. Empty means every day.",
+            "items": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "weekdays",
+          "opens_at",
+          "closes_at"
+        ],
+        "type": "object"
+      },
+      "TradeResourceView": {
+        "description": "One thing a trade would declare.",
+        "properties": {
+          "capacity": {
+            "description": "How many can be held at once. One stylist, six covers, five hundred\ntickets in a slot.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "capacity"
+        ],
+        "type": "object"
+      },
+      "TradeView": {
+        "description": "A ready-made rota.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "hours": {
+            "description": "Opening hours, as minutes past local midnight.",
+            "items": {
+              "$ref": "#/components/schemas/TradeHoursView"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "resources": {
+            "description": "Everything it would declare, so a signup form can show it before\nanybody commits to anything.",
+            "items": {
+              "$ref": "#/components/schemas/TradeResourceView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "resources",
+          "hours"
+        ],
+        "type": "object"
+      },
       "TrialBalanceView": {
         "properties": {
           "balances": {
@@ -4279,6 +4409,132 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/booking/fit-out": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Safe to run twice. Anything already there is left as it is, including a name\nsomebody changed.",
+        "operationId": "fit_out",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FitOut"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FittedOutView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No trade by that name"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Fit the tenant out for a trade: declare its rota and set its hours.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
     "/v1/booking/reservations": {
       "get": {
         "operationId": "list_reservations",
@@ -5885,6 +6141,56 @@
           "booking"
         ]
       }
+    },
+    "/v1/booking/trades": {
+      "get": {
+        "description": "Unauthenticated: a signup form needs to show the choices before anyone has\nan account. Everything a trade declares is renameable and withdrawable\nafterwards, so this is a starting point rather than a commitment.",
+        "operationId": "list_trades",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TradeView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "Ready-made rotas, in the caller's language.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/catalogue": {
       "get": {

@@ -54,12 +54,13 @@ mod commands;
 mod projections;
 mod reservation;
 mod resource;
+pub mod trades;
 
 pub use availability::{Availability, BadRule, any_covers};
 pub use calendar::{Calendar, NotAnOffset};
 pub use commands::{
     Amendment, Booking as Draft, BookingError, CUSTOMER_PREFIX, Details, amend_resource, assign,
-    customer_resource, declare_resource, move_to, reschedule, reserve, restore_resource,
+    customer_resource, declare_resource, fit_out, move_to, reschedule, reserve, restore_resource,
     schedule_resource, withdraw_resource,
 };
 pub use projections::{
@@ -69,6 +70,7 @@ pub use projections::{
 };
 pub use reservation::{Customer, Held, Line, Reservation, ReservationEvent, Stage, UnknownStage};
 pub use resource::{Kind, Resource, ResourceEvent, UnknownKind};
+pub use trades::{FittedOut, TRADES, TemplateHours, TemplateResource, Trade, trade};
 
 use erp_i18n::StaticCatalog;
 use erp_types::{DomainName, EventName, SchemaVersion};

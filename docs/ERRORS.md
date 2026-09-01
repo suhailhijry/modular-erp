@@ -106,6 +106,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — There is nothing bookable called {resource}.
 - **ar** — لا يوجد شيء قابل للحجز باسم {resource}.
 
+### `booking.no_such_trade`
+
+- **en** — There is no ready-made rota called {trade}.
+- **ar** — لا توجد قائمة موارد جاهزة باسم {trade}.
+
 ### `booking.not_a_day_of_the_month`
 
 - **en** — {value} is not a day of any month.
