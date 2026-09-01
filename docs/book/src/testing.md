@@ -58,6 +58,15 @@ just check
 
 Format check, clippy with warnings denied, then the tests.
 
+The suite runs under [`cargo-nextest`](https://nexte.st), which gives each test
+its own process — faster here, and a failure is named in the summary rather than
+buried in the scrollback. Install it with `cargo install cargo-nextest`.
+
+**Doctests are a second command, on purpose.** `nextest` does not run them at
+all, and this workspace has three; two are compile-checks on `erp-testkit`'s
+public examples, which is the kind of thing that rots the moment nothing looks at
+it. `just test` runs both, so neither is optional.
+
 Tests needing the network or real credentials are marked ignored, which covers
 the soak test, the rebuild benchmark, and the ZATCA sandbox tests that need a
 real taxpayer certificate. CI runs the same command against Postgres 18 and

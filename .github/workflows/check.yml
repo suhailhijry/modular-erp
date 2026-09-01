@@ -78,6 +78,11 @@ jobs:
 
       - uses: extractions/setup-just@v2
 
+      # `just test` runs the suite under nextest. A prebuilt binary, because
+      # `cargo install cargo-nextest` from source costs more than the suite it
+      # is there to speed up.
+      - uses: taiki-e/install-action@nextest
+
       - name: Install psql
         run: |
           sudo apt-get update

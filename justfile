@@ -19,8 +19,17 @@ default:
 # Everything CI runs, in the order that fails fastest.
 check: fmt-check lint test
 
+# `nextest` runs each test in its own process, which is both faster here and
+# easier to read when one fails: the summary names the failures instead of
+# burying them in the scrollback.
+#
+# **The second line is not redundant.** `nextest` does not run doctests at all,
+# and this workspace has three — two of them compile-checks on `erp-testkit`'s
+# public examples, which is exactly the kind of thing that rots unnoticed.
+# Dropping them would be a silent loss of coverage, which is what L6 is about.
 test:
-    cargo test --workspace
+    cargo nextest run --workspace
+    cargo test --workspace --doc
 
 # Redis for the test suite, on the port the tests actually default to.
 #

@@ -30,7 +30,7 @@ seconds of setup across a suite of hundreds.
 Reprint the numbers for your machine:
 
 ```bash
-cargo test -p erp-testkit --test harness cloning_is_fast -- --nocapture
+cargo nextest run -p erp-testkit --test harness cloning_is_fast --no-capture
 ```
 
 ## Usage
@@ -93,8 +93,13 @@ pub async fn drop_named_database(name: &str) -> anyhow::Result<()>;
 ```
 
 `Template::get` is memoized per fingerprint for the life of the process and
-serialized across processes with an advisory lock, so a `cargo test` that starts
-several test binaries at once builds each template exactly once. It returns
+serialized across processes with an advisory lock, so several test binaries
+starting at once build each template exactly once.
+
+**The cross-process half carries the suite now.** Under `nextest` every test is
+its own process, so the in-process memo helps almost nobody and the advisory lock
+does the work — which is the shape it was built for and the reason the switch
+cost nothing. It returns
 `&'static` because a template outlives every test that uses it and there is no
 meaningful teardown.
 

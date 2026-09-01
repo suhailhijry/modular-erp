@@ -36,6 +36,12 @@ just check
 That runs the format check, then clippy, then the tests, in the order that fails
 soonest. It's what CI runs.
 
+The tests need [`cargo-nextest`](https://nexte.st):
+
+```bash
+cargo install cargo-nextest
+```
+
 ## Seeing something real
 
 ```bash
