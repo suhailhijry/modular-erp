@@ -1,6 +1,6 @@
 # The HTTP API
 
-Fifty-seven operations across forty-two paths. Everything below is generated from
+Eighty operations across fifty-seven paths. Everything below is generated from
 the same router that serves the requests, so `docs/openapi.json` and this chapter
 cannot describe a route the server does not have.
 
@@ -225,6 +225,284 @@ does not know which tenant they are joining until they look.
 
 Accepting binds to the invited handle. If that address already has an account the
 password must match; if not, the password becomes that account's.
+
+## Customers
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/crm/customers` | Most recently registered first | Read |
+| `POST /v1/crm/customers` | Record one | ManageTenant |
+| `GET /v1/crm/customers/{customer}` | One, with everything on the record | Read |
+| `PATCH /v1/crm/customers/{customer}` | Change what is known | ManageTenant |
+| `POST /v1/crm/customers/{customer}/archive` | Out of the lists, documents intact | ManageTenant |
+| `DELETE /v1/crm/customers/{customer}/archive` | Back | ManageTenant |
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/crm/customers -d '{
+    "id":         "CUST-0001",
+    "name":       "نجد للاستشارات",
+    "name_latin": "Najd Consulting",
+    "kind":       "company",
+    "phone":      "+966500000000",
+    "vat_number": {"vat_number":"399999999900003","scheme":"CRN","identifier":"1010101010"}
+  }'
+```
+
+`kind` is `person` or `company`, and **only a company may carry a VAT number** —
+a person does not hold a registration, and allowing both would make the
+standard-against-simplified decision ambiguous at the moment it is taken.
+
+A customer needs a phone number or an email address. Refused with
+`crm.no_contact` otherwise, because a customer nobody can reach is a row rather
+than a customer.
+
+Archiving is not deletion:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/crm/customers/CUST-0001/archive \
+  -d '{"reason":"Closed the account"}'
+```
+
+They come out of the lists a clerk works from. Every invoice they are on stays
+exactly as it was.
+
+Passing `?archived=true` to the list includes them, which is what a search box
+wants and a working list does not.
+
+## Booking
+
+### The rota
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/booking/trades` | Ready-made rotas. **Unauthenticated** | — |
+| `POST /v1/booking/fit-out` | Declare a whole trade's rota at once | ManageTenant |
+| `GET /v1/booking/resources` | Everything bookable, people first | Read |
+| `POST /v1/booking/resources` | Record one | ManageTenant |
+| `GET /v1/booking/resources/{resource}` | One, with its timetable | Read |
+| `PATCH /v1/booking/resources/{resource}` | Rename, or change how much of it there is | ManageTenant |
+| `PUT /v1/booking/resources/{resource}/availability` | Set the whole timetable | ManageTenant |
+| `POST /v1/booking/resources/{resource}/withdrawal` | Out of service | ManageTenant |
+| `DELETE /v1/booking/resources/{resource}/withdrawal` | Back, at the capacity it had | ManageTenant |
+
+`/v1/booking/trades` needs no session, for the same reason `/v1/ledger/charts`
+does not: a signup form has to show a salon what a salon gets before anybody has
+an account.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/fit-out -d '{"trade":"salon"}'
+# {"declared":5,"skipped":0,"scheduled":5}
+```
+
+Six trades ship: `salon`, `restaurant`, `hotel`, `studio`, `gym`, `museum`.
+Running it twice is harmless — anything already there is counted as `skipped`
+and keeps whatever it has been renamed to.
+
+Or declare one by hand:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/resources -d '{
+    "id":         "stylist-noura",
+    "name":       "نورة",
+    "name_latin": "Noura",
+    "kind":       "person",
+    "capacity":   1
+  }'
+```
+
+`kind` is `person`, `place` or `thing`, and it is **display only** — no rule in
+the module branches on it, which is what keeps a stylist and a hotel room the
+same code.
+
+`capacity` is where most of the difference between trades lives: one stylist,
+six covers at a table, three rooms of a type, twelve places in a class, five
+hundred tickets in a slot. Names beginning `customer.` are refused; that prefix
+is kept for customers' own diaries.
+
+Opening hours:
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/resources/stylist-noura/availability -d '{
+    "hours": [
+      {"weekdays":[7,1,2,3,4], "opens_at":540, "closes_at":1260}
+    ]
+  }'
+```
+
+Times are **minutes past local midnight** — `540` is 09:00, `1260` is 21:00 —
+and the local part is the tenant's `booking.calendar` offset, `+03:00` by
+default. Weekdays are ISO, Monday as 1, so Sunday to Thursday is `[7,1,2,3,4]`.
+
+`months`, `weekdays` and `days` are all optional and **an empty list means
+every**. An empty `hours` means always open, which is what a hotel room wants.
+
+A window may not run past midnight: 22:00 to 02:00 is two windows.
+
+Withdrawing keeps the bookings already against it — a chair that broke on
+Tuesday was still booked on Monday:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/resources/chair-1/withdrawal -d '{"why":"انكسر"}'
+```
+
+### The tariff
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/booking/tariff` | Which hours cost more, and by how much | Read |
+| `PUT /v1/booking/tariff` | Set the whole thing | ManageTenant |
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/tariff -d '{
+    "bands": [
+      {"name":"ذروة المساء", "uplift":2500,
+       "hours":{"weekdays":[3,4],"opens_at":1020,"closes_at":1260}}
+    ]
+  }'
+```
+
+`uplift` is basis points: `2500` is a quarter more, `-1000` is a tenth off,
+which is what an off-peak band is. **First match wins**, so the order is your
+priority — a public holiday goes above a general evening band.
+
+**Bands, not prices.** What a service costs is yours to send on the line; when
+it costs more is the tenant's to configure, and that is the half a client must
+not be able to decide for itself.
+
+Bookings already taken keep the price they were given. The band is frozen onto
+the line when the booking is written, so moving your peak hours changes what the
+next booking costs and nothing that was already agreed.
+
+### The diary
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/booking/reservations` | Bookings overlapping a window, earliest first | Read |
+| `POST /v1/booking/reservations` | Take one | PostEntries |
+| `GET /v1/booking/reservations/{reservation}` | One, with its lines | Read |
+| `POST /v1/booking/reservations/{reservation}/stage` | Move it along | PostEntries |
+| `PUT /v1/booking/reservations/{reservation}/lines` | Move it in time, or onto other resources | PostEntries |
+| `PUT /v1/booking/reservations/{reservation}/lines/{line}/unit` | Pick a unit out of a pool | PostEntries |
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/reservations -d '{
+    "id":            "BK-0001",
+    "customer":      "CUST-0001",
+    "customer_name": "سارة",
+    "lines": [{
+      "what":  "قص وتصفيف",
+      "from":  "2026-09-02T07:00:00Z",
+      "until": "2026-09-02T08:00:00Z",
+      "takes": [{"resource":"stylist-noura"}, {"resource":"chair-1"}],
+      "charge": {"rate": 8000, "currency": "SAR", "quantity": 1}
+    }]
+  }'
+```
+
+`id` is yours, and **taking the same one twice is a no-op that takes no capacity
+the second time**. That gate matters more here than anywhere else in this API: a
+client whose request timed out and retried would otherwise book the chair twice.
+
+`takes` is everything the line needs at once — the stylist *and* the chair. Each
+entry defaults to `quantity: 1`; a party of four at a table is
+`{"resource":"table-6","quantity":4}`.
+
+`until` is exclusive, so a line ending at 11:00 and one starting at 11:00 are
+back to back and do not clash.
+
+`customer` is a `crm` id and is optional — a walk-in has none. When it is there,
+**the customer is held as a resource at capacity one**, so booking the same
+person into two chairs at the same hour is refused by the same machinery that
+refuses two people in one chair. `customer_name` is what the diary prints and is
+frozen, so somebody changing their name next year does not rewrite last year's
+calendar.
+
+`charge` is optional. The `rate` is yours; the band is the tenant's, resolved
+when the booking is written. What comes back on a read is the whole working:
+
+```json
+{"rate":8000,"currency":"SAR","quantity":1,"band":"ذروة المساء","uplift":2500,
+ "allowances":[],"gross":10000,"net":10000}
+```
+
+Refusals worth knowing:
+
+| Code | Status | What happened |
+|---|---|---|
+| `occupancy.overbooked` | 422 | Nothing free then. Carries how much is held, of what capacity |
+| `booking.not_offered` | 422 | The resource is not open at that hour |
+| `booking.withdrawn` | 422 | It is out of service |
+| `booking.no_such_customer` | 404 | No `crm` record answers to that id |
+| `booking.allowance_too_large` | 400 | A discount bigger than the line it comes off |
+
+Move it along the lifecycle:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/reservations/BK-0001/stage \
+  -d '{"stage":"arrived"}'
+```
+
+`reserved → confirmed → arrived → in_service → completed`, with `cancelled` and
+`no_show` as ends. **Skipping forwards is allowed** — a walk-in arrives without
+ever being confirmed. Backwards is not, and neither is `no_show` after they have
+arrived. Moving to the stage it is already in is a no-op, so a retried *mark them
+arrived* is harmless.
+
+Cancelling and no-show give the capacity back. **Completing does not** — a
+finished appointment held that chair, and freeing it would make the past look
+free.
+
+Reschedule, which moves it in time and onto different resources at once:
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/reservations/BK-0001/lines -d '{
+    "lines": [{
+      "what":  "قص وتصفيف",
+      "from":  "2026-09-02T07:30:00Z",
+      "until": "2026-09-02T08:30:00Z",
+      "takes": [{"resource":"stylist-noura"}, {"resource":"chair-1"}]
+    }]
+  }'
+```
+
+The whole set is replaced. A booking never conflicts with where it already was,
+so nudging it half an hour later works. **Assignments are dropped**: a line that
+moved has to be given a unit again, because the unit that was free at the old
+hour is a different question from the new one.
+
+Book the type, give out the room later:
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/reservations/BK-0006/lines/0/unit \
+  -d '{"unit":"room-201"}'
+```
+
+The pool holds the count and the unit holds the identity, so this takes a second
+claim on a different resource and nothing is counted twice. Assigning a
+different unit replaces the first and gives it back.
+
+Read the day:
+
+```bash
+curl -s "${AUTH[@]}" 'http://localhost:8080/v1/booking/reservations\
+?from=2026-09-02T00:00:00Z&until=2026-09-03T00:00:00Z&stage=reserved&limit=50'
+```
+
+The window is half-open and matches the way a claim overlaps, so a booking that
+straddles midnight appears on both days rather than on whichever one it happens
+to start in. Both ends are optional, so the same read serves *everything from
+now on* and *this week*.
 
 ## Ledger
 

@@ -53,19 +53,28 @@ chapter uses a type you have not already met.
 | 1 | [`erp-types`](./erp-types.md) | Newtypes, `Money`, `NonEmpty`, paging. No I/O |
 | 2 | [`erp-i18n`](./erp-i18n.md) | Message codes, locales, the `Localize` trait |
 | 3 | [`erp-eventlog`](./erp-eventlog.md) | The tenant log: append, load, upcast, number, enqueue |
-| 4 | [`erp-projection`](./erp-projection.md) | Groups, the runner, shadow replay |
-| 5 | [`erp-tenant`](./erp-tenant.md) | `TenantDb`, the connection budget, roles, module setup |
-| 6 | [`erp-control`](./erp-control.md) | Identities, tenants, entitlements, clusters, the fleet |
-| 7 | [`erp-web`](./erp-web.md) | Extractors, problem+json, paging, consistency |
-| 8 | [`erp-worker`](./erp-worker.md) | The `Job` trait, the visit loop, the three binaries |
-| 9 | [`erp-api`](./erp-api.md) | The core's routes, the module list, the composition root |
-| 10 | [`erp-demo`](./erp-demo.md) | The seeded tenant |
-| 11 | [`erp-testkit`](./erp-testkit.md) | Template databases, fault injection, the differ |
-| 12 | [`ledger`](./ledger.md) | Accounts, journal entries, periods, VAT, charts |
-| 13 | [`sales`](./sales.md) | Invoices, credit notes, payments in, receivables |
-| 14 | [`purchases`](./purchases.md) | Bills, payments out, input tax |
-| 15 | [`tax_sa`](./tax_sa.md) | The Saudi rate, the VAT return, ZATCA |
-| | [The HTTP API](./http.md) | All 41 endpoints, with curl for each |
+| 4 | [`erp-occupancy`](./erp-occupancy.md) | Capacity over time: does one more fit |
+| 5 | [`erp-projection`](./erp-projection.md) | Groups, the runner, shadow replay |
+| 6 | [`erp-tenant`](./erp-tenant.md) | `TenantDb`, the connection budget, roles, module setup |
+| 7 | [`erp-control`](./erp-control.md) | Identities, tenants, entitlements, clusters, the fleet |
+| 8 | [`erp-web`](./erp-web.md) | Extractors, problem+json, paging, consistency |
+| 9 | [`erp-worker`](./erp-worker.md) | The `Job` trait, the visit loop, the three binaries |
+| 10 | [`erp-api`](./erp-api.md) | The core's routes, the module list, the composition root |
+| 11 | [`erp-demo`](./erp-demo.md) | The seeded tenant |
+| 12 | [`erp-testkit`](./erp-testkit.md) | Template databases, fault injection, the differ |
+| 13 | [`crm`](./crm.md) | Customers as records |
+| 14 | [`ledger`](./ledger.md) | Accounts, journal entries, periods, VAT, charts |
+| 15 | [`sales`](./sales.md) | Invoices, credit notes, payments in, receivables |
+| 16 | [`purchases`](./purchases.md) | Bills, payments out, input tax |
+| 17 | [`tax_sa`](./tax_sa.md) | The Saudi rate, the VAT return, ZATCA |
+| 18 | [`booking`](./booking.md) | Reservations, rotas, availability, pricing |
+| | [The HTTP API](./http.md) | All 80 operations, with curl for each |
+
+`erp-occupancy` sits at 4 rather than beside `booking` because that is where its
+dependencies put it: it knows about `erp-types` and nothing else, and `booking`
+is the only thing that knows about it. It is a crate and not a module for a
+reason worth reading before the booking chapter — a read model can be rebuilt,
+and an accepted booking cannot be un-accepted.
 
 ## A note on the signatures
 
