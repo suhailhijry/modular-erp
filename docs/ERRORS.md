@@ -541,6 +541,11 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **en** — Every line of an invoice must be in the same currency.
 - **ar** — يجب أن تكون جميع سطور الفاتورة بالعملة نفسها.
 
+### `sales.no_such_customer`
+
+- **en** — There is no customer {customer} to issue this to. Record them first, or leave the customer reference out.
+- **ar** — لا يوجد عميل {customer} لإصدار الفاتورة له. سجّله أولًا أو اترك مرجع العميل فارغًا.
+
 ### `sales.not_a_discount`
 
 - **en** — A discount is the amount taken off, so it is positive. A negative one is a charge.

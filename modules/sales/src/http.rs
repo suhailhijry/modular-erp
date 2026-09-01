@@ -123,6 +123,13 @@ struct NewDiscount {
 
 #[derive(Debug, Deserialize, ToSchema)]
 struct NewCustomer {
+    /// The `crm` customer this is for. Optional, and checked when it is given:
+    /// an id naming no record, or an archived one, refuses the invoice.
+    ///
+    /// The fields below are still yours and are still what gets printed. The
+    /// reference is for grouping; the copy is what the document says.
+    #[serde(default)]
+    id: Option<String>,
     name: String,
     /// The buyer's VAT registration number, printed on the invoice.
     ///
@@ -404,6 +411,12 @@ async fn issue_invoice(
     }
 
     let mut customer = Customer::new(body.customer.name);
+    if let Some(reference) = &body.customer.id {
+        // Parsed here so a malformed id is a 400 about the id, and not a
+        // refusal from deep inside the issuing transaction about a customer
+        // that could never have existed.
+        customer = customer.of(parse_id(reference, locale)?);
+    }
     if let Some(number) = body.customer.vat_number {
         customer = customer.with_vat_number(number);
     }
@@ -611,8 +624,16 @@ async fn list_invoices(
 /// One customer's debt, split by how late it is.
 #[derive(Debug, Serialize, ToSchema)]
 struct AgedCustomerView {
-    /// As invoices name them. There is no customer record, so two spellings are
-    /// two rows — see the note on `AgedCustomer`.
+    /// What this row is grouped under: a customer id, or the frozen name when
+    /// the invoices named no record.
+    key: String,
+    /// Whether `key` is a customer id.
+    ///
+    /// `false` means these invoices were grouped by the name they froze, so two
+    /// spellings of one buyer are two rows. Record them in `crm` and reference
+    /// them to merge.
+    identified: bool,
+    /// A name to show: the one the most recent invoice in this group froze.
     customer: String,
     currency: String,
     /// Owed, but not late yet.
@@ -632,6 +653,8 @@ struct AgedCustomerView {
 
 fn aged_view(row: crate::AgedCustomer) -> AgedCustomerView {
     AgedCustomerView {
+        key: row.key,
+        identified: row.identified,
         customer: row.customer,
         currency: row.currency.as_str().to_owned(),
         not_yet_due: row.not_yet_due.minor(),
@@ -985,16 +1008,21 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
             match rejection {
                 // Well-formed, but about something that is not there or not in a
                 // state that allows it.
-                SalesError::NotIssued(_) | SalesError::Ledger(_) => {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                }
+
                 // The invoice moved on between the client reading it and paying
                 // it. Look again and decide.
                 SalesError::Overpayment { .. } | SalesError::AlreadyCancelled { .. } => {
                     StatusCode::CONFLICT
                 }
-                // Well-formed, and refused on the state of the invoice.
-                SalesError::HasPayments(_) => StatusCode::UNPROCESSABLE_ENTITY,
+                // Well-formed, and refused on the state of something the
+                // request named: the invoice, the posting accounts, or the
+                // customer record. None is a 404 — the invoice is what was
+                // being created, and it is the *body* that named what is
+                // missing or wrong.
+                SalesError::NotIssued(_)
+                | SalesError::Ledger(_)
+                | SalesError::HasPayments(_)
+                | SalesError::NoSuchCustomer(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::BAD_REQUEST,
             },
             rejection.message(),

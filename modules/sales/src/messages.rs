@@ -15,6 +15,8 @@ pub const NOT_A_DISCOUNT: MessageCode = MessageCode::new("sales.not_a_discount")
 pub const DISCOUNT_WITHOUT_A_BAND: MessageCode = MessageCode::new("sales.discount_without_a_band");
 pub const DISCOUNT_TOO_LARGE: MessageCode = MessageCode::new("sales.discount_too_large");
 pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("sales.amount_out_of_range");
+/// The invoice named a customer record that is not there, or is archived.
+pub const NO_SUCH_CUSTOMER: MessageCode = MessageCode::new("sales.no_such_customer");
 
 pub static CODES: &[MessageCode] = &[
     NOTHING_TO_INVOICE,
@@ -30,6 +32,7 @@ pub static CODES: &[MessageCode] = &[
     DISCOUNT_WITHOUT_A_BAND,
     DISCOUNT_TOO_LARGE,
     AMOUNT_OUT_OF_RANGE,
+    NO_SUCH_CUSTOMER,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -174,5 +177,19 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         HAS_PAYMENTS,
         Locale::Arabic,
         Template::Simple("توجد دفعات على الفاتورة {invoice}. أعِد المبالغ قبل إصدار إشعار دائن."),
+    ),
+    (
+        NO_SUCH_CUSTOMER,
+        Locale::English,
+        Template::Simple(
+            "There is no customer {customer} to issue this to. Record them first, or leave the customer reference out.",
+        ),
+    ),
+    (
+        NO_SUCH_CUSTOMER,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يوجد عميل {customer} لإصدار الفاتورة له. سجّله أولًا أو اترك مرجع العميل فارغًا.",
+        ),
     ),
 ];

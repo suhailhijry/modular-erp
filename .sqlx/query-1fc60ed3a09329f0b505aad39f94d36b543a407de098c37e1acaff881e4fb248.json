@@ -1,0 +1,108 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH aged AS (\n               SELECT customer_id,\n                      -- Identified rows group by id and unidentified ones by\n                      -- name, and a `CASE` on the same column is what keeps\n                      -- those two spaces from ever colliding: an id that\n                      -- happens to equal somebody's name cannot merge them.\n                      CASE WHEN customer_id IS NULL THEN customer END AS unnamed,\n                      COALESCE(customer_id, customer) AS key,\n                      customer_id IS NOT NULL AS identified,\n                      customer,\n                      id,\n                      issued_on,\n                      currency,\n                      outstanding,\n                      COALESCE(due_on, issued_on) AS due,\n                      ($1::timestamptz::date - COALESCE(due_on, issued_on)::date) AS days\n                 FROM proj_sales.invoice_status\n                WHERE outstanding > 0\n           ),\n           totalled AS (\n               SELECT key,\n                      identified,\n                      currency,\n                      (array_agg(customer ORDER BY issued_on DESC, id DESC))[1] AS customer,\n                      COALESCE(sum(outstanding) FILTER (WHERE days <= 0), 0)::BIGINT AS not_yet_due,\n                      COALESCE(sum(outstanding) FILTER (WHERE days BETWEEN 1 AND 30), 0)::BIGINT AS days_1_30,\n                      COALESCE(sum(outstanding) FILTER (WHERE days BETWEEN 31 AND 60), 0)::BIGINT AS days_31_60,\n                      COALESCE(sum(outstanding) FILTER (WHERE days BETWEEN 61 AND 90), 0)::BIGINT AS days_61_90,\n                      COALESCE(sum(outstanding) FILTER (WHERE days > 90), 0)::BIGINT AS over_90,\n                      sum(outstanding)::BIGINT AS total,\n                      count(*)::BIGINT AS invoices,\n                      min(due) AS oldest_due\n                 FROM aged\n                GROUP BY customer_id, unnamed, key, identified, currency\n           )\n           SELECT key as \"key!\", identified as \"identified!\", customer as \"customer!\",\n                  currency as \"currency!\",\n                  not_yet_due as \"not_yet_due!\", days_1_30 as \"days_1_30!\",\n                  days_31_60 as \"days_31_60!\", days_61_90 as \"days_61_90!\",\n                  over_90 as \"over_90!\", total as \"total!\",\n                  invoices as \"invoices!\", oldest_due as \"oldest_due!\"\n             FROM totalled\n            WHERE $3::bigint IS NULL OR (total, key) < ($3, $4)\n            ORDER BY total DESC, key DESC\n            LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "identified!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "customer!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_status",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "not_yet_due!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "days_1_30!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "days_31_60!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "days_61_90!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "over_90!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "total!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "invoices!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "oldest_due!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      true,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "1fc60ed3a09329f0b505aad39f94d36b543a407de098c37e1acaff881e4fb248"
+}

@@ -225,7 +225,7 @@
             "type": "string"
           },
           "customer": {
-            "description": "As invoices name them. There is no customer record, so two spellings are\ntwo rows — see the note on `AgedCustomer`.",
+            "description": "A name to show: the one the most recent invoice in this group froze.",
             "type": "string"
           },
           "days_1_30": {
@@ -240,9 +240,17 @@
             "format": "int64",
             "type": "integer"
           },
+          "identified": {
+            "description": "Whether `key` is a customer id.\n\n`false` means these invoices were grouped by the name they froze, so two\nspellings of one buyer are two rows. Record them in `crm` and reference\nthem to merge.",
+            "type": "boolean"
+          },
           "invoices": {
             "format": "int64",
             "type": "integer"
+          },
+          "key": {
+            "description": "What this row is grouped under: a customer id, or the frozen name when\nthe invoices named no record.",
+            "type": "string"
           },
           "not_yet_due": {
             "description": "Owed, but not late yet.",
@@ -265,6 +273,8 @@
           }
         },
         "required": [
+          "key",
+          "identified",
           "customer",
           "currency",
           "not_yet_due",
@@ -1976,6 +1986,13 @@
               }
             ]
           },
+          "id": {
+            "description": "The `crm` customer this is for. Optional, and checked when it is given:\nan id naming no record, or an archived one, refuses the invoice.\n\nThe fields below are still yours and are still what gets printed. The\nreference is for grouping; the copy is what the document says.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -2521,7 +2538,7 @@
                   "type": "string"
                 },
                 "customer": {
-                  "description": "As invoices name them. There is no customer record, so two spellings are\ntwo rows — see the note on `AgedCustomer`.",
+                  "description": "A name to show: the one the most recent invoice in this group froze.",
                   "type": "string"
                 },
                 "days_1_30": {
@@ -2536,9 +2553,17 @@
                   "format": "int64",
                   "type": "integer"
                 },
+                "identified": {
+                  "description": "Whether `key` is a customer id.\n\n`false` means these invoices were grouped by the name they froze, so two\nspellings of one buyer are two rows. Record them in `crm` and reference\nthem to merge.",
+                  "type": "boolean"
+                },
                 "invoices": {
                   "format": "int64",
                   "type": "integer"
+                },
+                "key": {
+                  "description": "What this row is grouped under: a customer id, or the frozen name when\nthe invoices named no record.",
+                  "type": "string"
                 },
                 "not_yet_due": {
                   "description": "Owed, but not late yet.",
@@ -2561,6 +2586,8 @@
                 }
               },
               "required": [
+                "key",
+                "identified",
                 "customer",
                 "currency",
                 "not_yet_due",

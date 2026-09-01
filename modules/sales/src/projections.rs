@@ -131,7 +131,7 @@ impl Projection for Invoices {
 /// nine arguments.
 struct NewInvoice {
     number: String,
-    customer: crate::invoice::Customer,
+    customer: Box<crate::invoice::Customer>,
     issued_on: Timestamp,
     due_on: Option<Timestamp>,
     currency: CurrencyCode,
@@ -151,14 +151,21 @@ async fn write_issued(
 ) -> Result<(), ProjectionError> {
     sqlx::query(
         "INSERT INTO invoice
-             (id, number, customer, customer_vat, issued_on, due_on, currency,
-              net, tax, gross, discount, note, recorded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             (id, number, customer, customer_vat, customer_id, issued_on, due_on,
+              currency, net, tax, gross, discount, note, recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
     )
     .bind(id)
     .bind(&invoice.number)
     .bind(&invoice.customer.name)
     .bind(invoice.customer.vat_number.as_deref())
+    .bind(
+        invoice
+            .customer
+            .id
+            .as_ref()
+            .map(erp_types::AggregateId::as_str),
+    )
     .bind(invoice.issued_on)
     .bind(invoice.due_on)
     .bind(invoice.currency.as_str())
@@ -673,10 +680,23 @@ pub async fn overpaid(conn: &mut PgConnection) -> Result<Vec<Overpaid>, sqlx::Er
 /// twice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgedCustomer {
-    /// The buyer as invoices name them. Not a foreign key — there is no customer
-    /// record, and an invoice freezes the name it was issued under (L5), so two
-    /// spellings are two rows. That is a real limitation and it is visible here
-    /// rather than hidden behind a join that would quietly merge them.
+    /// What this row is grouped under: a `crm` customer id when the invoices
+    /// named one, and the frozen name when they did not.
+    ///
+    /// The two never merge. An invoice that names a record and one that only
+    /// names a string are two different amounts of knowledge, and pretending
+    /// otherwise would silently combine a customer with a lookalike.
+    pub key: String,
+    /// Whether [`Self::key`] is a customer id.
+    ///
+    /// **This is the "says which".** A `false` row is the old behaviour and the
+    /// backfill surface: invoices issued before customers were records, or to a
+    /// walk-in. Two spellings of one name are still two rows there, and that is
+    /// visible instead of hidden behind a join that would quietly merge them.
+    pub identified: bool,
+    /// A name to show. The one the most recent invoice in this group froze,
+    /// because a customer who was renamed should appear under what they are
+    /// called now rather than what they were called first.
     pub customer: String,
     pub currency: CurrencyCode,
     /// Due after the date this was asked about. Owed, not late.
@@ -726,7 +746,17 @@ pub async fn receivables(
     let (total_before, customer_before) = resume_receivables(after)?;
     let rows = sqlx::query!(
         r#"WITH aged AS (
-               SELECT customer,
+               SELECT customer_id,
+                      -- Identified rows group by id and unidentified ones by
+                      -- name, and a `CASE` on the same column is what keeps
+                      -- those two spaces from ever colliding: an id that
+                      -- happens to equal somebody's name cannot merge them.
+                      CASE WHEN customer_id IS NULL THEN customer END AS unnamed,
+                      COALESCE(customer_id, customer) AS key,
+                      customer_id IS NOT NULL AS identified,
+                      customer,
+                      id,
+                      issued_on,
                       currency,
                       outstanding,
                       COALESCE(due_on, issued_on) AS due,
@@ -735,8 +765,10 @@ pub async fn receivables(
                 WHERE outstanding > 0
            ),
            totalled AS (
-               SELECT customer,
+               SELECT key,
+                      identified,
                       currency,
+                      (array_agg(customer ORDER BY issued_on DESC, id DESC))[1] AS customer,
                       COALESCE(sum(outstanding) FILTER (WHERE days <= 0), 0)::BIGINT AS not_yet_due,
                       COALESCE(sum(outstanding) FILTER (WHERE days BETWEEN 1 AND 30), 0)::BIGINT AS days_1_30,
                       COALESCE(sum(outstanding) FILTER (WHERE days BETWEEN 31 AND 60), 0)::BIGINT AS days_31_60,
@@ -746,16 +778,17 @@ pub async fn receivables(
                       count(*)::BIGINT AS invoices,
                       min(due) AS oldest_due
                  FROM aged
-                GROUP BY customer, currency
+                GROUP BY customer_id, unnamed, key, identified, currency
            )
-           SELECT customer as "customer!", currency as "currency!",
+           SELECT key as "key!", identified as "identified!", customer as "customer!",
+                  currency as "currency!",
                   not_yet_due as "not_yet_due!", days_1_30 as "days_1_30!",
                   days_31_60 as "days_31_60!", days_61_90 as "days_61_90!",
                   over_90 as "over_90!", total as "total!",
                   invoices as "invoices!", oldest_due as "oldest_due!"
              FROM totalled
-            WHERE $3::bigint IS NULL OR (total, customer) < ($3, $4)
-            ORDER BY total DESC, customer DESC
+            WHERE $3::bigint IS NULL OR (total, key) < ($3, $4)
+            ORDER BY total DESC, key DESC
             LIMIT $2"#,
         as_of,
         limit,
@@ -769,6 +802,8 @@ pub async fn receivables(
         .map(|row| {
             let currency = parse_currency(&row.currency)?;
             Ok(AgedCustomer {
+                key: row.key,
+                identified: row.identified,
                 customer: row.customer,
                 currency,
                 not_yet_due: Money::from_minor(row.not_yet_due, currency),
@@ -784,12 +819,14 @@ pub async fn receivables(
         .collect::<Result<Vec<_>, sqlx::Error>>()
         .map(|items| {
             Page::of(items, limit, |row| {
-                Cursor::over(&[&row.total.minor().to_string(), &row.customer])
+                // The key, not the display name: it is what the query orders
+                // by, and a cursor over a different column pages incorrectly.
+                Cursor::over(&[&row.total.minor().to_string(), &row.key])
             })
         })
 }
 
-/// The cursor for [`receivables`], which orders by total then customer.
+/// The cursor for [`receivables`], which orders by total then grouping key.
 fn resume_receivables(
     after: Option<&Cursor>,
 ) -> Result<(Option<i64>, Option<String>), sqlx::Error> {

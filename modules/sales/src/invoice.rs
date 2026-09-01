@@ -15,11 +15,26 @@ use crate::vat::{Totals, Vat};
 /// year, and a foreign key would do exactly that. This is architecture L5
 /// applied to the most visible place it matters.
 ///
-/// ponytail: no customer aggregate yet. When someone wants a customer list or a
-/// statement of account, that is what earns one — and it will still be copied
-/// onto the invoice at issue, for the reason above.
+/// # The reference and the copy, both
+///
+/// [`Customer::id`] points at a `crm` record and the rest of this struct is
+/// what was printed. Both, never either. The reference is what makes "every
+/// invoice for this customer" answerable when they are spelled two ways; the
+/// copy is what the law requires the document to say, and it does not move when
+/// the record does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Customer {
+    /// The `crm` record this was issued to, when there is one.
+    ///
+    /// **Optional, and it stays optional.** Every invoice issued before this
+    /// field existed has none, a walk-in at a till has none, and making it
+    /// required would mean a backfill that has to invent a customer for every
+    /// historic document. It is a reconciliation surface and not a foreign key.
+    ///
+    /// `#[serde(default)]`, so those older events still decode, which is why
+    /// this needs no upcaster — the same argument as `address` below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<erp_types::AggregateId>,
     pub name: String,
     /// The buyer's VAT registration number. Required by ZATCA on a B2B invoice
     /// and absent on a simplified one, which is why it is optional here.
@@ -72,10 +87,21 @@ impl Customer {
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            id: None,
             name: name.into(),
             vat_number: None,
             address: None,
         }
+    }
+
+    /// Points this at a `crm` record.
+    ///
+    /// Does not fill anything in from it. What the document says is the
+    /// caller's, because it is what will be printed and cleared.
+    #[must_use]
+    pub fn of(mut self, id: erp_types::AggregateId) -> Self {
+        self.id = Some(id);
+        self
     }
 
     #[must_use]
@@ -173,7 +199,11 @@ pub enum InvoiceEvent {
         /// statement that nothing allocated one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         number: Option<String>,
-        customer: Customer,
+        /// Boxed for the reason [`Customer::address`] is, and it is now the
+        /// customer that carries the weight: a reference, a name, a VAT number
+        /// and an address. `Box<T>` serialises as `T`, so nothing on the wire
+        /// or in the log changes and no upcaster is needed.
+        customer: Box<Customer>,
         /// The tax point — the date the supply is treated as made. Not when the
         /// row was written.
         issued_on: Timestamp,
@@ -356,7 +386,7 @@ mod tests {
         let net = Money::from_minor(gross_net, currency);
         InvoiceEvent::Issued {
             number: Some("INV-00001".to_owned()),
-            customer: Customer::new("Acme"),
+            customer: Box::new(Customer::new("Acme")),
             issued_on: Timestamp::UNIX_EPOCH,
             due_on: None,
             currency,

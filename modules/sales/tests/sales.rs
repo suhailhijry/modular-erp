@@ -2693,3 +2693,276 @@ async fn the_largest_debt_comes_first() {
     let order: Vec<&str> = rows.iter().map(|r| r.customer.as_str()).collect();
     assert_eq!(order, vec!["Big Co", "Mid Co", "Small Co"]);
 }
+
+// ---------------------------------------------------------------------------
+// The customer reference
+// ---------------------------------------------------------------------------
+//
+// An invoice references a `crm` record **and** freezes what it printed. Both,
+// never either. The reference is what makes "everything for this customer"
+// answerable when they are spelled two ways; the frozen copy is what the law
+// requires the document to say, and it does not move when the record does.
+
+/// Records a customer, so an invoice has somebody real to name.
+async fn customer_record(fixture: &Fixture, id: &str, name: &str) {
+    crm::register_customer(
+        &fixture.db,
+        &code(id),
+        &crm::Details {
+            name: name.to_owned(),
+            name_latin: None,
+            kind: crm::CustomerKind::Person,
+            contact: crm::Contact {
+                phone: Some("+966500000000".to_owned()),
+                email: None,
+            },
+            address: None,
+            tax: None,
+        },
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("registers");
+}
+
+/// Issues to a `crm` record, freezing a name that may differ from the record's.
+async fn owe_customer(
+    fixture: &Fixture,
+    id: &str,
+    reference: &str,
+    printed: &str,
+    issued: &str,
+    amount: Money,
+) -> Outcome {
+    issue_invoice(
+        &fixture.db,
+        &code(id),
+        &Draft {
+            customer: Customer::new(printed).of(code(reference)),
+            issued_on: on(issued),
+            due_on: Some(on(issued)),
+            currency: amount.currency(),
+            lines: vec![line("Consulting", amount, VatCategory::Zero)],
+            discounts: Vec::new(),
+            note: String::new(),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .map(|numbered| numbered.committed)
+}
+
+/// **The reference and the copy, both.**
+#[tokio::test]
+async fn an_invoice_names_a_customer_and_still_freezes_what_it_printed() {
+    let fixture = Fixture::new().await;
+    customer_record(&fixture, "CUST-1", "Najd Consulting").await;
+
+    // The document prints something the record does not say — a trading name,
+    // a branch, a spelling. That is what a document does, and the reference is
+    // what still ties it to the record.
+    owe_customer(
+        &fixture,
+        "INV-1",
+        "CUST-1",
+        "Najd Consulting · Riyadh branch",
+        "2026-03-01",
+        riyals(1_000),
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let stored: (String, Option<String>) =
+        sqlx::query_as("SELECT customer, customer_id FROM proj_sales.invoice WHERE id = 'INV-1'")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("reads");
+
+    assert_eq!(
+        stored.0, "Najd Consulting · Riyadh branch",
+        "the document still says what it printed"
+    );
+    assert_eq!(
+        stored.1.as_deref(),
+        Some("CUST-1"),
+        "and still points at the record"
+    );
+
+    drop(conn);
+    fixture.cleanup().await;
+}
+
+/// **A reference to nobody is refused, and costs no invoice number.**
+///
+/// The number matters as much as the refusal. `reserve` runs before the
+/// aggregate is touched, so a rejection after it must roll the whole
+/// transaction back — otherwise a typo'd customer id puts a permanent gap in a
+/// series ZATCA requires to be gapless.
+#[tokio::test]
+async fn an_invoice_to_a_customer_who_is_not_there_is_refused() {
+    let fixture = Fixture::new().await;
+    customer_record(&fixture, "CUST-1", "Najd Consulting").await;
+
+    let refused = owe_customer(
+        &fixture,
+        "INV-1",
+        "CUST-TYPO",
+        "Najd Consulting",
+        "2026-03-01",
+        riyals(1_000),
+    )
+    .await
+    .expect_err("there is no such customer");
+    assert!(matches!(
+        rejection(&refused),
+        Some(SalesError::NoSuchCustomer(_))
+    ));
+
+    // The next real invoice takes the first number, so nothing was burned.
+    let issued = owe_customer(
+        &fixture,
+        "INV-2",
+        "CUST-1",
+        "Najd Consulting",
+        "2026-03-02",
+        riyals(1_000),
+    )
+    .await
+    .expect("issues");
+    assert!(!issued.did_nothing());
+
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let number: String =
+        sqlx::query_scalar("SELECT number FROM proj_sales.invoice WHERE id = 'INV-2'")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("reads");
+    assert!(
+        number.ends_with("00001"),
+        "the refused invoice must not have consumed a number, got {number}"
+    );
+
+    drop(conn);
+    fixture.cleanup().await;
+}
+
+/// An archived customer takes no new invoices, and keeps every old one.
+#[tokio::test]
+async fn an_archived_customer_takes_no_new_invoice() {
+    let fixture = Fixture::new().await;
+    customer_record(&fixture, "CUST-1", "Najd Consulting").await;
+    owe_customer(
+        &fixture,
+        "INV-1",
+        "CUST-1",
+        "Najd",
+        "2026-03-01",
+        riyals(500),
+    )
+    .await
+    .expect("issues");
+
+    crm::archive_customer(&fixture.db, &code("CUST-1"), None, &Metadata::default())
+        .await
+        .expect("archives");
+
+    let refused = owe_customer(
+        &fixture,
+        "INV-2",
+        "CUST-1",
+        "Najd",
+        "2026-03-05",
+        riyals(500),
+    )
+    .await
+    .expect_err("archived customers take no new work");
+    assert!(matches!(
+        rejection(&refused),
+        Some(SalesError::NoSuchCustomer(_))
+    ));
+
+    fixture.project().await;
+    let rows = aged(&fixture, "2026-04-01").await;
+    assert_eq!(rows.len(), 1, "the invoice they already have is untouched");
+
+    fixture.cleanup().await;
+}
+
+/// **The payoff: a reference merges what a name cannot.**
+///
+/// Two invoices under two spellings of one buyer are two rows when all the
+/// report has is the frozen name, and one row when they name the same record.
+/// Both behaviours in one test, because the second is only interesting beside
+/// the first.
+#[tokio::test]
+async fn receivables_merge_by_reference_and_split_by_name() {
+    let fixture = Fixture::new().await;
+    customer_record(&fixture, "CUST-1", "Najd Consulting").await;
+
+    // Two spellings, one record.
+    owe_customer(
+        &fixture,
+        "INV-1",
+        "CUST-1",
+        "Najd Consulting",
+        "2026-03-01",
+        riyals(1_000),
+    )
+    .await
+    .expect("issues");
+    owe_customer(
+        &fixture,
+        "INV-2",
+        "CUST-1",
+        "NAJD CONSULTING LLC",
+        "2026-03-05",
+        riyals(500),
+    )
+    .await
+    .expect("issues");
+
+    // Two spellings, no record. The old behaviour, still visible.
+    owe(&fixture, "INV-3", "Rawabi", "2026-03-01", None, riyals(300))
+        .await
+        .expect("issues");
+    owe(&fixture, "INV-4", "RAWABI", "2026-03-02", None, riyals(200))
+        .await
+        .expect("issues");
+
+    fixture.project().await;
+    let rows = aged(&fixture, "2026-04-01").await;
+
+    let merged: Vec<_> = rows.iter().filter(|r| r.identified).collect();
+    assert_eq!(
+        merged.len(),
+        1,
+        "one record, one row, whatever it was called"
+    );
+    assert_eq!(merged[0].key, "CUST-1");
+    assert_eq!(merged[0].total, riyals(1_500), "both invoices in one total");
+    assert_eq!(merged[0].invoices, 2);
+    assert_eq!(
+        merged[0].customer, "NAJD CONSULTING LLC",
+        "shown under the name the most recent invoice froze"
+    );
+
+    let unmerged: Vec<_> = rows.iter().filter(|r| !r.identified).collect();
+    assert_eq!(
+        unmerged.len(),
+        2,
+        "two spellings with no record stay two rows, and say so"
+    );
+    for row in unmerged {
+        assert_eq!(
+            row.key, row.customer,
+            "an unidentified row keys by its name"
+        );
+    }
+
+    fixture.cleanup().await;
+}

@@ -24,6 +24,18 @@ CREATE TABLE IF NOT EXISTS invoice (
     customer     TEXT NOT NULL,
     customer_vat TEXT,
 
+    -- **The reference, beside the copy above.** Points at a `crm` record when
+    -- the invoice named one.
+    --
+    -- Deliberately not a foreign key, and it could not be one: `proj_crm` is a
+    -- different projection group on its own checkpoint, and a constraint across
+    -- them would make one group's rebuild depend on another's (L3). The check
+    -- that this names a real customer happens once, at issue, against the log.
+    --
+    -- Nullable for ever. Invoices issued before customers were records have
+    -- none, and a walk-in at a till has none.
+    customer_id  TEXT,
+
     -- The tax point, and when payment is due. Both dates the business chose,
     -- not clock readings.
     issued_on    TIMESTAMPTZ NOT NULL,
@@ -58,6 +70,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS invoice_number_is_unique ON invoice (number);
 
 CREATE INDEX IF NOT EXISTS invoice_by_date_idx ON invoice (issued_on DESC);
 CREATE INDEX IF NOT EXISTS invoice_by_customer_idx ON invoice (customer);
+CREATE INDEX IF NOT EXISTS invoice_by_customer_id_idx ON invoice (customer_id)
+    WHERE customer_id IS NOT NULL;
 
 -- What was taken off the whole invoice, and why.
 --
@@ -203,6 +217,7 @@ SELECT i.id,
        i.number,
        i.customer,
        i.customer_vat,
+       i.customer_id,
        i.issued_on,
        i.due_on,
        i.currency,

@@ -49,6 +49,8 @@ pub enum SalesError {
     HasPayments(String),
     #[error("{0} cannot be used as a reference")]
     InvalidReference(String),
+    #[error("there is no customer {0} to issue this to")]
+    NoSuchCustomer(String),
     #[error(transparent)]
     Tax(#[from] TaxError),
     #[error(transparent)]
@@ -70,6 +72,8 @@ impl erp_i18n::Localize for SalesError {
         use erp_i18n::{Message, MessageArg};
         match self {
             Self::NothingToInvoice => Message::new(messages::NOTHING_TO_INVOICE),
+            Self::NoSuchCustomer(id) => Message::new(messages::NO_SUCH_CUSTOMER)
+                .with("customer", MessageArg::text(id.clone())),
             Self::NotIssued(id) => {
                 Message::new(messages::NOT_ISSUED).with("invoice", MessageArg::text(id.clone()))
             }
@@ -207,6 +211,27 @@ async fn issue_in(
     memo: &str,
     metadata: &Metadata,
 ) -> Result<Numbered, ExecuteError<SalesError>> {
+    // **The customer reference, checked in this transaction.**
+    //
+    // Against the *log* and not `proj_crm.customer`, because `crm` is a
+    // different projection group running on its own checkpoint: a customer
+    // created a moment ago is not in that table yet, and validating against it
+    // would refuse an invoice to somebody the caller has just created. Same
+    // question and same answer as `ledger::accepts_postings` one module over.
+    //
+    // Reading `crm`'s **write** side is not the cross-group read L3 forbids.
+    // That law is about projection groups, and this touches none: it is the
+    // event log, which every module shares by design.
+    if let Some(customer) = &draft.customer.id
+        && !crm::accepts_documents(&mut *conn, customer)
+            .await
+            .map_err(ExecuteError::Load)?
+    {
+        return Err(ExecuteError::Rejected(SalesError::NoSuchCustomer(
+            customer.to_string(),
+        )));
+    }
+
     // **The rate, in this transaction too.** It used to be a constant the API
     // handler stamped onto each line before the command ran; it is now the
     // tenant's, and reading it here is what stops an invoice carrying a rate
@@ -284,7 +309,7 @@ async fn issue_in(
             }
             Ok(Decision::one(InvoiceEvent::Issued {
                 number: Some(number.clone()),
-                customer: draft.customer.clone(),
+                customer: Box::new(draft.customer.clone()),
                 issued_on: draft.issued_on,
                 due_on: draft.due_on,
                 currency: draft.currency,

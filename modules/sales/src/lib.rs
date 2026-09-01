@@ -138,6 +138,17 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         GROUPS,
         upcasters,
     )
+    // **The ledger, and deliberately not `crm`.**
+    //
+    // The crate dependency and the entitlement dependency are not the same
+    // thing, and this is the clearest case of it in the build. `sales` links
+    // `crm` to check a customer reference at issue, but that reference is
+    // *optional*: a till issuing simplified invoices to walk-ins never names a
+    // customer record and should not be made to keep one.
+    //
+    // A tenant without `crm` who sends a customer id is refused with
+    // `sales.no_such_customer`, which is the honest answer — there is no such
+    // customer, because there are none.
     .requiring(&["ledger"])
 }
 

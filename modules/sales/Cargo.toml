@@ -14,6 +14,7 @@ workspace = true
 chrono = { workspace = true }
 # The second module, and the first to depend on another one. See `lib.rs` on why
 # that is deliberate rather than a shortcut.
+crm = { workspace = true }
 ledger = { workspace = true }
 
 # The module ships its own routes; `erp-web` is what they are built from.

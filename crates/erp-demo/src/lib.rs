@@ -369,15 +369,17 @@ async fn sign_up(
 /// two obligations.
 async fn seed_customers(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
     let customers = [
+        // The two that appear on more than one invoice. Referencing them is
+        // what makes receivables show one row each instead of one per spelling.
         serde_json::json!({
             "id": "CUST-0001",
-            "name": "نجد للاستشارات",
-            "name_latin": "Najd Consulting",
+            "name": "مجموعة الفيصلية",
+            "name_latin": "Al Faisaliah Group",
             "kind": "company",
             "phone": "+966500000001",
-            "email": "hello@najd.example",
+            "email": "ap@faisaliah.example",
             "vat_number": {
-                "vat_number": "399999999900003",
+                "vat_number": "310122393500003",
                 "scheme": "CRN",
                 "identifier": "1010101010"
             },
@@ -393,10 +395,26 @@ async fn seed_customers(app: &axum::Router, slug: &str, token: &str) -> Result<u
         }),
         serde_json::json!({
             "id": "CUST-0002",
-            "name": "سارة العتيبي",
-            "kind": "person",
+            "name": "نجد للخدمات اللوجستية",
+            "name_latin": "Najd Logistics",
+            "kind": "company",
             "phone": "+966500000002",
-            "registered_on": "2026-02-11T00:00:00Z"
+            "vat_number": {
+                "vat_number": "311234567800003",
+                "scheme": "CRN",
+                "identifier": "2020202020"
+            },
+            "registered_on": "2026-01-12T00:00:00Z"
+        }),
+        // A company with no Saudi VAT registration, which is why its invoice is
+        // zero-rated and simplified. `kind` is still `company`; not every
+        // company is registered here.
+        serde_json::json!({
+            "id": "CUST-0003",
+            "name": "Gulf Freight DMCC",
+            "kind": "company",
+            "email": "accounts@gulffreight.example",
+            "registered_on": "2026-02-01T00:00:00Z"
         }),
     ];
 
@@ -649,6 +667,18 @@ async fn seed_bills(app: &axum::Router, slug: &str, token: &str) -> Result<usize
     Ok(bills.len())
 }
 
+/// The `crm` record each invoice is issued to.
+///
+/// The demo's whole point here: two invoices to Al Faisaliah name the same
+/// record, so receivables shows one row for them rather than one per spelling.
+fn reference(customer: &str) -> &'static str {
+    match customer {
+        "Najd Logistics" => "CUST-0002",
+        "Gulf Freight DMCC" => "CUST-0003",
+        _ => "CUST-0001",
+    }
+}
+
 /// Five invoices across three customers, spanning every VAT treatment.
 ///
 /// The mix is the point: a demo with one 15% invoice shows nothing about the
@@ -730,6 +760,10 @@ async fn seed_invoices(app: &axum::Router, slug: &str, token: &str) -> Result<us
             &serde_json::json!({
                 "id": id,
                 "customer": {
+                    // **The reference and the copy, both.** The record is what
+                    // groups a customer's debt; the name and address below are
+                    // what the document prints and what ZATCA clears.
+                    "id": reference(customer),
                     "name": customer,
                     "vat_number": vat_number,
                     // ZATCA wants a buyer address on a standard invoice, and
@@ -802,7 +836,11 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
         Some(token),
         &serde_json::json!({
             "id": "crm-4544",
-            "customer": { "name": "Najd Logistics", "vat_number": "311234567800003" },
+            "customer": {
+                "id": "CUST-0002",
+                "name": "Najd Logistics",
+                "vat_number": "311234567800003"
+            },
             "issued_on": "2026-03-11T00:00:00Z",
             "due_on": "2026-04-10T00:00:00Z",
             "currency": "SAR",
