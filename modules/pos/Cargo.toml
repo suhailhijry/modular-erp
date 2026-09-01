@@ -1,0 +1,48 @@
+[package]
+name = "pos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The counter: a shift, a till sale, and the variance a manager reads."
+
+[lints]
+workspace = true
+
+[dependencies]
+# **`sales`, and that is the whole architecture of this module.** A till
+# transaction is a ZATCA simplified invoice, and `sales` already builds, numbers,
+# hashes, chains, signs and reports one. Writing a second document model here
+# would duplicate VAT, numbering and the ZATCA chain, and give revenue two
+# sources of truth. So `pos` owns the cash drawer and composes the document.
+#
+# `crm` because a till sale may name a customer — a VAT number makes it a
+# standard invoice — and `ledger` because the drawer posts.
+ledger = { workspace = true }
+sales = { workspace = true }
+crm = { workspace = true }
+erp-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+erp-i18n = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

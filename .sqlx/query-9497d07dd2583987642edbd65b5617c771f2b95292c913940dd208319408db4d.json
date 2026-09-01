@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT method as \"method!\", taken as \"taken!\", refunded as \"refunded!\",\n                  currency as \"currency!\"\n             FROM proj_pos.taking WHERE shift = $1 ORDER BY method",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "method!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_pos.taking",
+            "name": "method"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "taken!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_pos.taking",
+            "name": "taken"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "refunded!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_pos.taking",
+            "name": "refunded"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_pos.taking",
+            "name": "currency"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9497d07dd2583987642edbd65b5617c771f2b95292c913940dd208319408db4d"
+}

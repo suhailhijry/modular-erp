@@ -1738,6 +1738,10 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("get_subscription", ALL_ROLES),
     ("outstanding", ALL_ROLES),
     ("deferral_accounts", ALL_ROLES),
+    ("list_shifts", ALL_ROLES),
+    ("get_shift", ALL_ROLES),
+    ("shift_takings", ALL_ROLES),
+    ("till_accounts", ALL_ROLES),
     ("list_cards", ALL_ROLES),
     ("get_card", ALL_ROLES),
     ("loyalty_scheme", ALL_ROLES),
@@ -1779,6 +1783,10 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("resume_subscription", &["owner", "accountant", "clerk"]),
     ("renew_subscription", &["owner", "accountant", "clerk"]),
     ("cancel_subscription", &["owner", "accountant", "clerk"]),
+    ("open_shift", &["owner", "accountant", "clerk"]),
+    ("ring_sale", &["owner", "accountant", "clerk"]),
+    ("pay_out", &["owner", "accountant", "clerk"]),
+    ("close_shift", &["owner", "accountant", "clerk"]),
     ("open_card", &["owner", "accountant", "clerk"]),
     ("earn_on_card", &["owner", "accountant", "clerk"]),
     ("redeem_card_points", &["owner", "accountant", "clerk"]),
@@ -1795,6 +1803,7 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Where a liability is held is the shape of the books, not a day's work.
     ("set_deferral_accounts", &["owner", "accountant"]),
     ("set_loyalty_scheme", &["owner", "accountant"]),
+    ("set_till_accounts", &["owner", "accountant"]),
     // Declaring the numbers final is the accountant's call, and not
     // something a clerk posting entries should be able to do to them.
     ("close_books", &["owner", "accountant"]),
@@ -1909,8 +1918,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        94,
-        "expected ninety-four role-scoped operations"
+        103,
+        "expected a hundred and three role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

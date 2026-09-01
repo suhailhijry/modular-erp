@@ -20,6 +20,7 @@ erp-occupancy = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }
 prepaid = { workspace = true }
+pos = { workspace = true }
 purchases = { workspace = true }
 tax_sa = { workspace = true }
 erp-i18n = { workspace = true }
@@ -46,6 +47,7 @@ erp-eventlog = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }
 prepaid = { workspace = true }
+pos = { workspace = true }
 purchases = { workspace = true }
 tax_sa = { workspace = true }
 erp-projection = { workspace = true }

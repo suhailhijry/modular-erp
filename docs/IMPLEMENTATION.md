@@ -1415,25 +1415,72 @@ It is also the cheapest phase to be confident about, because the hard half is
 already built: every till transaction is a ZATCA **simplified** invoice, and
 this system builds, hashes, chains, signs and reports those today.
 
-- [ ] `Sale` — lines of products and services, discounts, a tender, a receipt.
-      One aggregate, and it posts to `ledger` in its own transaction like every
-      other document
-- [ ] `Shift` — open, count, sell, count, close. The cash-drawer domain: an
-      opening float, takings by tender, a declared count, and **the variance**,
-      which is the number a manager actually reads
-- [ ] A sale is a simplified invoice unless the buyer gives a VAT number, and
-      then it is standard and needs clearing before the customer walks away with
-      it. `zatca::Kind::of` already decides this and stays the only place it is
-      decided
-- [ ] Returns and refunds against a sale, which for a cleared document is a
-      credit note and not an edit
-- [ ] **Offline is deliberately out of scope for now.** A till that queues sales
-      locally and reconciles later is a second write path with its own ordering
-      problem, and L1 is not negotiable. Revisit when a customer loses money to
-      it, not before
+- [x] **`Sale` is not an aggregate, and that is the phase's one real decision.**
+      A till transaction *is* a ZATCA simplified invoice, and `sales` already
+      builds, numbers, hashes, chains, signs and reports one. A second document
+      model here would duplicate VAT, discounts, numbering and the ZATCA chain —
+      and give revenue two sources of truth, so the VAT return and the till
+      report could disagree with nobody able to say which was right.
 
-**Exit:** a café opens a shift, sells forty coffees, closes with a variance of
-zero, and every receipt is reported to ZATCA within the day.
+      So `pos` **composes**: `sell` writes the shift's event, `sales::issue_in`
+      and `sales::pay_in` in **one transaction**, the same seam `sales` itself
+      uses on `ledger`. The two functions were already there and private;
+      making them public was the whole of the change to `sales`
+- [x] `Shift` — open, sell, pay out, count, close. The cash-drawer domain: an
+      opening float, takings by tender, a declared count, and **the variance**,
+      which is the number a manager actually reads and the only one this module
+      posts
+- [x] A sale is a simplified invoice unless the buyer gives a VAT number. Not
+      re-decided here: it is `sales`' rule, reached by passing the customer
+      through, which is what composing buys
+- [ ] **Returns and refunds — blocked, and the plan did not see why.**
+      `sales::cancel_invoice` refuses an invoice that has payments
+      (`SalesError::HasPayments`), and **every till sale is paid the instant it
+      happens**, so no till sale can be credited through the existing path.
+
+      The refusal is right as it stands: crediting a paid invoice without paying
+      the money back leaves the business holding cash it now owes. What is
+      missing is a **refund** — money out — which `sales` has no concept of, and
+      which belongs there rather than here because a shop that invoices normally
+      can also refund. `ShiftEvent::Refunded` and the drawer half of it are
+      built and unreachable, waiting on that
+- [x] **Offline is deliberately out of scope.** Unchanged, and the reason is
+      unchanged: a till that queues sales locally is a second write path with
+      its own ordering problem, and L1 is not negotiable
+
+**Two more divergences, and the reasons.**
+
+- **The float does not post.** Cash moved from a safe to a drawer is still
+  `1000 Cash on hand`, so the business is no richer and there is no entry. It
+  follows that a shift's `expected` — what the drawer should physically hold — is
+  a *larger* number than what the shift added to the ledger, and that the two
+  answer different questions. The variance is what reconciles them
+- **`5910 Cash over and short` is new in every chart**, for the reason `2400`
+  was added in Phase 14: a till that records a shortage and cannot post it
+  leaves the books saying the drawer holds what it does not, for ever
+
+**Two weak tests, found by falsification and not by review.** Both passed
+against code that was wrong, which is the failure mode a test suite is worst at
+noticing about itself.
+
+- The drawer rule was written **twice**: the aggregate matched on `Method::Cash`
+  and the projection asked `is_in_the_drawer`. Making every card sale count into
+  the drawer left every test green, because the aggregate never consulted the
+  rule being broken. `Takings::in_the_drawer` is now the one place it is applied
+- The variance test closed one till short and one over by the same amount and
+  asserted the expense account netted to zero — which is also what posting
+  *neither* looks like, and what posting them backwards looks like. It now
+  asserts the shortage on its own before the overage exists
+
+Seven mutations after those fixes, seven caught: a card in the drawer, a
+variance unposted, a variance inverted, tenders that need not match the sale, a
+retried sale ringing twice, a shut till still selling, and a pay-out counted
+twice.
+
+**Exit: met.** `a_cafe_opens_sells_and_closes_level` opens a shift, rings forty
+coffees, checks all forty statutory numbers are distinct, closes level, and
+asserts the drawer, revenue and VAT payable in the ledger — which `pos` never
+posted, because `sales` did.
 
 ---
 

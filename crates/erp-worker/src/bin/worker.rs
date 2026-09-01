@@ -510,6 +510,14 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
             .for_module(prepaid::module_id()),
         ),
         Arc::new(
+            ProjectionJob::<pos::Pos>::new(
+                pos::projections(),
+                Arc::new(pos::upcasters().clone()),
+                200,
+            )
+            .for_module(pos::module_id()),
+        ),
+        Arc::new(
             ProjectionJob::<purchases::Purchases>::new(
                 purchases::projections(),
                 Arc::new(purchases::upcasters().clone()),

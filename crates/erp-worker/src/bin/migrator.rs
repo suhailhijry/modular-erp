@@ -251,6 +251,12 @@ async fn rebuild(
                 owned.iter().map(std::convert::AsRef::as_ref).collect();
             rebuild_swap::<prepaid::Prepaid>(&pool, sql, &refs, upcasters, 500).await?
         }
+        "pos" => {
+            let owned = pos::projections();
+            let refs: Vec<&dyn Projection<Group = pos::Pos>> =
+                owned.iter().map(std::convert::AsRef::as_ref).collect();
+            rebuild_swap::<pos::Pos>(&pool, sql, &refs, upcasters, 500).await?
+        }
         "purchases" => {
             let owned = purchases::projections();
             let refs: Vec<&dyn Projection<Group = purchases::Purchases>> =
@@ -404,6 +410,7 @@ mod tests {
             "crm",
             "ledger",
             "prepaid",
+            "pos",
             "sales",
             "purchases",
             "tax_sa",

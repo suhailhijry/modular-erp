@@ -31,6 +31,7 @@ crm = { path = "modules/crm" }
 ledger = { path = "modules/ledger" }
 sales = { path = "modules/sales" }
 prepaid = { path = "modules/prepaid" }
+pos = { path = "modules/pos" }
 purchases = { path = "modules/purchases" }
 tax_sa = { path = "modules/tax_sa" }
 

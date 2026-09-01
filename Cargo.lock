@@ -564,6 +564,7 @@ dependencies = [
  "erp-web",
  "ledger",
  "openssl",
+ "pos",
  "prepaid",
  "purchases",
  "sales",
@@ -622,6 +623,7 @@ dependencies = [
  "erp-testkit",
  "erp-types",
  "ledger",
+ "pos",
  "prepaid",
  "purchases",
  "sales",
@@ -773,6 +775,7 @@ dependencies = [
  "erp-types",
  "ledger",
  "lettre",
+ "pos",
  "prepaid",
  "purchases",
  "sales",
@@ -1640,6 +1643,35 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "pos"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "crm",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-projection",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "futures-util",
+ "ledger",
+ "sales",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+]
 
 [[package]]
 name = "potential_utf"

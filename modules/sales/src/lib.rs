@@ -39,7 +39,8 @@ mod projections;
 mod vat;
 
 pub use commands::{
-    Draft, Numbered, Receipt, SalesError, cancel_invoice, issue_invoice, record_payment,
+    Draft, Numbered, Receipt, SalesError, cancel_invoice, issue_in, issue_invoice, pay_in,
+    record_payment,
 };
 pub use invoice::{
     Address, Customer, Discount, DraftDiscount, DraftLine, Invoice, InvoiceEvent, InvoiceLine,

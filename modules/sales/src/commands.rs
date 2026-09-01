@@ -205,7 +205,12 @@ pub async fn issue_invoice(
 
 /// One attempt at issuing: the invoice event and its journal entry, in the
 /// caller's transaction.
-async fn issue_in(
+///
+/// **Public because a till composes it.** `pos` writes a shift's own event, this
+/// invoice and its payment in one transaction, for the same reason this module
+/// calls `ledger::post_entry_in` rather than posting a moment later: a sale that
+/// exists in one place and not the other is a state nobody could explain.
+pub async fn issue_in(
     conn: &mut sqlx::PgConnection,
     id: &AggregateId,
     entry_id: &AggregateId,
@@ -402,7 +407,9 @@ pub async fn record_payment(
     Err(contended(invoice))
 }
 
-async fn pay_in(
+/// One attempt at recording a payment, in the caller's transaction. Public for
+/// the reason [`issue_in`] is.
+pub async fn pay_in(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,
     entry_id: &AggregateId,

@@ -81,6 +81,11 @@ const REGISTERED: &[Registered] = &[
         http: prepaid::http::routes,
     },
     Registered {
+        name: "pos",
+        setup: pos::setup,
+        http: pos::http::routes,
+    },
+    Registered {
         name: "purchases",
         setup: purchases::setup,
         http: purchases::http::routes,

@@ -144,11 +144,14 @@ async fn every_module_is_enabled_and_answering() {
         "the ledger has a chart"
     );
 
+    // **The till's sales are in here too**, and that is `pos`'s whole claim:
+    // a counter transaction is a `sales` invoice, so there is one place that
+    // answers "what did we sell" and the VAT return does not have to choose.
     let invoices = demo.get("/v1/sales/invoices").await["items"].clone();
     assert_eq!(
         invoices.as_array().expect("a list").len(),
-        demo.seeded.invoices,
-        "sales has its invoices"
+        demo.seeded.invoices + demo.seeded.till_sales,
+        "sales has its invoices, the counter's among them"
     );
 
     let diary = demo.get("/v1/booking/reservations").await["items"].clone();
@@ -195,6 +198,8 @@ async fn every_module_is_enabled_and_answering() {
         card["deferred"]["minor"], 549,
         "9.09 deferred against a hundred riyals, less the 3.60 honoured"
     );
+
+    the_counter_counted(&demo).await;
 
     let membership = demo
         .get(&format!(
@@ -442,6 +447,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
         replay!(pool, booking, booking::Booking, "reservation"),
         replay!(pool, crm, crm::Crm, "customer"),
         replay!(pool, prepaid, prepaid::Prepaid, "entitlement"),
+        replay!(pool, pos, pos::Pos, "shift"),
         replay!(pool, ledger, ledger::Ledger, "account"),
         replay!(pool, sales, sales::Sales, "invoice"),
         replay!(pool, purchases, purchases::Purchases, "bill"),
@@ -522,7 +528,7 @@ async fn the_demo_passes_every_invariant() {
         .items;
     assert_eq!(
         documents.len(),
-        demo.seeded.invoices + demo.seeded.credited,
+        demo.seeded.invoices + demo.seeded.till_sales + demo.seeded.credited,
         "every invoice and every credit note is a ZATCA document"
     );
     let mut positions: Vec<i64> = documents.iter().filter_map(|d| d.icv).collect();
@@ -703,4 +709,25 @@ async fn the_demo_has_somebody_who_cannot_do_everything() {
     );
 
     demo.cleanup().await;
+}
+
+/// The counter: a shift that was counted, and came up short.
+///
+/// Split out because the test above was one line over the limit. It is also a
+/// separate claim: the others are that a module answers, this is that the till
+/// reconciled — and that the number it reconciled to is not zero, because a
+/// demo where the drawer always balances shows nothing about the feature.
+async fn the_counter_counted(demo: &Demo) {
+    let shift = demo
+        .get(&format!(
+            "/v1/pos/shifts/{}",
+            erp_demo::demo_id("SHIFT-0001")
+        ))
+        .await;
+    assert_eq!(shift["sales_count"], 4);
+    assert_eq!(
+        shift["variance"]["minor"], -50,
+        "the demo's drawer is fifty halalas short, on purpose"
+    );
+    assert_eq!(shift["expected"]["minor"], 23_645);
 }

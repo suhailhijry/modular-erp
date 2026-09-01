@@ -197,6 +197,15 @@ static SERVICES: &[TemplateAccount] = &[
         "مصروفات أخرى",
         AccountKind::Expense,
     ),
+    // **What a counted drawer disagrees with the books by.** In every template
+    // for the reason `2400` is: a till that cannot post its shortage leaves the
+    // books saying the drawer holds what it does not, for ever.
+    account(
+        "5910",
+        "Cash over and short",
+        "فروقات الصندوق",
+        AccountKind::Expense,
+    ),
 ];
 
 /// The services chart plus what a business holding stock needs.
@@ -300,6 +309,15 @@ static RETAIL: &[TemplateAccount] = &[
         "5900",
         "Other expenses",
         "مصروفات أخرى",
+        AccountKind::Expense,
+    ),
+    // **What a counted drawer disagrees with the books by.** In every template
+    // for the reason `2400` is: a till that cannot post its shortage leaves the
+    // books saying the drawer holds what it does not, for ever.
+    account(
+        "5910",
+        "Cash over and short",
+        "فروقات الصندوق",
         AccountKind::Expense,
     ),
 ];

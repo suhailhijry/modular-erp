@@ -84,6 +84,8 @@ pub struct Seeded {
     pub reservations: usize,
     /// Packages and gym memberships sold, and therefore deferred.
     pub prepaid: usize,
+    /// Sales rung through the till, on a shift that was counted.
+    pub till_sales: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -204,6 +206,10 @@ pub async fn seed(
     // before the last projection run.
     let prepaid = seed_prepaid(&app, slug, &token).await?;
 
+    // The counter. After the customers for the same reason the diary is, and
+    // before the last projection run.
+    let till_sales = seed_till(&app, slug, &token).await?;
+
     let colleague = seed_colleague(&app, slug, &token, password).await?;
 
     // Drive the projections, so the demo has something to show the moment it
@@ -253,6 +259,7 @@ pub async fn seed(
         bookables,
         reservations,
         prepaid,
+        till_sales,
     })
 }
 
@@ -261,6 +268,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     let db = control.enter_for_maintenance(tenant).await?;
     advance::<booking::Booking>(&db, &booking::projections(), booking::upcasters()).await?;
     advance::<prepaid::Prepaid>(&db, &prepaid::projections(), prepaid::upcasters()).await?;
+    advance::<pos::Pos>(&db, &pos::projections(), pos::upcasters()).await?;
     advance::<crm::Crm>(&db, &crm::projections(), crm::upcasters()).await?;
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
     advance::<sales::Sales>(&db, &sales::projections(), sales::upcasters()).await?;
@@ -1338,6 +1346,109 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
     .await?;
 
     Ok(1)
+}
+
+/// A day at the counter: a shift opened, sales rung, and the drawer counted.
+///
+/// # Why the demo closes short by half a riyal
+///
+/// Because a variance of zero demonstrates the arithmetic and nothing about the
+/// feature. **The number a manager reads is the one that is not zero**, and a
+/// demo where the drawer always balances hides both the posting it makes and
+/// the screen that shows it. Fifty halalas missing is what a real till looks
+/// like on a real Tuesday.
+///
+/// Every sale here is a ZATCA simplified invoice in `sales` with a statutory
+/// number, which is the module's whole claim: there is no second document.
+async fn seed_till(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    create(
+        app,
+        slug,
+        "/v1/pos/shifts",
+        token,
+        "SHIFT-0001",
+        &serde_json::json!({
+            "till": "الكاشير ١",
+            "float": { "minor": 50_000, "currency": "SAR" },
+            "at": "2026-04-01T06:00:00Z"
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+
+    // A morning: cash, card, and one split between the two.
+    let sales = [
+        ("TILL-0001", "قهوة مختصة", 1_500, vec![("cash", 1_725)]),
+        ("TILL-0002", "فطور", 3_200, vec![("card", 3_680)]),
+        (
+            "TILL-0003",
+            "قهوة وكرواسان",
+            2_600,
+            vec![("cash", 1_000), ("card", 1_990)],
+        ),
+        ("TILL-0004", "شاي", 800, vec![("cash", 920)]),
+    ];
+    for (id, what, net, tenders) in &sales {
+        let tenders: Vec<serde_json::Value> = tenders
+            .iter()
+            .map(|(method, minor)| {
+                serde_json::json!({
+                    "method": method,
+                    "amount": { "minor": minor, "currency": "SAR" }
+                })
+            })
+            .collect();
+        create(
+            app,
+            slug,
+            &format!("/v1/pos/shifts/{}/sales", demo_id("SHIFT-0001")),
+            token,
+            id,
+            &serde_json::json!({
+                "customer": { "name": "زبون" },
+                "currency": "SAR",
+                "lines": [{ "description": what, "net": net, "vat": "standard" }],
+                "tenders": tenders,
+                "at": "2026-04-01T08:00:00Z"
+            }),
+            StatusCode::CREATED,
+        )
+        .await?;
+    }
+
+    // A banking run: cash out of the drawer that is not a refund.
+    post(
+        app,
+        slug,
+        &format!("/v1/pos/shifts/{}/pay-outs", demo_id("SHIFT-0001")),
+        Some(token),
+        &serde_json::json!({
+            "reference": "BANK-0001",
+            "amount": { "minor": 30_000, "currency": "SAR" },
+            "to": "1010",
+            "why": "إيداع بنكي",
+            "at": "2026-04-01T13:00:00Z"
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    // Float 500.00, plus 17.25 + 10.00 + 9.20 in cash, less the 300.00 banked.
+    // The drawer should hold 236.45; it counts 235.95.
+    post(
+        app,
+        slug,
+        &format!("/v1/pos/shifts/{}/count", demo_id("SHIFT-0001")),
+        Some(token),
+        &serde_json::json!({
+            "declared": { "minor": 23_595, "currency": "SAR" },
+            "at": "2026-04-01T15:00:00Z"
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    Ok(sales.len())
 }
 
 /// A second person, who does the invoicing and not the books.

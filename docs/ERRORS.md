@@ -446,6 +446,49 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **ar** — {n} مجموعة بلغت حدّها الأقصى.
 
 
+## `pos`
+
+### `pos.amount_out_of_range`
+
+- **en** — That amount is outside the range this system can hold.
+- **ar** — هذا المبلغ خارج النطاق الذي يستطيع النظام حفظه.
+
+### `pos.closed`
+
+- **en** — Shift {id} has been closed and cannot take any more.
+- **ar** — الوردية {id} أُغلقت ولا يمكنها استقبال المزيد.
+
+### `pos.no_such_shift`
+
+- **en** — There is no shift {id}.
+- **ar** — لا توجد وردية {id}.
+
+### `pos.not_a_float`
+
+- **en** — An opening float cannot be negative.
+- **ar** — رصيد الافتتاح لا يمكن أن يكون سالبًا.
+
+### `pos.not_an_amount`
+
+- **en** — An amount here must be more than nothing.
+- **ar** — المبلغ هنا يجب أن يكون أكثر من صفر.
+
+### `pos.nothing_sold`
+
+- **en** — A sale needs at least one line on it.
+- **ar** — البيع يحتاج إلى بند واحد على الأقل.
+
+### `pos.tenders_do_not_match`
+
+- **en** — The tenders come to {tendered} and the sale is {total}. A till sale is paid in full at the counter: less would leave a balance owing, and change handed back is not recorded.
+- **ar** — مجموع المدفوعات {tendered} والبيع {total}. بيع الكاشير يُسدَّد بالكامل عند الصندوق: الأقل يترك رصيدًا مستحقًا، والباقي المعاد لا يُسجَّل.
+
+### `pos.unknown_method`
+
+- **en** — {method} is not a way money arrives. Use cash, card or transfer.
+- **ar** — {method} ليست طريقة استلام. استخدم cash أو card أو transfer.
+
+
 ## `prepaid`
 
 ### `prepaid.already_frozen`
