@@ -448,6 +448,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
         replay!(pool, crm, crm::Crm, "customer"),
         replay!(pool, prepaid, prepaid::Prepaid, "entitlement"),
         replay!(pool, pos, pos::Pos, "shift"),
+        replay!(pool, branches, branches::Branches, "branch"),
         replay!(pool, ledger, ledger::Ledger, "account"),
         replay!(pool, sales, sales::Sales, "invoice"),
         replay!(pool, purchases, purchases::Purchases, "bill"),
@@ -718,6 +719,15 @@ async fn the_demo_has_somebody_who_cannot_do_everything() {
 /// reconciled — and that the number it reconciled to is not zero, because a
 /// demo where the drawer always balances shows nothing about the feature.
 async fn the_counter_counted(demo: &Demo) {
+    // Two places, and the till's takings attributable to one of them — which is
+    // what a branch is for, and what one branch could not demonstrate.
+    let places = demo.get("/v1/branches").await["items"].clone();
+    assert_eq!(
+        places.as_array().expect("a list").len(),
+        demo.seeded.branches,
+        "branches has its places"
+    );
+
     let shift = demo
         .get(&format!(
             "/v1/pos/shifts/{}",

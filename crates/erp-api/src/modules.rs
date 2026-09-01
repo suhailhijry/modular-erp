@@ -60,6 +60,12 @@ const REGISTERED: &[Registered] = &[
         setup: booking::setup,
         http: booking::http::routes,
     },
+    // First, because everything else may name one and it names nothing.
+    Registered {
+        name: "branches",
+        setup: branches::setup,
+        http: branches::http::routes,
+    },
     Registered {
         name: "crm",
         setup: crm::setup,
@@ -457,8 +463,14 @@ mod tests {
             let paths = (module.http)().to_openapi().paths.paths;
             assert!(!paths.is_empty(), "{} mounted nothing", module.name);
             for path in paths.keys() {
+                // The module's own root counts. `branches` is the first module
+                // whose resource *is* its name — `/v1/branches` rather than
+                // `/v1/branches/somethings` — and `module_of` reads that path
+                // as `branches` correctly. Requiring a trailing segment would
+                // reject a scoped route for having nothing after the scope.
+                let root = format!("/v1/{}", module.name);
                 assert!(
-                    path.starts_with(&format!("/v1/{}/", module.name)),
+                    path == &root || path.starts_with(&format!("{root}/")),
                     "{} serves `{path}`, which `Allowed<C>` will judge on the \
                      tenant-wide role rather than on {}'s",
                     module.name,

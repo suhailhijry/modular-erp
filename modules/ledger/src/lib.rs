@@ -42,8 +42,8 @@ pub use entry::{JournalEntry, JournalEntryEvent};
 pub use lines::{BalancedLines, Line, Unbalanced};
 pub use period::Books;
 pub use projections::{
-    AccountBalance, Accounts, Ledger, Postings, TrialBalance, account_balances, imbalances,
-    projections, trial_balance,
+    AccountBalance, Accounts, BranchBalance, Ledger, Postings, TrialBalance, account_balances,
+    branch_balances, imbalances, projections, trial_balance,
 };
 pub use vat::{Rates, VatCategory};
 

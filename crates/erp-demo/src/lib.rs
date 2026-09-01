@@ -86,6 +86,8 @@ pub struct Seeded {
     pub prepaid: usize,
     /// Sales rung through the till, on a shift that was counted.
     pub till_sales: usize,
+    /// Places the business trades from.
+    pub branches: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -206,6 +208,10 @@ pub async fn seed(
     // before the last projection run.
     let prepaid = seed_prepaid(&app, slug, &token).await?;
 
+    // The places. **Before the till**, because a document dated to a branch
+    // that does not exist yet is refused by `ledger::post_entry_in`.
+    let branches = seed_branches(&app, slug, &token).await?;
+
     // The counter. After the customers for the same reason the diary is, and
     // before the last projection run.
     let till_sales = seed_till(&app, slug, &token).await?;
@@ -260,6 +266,7 @@ pub async fn seed(
         reservations,
         prepaid,
         till_sales,
+        branches,
     })
 }
 
@@ -268,6 +275,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     let db = control.enter_for_maintenance(tenant).await?;
     advance::<booking::Booking>(&db, &booking::projections(), booking::upcasters()).await?;
     advance::<prepaid::Prepaid>(&db, &prepaid::projections(), prepaid::upcasters()).await?;
+    advance::<branches::Branches>(&db, &branches::projections(), branches::upcasters()).await?;
     advance::<pos::Pos>(&db, &pos::projections(), pos::upcasters()).await?;
     advance::<crm::Crm>(&db, &crm::projections(), crm::upcasters()).await?;
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
@@ -1348,6 +1356,39 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
     Ok(1)
 }
 
+/// The two places this salon trades from.
+///
+/// # Why the demo has two and not one
+///
+/// Because one branch demonstrates a settings row and two demonstrate a
+/// *dimension*. The till below rings at Olaya, so `GET /v1/ledger/branches`
+/// shows a business whose revenue is attributable — which is the whole claim,
+/// and the thing a single-branch demo cannot make.
+async fn seed_branches(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    let places = [
+        ("BRANCH-OLAYA", "فرع العليا", "Olaya", "طريق الملك فهد"),
+        ("BRANCH-MALAZ", "فرع الملز", "Malaz", "شارع الأمير عبدالله"),
+    ];
+    for (id, name, latin, street) in &places {
+        create(
+            app,
+            slug,
+            "/v1/branches",
+            token,
+            id,
+            &serde_json::json!({
+                "name": name,
+                "name_latin": latin,
+                "address": { "street": street, "city": "الرياض", "country": "SA" },
+                "at": "2026-01-01T00:00:00Z"
+            }),
+            StatusCode::CREATED,
+        )
+        .await?;
+    }
+    Ok(places.len())
+}
+
 /// A day at the counter: a shift opened, sales rung, and the drawer counted.
 ///
 /// # Why the demo closes short by half a riyal
@@ -1361,12 +1402,13 @@ async fn seed_corrections(app: &axum::Router, slug: &str, token: &str) -> Result
 /// Every sale here is a ZATCA simplified invoice in `sales` with a statutory
 /// number, which is the module's whole claim: there is no second document.
 async fn seed_till(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
-    create(
+    create_at(
         app,
         slug,
         "/v1/pos/shifts",
         token,
         "SHIFT-0001",
+        Some(&demo_id("BRANCH-OLAYA")),
         &serde_json::json!({
             "till": "الكاشير ١",
             "float": { "minor": 50_000, "currency": "SAR" },
@@ -1398,12 +1440,13 @@ async fn seed_till(app: &axum::Router, slug: &str, token: &str) -> Result<usize,
                 })
             })
             .collect();
-        create(
+        create_at(
             app,
             slug,
             &format!("/v1/pos/shifts/{}/sales", demo_id("SHIFT-0001")),
             token,
             id,
+            Some(&demo_id("BRANCH-OLAYA")),
             &serde_json::json!({
                 "customer": { "name": "زبون" },
                 "currency": "SAR",
@@ -1609,7 +1652,31 @@ async fn create(
     body: &serde_json::Value,
     expected: StatusCode,
 ) -> Result<serde_json::Value, DemoError> {
-    let request = Request::post(path)
+    create_at(app, slug, path, token, name, None, body, expected).await
+}
+
+/// A create that says **where it happened**.
+///
+/// The branch travels in `X-Branch` and is folded into the metadata by the
+/// authorization extractor, so every event the request produces carries it —
+/// the invoice, its journal entry and the shift that rang it. See
+/// `erp_web::Allowed::branch`.
+#[expect(clippy::too_many_arguments, reason = "a request has this many parts")]
+async fn create_at(
+    app: &axum::Router,
+    slug: &str,
+    path: &str,
+    token: &str,
+    name: &str,
+    branch: Option<&str>,
+    body: &serde_json::Value,
+    expected: StatusCode,
+) -> Result<serde_json::Value, DemoError> {
+    let mut request = Request::post(path);
+    if let Some(branch) = branch {
+        request = request.header("x-branch", branch);
+    }
+    let request = request
         .header(header::HOST, format!("{slug}.localhost"))
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::AUTHORIZATION, format!("Bearer {token}"))

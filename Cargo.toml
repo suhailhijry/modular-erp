@@ -27,6 +27,7 @@ erp-api = { path = "crates/erp-api" }
 erp-web = { path = "crates/erp-web" }
 erp-demo = { path = "crates/erp-demo" }
 booking = { path = "modules/booking" }
+branches = { path = "modules/branches" }
 crm = { path = "modules/crm" }
 ledger = { path = "modules/ledger" }
 sales = { path = "modules/sales" }

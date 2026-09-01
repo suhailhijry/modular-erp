@@ -1492,19 +1492,59 @@ dimension. Every competitor meters them (Qoyod charges SAR 40 each, Rekaz caps
 them at five even on its top tier), which makes unlimited branches a real
 differentiator and means the concept has to exist first.
 
-- [ ] `Branch` — a place, with an address and its own opening hours
-- [ ] A dimension on every document: a sale, a booking, a shift, an invoice
-- [ ] Resources belong to a branch, which is what makes "book at Olaya" work
-- [ ] A person may be scoped to one, which is `roles.rs`'s own worked example of
-      what the rule engine is for: *"a bookkeeper allowed to post only to their
-      own branch"*
-- [ ] ZATCA: a branch that issues its own documents may need its own EGS unit,
-      its own certificate and its own chain. `taxpayer_id()` is one stream per
-      tenant today and its doc comment already names this as the shape that
-      would change it
+- [x] `Branch` — a place, with an address. `modules/branches`, a **leaf that
+      depends on nothing**, which is what makes it safe for everything else to
+      sit on. Opening, amending, closing and reopening are events, because a
+      dimension edited in place rewrites history: a report for Olaya run in
+      March and again in June would differ with nothing able to say why
+- [x] **A dimension on every document, from one mechanism.** The branch travels
+      in `Metadata`, folded in by `erp_web::Allowed` from an `X-Branch` header —
+      so *every* event a request produces carries it, and no module threads a
+      field through. `ledger`'s `posting` table reads it off the envelope, and
+      `branch_balances` splits the chart by it
+- [x] **Validated once**, in `ledger::post_entry_in`. Every posting in the
+      system arrives there — it is already where a closed period is enforced —
+      so one check covers `sales`, `purchases`, `prepaid` and `pos` without any
+      of them repeating it
+- [ ] **Opening hours: deliberately not built.** Nothing would read them.
+      `booking` already keeps availability per *resource*, which is finer than a
+      branch and is what a diary needs; branch hours are for the public booking
+      site, which is Phase 17. A rule nobody applies is wrong by the time
+      somebody applies it
+- [ ] Resources belong to a branch. Not built: `booking` resources are
+      tenant-wide, and scoping them is a `booking` change rather than a
+      `branches` one. The dimension it needs now exists
+- [ ] A person scoped to one. Not built, but **the seam is placed**:
+      `Allowed::branch` sits beside the capability check, which is where a
+      person's scope would be enforced, and the doc comment says so
+- [ ] ZATCA per-branch EGS units. Not built, and unchanged: `taxpayer_id()` is
+      still one stream per tenant
 
-**Exit:** a two-branch salon reports each separately and both reconcile to one
-trial balance.
+**Two decisions worth keeping.**
+
+- **A per-branch trial balance does not have to balance, and nothing here
+  pretends it does.** Debits equal credits per *currency* — that is the
+  invariant `ledger` asserts and it is untouched. Moving cash between branches
+  debits one and credits the other, so each side is out by the transfer until
+  inter-branch clearing accounts exist. What this phase delivers is that each
+  branch can be **reported** separately and that the branches are a *partition*
+  of the whole. Claiming more would report a normal transfer as a broken ledger
+- **A fourth `Address`.** `crm`, `sales` and `tax_sa` each already define one.
+  Collapsing them into `erp-types` is worth doing and was not done here, because
+  the three are event schemas that are equal by coincidence rather than by rule —
+  ZATCA adding a field to the invoice one is what would separate them again. The
+  duplication is named in `branches::Address` rather than left unexplained
+
+**One guard had to be relaxed, and it was right to check.**
+`every_modules_routes_live_under_its_own_name` required every path to start
+`/v1/{module}/`. `branches` is the first module whose resource *is* its name —
+`/v1/branches`, with nothing after it — which `module_of` already scopes
+correctly. The guard now accepts the module root as well as paths beneath it.
+
+**Exit: met.** `two_branches_report_separately_and_sum_to_one_trial_balance`
+opens two branches, rings two tills at them through `pos`, and asserts each
+branch's revenue on its own, that the per-branch rows sum to the unsplit chart,
+and that the trial balance still balances.
 
 ---
 

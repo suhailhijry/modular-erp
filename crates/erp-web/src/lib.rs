@@ -43,8 +43,8 @@ use erp_i18n::{Composite, StaticCatalog};
 pub use consistency::{Consistency, nudge};
 pub use error::ApiError;
 pub use extract::{
-    Allowed, Authenticated, Capability, IdempotencyKey, Language, ManageAccounts, ManageTenant,
-    PostEntries, Read, Tenant,
+    Allowed, Authenticated, BRANCH_HEADER, Capability, IdempotencyKey, Language, ManageAccounts,
+    ManageTenant, PostEntries, Read, Tenant,
 };
 pub use problem::Problem;
 pub use state::AppState;

@@ -22,6 +22,8 @@ pub enum LedgerError {
     AlreadyPosted(String),
     #[error("there is no entry {0}")]
     NoSuchEntry(String),
+    #[error("there is no open branch {0}")]
+    NoSuchBranch(String),
     #[error("entry {entry} was already reversed by {by}")]
     AlreadyReversed { entry: String, by: String },
     /// The books were closed before this date. A correction goes into the
@@ -72,6 +74,9 @@ impl erp_i18n::Localize for LedgerError {
             Self::AlreadyPosted(_) => Message::new(messages::ALREADY_POSTED),
             Self::NoSuchEntry(id) => {
                 Message::new(messages::NO_SUCH_ENTRY).with("entry", MessageArg::text(id.clone()))
+            }
+            Self::NoSuchBranch(id) => {
+                Message::new(messages::NO_SUCH_BRANCH).with("branch", MessageArg::text(id.clone()))
             }
             Self::AlreadyReversed { by, .. } => {
                 Message::new(messages::ALREADY_REVERSED).with("by", MessageArg::text(by.clone()))
@@ -222,6 +227,25 @@ pub async fn post_entry_in(
     // because an invoice and its journal entry commit together. Read inside this
     // transaction, so a period closed a moment ago refuses the next entry rather
     // than the one after that.
+    // **And the one place a branch is checked**, for exactly the same reason:
+    // every posting arrives here, so one check covers `sales`, `purchases`,
+    // `prepaid` and `pos` without any of them repeating it. Against the log
+    // rather than `proj_branches`, so a branch opened a moment ago can be
+    // invoiced against immediately (L3 permits this: the event log is shared,
+    // projection groups are not).
+    if let Some(branch) = metadata.branch() {
+        let id = AggregateId::new(branch)
+            .map_err(|_| ExecuteError::Rejected(LedgerError::NoSuchBranch(branch.to_owned())))?;
+        if !branches::accepts_documents(&mut *conn, &id)
+            .await
+            .map_err(ExecuteError::Load)?
+        {
+            return Err(ExecuteError::Rejected(LedgerError::NoSuchBranch(
+                branch.to_owned(),
+            )));
+        }
+    }
+
     let books = crate::period::books(&mut *conn)
         .await
         .map_err(|e| ExecuteError::Rejected(LedgerError::Config(e)))?;

@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 const LOADS: [&str; 3] = ["erp_eventlog::load", "aggregate::load", "load_since"];
 
 /// Paths that may. Matched as suffixes.
-const ALLOWED: [&str; 8] = [
+const ALLOWED: [&str; 9] = [
     // Command handling. This is the whole point of the write model.
     //
     // `booking` loads more than the others and each one is a decision made from
@@ -49,6 +49,11 @@ const ALLOWED: [&str; 8] = [
     // `pos` loads a shift to answer what the drawer should hold, and loads the
     // invoice a retried sale already issued to report its total back.
     "modules/pos/src/commands.rs",
+    // `branches` answers "may a document be dated here" from the log, because
+    // `proj_branches` is another projection group and a branch opened a moment
+    // ago is not in it yet. Read by `ledger::post_entry_in`, in that
+    // transaction — the same argument `crm::accepts_documents` makes.
+    "modules/branches/src/commands.rs",
     "modules/sales/src/commands.rs",
     "modules/purchases/src/commands.rs",
     "modules/tax_sa/src/commands.rs",

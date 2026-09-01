@@ -48,6 +48,31 @@ impl Metadata {
         self
     }
 
+    /// Records which branch this happened at.
+    ///
+    /// **The reporting dimension, and it travels in metadata on purpose.** A
+    /// branch is a fact about *where the request came from*, uniform across
+    /// every event one request produces — an invoice, its journal entry and the
+    /// shift that rang it are all at the same counter. Putting it here rather
+    /// than in each event's payload is what makes that true by construction
+    /// instead of by four modules remembering to thread a field through.
+    #[must_use]
+    pub fn at_branch(mut self, branch: &str) -> Self {
+        self.extra.insert(
+            crate::BRANCH.to_owned(),
+            serde_json::Value::String(branch.to_owned()),
+        );
+        self
+    }
+
+    /// Where this happened, if the request said.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        self.extra
+            .get(crate::BRANCH)
+            .and_then(serde_json::Value::as_str)
+    }
+
     /// Which request produced this, if it said.
     #[must_use]
     pub fn fingerprint(&self) -> Option<&str> {

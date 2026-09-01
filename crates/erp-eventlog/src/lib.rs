@@ -37,8 +37,9 @@ pub mod configuration {
     pub use crate::config::{get, set, version};
 }
 pub use aggregate::{
-    Aggregate, Committed, Decision, DomainEvent, ExecuteError, LoadError, Loaded, MAX_ATTEMPTS,
-    REQUEST_FINGERPRINT, append_events, execute, load, load_since, try_create, try_execute,
+    Aggregate, BRANCH, Committed, Decision, DomainEvent, ExecuteError, LoadError, Loaded,
+    MAX_ATTEMPTS, REQUEST_FINGERPRINT, append_events, execute, load, load_since, try_create,
+    try_execute,
 };
 pub use append::{AppendError, NewEvent, append};
 pub use envelope::{Envelope, Metadata};

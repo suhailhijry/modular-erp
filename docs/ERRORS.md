@@ -212,6 +212,34 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **ar** — {resource} خارج الخدمة.
 
 
+## `branches`
+
+### `branches.closed`
+
+- **en** — Branch {id} is closed and takes no new documents. Its old ones are unaffected.
+- **ar** — الفرع {id} مغلق ولا يستقبل مستندات جديدة. مستنداته السابقة كما هي.
+
+### `branches.no_address`
+
+- **en** — A branch needs a street and a city.
+- **ar** — الفرع يحتاج إلى شارع ومدينة.
+
+### `branches.no_name`
+
+- **en** — A branch needs a name.
+- **ar** — الفرع يحتاج إلى اسم.
+
+### `branches.no_such_branch`
+
+- **en** — There is no branch {id}.
+- **ar** — لا يوجد فرع {id}.
+
+### `branches.not_a_country`
+
+- **en** — {country} is not a two-letter ISO 3166-1 country code.
+- **ar** — {country} ليس رمز دولة من حرفين وفق ISO 3166-1.
+
+
 ## `crm`
 
 ### `crm.archived`
@@ -322,6 +350,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — There is no account {code}.
 - **ar** — لا يوجد حساب {code}.
+
+### `ledger.no_such_branch`
+
+- **en** — There is no open branch {branch}. A document can only be dated to a branch that exists and is still trading.
+- **ar** — لا يوجد فرع مفتوح {branch}. المستند لا يُنسب إلا لفرع قائم وما زال يعمل.
 
 ### `ledger.no_such_entry`
 

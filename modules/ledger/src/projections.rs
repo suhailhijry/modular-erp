@@ -132,8 +132,8 @@ impl Projection for Postings {
             sqlx::query(
                 "INSERT INTO posting
                      (id, entry_id, line_index, account, amount, currency,
-                      memo, occurred_on, recorded_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                      memo, branch, occurred_on, recorded_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             )
             // Derived from the position, so a rebuild produces the same key.
             // `Uuid::new_v4()` here would make every replayed row differ.
@@ -144,6 +144,11 @@ impl Projection for Postings {
             .bind(line.amount.minor())
             .bind(line.amount.currency().as_str())
             .bind(line.memo.as_deref().or(Some(memo.as_str())))
+            // **Read from the metadata**, which is where a request records
+            // where it happened — see `Metadata::at_branch`. Every posting in
+            // the system therefore carries it, without any module that posts
+            // having to thread a field through.
+            .bind(envelope.metadata.branch())
             .bind(occurred_on)
             .bind(ctx.event_time())
             .execute(&mut *conn)
@@ -210,6 +215,63 @@ pub async fn trial_balance(conn: &mut PgConnection) -> Result<Vec<TrialBalance>,
                 difference: Money::from_minor(row.difference, currency),
                 debits: Money::from_minor(row.debits, currency),
                 credits: Money::from_minor(row.credits, currency),
+                postings: row.postings,
+            })
+        })
+        .collect()
+}
+
+/// What one branch did, per account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchBalance {
+    /// `None` on postings written without a branch — which is every posting a
+    /// single-branch business makes, and every one written before branches
+    /// existed.
+    pub branch: Option<String>,
+    pub code: String,
+    pub name: String,
+    pub balance: Money,
+    pub postings: i64,
+}
+
+/// The chart of accounts, split by branch.
+///
+/// # What this answers, and what it does not
+///
+/// It answers *"what did Olaya do"*, and the branches sum to the whole — which
+/// is the exit criterion for branches and the useful half of a per-branch
+/// report.
+///
+/// It does **not** claim each branch is a balanced set of books. Debits equal
+/// credits per *currency*, which is [`trial_balance`]; a transfer of cash from
+/// one branch to another debits one and credits the other, so each side is out
+/// by the transfer until inter-branch clearing accounts exist. Reporting a
+/// per-branch difference as an error would be reporting a normal transfer as a
+/// broken ledger.
+pub async fn branch_balances(
+    conn: &mut PgConnection,
+    branch: Option<&str>,
+) -> Result<Vec<BranchBalance>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT branch, account as "account!", name, currency as "currency!",
+                  balance as "balance!", postings as "postings!"
+             FROM proj_ledger.branch_balance
+            WHERE $1::text IS NULL OR branch = $1
+            ORDER BY branch NULLS FIRST, account"#,
+        branch
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let currency =
+                CurrencyCode::new(&row.currency).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+            Ok(BranchBalance {
+                branch: row.branch,
+                code: row.account,
+                name: row.name.unwrap_or_default(),
+                balance: Money::from_minor(row.balance, currency),
                 postings: row.postings,
             })
         })

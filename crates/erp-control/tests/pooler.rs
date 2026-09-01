@@ -41,6 +41,7 @@ fn no_session_scoped_set_outside_a_ddl_path() {
         "modules/crm/src/lib.rs",
         "modules/prepaid/src/lib.rs",
         "modules/pos/src/lib.rs",
+        "modules/branches/src/lib.rs",
         "modules/ledger/src/lib.rs",
         "modules/sales/src/lib.rs",
         "modules/purchases/src/lib.rs",

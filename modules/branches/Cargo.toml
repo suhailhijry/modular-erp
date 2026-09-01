@@ -1,11 +1,11 @@
 [package]
-name = "ledger"
+name = "branches"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Double-entry accounting: accounts, journal entries, and the invariant that keeps them honest."
+description = "Places a business trades from, and the dimension every document is reported by."
 
 [lints]
 workspace = true
@@ -19,12 +19,6 @@ workspace = true
 #
 # `erp-control` is a dev-dependency only, for `MIGRATIONS` in tests.
 # The module ships its own routes; `erp-web` is what they are built from.
-# **`branches`, and only for one check.** Every posting in the system arrives at
-# `post_entry_in`, which is where a closed period is refused — so it is also the
-# one place a branch that names nothing open can be refused, once, for all four
-# modules that post. `branches` depends on nothing, which is what makes it safe
-# to sit under this one.
-branches = { workspace = true }
 erp-web = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
@@ -36,15 +30,22 @@ erp-i18n = { workspace = true }
 erp-projection = { workspace = true }
 erp-types = { workspace = true, features = ["sqlx"] }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# **The exit criterion is what a branch is for**, so the test that carries this
+# module drives real documents through `pos` and `sales` and reads the ledger
+# per branch. Dev-only: nothing here depends on them, which is the point.
+pos = { workspace = true }
+sales = { workspace = true }
+ledger = { workspace = true }
+crm = { workspace = true }
 erp-control = { workspace = true }
 erp-testkit = { workspace = true }
 erp-i18n = { workspace = true }
-proptest = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

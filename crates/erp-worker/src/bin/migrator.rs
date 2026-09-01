@@ -251,6 +251,12 @@ async fn rebuild(
                 owned.iter().map(std::convert::AsRef::as_ref).collect();
             rebuild_swap::<prepaid::Prepaid>(&pool, sql, &refs, upcasters, 500).await?
         }
+        "branches" => {
+            let owned = branches::projections();
+            let refs: Vec<&dyn Projection<Group = branches::Branches>> =
+                owned.iter().map(std::convert::AsRef::as_ref).collect();
+            rebuild_swap::<branches::Branches>(&pool, sql, &refs, upcasters, 500).await?
+        }
         "pos" => {
             let owned = pos::projections();
             let refs: Vec<&dyn Projection<Group = pos::Pos>> =
@@ -407,6 +413,7 @@ mod tests {
     fn every_module_can_be_rebuilt() {
         const REBUILDABLE: &[&str] = &[
             "booking",
+            "branches",
             "crm",
             "ledger",
             "prepaid",

@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS posting (
     currency    CHAR(3) NOT NULL,
 
     memo        TEXT,
+
+    -- **The reporting dimension.** Null on an entry posted without one, which
+    -- is every entry a single-branch business writes and every entry written
+    -- before branches existed. No foreign key: `proj_branches` is another
+    -- projection group and L3 forbids joining to it — a report that wants a
+    -- branch's *name* reads that group and these numbers separately.
+    branch      TEXT,
+
     occurred_on TIMESTAMPTZ NOT NULL,
     -- The event's own timestamp, never `now()` — see architecture L2.
     recorded_at TIMESTAMPTZ NOT NULL,
@@ -81,6 +89,26 @@ SELECT a.code,
   FROM account a
   LEFT JOIN posting p ON p.account = a.code
  GROUP BY a.code, a.name, a.kind, a.currency, a.closed;
+
+-- What each branch holds, per account.
+--
+-- **A branch's own trial balance does not have to be zero**, and this view does
+-- not claim it is. Debits equal credits per *currency*, which is the invariant
+-- below; moving cash from one branch to another debits one and credits the
+-- other, so each side is out by the transfer until inter-branch clearing
+-- accounts exist. What this answers is "what did Olaya do", and the branches
+-- sum to the whole.
+CREATE OR REPLACE VIEW branch_balance AS
+SELECT p.branch,
+       p.account,
+       a.name,
+       a.kind,
+       p.currency,
+       sum(p.amount)::BIGINT AS balance,
+       count(*)              AS postings
+  FROM posting p
+  LEFT JOIN account a ON a.code = p.account
+ GROUP BY p.branch, p.account, a.name, a.kind, p.currency;
 
 -- The invariant, as a query.
 --

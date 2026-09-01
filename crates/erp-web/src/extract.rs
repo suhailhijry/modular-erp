@@ -330,6 +330,17 @@ capability! {
 #[derive(Debug)]
 pub struct Allowed<C: Capability> {
     tenant: Tenant,
+    /// Which branch this request is for, from `X-Branch`.
+    ///
+    /// **On the authorization extractor and not on each handler**, so every
+    /// write in the system carries it without forty handlers remembering to.
+    /// It is not validated here — `erp-web` is core and knows nothing of
+    /// modules — but `ledger::post_entry_in` refuses one that names no open
+    /// branch, and every posting in the system arrives there.
+    ///
+    /// It is also where a person scoped to one branch would be refused another,
+    /// which is why it sits beside the capability check rather than beyond it.
+    pub branch: Option<AggregateId>,
     capability: std::marker::PhantomData<C>,
 }
 
@@ -411,10 +422,25 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
 
         Ok(Self {
             tenant,
+            branch: parts
+                .headers
+                .get(BRANCH_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|raw| !raw.is_empty())
+                .map(|raw| {
+                    AggregateId::new(raw).map_err(|_| {
+                        crate::wire::bad_request(crate::messages::INVALID_ID, "branch", raw, locale)
+                    })
+                })
+                .transpose()?,
             capability: std::marker::PhantomData,
         })
     }
 }
+
+/// The header a request names its branch in.
+pub const BRANCH_HEADER: &str = "x-branch";
 
 #[cfg(test)]
 mod tests {

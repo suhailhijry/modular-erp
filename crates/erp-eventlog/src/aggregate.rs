@@ -496,6 +496,9 @@ async fn created_by(
 /// Where [`try_create`] records what request created a stream.
 pub const REQUEST_FINGERPRINT: &str = "request";
 
+/// Where a request records which branch it happened at.
+pub const BRANCH: &str = "branch";
+
 /// Appends typed events to an aggregate's stream.
 ///
 /// The typed counterpart to [`append`](crate::append), for callers who own their

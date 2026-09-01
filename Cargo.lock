@@ -273,6 +273,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "branches"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "crm",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-projection",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "ledger",
+ "pos",
+ "sales",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -552,6 +581,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "booking",
+ "branches",
  "chrono",
  "crm",
  "erp-control",
@@ -615,6 +645,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "booking",
+ "branches",
  "crm",
  "erp-api",
  "erp-control",
@@ -764,6 +795,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "booking",
+ "branches",
  "chrono",
  "crm",
  "erp-api",
@@ -1350,6 +1382,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "branches",
  "chrono",
  "erp-control",
  "erp-eventlog",

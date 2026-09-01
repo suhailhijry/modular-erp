@@ -23,12 +23,16 @@ check: fmt-check lint test
 # easier to read when one fails: the summary names the failures instead of
 # burying them in the scrollback.
 #
+# `--no-fail-fast` because the default stops the whole run on the first failure,
+# which `cargo test` never did: one broken guard would hide four hundred other
+# results and turn a full picture into a bisect.
+#
 # **The second line is not redundant.** `nextest` does not run doctests at all,
 # and this workspace has three — two of them compile-checks on `erp-testkit`'s
 # public examples, which is exactly the kind of thing that rots unnoticed.
 # Dropping them would be a silent loss of coverage, which is what L6 is about.
 test:
-    cargo nextest run --workspace
+    cargo nextest run --workspace --no-fail-fast
     cargo test --workspace --doc
 
 # Redis for the test suite, on the port the tests actually default to.

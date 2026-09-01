@@ -139,10 +139,15 @@ impl Amount {
 /// Generic over the capability, because every write is behind a different one
 /// and they all deref to the same `Tenant`.
 pub fn metadata<C: Capability>(tenant: &Allowed<C>) -> Metadata {
-    Metadata {
+    let metadata = Metadata {
         actor: Some(tenant.session.identity.to_string()),
         ..Metadata::default()
-    }
+    };
+    // **Every write carries its branch**, because it is folded in here rather
+    // than at each handler. See `Allowed::branch`.
+    tenant.branch.as_ref().map_or(metadata.clone(), |branch| {
+        metadata.at_branch(branch.as_str())
+    })
 }
 
 /// The metadata a **create** runs under: who did it, and which request it was.

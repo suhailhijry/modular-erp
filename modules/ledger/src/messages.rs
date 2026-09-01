@@ -7,6 +7,7 @@ pub const NO_SUCH_ACCOUNT: MessageCode = MessageCode::new("ledger.no_such_accoun
 pub const ACCOUNT_CLOSED: MessageCode = MessageCode::new("ledger.account_closed");
 pub const ALREADY_POSTED: MessageCode = MessageCode::new("ledger.already_posted");
 pub const NO_SUCH_ENTRY: MessageCode = MessageCode::new("ledger.no_such_entry");
+pub const NO_SUCH_BRANCH: MessageCode = MessageCode::new("ledger.no_such_branch");
 pub const ALREADY_REVERSED: MessageCode = MessageCode::new("ledger.already_reversed");
 pub const TOO_FEW_LINES: MessageCode = MessageCode::new("ledger.too_few_lines");
 pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("ledger.mixed_currencies");
@@ -22,6 +23,7 @@ pub static CODES: &[MessageCode] = &[
     ACCOUNT_CLOSED,
     ALREADY_POSTED,
     NO_SUCH_ENTRY,
+    NO_SUCH_BRANCH,
     ALREADY_REVERSED,
     TOO_FEW_LINES,
     MIXED_CURRENCIES,
@@ -162,6 +164,18 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_ENTRY,
         Locale::Arabic,
         Template::Simple("لا يوجد قيد {entry}."),
+    ),
+    (
+        NO_SUCH_BRANCH,
+        Locale::English,
+        Template::Simple(
+            "There is no open branch {branch}. A document can only be dated to a branch that exists and is still trading.",
+        ),
+    ),
+    (
+        NO_SUCH_BRANCH,
+        Locale::Arabic,
+        Template::Simple("لا يوجد فرع مفتوح {branch}. المستند لا يُنسب إلا لفرع قائم وما زال يعمل."),
     ),
     (
         ALREADY_REVERSED,

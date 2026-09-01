@@ -62,6 +62,10 @@ The suite runs under [`cargo-nextest`](https://nexte.st), which gives each test
 its own process — faster here, and a failure is named in the summary rather than
 buried in the scrollback. Install it with `cargo install cargo-nextest`.
 
+It runs with `--no-fail-fast`, because the default stops the whole run at the
+first failure: one broken guard would hide four hundred other results and turn a
+full picture into a bisect.
+
 **Doctests are a second command, on purpose.** `nextest` does not run them at
 all, and this workspace has three; two are compile-checks on `erp-testkit`'s
 public examples, which is the kind of thing that rots the moment nothing looks at

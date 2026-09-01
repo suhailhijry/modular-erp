@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT branch, account as \"account!\", name, currency as \"currency!\",\n                  balance as \"balance!\", postings as \"postings!\"\n             FROM proj_ledger.branch_balance\n            WHERE $1::text IS NULL OR branch = $1\n            ORDER BY branch NULLS FIRST, account",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.branch_balance",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "account!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.branch_balance",
+            "name": "account"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.branch_balance",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.branch_balance",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "balance!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.branch_balance",
+            "name": "balance"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "postings!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.branch_balance",
+            "name": "postings"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "90a45eb0f97c39471bc193f125d32e5188205601ae60f5a177542e4899ddc887"
+}

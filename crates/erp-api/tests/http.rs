@@ -1738,6 +1738,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("get_subscription", ALL_ROLES),
     ("outstanding", ALL_ROLES),
     ("deferral_accounts", ALL_ROLES),
+    ("list_branches", ALL_ROLES),
+    ("get_branch", ALL_ROLES),
     ("list_shifts", ALL_ROLES),
     ("get_shift", ALL_ROLES),
     ("shift_takings", ALL_ROLES),
@@ -1844,6 +1846,10 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("set_opening_hours", OWNER),
     ("withdraw_bookable", OWNER),
     ("restore_bookable", OWNER),
+    ("open_branch", OWNER),
+    ("amend_branch", OWNER),
+    ("close_branch", OWNER),
+    ("reopen_branch", OWNER),
     ("register_customer", OWNER),
     ("amend_customer", OWNER),
     ("archive_customer", OWNER),
@@ -1918,8 +1924,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        103,
-        "expected a hundred and three role-scoped operations"
+        109,
+        "expected a hundred and nine role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
