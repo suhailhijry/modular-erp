@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO occupancy_resource (id, capacity) VALUES ($1, $2)\n         ON CONFLICT (id) DO UPDATE\n            SET capacity = EXCLUDED.capacity, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e4bc32a0525ffac671a1ec6586beb153d64d625fc250d557483ca2e18c759d5b"
+}

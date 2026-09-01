@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH overlapping AS (\n               SELECT starts_at, ends_at, quantity\n                 FROM occupancy_claim\n                WHERE resource = $1 AND ends_at > $2 AND starts_at < $3\n           ),\n           edges AS (\n               SELECT starts_at AS at, quantity AS delta FROM overlapping\n               UNION ALL\n               SELECT ends_at AS at, -quantity AS delta FROM overlapping\n           ),\n           running AS (\n               SELECT at, SUM(delta) OVER (ORDER BY at, delta) AS held FROM edges\n           )\n           SELECT COALESCE(MAX(held), 0) AS \"held!\" FROM running WHERE at < $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "held!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "cec968d9e348b2834ecb4c1026196b0405d0e5bf7bcf6b8eb61248a77dbf15c9"
+}

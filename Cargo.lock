@@ -632,6 +632,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "erp-occupancy"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-testkit",
+ "erp-types",
+ "sqlx",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "erp-projection"
 version = "0.1.0"
 dependencies = [

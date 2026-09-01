@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, capacity FROM occupancy_resource WHERE id = ANY($1::TEXT[])",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "occupancy_resource",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "capacity",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "occupancy_resource",
+            "name": "capacity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b5f49cb4f3821c97e703800245e22e20a5aebfed1918d109f9c29fb3a81fba1f"
+}

@@ -1,0 +1,26 @@
+[package]
+name = "erp-occupancy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Capacity over time: who holds what, when, and whether one more fits."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Deliberately thin. No `erp-tenant`, no `erp-eventlog`: this engine writes no
+# events and loads no aggregates, and a dependency on either would invite it to
+# start doing both. It takes a connection and answers a question about capacity.
+erp-i18n = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+erp-eventlog = { workspace = true }
+erp-testkit = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

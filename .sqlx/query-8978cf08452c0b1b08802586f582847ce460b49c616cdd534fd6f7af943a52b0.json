@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO occupancy_claim (resource, owner, starts_at, ends_at, quantity)\n             VALUES ($1, $2, $3, $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8978cf08452c0b1b08802586f582847ce460b49c616cdd534fd6f7af943a52b0"
+}

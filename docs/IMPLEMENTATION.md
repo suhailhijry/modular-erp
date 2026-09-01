@@ -599,15 +599,22 @@ name (L5), so two spellings are two rows and nothing can answer "everything for
 this customer". Booking cannot start without it, because a reservation is made
 *by* somebody.
 
-- [ ] `Customer` — name, contacts, addresses, tax registration, the fields ZATCA
+- [x] `Customer` — name, contacts, addresses, tax registration, the fields ZATCA
       needs on a B2B invoice
-- [ ] An invoice references a customer **and still freezes what it printed**.
+- [x] An invoice references a customer **and still freezes what it printed**.
       Both, not either: the reference is for the customer list, the frozen copy
-      is what the law requires the document to say
+      is what the law requires the document to say. Validated against `crm`'s
+      *log* and not its projection, because a projection lags and an invoice
+      would be refused to a customer created a moment earlier
 - [ ] Backfill: existing invoices name a customer that no record matches, so the
       first migration is a reconciliation surface, not a foreign key
-- [ ] Receivables groups by customer id where one exists and by name where none
-      does, and says which
+- [x] Receivables groups by customer id where one exists and by name where none
+      does, and says which — `AgedCustomer::identified`
+
+**`sales` does not require `crm`.** It was made to, and three tests said no: the
+reference is optional, so a till issuing simplified invoices to walk-ins must
+not be forced to keep a customer list. The crate dependency and the entitlement
+dependency are different things.
 
 ### 7b · The occupancy engine
 
@@ -616,22 +623,40 @@ rebuilt, a booking that was accepted cannot be un-accepted. That system says
 the same of its own table — write-side state, never truncated and never rebuilt
 by a replay — and it is right.
 
-- [ ] `Resource` — a person, a place or a thing. Carries a **capacity**
-- [ ] `Claim` — one resource, one half-open interval, and a **quantity**
-- [ ] The conflict test is `SUM(quantity) over overlaps + new > capacity`, not an
-      existence check. That system has no capacity at all, which is why it
-      fits one vertical and nothing else
-- [ ] A guard row per `(resource, date)`, taken with `FOR UPDATE` **in sorted
+Built as `crates/erp-occupancy` with its tables in `migrations/tenant/0007`,
+which is where that argument lands: a module's `install_sql` is what
+`rebuild_schema` drops, and these rows must be somewhere it cannot reach. Same
+shape as `erp_eventlog::numbering` for the same reason. Nobody enables
+`occupancy`; a tenant enables `booking`, and `booking` links it.
+
+- [x] `Resource` — a person, a place or a thing. Carries a **capacity**.
+      Capacity 0 is legal and means out of service, which is retirement without
+      a second column and without losing the claims already against it
+- [x] `Claim` — one resource, one half-open interval, and a **quantity**
+- [x] The conflict test is capacity and not an existence check. **It is a peak
+      and not a sum**, which is a correction to the line this plan used to
+      carry: `SUM(quantity) over overlaps` counts claims that never coexist,
+      so a room type with eight units and eight one-night stays across a week
+      turns away a guest asking for the week while seven rooms stand empty
+      every night of it. The claims become `+q` at each start and `-q` at each
+      end, and the largest the running total reaches is what is held at once
+- [x] A guard row per `(resource, date)`, taken with `FOR UPDATE` **in sorted
       order** before the probe. Unsorted, two multi-resource bookings touching
-      the same two resources in opposite orders deadlock — their bug, recorded
-- [ ] The batch is checked **against itself**. Theirs was not, and the defect
+      the same two resources in opposite orders deadlock — their bug, recorded.
+      The insert is sorted too: `ON CONFLICT DO NOTHING` waits on a conflicting
+      insert that has not committed, so the deadlock is reachable before a
+      single `FOR UPDATE` runs
+- [x] The batch is checked **against itself**. Theirs was not, and the defect
       it caused is recorded in its own source: one request naming the same
       resource twice at the same hour found nothing already held, wrote both
-      claims, and double-booked that resource against itself
-- [ ] Times normalised on construction. Theirs: *"comparing those unnormalised is
-      how an overlap check silently passes"*
-- [ ] Release is by owner and idempotent, so a retried handler is harmless (L8)
-- [ ] A reschedule ignores the rows it is about to release, so a booking never
+      claims, and double-booked that resource against itself. Fixed
+      structurally by writing each claim before probing the next, so the second
+      sees the first and there is no separate self-check to forget
+- [x] Times normalised on construction — truncated to whole seconds, in a type
+      whose constructor is the only way to build one. Theirs: *"comparing those
+      unnormalised is how an overlap check silently passes"*
+- [x] Release is by owner and idempotent, so a retried handler is harmless (L8)
+- [x] A reschedule ignores the rows it is about to release, so a booking never
       conflicts with its own previous position
 
 **Not modelled, deliberately.** Slot granularity — store instants; fifteen-minute
@@ -639,10 +664,20 @@ slots are validation and display, one configuration key. Buffers — a cleaning 
 setup allowance widens the claimed interval at claim time, so the probe stays one
 comparison.
 
-**Exit:** capacity 1 and capacity N both hold under a concurrent test, and the
-engine knows nothing about what a resource is for.
+**All or nothing is the caller's transaction, not the engine's.** `take` writes
+as it goes, so a batch refused on its third claim leaves the first two in the
+caller's transaction. Rolling back is what makes the booking atomic, exactly as
+it is for `sales::issue_in`, and it matters most in `reschedule`: committing
+over a refused reschedule gives up the slot the booking already had.
 
----
+**Exit:** capacity 1 and capacity N both hold under a concurrent test
+(`only_one_of_two_bookings_racing_for_the_last_place_gets_it`), a deadlock is
+unreachable under one (`a_deadlock_is_not_reachable`), and the engine knows
+nothing about what a resource is for.
+
+Left for 8a, where it belongs: **availability and downtime**. When a resource is
+*offered* is a recurrence, not a claim, and this engine only answers whether one
+more fits.
 
 ## Phase 8 — Reservations, and the verticals that prove it is general · 5–6 weeks
 
@@ -665,6 +700,10 @@ engine is still written for one trade.
       needs no special case
 - [ ] Fungible pools: book the **type**, assign the unit later. A hotel books "a
       double", assigns room 302 at check-in; a salon books "any stylist"
+- [ ] Add `erp_occupancy::CATALOG` to `erp_api::CATALOG`. It is deliberately not
+      there yet: its codes exist and nothing can produce one until a route
+      surfaces an `Overbooked`, and `docs/ERRORS.md` is generated from what the
+      API can actually answer with
 
 ### 8b · Four fixtures, one engine
 

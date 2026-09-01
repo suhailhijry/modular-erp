@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO occupancy_guard (resource, on_date)\n         SELECT r, d FROM unnest($1::TEXT[], $2::DATE[]) AS k(r, d)\n          ORDER BY r, d\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "DateArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "97cbc771f1594edf2cda1fba4ba77b1c21a872763993a222162080cff9cd8964"
+}

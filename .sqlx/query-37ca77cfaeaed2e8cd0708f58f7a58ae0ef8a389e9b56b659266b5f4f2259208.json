@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM occupancy_claim WHERE owner = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "37ca77cfaeaed2e8cd0708f58f7a58ae0ef8a389e9b56b659266b5f4f2259208"
+}
