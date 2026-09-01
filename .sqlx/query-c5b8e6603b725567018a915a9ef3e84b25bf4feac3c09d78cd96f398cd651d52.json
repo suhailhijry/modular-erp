@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT line as \"line!\", what as \"what!\",\n                  starts_at as \"starts_at!\", ends_at as \"ends_at!\",\n                  takes as \"takes!\", unit\n             FROM proj_booking.reservation_line\n            WHERE reservation_id = $1\n            ORDER BY line",
+  "query": "SELECT line as \"line!\", what as \"what!\",\n                  starts_at as \"starts_at!\", ends_at as \"ends_at!\",\n                  takes as \"takes!\", unit, charge\n             FROM proj_booking.reservation_line\n            WHERE reservation_id = $1\n            ORDER BY line",
   "describe": {
     "columns": [
       {
@@ -68,6 +68,17 @@
             "name": "unit"
           }
         }
+      },
+      {
+        "ordinal": 6,
+        "name": "charge",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation_line",
+            "name": "charge"
+          }
+        }
       }
     ],
     "parameters": {
@@ -81,8 +92,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "681d16dfa890f1f00449050587f16017274f917348b2b15d87da6aac91c5ed56"
+  "hash": "c5b8e6603b725567018a915a9ef3e84b25bf4feac3c09d78cd96f398cd651d52"
 }

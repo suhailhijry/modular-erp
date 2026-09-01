@@ -27,9 +27,9 @@ use erp_web::AppState;
 use erp_web::Problem;
 use erp_web::{After, Allowed, Language, ManageTenant, Paged, PostEntries, Read};
 use erp_web::{Consistency, nudge};
-use erp_web::{Json, Query, metadata, parse_id, require_module};
+use erp_web::{Json, Query, bad_request, metadata, parse_id, require_module};
 
-use crate::{Availability, BookingError, Details, Draft, Held, Kind, Line, Stage};
+use crate::{Availability, BookingError, Details, Draft, DraftLine, Held, Kind, Stage};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -45,6 +45,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         // Unauthenticated on purpose, like `ledger::list_charts`: a signup form
         // needs to show a salon what a salon gets before anybody has an
         // account. It is product information, not data.
+        .routes(routes!(tariff, set_tariff))
         .routes(routes!(list_trades))
         .routes(routes!(fit_out))
 }
@@ -217,6 +218,51 @@ const fn one() -> u16 {
     1
 }
 
+/// Something taken off a line, and why.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+struct LineAllowance {
+    /// A customer reads this, so it is text and not a code.
+    reason: String,
+    /// What comes off, in minor units and positive. `2500` is 25.00 SAR.
+    amount: i64,
+}
+
+/// What to charge for a line, before the tenant's price bands.
+///
+/// **The rate is yours; the band is the tenant's.** Which hours cost more is
+/// configuration, resolved when the booking is written and frozen onto it, so
+/// a client cannot decide its own peak rate.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[schema(example = json!({"rate": 8000, "quantity": 1, "currency": "SAR"}))]
+struct LineCharge {
+    /// The list rate for one of these, in minor units.
+    rate: i64,
+    /// ISO 4217. Every amount on the booking must be in it.
+    currency: String,
+    /// How many. Four covers, twelve places, three nights.
+    #[serde(default = "one")]
+    quantity: u16,
+    #[serde(default)]
+    allowances: Vec<LineAllowance>,
+}
+
+/// What a line came to, as it was priced.
+#[derive(Debug, Serialize, ToSchema)]
+struct ChargedLine {
+    rate: i64,
+    currency: String,
+    quantity: u16,
+    /// The band that applied, or absent for the base rate.
+    band: Option<String>,
+    /// What the band did, in basis points. `2500` is a quarter more.
+    uplift: Option<i32>,
+    allowances: Vec<LineAllowance>,
+    /// Rate, banded, times quantity.
+    gross: i64,
+    /// **What is charged, before tax.** `gross` less every allowance.
+    net: i64,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 struct NewReservationLine {
     /// What the business calls it. Never looked at by any rule here.
@@ -229,6 +275,9 @@ struct NewReservationLine {
     until: Timestamp,
     /// Everything this line takes at once — the stylist *and* the chair.
     takes: Vec<BookedResource>,
+    /// What to charge. Absent for a business that bills elsewhere.
+    #[serde(default)]
+    charge: Option<LineCharge>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -317,6 +366,8 @@ struct ReservationRecordLine {
     takes: Vec<BookedResource>,
     /// The unit picked out of the pool, once one has been.
     unit: Option<String>,
+    /// What it came to, if it was priced.
+    charge: Option<ChargedLine>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -842,6 +893,7 @@ async fn get_reservation(
                 until: l.ends_at,
                 takes: l.takes.iter().map(taken).collect(),
                 unit: l.unit,
+                charge: l.charge.as_ref().map(charged),
             })
             .collect(),
     }))
@@ -1008,6 +1060,136 @@ async fn assign_unit(
     }))
 }
 
+/// A price band on the wire.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[schema(example = json!({
+    "name": "ذروة المساء",
+    "uplift": 2500,
+    "hours": { "weekdays": [3, 4], "opens_at": 1020, "closes_at": 1260 }
+}))]
+struct TariffBand {
+    /// Printed beside the price, so a person recognises it on a receipt.
+    name: String,
+    /// What it does to the rate, in basis points. `2500` is a quarter more;
+    /// `-1000` is a tenth off, which is what an off-peak band is.
+    uplift: i32,
+    /// When it applies, in local time. The same shape as a resource's hours.
+    hours: OpeningHours,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+struct TariffView {
+    /// **First match wins**, so the order is your priority. A public holiday
+    /// goes above a general evening band.
+    bands: Vec<TariffBand>,
+}
+
+/// The tenant's price bands: which hours cost more, and by how much.
+#[utoipa::path(
+    get,
+    path = "/v1/booking/tariff",
+    tag = "booking",
+    responses(
+        (status = OK, description = "An empty list means every hour is the same price.", body = TariffView),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+    ),
+)]
+async fn tariff(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<TariffView>, Problem> {
+    require_module(&tenant, &crate::module_id(), locale)?;
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let resolved = crate::Tariff::resolve(&mut conn)
+        .await
+        .map_err(|e| config(&e, locale))?;
+
+    Ok(Json(TariffView {
+        bands: resolved
+            .bands
+            .iter()
+            .map(|b| TariffBand {
+                name: b.name.clone(),
+                uplift: b.uplift,
+                hours: hours(&b.when),
+            })
+            .collect(),
+    }))
+}
+
+/// Set the whole tariff, replacing what was there.
+///
+/// **Bookings already taken keep the price they were given.** The band is
+/// frozen onto the line when the booking is written (L5), so moving your peak
+/// hours changes what the next booking costs and nothing that was already
+/// agreed.
+#[utoipa::path(
+    put,
+    path = "/v1/booking/tariff",
+    tag = "booking",
+    request_body = TariffView,
+    responses(
+        (status = NO_CONTENT, description = "Set."),
+        (status = BAD_REQUEST, description = "A window that closes before it opens, or an uplift that would make the service cost you money", body = Problem),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+    ),
+)]
+async fn set_tariff(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+    Json(body): Json<TariffView>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant, &crate::module_id(), locale)?;
+
+    let bands = body
+        .bands
+        .iter()
+        .map(|b| {
+            // Below -100% the business would be paying the customer to come in.
+            if b.uplift < -10_000 {
+                return Err(Problem::new(
+                    StatusCode::BAD_REQUEST,
+                    &erp_i18n::Message::new(crate::messages::NOT_A_RATE),
+                    locale,
+                    &CATALOG,
+                ));
+            }
+            Ok(crate::Band {
+                name: b.name.clone(),
+                when: Availability::from_parts(
+                    &b.hours.months,
+                    &b.hours.weekdays,
+                    &b.hours.days,
+                    b.hours.opens_at,
+                    b.hours.closes_at,
+                    b.hours.from,
+                    b.hours.until,
+                )
+                .map_err(|e| {
+                    Problem::new(StatusCode::BAD_REQUEST, &e.message(), locale, &CATALOG)
+                })?,
+                uplift: b.uplift,
+            })
+        })
+        .collect::<Result<Vec<_>, Problem>>()?;
+
+    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    erp_eventlog::configuration::set(
+        &mut conn,
+        crate::Tariff::KEY,
+        &crate::Tariff { bands },
+        Some(&tenant.session.identity.to_string()),
+    )
+    .await
+    .map_err(|e| config(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Ready-made rotas, in the caller's language.
 ///
 /// Unauthenticated: a signup form needs to show the choices before anyone has
@@ -1109,7 +1291,7 @@ async fn fit_out(
 // Translation
 // ---------------------------------------------------------------------------
 
-fn lines(sent: &[NewReservationLine], locale: Locale) -> Result<Vec<Line>, Problem> {
+fn lines(sent: &[NewReservationLine], locale: Locale) -> Result<Vec<DraftLine>, Problem> {
     sent.iter()
         .map(|line| {
             let span = Span::new(line.from, line.until).map_err(|e| {
@@ -1125,13 +1307,61 @@ fn lines(sent: &[NewReservationLine], locale: Locale) -> Result<Vec<Line>, Probl
                     })
                 })
                 .collect::<Result<Vec<_>, Problem>>()?;
-            Ok(Line {
+            Ok(DraftLine {
                 what: line.what.clone(),
                 span,
                 takes,
+                charge: line
+                    .charge
+                    .as_ref()
+                    .map(|c| charge(c, locale))
+                    .transpose()?,
             })
         })
         .collect()
+}
+
+fn charge(sent: &LineCharge, locale: Locale) -> Result<crate::Charge, Problem> {
+    let currency = erp_types::CurrencyCode::new(&sent.currency).map_err(|_| {
+        bad_request(
+            erp_web::messages::UNKNOWN_CURRENCY,
+            "currency",
+            &sent.currency,
+            locale,
+        )
+    })?;
+    Ok(crate::Charge {
+        rate: erp_types::Money::from_minor(sent.rate, currency),
+        quantity: sent.quantity,
+        allowances: sent
+            .allowances
+            .iter()
+            .map(|a| crate::Allowance {
+                reason: a.reason.clone(),
+                amount: erp_types::Money::from_minor(a.amount, currency),
+            })
+            .collect(),
+    })
+}
+
+fn charged(c: &crate::Charged) -> ChargedLine {
+    ChargedLine {
+        rate: c.rate.minor(),
+        currency: c.rate.currency().as_str().to_owned(),
+        quantity: c.quantity,
+        band: c.band.as_ref().map(|b| b.name.clone()),
+        uplift: c.band.as_ref().map(|b| b.uplift),
+        allowances: c
+            .allowances
+            .iter()
+            .map(|a| LineAllowance {
+                reason: a.reason.clone(),
+                amount: a.amount.minor(),
+            })
+            .collect(),
+        gross: c.gross.minor(),
+        net: c.net.minor(),
+    }
 }
 
 fn kind(sent: &str, locale: Locale) -> Result<Kind, Problem> {
@@ -1253,6 +1483,16 @@ fn pool(error: &erp_tenant::PoolError, locale: Locale) -> Problem {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     Problem::new(status, &error.message(), locale, &CATALOG)
+}
+
+fn config(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem {
+    tracing::error!(error = %error, "booking configuration failed");
+    Problem::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &error.message(),
+        locale,
+        &CATALOG,
+    )
 }
 
 fn database(error: &sqlx::Error, locale: Locale) -> Problem {

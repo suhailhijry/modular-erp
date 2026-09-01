@@ -13,6 +13,7 @@ use erp_types::{Cursor, Page, Timestamp};
 use sqlx::PgConnection;
 
 use crate::availability::Availability;
+use crate::pricing::Charged;
 use crate::reservation::{Held, Line, ReservationEvent, Stage};
 use crate::resource::ResourceEvent;
 
@@ -269,8 +270,9 @@ async fn write_lines(
     for (index, line) in lines.iter().enumerate() {
         sqlx::query(
             "INSERT INTO reservation_line
-                 (reservation_id, line, what, starts_at, ends_at, takes)
-             VALUES ($1,$2,$3,$4,$5,$6)",
+                 (reservation_id, line, what, starts_at, ends_at, takes,
+                  charge, net, currency)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         )
         .bind(id)
         .bind(i16::try_from(index).unwrap_or(i16::MAX))
@@ -278,6 +280,13 @@ async fn write_lines(
         .bind(line.span.from())
         .bind(line.span.until())
         .bind(sqlx::types::Json(&line.takes))
+        .bind(line.charge.as_ref().map(sqlx::types::Json))
+        .bind(line.charge.as_ref().map(|c| c.net.minor()))
+        .bind(
+            line.charge
+                .as_ref()
+                .map(|c| c.net.currency().as_str().to_owned()),
+        )
         .execute(&mut *conn)
         .await?;
     }
@@ -450,6 +459,8 @@ pub struct ReservationLine {
     pub ends_at: Timestamp,
     pub takes: Vec<Held>,
     pub unit: Option<String>,
+    /// What it came to, if it was priced.
+    pub charge: Option<Charged>,
 }
 
 /// A booking with everything on it.
@@ -541,7 +552,7 @@ pub async fn reservation(
     let lines = sqlx::query!(
         r#"SELECT line as "line!", what as "what!",
                   starts_at as "starts_at!", ends_at as "ends_at!",
-                  takes as "takes!", unit
+                  takes as "takes!", unit, charge
              FROM proj_booking.reservation_line
             WHERE reservation_id = $1
             ORDER BY line"#,
@@ -571,6 +582,10 @@ pub async fn reservation(
                 ends_at: l.ends_at,
                 takes: serde_json::from_value(l.takes).unwrap_or_default(),
                 unit: l.unit,
+                // A price that will not decode is one this build cannot read,
+                // and showing nothing is the honest answer — showing zero would
+                // say the appointment was free.
+                charge: l.charge.and_then(|c| serde_json::from_value(c).ok()),
             })
             .collect(),
     }))

@@ -27,7 +27,8 @@ use erp_types::{AggregateId, DomainName, StreamId, Timestamp};
 
 use crate::availability::{Availability, BadRule, any_covers};
 use crate::calendar::Calendar;
-use crate::reservation::{Customer, Line, Reservation, ReservationEvent, Stage};
+use crate::pricing::{PriceError, Tariff, price};
+use crate::reservation::{Customer, DraftLine, Line, Reservation, ReservationEvent, Stage};
 use crate::resource::{Kind, Resource, ResourceEvent};
 use crate::trades::{FittedOut, Trade};
 
@@ -72,6 +73,8 @@ pub enum BookingError {
     #[error(transparent)]
     Rule(#[from] BadRule),
     #[error(transparent)]
+    Price(#[from] PriceError),
+    #[error(transparent)]
     Config(#[from] erp_eventlog::ConfigError),
 }
 
@@ -115,6 +118,7 @@ impl erp_i18n::Localize for BookingError {
             Self::Occupancy(e) => e.message(),
             Self::Span(e) => e.message(),
             Self::Rule(e) => e.message(),
+            Self::Price(e) => e.message(),
             Self::Config(e) => e.message(),
         }
     }
@@ -212,7 +216,7 @@ fn named(name: &str) -> Result<(), BookingError> {
 #[derive(Debug, Clone)]
 pub struct Booking {
     pub customer: Customer,
-    pub lines: Vec<Line>,
+    pub lines: Vec<DraftLine>,
     pub note: String,
     /// When it was taken. Not the wall clock — a booking entered this morning
     /// for a call that came in yesterday is yesterday's.
@@ -507,7 +511,8 @@ pub async fn reserve(
         let outcome = async {
             let conn = &mut *tx;
             check_customer(&mut *conn, booking.customer.id.as_ref()).await?;
-            check_offered(&mut *conn, &booking.lines).await?;
+            let lines = priced(&mut *conn, &booking.lines).await?;
+            check_offered(&mut *conn, &lines).await?;
 
             let committed = try_execute::<Reservation, _, _>(
                 &mut *conn,
@@ -521,7 +526,7 @@ pub async fn reserve(
                     }
                     Ok::<_, BookingError>(Decision::one(ReservationEvent::Reserved {
                         customer: Box::new(booking.customer.clone()),
-                        lines: booking.lines.clone(),
+                        lines: lines.clone(),
                         note: booking.note.clone(),
                         at: booking.at,
                     }))
@@ -617,7 +622,7 @@ pub async fn move_to(
 pub async fn reschedule(
     db: &TenantDb,
     id: &AggregateId,
-    lines: &[Line],
+    lines: &[DraftLine],
     at: Timestamp,
     metadata: &Metadata,
 ) -> Outcome<ReservationEvent> {
@@ -629,7 +634,8 @@ pub async fn reschedule(
         let mut tx = db.begin().await?;
         let outcome = async {
             let conn = &mut *tx;
-            check_offered(&mut *conn, lines).await?;
+            let lines = priced(&mut *conn, lines).await?;
+            check_offered(&mut *conn, &lines).await?;
 
             let committed = try_execute::<Reservation, _, _>(
                 &mut *conn,
@@ -651,7 +657,7 @@ pub async fn reschedule(
                         return Ok(Decision::nothing());
                     }
                     Ok(Decision::one(ReservationEvent::Rescheduled {
-                        lines: lines.to_vec(),
+                        lines: lines.clone(),
                         at,
                     }))
                 },
@@ -845,6 +851,47 @@ fn claims_for(
 pub fn customer_resource(customer: &AggregateId) -> Result<AggregateId, BookingError> {
     AggregateId::new(format!("{CUSTOMER_PREFIX}{customer}"))
         .map_err(|_| BookingError::InvalidReference(customer.to_string()))
+}
+
+/// Prices every line against the tenant's bands, **in this transaction**.
+///
+/// The band is resolved here and frozen onto the line (L5), for the same
+/// reason `sales` resolves the VAT rate in the transaction that issues an
+/// invoice: a tenant who moves their peak hours next month must not restate
+/// what was booked this month, and a client must not be able to send its own
+/// idea of what peak costs.
+///
+/// A line with no charge stays unpriced and costs nothing. That is a business
+/// that bills elsewhere, not an error.
+async fn priced(
+    conn: &mut sqlx::PgConnection,
+    drafts: &[DraftLine],
+) -> Result<Vec<Line>, ExecuteError<BookingError>> {
+    let calendar = Calendar::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(BookingError::Config(e)))?;
+    let tariff = Tariff::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(BookingError::Config(e)))?;
+
+    drafts
+        .iter()
+        .map(|draft| {
+            let charge = match &draft.charge {
+                Some(charge) => Some(
+                    price(charge, tariff.band_for(draft.span, calendar))
+                        .map_err(|e| ExecuteError::Rejected(BookingError::Price(e)))?,
+                ),
+                None => None,
+            };
+            Ok(Line {
+                what: draft.what.clone(),
+                span: draft.span,
+                takes: draft.takes.clone(),
+                charge,
+            })
+        })
+        .collect()
 }
 
 /// Refuses a `crm` reference nothing answers to.

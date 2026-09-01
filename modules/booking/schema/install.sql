@@ -110,6 +110,17 @@ CREATE TABLE IF NOT EXISTS reservation_line (
     -- every business that books the thing itself, which is most of them.
     unit           TEXT,
 
+    -- What the line came to, as it was priced. Whole, for a screen that shows
+    -- the rate, the band and what was taken off.
+    charge         JSONB,
+
+    -- **And the net on its own**, because "what did we take on Thursday" is a
+    -- sum and not a decode. Null on a line nobody priced, which is a business
+    -- that bills elsewhere rather than one that charged zero — the difference
+    -- a `0` here would lose.
+    net            BIGINT,
+    currency       TEXT,
+
     PRIMARY KEY (reservation_id, line)
 );
 

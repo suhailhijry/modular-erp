@@ -3,6 +3,8 @@
 use erp_eventlog::{Aggregate, DomainEvent};
 use erp_occupancy::Span;
 use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
+
+use crate::pricing::{Charge, Charged};
 use serde::{Deserialize, Serialize};
 
 /// Where a reservation is in its life.
@@ -193,6 +195,31 @@ pub struct Line {
     /// Every resource this line takes at once. A salon line takes the stylist
     /// and the chair; a class line takes the instructor and the room.
     pub takes: Vec<Held>,
+    /// What it costs, **as it was priced at the moment of booking** (L5).
+    ///
+    /// `Option`, and it stays optional. Every reservation taken before pricing
+    /// existed has none, and a clinic billing through an insurer never sets
+    /// one. `#[serde(default)]`, so those older events still decode, which is
+    /// why this needs no upcaster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charge: Option<Charged>,
+}
+
+/// A line as a caller sends it: what, when, what it takes, and the rate asked
+/// for. **Not what it comes to** — the band is the tenant's, resolved in the
+/// command's own transaction, because a rate that changed between the request
+/// and the write would stamp a booking with one that was never current.
+///
+/// The same split `sales` makes between `DraftLine` and `InvoiceLine`, for the
+/// same reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftLine {
+    pub what: String,
+    pub span: Span,
+    pub takes: Vec<Held>,
+    /// What to charge, before the tenant's bands are applied. Absent for a
+    /// business that does not price here.
+    pub charge: Option<Charge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

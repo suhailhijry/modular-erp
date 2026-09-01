@@ -22,10 +22,6 @@ use serde::{Deserialize, Serialize};
 // categories, and two sibling modules must not depend on each other.
 pub use ledger::VatCategory;
 
-/// One ten-thousandth. Rates are basis points because 15% is exact there and
-/// `0.15` is not — and `float_arithmetic` is denied workspace-wide anyway.
-const BASIS: i128 = 10_000;
-
 /// A tax treatment together with the rate that applied when it was chosen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vat {
@@ -62,10 +58,7 @@ impl Vat {
     /// `-15.005` becomes `-15.01` — symmetric, so crediting an invoice line
     /// reverses it exactly instead of leaving a halala behind.
     pub fn on(self, net: Money) -> Result<Money, TaxError> {
-        let product = i128::from(net.minor()) * i128::from(self.basis_points);
-        let rounded = div_round_half_away(product, BASIS);
-        let minor = i64::try_from(rounded).map_err(|_| TaxError::OutOfRange)?;
-        Ok(Money::from_minor(minor, net.currency()))
+        Ok(net.scaled_by(self.basis_points)?)
     }
 }
 
@@ -98,20 +91,6 @@ impl From<erp_types::MoneyError> for TaxError {
             }
         }
     }
-}
-
-/// `numerator / denominator`, rounding halves away from zero.
-///
-/// `denominator` is always [`BASIS`]; it is a parameter so the property test can
-/// vary it.
-fn div_round_half_away(numerator: i128, denominator: i128) -> i128 {
-    let sign = if numerator < 0 { -1 } else { 1 };
-    let magnitude = numerator.unsigned_abs();
-    let denominator = denominator.unsigned_abs();
-    // `(2n + d) / 2d` is `n/d` rounded half up, without a division producing a
-    // remainder anyone has to interpret.
-    let rounded = (magnitude * 2 + denominator) / (denominator * 2);
-    sign * i128::try_from(rounded).unwrap_or(i128::MAX)
 }
 
 /// Net and tax for one rate, as a tax invoice must show them.
@@ -537,26 +516,5 @@ mod tests {
             basis_points: i32::MAX,
         };
         assert_eq!(absurd.on(money(i64::MAX)), Err(TaxError::OutOfRange));
-    }
-
-    #[test]
-    fn rounding_matches_a_reference_implementation() {
-        // The reference is the definition — `round(n/d)` with halves away from
-        // zero — spelled out the slow, obvious way.
-        for numerator in -50_i128..=50 {
-            for denominator in 1_i128..=7 {
-                let exact_twice = numerator * 2;
-                let mut expected = numerator / denominator;
-                let remainder_twice = exact_twice - expected * denominator * 2;
-                if remainder_twice.abs() >= denominator {
-                    expected += if numerator < 0 { -1 } else { 1 };
-                }
-                assert_eq!(
-                    div_round_half_away(numerator, denominator),
-                    expected,
-                    "{numerator}/{denominator}"
-                );
-            }
-        }
     }
 }

@@ -247,12 +247,44 @@ impl Money {
     ///
     /// There is deliberately no multiplication by a fraction or a percentage:
     /// those need an explicit rounding policy, and burying one in an operator is
-    /// how ledgers drift by a halala per line.
+    /// how ledgers drift by a halala per line. Where a rate is genuinely needed,
+    /// [`Self::scaled_by`] names its policy in the doc rather than hiding it in
+    /// a `*`.
     pub fn checked_mul_int(self, factor: i64) -> Result<Self, MoneyError> {
         self.minor
             .checked_mul(factor)
             .map(|minor| Self::from_minor(minor, self.currency))
             .ok_or(MoneyError::Overflow {
+                currency: self.currency,
+            })
+    }
+
+    /// Scales by a rate in basis points, **rounding halves away from zero**.
+    ///
+    /// One ten-thousandth, because 15% is exact in basis points and `0.15` is
+    /// not — and `float_arithmetic` is denied workspace-wide anyway.
+    ///
+    /// # Why the rounding is this and not something else
+    ///
+    /// Half away from zero is what ZATCA's invoicing rules specify and what
+    /// every till in the country does. `15.005` becomes `15.01`, and `-15.005`
+    /// becomes `-15.01` — symmetric, so crediting a line reverses it exactly
+    /// instead of leaving a halala behind.
+    ///
+    /// # Why this is on `Money` and not in whichever module needed it first
+    ///
+    /// It was in `sales::vat`, privately, and `booking` needed the same rule to
+    /// put a peak-hour uplift on a price. Two implementations of one rounding
+    /// rule is the defect the booking system this was measured against records
+    /// in its own source: three of them, disagreeing, and every fixed discount
+    /// differing by exactly the tax on it. One rule, one place, and the tax
+    /// tests in `sales` are what keep it honest.
+    pub fn scaled_by(self, basis_points: i32) -> Result<Self, MoneyError> {
+        let product = i128::from(self.minor) * i128::from(basis_points);
+        let rounded = div_round_half_away(product, BASIS);
+        i64::try_from(rounded)
+            .map(|minor| Self::from_minor(minor, self.currency))
+            .map_err(|_| MoneyError::Overflow {
                 currency: self.currency,
             })
     }
@@ -277,6 +309,23 @@ impl Money {
             .into_iter()
             .try_fold(Self::zero(currency), Money::checked_add)
     }
+}
+
+/// One ten-thousandth. See [`Money::scaled_by`].
+const BASIS: i128 = 10_000;
+
+/// `numerator / denominator`, rounding halves away from zero.
+///
+/// `denominator` is always [`BASIS`]; it is a parameter so the property test
+/// can vary it.
+fn div_round_half_away(numerator: i128, denominator: i128) -> i128 {
+    let sign = if numerator < 0 { -1 } else { 1 };
+    let magnitude = numerator.unsigned_abs();
+    let denominator = denominator.unsigned_abs();
+    // `(2n + d) / 2d` is `n/d` rounded half up, without a division producing a
+    // remainder anyone has to interpret.
+    let rounded = (magnitude * 2 + denominator) / (denominator * 2);
+    sign * i128::try_from(rounded).unwrap_or(i128::MAX)
 }
 
 impl fmt::Display for Money {
@@ -305,6 +354,46 @@ impl fmt::Display for Money {
 
 #[cfg(test)]
 mod tests {
+    /// **The rounding rule, against its own definition.**
+    ///
+    /// Lived in `sales::vat` until `booking` needed the same rule for a
+    /// peak-hour uplift. The reference is `round(n/d)` with halves away from
+    /// zero, spelled out the slow, obvious way.
+    #[test]
+    fn rounding_matches_a_reference_implementation() {
+        for numerator in -50_i128..=50 {
+            for denominator in 1_i128..=7 {
+                let exact_twice = numerator * 2;
+                let mut expected = numerator / denominator;
+                let remainder_twice = exact_twice - expected * denominator * 2;
+                if remainder_twice.abs() >= denominator {
+                    expected += if numerator < 0 { -1 } else { 1 };
+                }
+                assert_eq!(
+                    div_round_half_away(numerator, denominator),
+                    expected,
+                    "{numerator}/{denominator}"
+                );
+            }
+        }
+    }
+
+    /// The two callers that matter: 15% tax, and a 25% peak uplift.
+    #[test]
+    fn scaling_by_a_rate_rounds_halves_away_from_zero() {
+        let sar = CurrencyCode::new("SAR").unwrap_or_else(|_| unreachable!("a real code"));
+        let m = |minor| Money::from_minor(minor, sar);
+
+        assert_eq!(m(10_000).scaled_by(1_500), Ok(m(1_500)));
+        assert_eq!(m(10_000).scaled_by(2_500), Ok(m(2_500)));
+        // 33.33 at 15% is 4.9995, which goes up rather than to the even neighbour.
+        assert_eq!(m(3_333).scaled_by(1_500), Ok(m(500)));
+        // And symmetrically downwards, so a credit reverses a charge exactly.
+        assert_eq!(m(-3_333).scaled_by(1_500), Ok(m(-500)));
+        assert_eq!(m(1).scaled_by(0), Ok(m(0)));
+        assert!(m(i64::MAX).scaled_by(i32::MAX).is_err());
+    }
+
     use super::*;
 
     fn sar() -> CurrencyCode {

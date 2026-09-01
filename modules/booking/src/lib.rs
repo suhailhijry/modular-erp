@@ -51,6 +51,7 @@ pub mod http;
 pub mod messages;
 
 mod commands;
+pub mod pricing;
 mod projections;
 mod reservation;
 mod resource;
@@ -63,12 +64,15 @@ pub use commands::{
     customer_resource, declare_resource, fit_out, move_to, reschedule, reserve, restore_resource,
     schedule_resource, withdraw_resource,
 };
+pub use pricing::{Allowance, Applied, Band, Charge, Charged, PriceError, Tariff, price};
 pub use projections::{
     Booking, ReservationDetail, ReservationLine, ReservationSummary, Reservations, ResourceDetail,
     ResourceSummary, Resources, projections, reservation, reservations, resource, resources,
     stages,
 };
-pub use reservation::{Customer, Held, Line, Reservation, ReservationEvent, Stage, UnknownStage};
+pub use reservation::{
+    Customer, DraftLine, Held, Line, Reservation, ReservationEvent, Stage, UnknownStage,
+};
 pub use resource::{Kind, Resource, ResourceEvent, UnknownKind};
 pub use trades::{FittedOut, TRADES, TemplateHours, TemplateResource, Trade, trade};
 

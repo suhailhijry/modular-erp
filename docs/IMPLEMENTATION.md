@@ -796,18 +796,49 @@ loyalty points are one accounting problem wearing five names.
 
 ### 8d · Pricing, once and pure
 
-- [ ] One `price` function. No database, no settings, no clock — so it is
-      testable and cannot drift with configuration
-- [ ] **Time-based pricing.** Peak and off-peak, which Rekaz sells and every
+- [x] One `price` function. No database, no settings, no clock — so it is
+      testable and cannot drift with configuration. `modules/booking/src/pricing.rs`
+- [x] **Time-based pricing.** Peak and off-peak, which Rekaz sells and every
       salon wants. It is an argument to `price`, resolved from configuration at
-      the moment of booking and frozen onto the line (L5), never read again
-- [ ] **Tax-exclusive discounts**: a discount reduces the taxable base and VAT is
-      charged on what remains. This matches how ZATCA models a line allowance
-- [ ] `Money`, never a float. That system's engine takes floating-point
-      amounts, and its own docblock records three implementations that
-      disagreed — every fixed discount differed by exactly the VAT on it
+      the moment of booking and frozen onto the line (L5), never read again.
+      A band's *when* is an `Availability` — the same recurrence that says when
+      a resource is offered, because "open Thursday evening" and "dearer
+      Thursday evening" are one shape and a tenant should learn it once
+- [x] **Tax-exclusive discounts**: an allowance comes off the net and tax is
+      charged on what remains. **No tax is computed in `booking`**, and that is
+      the point: a reservation is not a tax document, so the allowances travel
+      with the line to `sales` when it is invoiced and reduce the band they
+      come off there. The tax-exclusive property falls out rather than being
+      something two modules each have to remember
+- [x] `Money`, never a float
 
-**Exit:** four verticals demonstrable from blueprints, and one pricing path.
+**The rounding rule moved before it could be duplicated.** That system's engine
+takes floating-point amounts and its own docblock records three implementations
+that disagreed, every fixed discount differing by exactly the tax on it. The
+half-away-from-zero rule was private to `sales::vat`; `booking` needed the same
+one for a peak-hour uplift. It is now `Money::scaled_by`, which is the only
+place in the workspace a rate is applied to an amount, and `sales`' fifty-four
+tax tests are what keep it honest.
+
+**The order of operations is written down, because it is not free.** The band
+moves the **rate**, then quantity multiplies, then allowances come off the
+total. Banding the total instead gives a different answer wherever the rounding
+bites, and it bites at the prices businesses actually use: a 33.33 service at a
+quarter more is 41.66 each, so four are 166.64 — banding the total gives 166.65
+and a customer who checks finds a halala nobody can explain.
+
+**Bands, not prices.** What a service costs is the caller's to send; *when* it
+costs more is the tenant's to configure. Putting the price list on the server
+would need a service catalogue, which nothing has asked for and which `what`
+being opaque is currently buying us. A client cannot decide its own peak rate,
+which is the half that had to be server-side.
+
+**A whole span, not its start.** A treatment beginning before peak and running
+into it is charged at the base rate. The alternative is the answer a customer
+argues with, and a business that wants the other rule splits the booking, which
+is what they would do at the till anyway.
+
+**Exit:** six verticals demonstrable from blueprints, and one pricing path.
 
 ---
 

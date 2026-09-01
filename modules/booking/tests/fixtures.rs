@@ -22,7 +22,9 @@
 
 use std::sync::Arc;
 
-use booking::{BookingError, Draft, Held, Line, Stage, Trade, fit_out, move_to, reserve, trade};
+use booking::{
+    BookingError, Draft, DraftLine, Held, Stage, Trade, fit_out, move_to, reserve, trade,
+};
 use erp_control::{
     Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
 };
@@ -60,27 +62,29 @@ fn span(from: &str, until: &str) -> Span {
 }
 
 /// One line taking one of everything named.
-fn line(what: &str, from: &str, until: &str, takes: &[&str]) -> Line {
-    Line {
+fn line(what: &str, from: &str, until: &str, takes: &[&str]) -> DraftLine {
+    DraftLine {
         what: what.to_owned(),
         span: span(from, until),
         takes: takes.iter().map(|r| Held::one(code(r))).collect(),
+        charge: None,
     }
 }
 
 /// One line taking `quantity` of a single resource.
-fn places(what: &str, from: &str, until: &str, resource: &str, quantity: u16) -> Line {
-    Line {
+fn places(what: &str, from: &str, until: &str, resource: &str, quantity: u16) -> DraftLine {
+    DraftLine {
         what: what.to_owned(),
         span: span(from, until),
         takes: vec![Held {
             resource: code(resource),
             quantity,
         }],
+        charge: None,
     }
 }
 
-fn booking_for(customer: &str, lines: Vec<Line>) -> Draft {
+fn booking_for(customer: &str, lines: Vec<DraftLine>) -> Draft {
     Draft {
         customer: booking::Customer {
             id: Some(code(customer)),
@@ -218,7 +222,12 @@ impl Fixture {
         .expect("the customer is on file");
     }
 
-    async fn book(&self, id: &str, customer: &str, lines: Vec<Line>) -> Result<(), BookingError> {
+    async fn book(
+        &self,
+        id: &str,
+        customer: &str,
+        lines: Vec<DraftLine>,
+    ) -> Result<(), BookingError> {
         match reserve(
             &self.db,
             &code(id),
@@ -383,7 +392,7 @@ async fn a_hotel_books_the_room_type_and_gives_out_the_room_at_check_in() {
 
     // Three nights, across midnight twice. No opening hours, because a guest
     // checks in at any hour.
-    let stay = |id: &str| Line {
+    let stay = |id: &str| DraftLine {
         what: "إقامة".to_owned(),
         span: Span::new(
             "2026-09-02T15:00:00+03:00".parse().expect("valid"),
@@ -391,6 +400,7 @@ async fn a_hotel_books_the_room_type_and_gives_out_the_room_at_check_in() {
         )
         .expect("three nights"),
         takes: vec![Held::one(code(id))],
+        charge: None,
     };
 
     for (n, who) in ["c1", "c2", "c3"].into_iter().enumerate() {

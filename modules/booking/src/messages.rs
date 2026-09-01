@@ -25,6 +25,12 @@ pub const UNKNOWN_STAGE: MessageCode = MessageCode::new("booking.unknown_stage")
 pub const UNKNOWN_KIND: MessageCode = MessageCode::new("booking.unknown_kind");
 pub const NOT_AN_OFFSET: MessageCode = MessageCode::new("booking.not_an_offset");
 pub const NO_SUCH_TRADE: MessageCode = MessageCode::new("booking.no_such_trade");
+pub const NOT_A_RATE: MessageCode = MessageCode::new("booking.not_a_rate");
+pub const NOTHING_CHARGED: MessageCode = MessageCode::new("booking.nothing_charged");
+pub const NOT_AN_ALLOWANCE: MessageCode = MessageCode::new("booking.not_an_allowance");
+pub const ALLOWANCE_TOO_LARGE: MessageCode = MessageCode::new("booking.allowance_too_large");
+pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("booking.mixed_currencies");
+pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("booking.amount_out_of_range");
 
 pub static CODES: &[MessageCode] = &[
     NOTHING_TO_BOOK,
@@ -50,6 +56,12 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_KIND,
     NOT_AN_OFFSET,
     NO_SUCH_TRADE,
+    NOT_A_RATE,
+    NOTHING_CHARGED,
+    NOT_AN_ALLOWANCE,
+    ALLOWANCE_TOO_LARGE,
+    MIXED_CURRENCIES,
+    AMOUNT_OUT_OF_RANGE,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -271,6 +283,66 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_AN_OFFSET,
         Locale::English,
         Template::Simple("A timezone offset is minutes from UTC, between -{limit} and {limit}."),
+    ),
+    (
+        NOT_A_RATE,
+        Locale::English,
+        Template::Simple("A price cannot be negative."),
+    ),
+    (
+        NOT_A_RATE,
+        Locale::Arabic,
+        Template::Simple("لا يمكن أن يكون السعر بالسالب."),
+    ),
+    (
+        NOTHING_CHARGED,
+        Locale::English,
+        Template::Simple("A priced line must be for at least one."),
+    ),
+    (
+        NOTHING_CHARGED,
+        Locale::Arabic,
+        Template::Simple("يجب أن يكون البند المسعّر لواحد على الأقل."),
+    ),
+    (
+        NOT_AN_ALLOWANCE,
+        Locale::English,
+        Template::Simple("A discount is the amount taken off, so it is a positive number."),
+    ),
+    (
+        NOT_AN_ALLOWANCE,
+        Locale::Arabic,
+        Template::Simple("الخصم هو المبلغ المحسوم، لذا يجب أن يكون رقمًا موجبًا."),
+    ),
+    (
+        ALLOWANCE_TOO_LARGE,
+        Locale::English,
+        Template::Simple("A discount cannot be larger than what it comes off."),
+    ),
+    (
+        ALLOWANCE_TOO_LARGE,
+        Locale::Arabic,
+        Template::Simple("لا يمكن أن يتجاوز الخصم المبلغ المحسوم منه."),
+    ),
+    (
+        MIXED_CURRENCIES,
+        Locale::English,
+        Template::Simple("Every amount on a booking must be in the same currency."),
+    ),
+    (
+        MIXED_CURRENCIES,
+        Locale::Arabic,
+        Template::Simple("يجب أن تكون جميع المبالغ في الحجز بالعملة نفسها."),
+    ),
+    (
+        AMOUNT_OUT_OF_RANGE,
+        Locale::English,
+        Template::Simple("That amount is too large to record."),
+    ),
+    (
+        AMOUNT_OUT_OF_RANGE,
+        Locale::Arabic,
+        Template::Simple("هذا المبلغ أكبر من أن يُسجَّل."),
     ),
     (
         NO_SUCH_TRADE,

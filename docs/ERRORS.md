@@ -66,6 +66,16 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 ## `booking`
 
+### `booking.allowance_too_large`
+
+- **en** — A discount cannot be larger than what it comes off.
+- **ar** — لا يمكن أن يتجاوز الخصم المبلغ المحسوم منه.
+
+### `booking.amount_out_of_range`
+
+- **en** — That amount is too large to record.
+- **ar** — هذا المبلغ أكبر من أن يُسجَّل.
+
 ### `booking.backwards_dates`
 
 - **en** — The last day these hours apply is before the first.
@@ -80,6 +90,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — {reference} cannot be used as a reference.
 - **ar** — لا يمكن استخدام {reference} كمرجع.
+
+### `booking.mixed_currencies`
+
+- **en** — Every amount on a booking must be in the same currency.
+- **ar** — يجب أن تكون جميع المبالغ في الحجز بالعملة نفسها.
 
 ### `booking.no_name`
 
@@ -121,6 +136,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — {value} is not a month.
 - **ar** — {value} ليس شهرًا.
 
+### `booking.not_a_rate`
+
+- **en** — A price cannot be negative.
+- **ar** — لا يمكن أن يكون السعر بالسالب.
+
 ### `booking.not_a_time_of_day`
 
 - **en** — A time of day is minutes past midnight, from 0 to {most}.
@@ -136,6 +156,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — Opening hours must close after they open. A window that runs past midnight is two windows.
 - **ar** — يجب أن تنتهي ساعات العمل بعد بدايتها. النافذة التي تتجاوز منتصف الليل هي نافذتان.
 
+### `booking.not_an_allowance`
+
+- **en** — A discount is the amount taken off, so it is a positive number.
+- **ar** — الخصم هو المبلغ المحسوم، لذا يجب أن يكون رقمًا موجبًا.
+
 ### `booking.not_an_offset`
 
 - **en** — A timezone offset is minutes from UTC, between -{limit} and {limit}.
@@ -145,6 +170,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — {resource} is not open at that time.
 - **ar** — {resource} غير متاح في ذلك الوقت.
+
+### `booking.nothing_charged`
+
+- **en** — A priced line must be for at least one.
+- **ar** — يجب أن يكون البند المسعّر لواحد على الأقل.
 
 ### `booking.nothing_to_book`
 

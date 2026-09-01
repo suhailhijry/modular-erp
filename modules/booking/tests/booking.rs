@@ -12,8 +12,9 @@
 use std::sync::Arc;
 
 use booking::{
-    Availability, BookingError, Details, Draft, Held, Kind, Line, Stage, assign, declare_resource,
-    move_to, reschedule, reserve, restore_resource, schedule_resource, withdraw_resource,
+    Availability, BookingError, Details, Draft, DraftLine, Held, Kind, Stage, assign,
+    declare_resource, move_to, reschedule, reserve, restore_resource, schedule_resource,
+    withdraw_resource,
 };
 use erp_control::{
     Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
@@ -53,15 +54,16 @@ fn span(from: &str, until: &str) -> Span {
 }
 
 /// One line, one hour, taking whatever it is given.
-fn line(what: &str, from: &str, until: &str, takes: &[&str]) -> Line {
-    Line {
+fn line(what: &str, from: &str, until: &str, takes: &[&str]) -> DraftLine {
+    DraftLine {
         what: what.to_owned(),
         span: span(from, until),
         takes: takes.iter().map(|r| Held::one(code(r))).collect(),
+        charge: None,
     }
 }
 
-fn booking_for(customer: Option<&str>, lines: Vec<Line>) -> Draft {
+fn booking_for(customer: Option<&str>, lines: Vec<DraftLine>) -> Draft {
     Draft {
         customer: booking::Customer {
             id: customer.map(code),
@@ -843,10 +845,11 @@ async fn a_resource_is_only_booked_inside_its_opening_hours() {
         &code("BK-3"),
         &booking_for(
             None,
-            vec![Line {
+            vec![DraftLine {
                 what: "قص".to_owned(),
                 span: thursday,
                 takes: vec![Held::one(code("chair-1"))],
+                charge: None,
             }],
         ),
         &Metadata::default(),
@@ -1064,6 +1067,240 @@ async fn a_rebuild_reproduces_the_diary() {
         report.is_reproducible(),
         "a rebuild must reproduce the diary exactly: {:?}",
         report.differences()
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Sets the tenant's price bands. Configuration, like the VAT rate.
+async fn set_bands(fixture: &Fixture, bands: Vec<booking::Band>) {
+    let mut conn = fixture.pool.acquire().await.expect("connection");
+    erp_eventlog::configuration::set(
+        &mut conn,
+        booking::Tariff::KEY,
+        &booking::Tariff { bands },
+        None,
+    )
+    .await
+    .expect("the tariff is set");
+}
+
+/// Thursday evening costs a quarter more.
+fn thursday_peak() -> booking::Band {
+    booking::Band {
+        name: "ذروة الخميس".to_owned(),
+        when: Availability::from_parts(&[], &[4], &[], 17 * 60, 21 * 60, None, None)
+            .expect("a rule"),
+        uplift: 2_500,
+    }
+}
+
+fn sar() -> erp_types::CurrencyCode {
+    erp_types::CurrencyCode::new("SAR").expect("a real code")
+}
+
+fn money(minor: i64) -> erp_types::Money {
+    erp_types::Money::from_minor(minor, sar())
+}
+
+/// A line with a price on it.
+fn charged(
+    what: &str,
+    span: Span,
+    resource: &str,
+    rate: i64,
+    quantity: u16,
+    off: i64,
+) -> DraftLine {
+    DraftLine {
+        what: what.to_owned(),
+        span,
+        takes: vec![Held::one(code(resource))],
+        charge: Some(booking::Charge {
+            rate: money(rate),
+            quantity,
+            allowances: if off == 0 {
+                Vec::new()
+            } else {
+                vec![booking::Allowance {
+                    reason: "عرض الافتتاح".to_owned(),
+                    amount: money(off),
+                }]
+            },
+        }),
+    }
+}
+
+/// An hour on the Thursday after the Wednesday everything else happens on.
+fn thursday(from: &str, until: &str) -> Span {
+    Span::new(
+        format!("2026-09-03T{from}:00:00+03:00")
+            .parse()
+            .expect("valid"),
+        format!("2026-09-03T{until}:00:00+03:00")
+            .parse()
+            .expect("valid"),
+    )
+    .expect("an hour")
+}
+
+/// **A booking is priced when it is taken, and the band is frozen onto it.**
+///
+/// The whole of 8d in one pass: the tenant's bands are configuration, they are
+/// resolved inside the transaction that writes the booking, and moving them
+/// afterwards changes what the *next* booking costs and nothing that was
+/// already agreed (L5).
+#[tokio::test]
+async fn a_booking_is_priced_against_the_tenants_bands() {
+    let fixture = Fixture::new().await;
+    set_bands(&fixture, vec![thursday_peak()]).await;
+
+    // Wednesday at ten: the base rate, and a discount off the net.
+    reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(
+            Some("CUST-1"),
+            vec![charged("قص", span("10", "11"), "chair-1", 8_000, 2, 2_500)],
+        ),
+        &Metadata::default(),
+    )
+    .await
+    .expect("booked");
+    fixture.project().await;
+
+    let detail = fixture.get("BK-1").await.expect("there");
+    let priced = detail.lines[0].charge.as_ref().expect("it was priced");
+    assert!(priced.band.is_none(), "Wednesday is not a peak band");
+    assert_eq!(priced.gross, money(16_000));
+    assert_eq!(priced.net, money(13_500), "the discount came off the net");
+
+    // Thursday evening: a quarter more, and the band's name is on the line.
+    reserve(
+        &fixture.db,
+        &code("BK-2"),
+        &booking_for(
+            Some("CUST-1"),
+            vec![charged("قص", thursday("18", "19"), "chair-1", 8_000, 1, 0)],
+        ),
+        &Metadata::default(),
+    )
+    .await
+    .expect("booked");
+    fixture.project().await;
+
+    let detail = fixture.get("BK-2").await.expect("there");
+    let priced = detail.lines[0].charge.as_ref().expect("it was priced");
+    assert_eq!(
+        priced.band.as_ref().map(|b| b.name.as_str()),
+        Some("ذروة الخميس"),
+        "the peak band did not apply"
+    );
+    assert_eq!(priced.rate, money(8_000), "the list rate is kept beside it");
+    assert_eq!(priced.net, money(10_000));
+
+    fixture.cleanup().await;
+}
+
+/// **Moving the bands does not restate a booking already taken.**
+///
+/// The band is resolved in the transaction that writes the booking and frozen
+/// onto the line (L5), for the same reason a VAT rate is frozen onto an
+/// invoice. A tenant who puts their peak hours up next month has not made last
+/// month's appointments more expensive.
+#[tokio::test]
+async fn moving_the_bands_does_not_restate_what_was_already_agreed() {
+    let fixture = Fixture::new().await;
+    set_bands(&fixture, vec![thursday_peak()]).await;
+
+    reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(
+            Some("CUST-1"),
+            vec![charged("قص", thursday("18", "19"), "chair-1", 8_000, 1, 0)],
+        ),
+        &Metadata::default(),
+    )
+    .await
+    .expect("booked at peak");
+    fixture.project().await;
+    assert_eq!(
+        fixture.get("BK-1").await.expect("there").lines[0]
+            .charge
+            .as_ref()
+            .expect("priced")
+            .net,
+        money(10_000)
+    );
+
+    set_bands(&fixture, Vec::new()).await;
+    fixture.project().await;
+    assert_eq!(
+        fixture.get("BK-1").await.expect("still there").lines[0]
+            .charge
+            .as_ref()
+            .expect("still priced")
+            .net,
+        money(10_000),
+        "clearing the tariff restated a booking that was already agreed"
+    );
+
+    // And the next booking at that hour is now the base rate.
+    reserve(
+        &fixture.db,
+        &code("BK-2"),
+        &booking_for(
+            Some("CUST-1"),
+            vec![charged("قص", thursday("19", "20"), "chair-1", 8_000, 1, 0)],
+        ),
+        &Metadata::default(),
+    )
+    .await
+    .expect("booked");
+    fixture.project().await;
+    assert_eq!(
+        fixture.get("BK-2").await.expect("there").lines[0]
+            .charge
+            .as_ref()
+            .expect("priced")
+            .net,
+        money(8_000)
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A client cannot send its own idea of what a booking costs.**
+///
+/// The rate is the caller's, the band is the tenant's. A refused price leaves
+/// nothing behind — no event, and no claim on the chair.
+#[tokio::test]
+async fn a_price_that_is_not_one_is_refused_and_takes_no_capacity() {
+    let fixture = Fixture::new().await;
+
+    let refused = reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(
+            Some("CUST-1"),
+            vec![charged("قص", span("10", "11"), "chair-1", 8_000, 1, 9_000)],
+        ),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("a discount larger than the line");
+    assert!(
+        matches!(
+            rejection(&refused),
+            Some(BookingError::Price(booking::PriceError::AllowanceTooLarge))
+        ),
+        "expected AllowanceTooLarge, got {refused}"
+    );
+    assert_eq!(
+        fixture.free("chair-1", "10", "11").await,
+        1,
+        "the chair was held by a booking that was refused"
     );
 
     fixture.cleanup().await;

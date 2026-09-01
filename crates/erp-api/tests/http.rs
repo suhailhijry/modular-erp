@@ -1719,6 +1719,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // at ten is what everyone on a shop floor needs, and it is the screen most
     // of these businesses live on.
     ("list_bookables", ALL_ROLES),
+    // What the hours cost. A viewer may read the tariff for the same reason
+    // they may read the VAT rate: it is on every quote they give a customer.
+    ("tariff", ALL_ROLES),
     ("get_bookable", ALL_ROLES),
     ("list_reservations", ALL_ROLES),
     ("get_reservation", ALL_ROLES),
@@ -1781,6 +1784,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Fitting a tenant out for a trade declares its whole rota at once, which
     // is the same decision as declaring one by hand and sits in the same place.
     ("fit_out", OWNER),
+    // Which hours cost more is the shape of the business, and it is the half a
+    // client must not be able to decide for itself.
+    ("set_tariff", OWNER),
     ("declare_bookable", OWNER),
     ("amend_bookable", OWNER),
     ("set_opening_hours", OWNER),
@@ -1860,8 +1866,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        67,
-        "expected sixty-seven role-scoped operations"
+        69,
+        "expected sixty-nine role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

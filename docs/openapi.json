@@ -856,6 +856,63 @@
         ],
         "type": "object"
       },
+      "ChargedLine": {
+        "description": "What a line came to, as it was priced.",
+        "properties": {
+          "allowances": {
+            "items": {
+              "$ref": "#/components/schemas/LineAllowance"
+            },
+            "type": "array"
+          },
+          "band": {
+            "description": "The band that applied, or absent for the base rate.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currency": {
+            "type": "string"
+          },
+          "gross": {
+            "description": "Rate, banded, times quantity.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "net": {
+            "description": "**What is charged, before tax.** `gross` less every allowance.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "quantity": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rate": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "uplift": {
+            "description": "What the band did, in basis points. `2500` is a quarter more.",
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "rate",
+          "currency",
+          "quantity",
+          "allowances",
+          "gross",
+          "net"
+        ],
+        "type": "object"
+      },
       "ChartAccountView": {
         "properties": {
           "code": {
@@ -1713,6 +1770,61 @@
         "required": [
           "id",
           "number"
+        ],
+        "type": "object"
+      },
+      "LineAllowance": {
+        "description": "Something taken off a line, and why.",
+        "properties": {
+          "amount": {
+            "description": "What comes off, in minor units and positive. `2500` is 25.00 SAR.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "A customer reads this, so it is text and not a code.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "amount"
+        ],
+        "type": "object"
+      },
+      "LineCharge": {
+        "description": "What to charge for a line, before the tenant's price bands.\n\n**The rate is yours; the band is the tenant's.** Which hours cost more is\nconfiguration, resolved when the booking is written and frozen onto it, so\na client cannot decide its own peak rate.",
+        "example": {
+          "currency": "SAR",
+          "quantity": 1,
+          "rate": 8000
+        },
+        "properties": {
+          "allowances": {
+            "items": {
+              "$ref": "#/components/schemas/LineAllowance"
+            },
+            "type": "array"
+          },
+          "currency": {
+            "description": "ISO 4217. Every amount on the booking must be in it.",
+            "type": "string"
+          },
+          "quantity": {
+            "description": "How many. Four covers, twelve places, three nights.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rate": {
+            "description": "The list rate for one of these, in minor units.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rate",
+          "currency"
         ],
         "type": "object"
       },
@@ -2705,6 +2817,17 @@
       },
       "NewReservationLine": {
         "properties": {
+          "charge": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LineCharge",
+                "description": "What to charge. Absent for a business that bills elsewhere."
+              }
+            ]
+          },
           "from": {
             "format": "date-time",
             "type": "string"
@@ -3898,6 +4021,17 @@
       },
       "ReservationRecordLine": {
         "properties": {
+          "charge": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChargedLine",
+                "description": "What it came to, if it was priced."
+              }
+            ]
+          },
           "from": {
             "format": "date-time",
             "type": "string"
@@ -4180,6 +4314,57 @@
           "awaiting_clearance",
           "chain_length",
           "unsigned"
+        ],
+        "type": "object"
+      },
+      "TariffBand": {
+        "description": "A price band on the wire.",
+        "example": {
+          "hours": {
+            "closes_at": 1260,
+            "opens_at": 1020,
+            "weekdays": [
+              3,
+              4
+            ]
+          },
+          "name": "ذروة المساء",
+          "uplift": 2500
+        },
+        "properties": {
+          "hours": {
+            "$ref": "#/components/schemas/OpeningHours",
+            "description": "When it applies, in local time. The same shape as a resource's hours."
+          },
+          "name": {
+            "description": "Printed beside the price, so a person recognises it on a receipt.",
+            "type": "string"
+          },
+          "uplift": {
+            "description": "What it does to the rate, in basis points. `2500` is a quarter more;\n`-1000` is a tenth off, which is what an off-peak band is.",
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "uplift",
+          "hours"
+        ],
+        "type": "object"
+      },
+      "TariffView": {
+        "properties": {
+          "bands": {
+            "description": "**First match wins**, so the order is your priority. A public holiday\ngoes above a general evening band.",
+            "items": {
+              "$ref": "#/components/schemas/TariffBand"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "bands"
         ],
         "type": "object"
       },
@@ -6137,6 +6322,174 @@
           }
         },
         "summary": "Take a resource out of service. Bookings already against it stand.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/tariff": {
+      "get": {
+        "operationId": "tariff",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TariffView"
+                }
+              }
+            },
+            "description": "An empty list means every hour is the same price."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "The tenant's price bands: which hours cost more, and by how much.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "**Bookings already taken keep the price they were given.** The band is\nfrozen onto the line when the booking is written (L5), so moving your peak\nhours changes what the next booking costs and nothing that was already\nagreed.",
+        "operationId": "set_tariff",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TariffView"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Set."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A window that closes before it opens, or an uplift that would make the service cost you money"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Set the whole tariff, replacing what was there.",
         "tags": [
           "booking"
         ]
