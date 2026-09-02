@@ -1,0 +1,27 @@
+[package]
+name = "erp-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Where a file actually lives: an engine, a key, and a checksum that is verified on read."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Deliberately thin, like `erp-occupancy` and `erp-links`. No database at all:
+# this stores bytes under a key. What a file *means* — who it belongs to, who
+# may read it — is a module's, and the day this crate learns any of it is the
+# day it stops being swappable.
+erp-i18n = { workspace = true }
+async-trait = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

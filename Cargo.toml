@@ -18,6 +18,7 @@ erp-i18n = { path = "crates/erp-i18n" }
 erp-eventlog = { path = "crates/erp-eventlog" }
 erp-occupancy = { path = "crates/erp-occupancy" }
 erp-links = { path = "crates/erp-links" }
+erp-storage = { path = "crates/erp-storage" }
 erp-recurrence = { path = "crates/erp-recurrence" }
 erp-projection = { path = "crates/erp-projection" }
 erp-types = { path = "crates/erp-types" }
@@ -35,6 +36,7 @@ payroll = { path = "modules/payroll" }
 hr_sa = { path = "modules/hr_sa" }
 reports = { path = "modules/reports" }
 messaging = { path = "modules/messaging" }
+files = { path = "modules/files" }
 crm = { path = "modules/crm" }
 ledger = { path = "modules/ledger" }
 sales = { path = "modules/sales" }

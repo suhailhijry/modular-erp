@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 969 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 985 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -31,8 +31,10 @@ guard (Phase 17); Phase 9 — the org chart with claims travelling up it, work
 documents, skills, shifts, attendance, leave, payroll with commission, and the
 Saudi statutory arithmetic; Phase 10 — `modules/reports`, which subscribes
 to the log rather than reading four groups, and reconciles to the books; and
-Phase 11a/b/e — short links, and `modules/messaging`: templates that fetch their
-own data, audiences resolved rather than frozen, and SMS billed by the segment.
+Phase 11a/b/c/e — short links; `modules/messaging`, with templates that fetch
+their own data, audiences resolved rather than frozen and SMS billed by the
+segment; and `modules/files`, where a document's record is a key and a checksum
+rather than a URL.
 
 **Phase 9 is complete except two items, and both are blocked on something
 outside the repository**: the WPS file needs a specification this build cannot
@@ -342,6 +344,40 @@ now, and it should: it is a template about an employee addressed to their branch
 manager, and every piece of that exists. **Not done in this pass** — it belongs
 with the rest of 11's producers rather than smuggled into the module that made it
 possible.
+
+### 18 · No S3 engine ships, and this one is a decision rather than a gap
+
+`erp_storage::Storage` is the seam and `Local` is a complete implementation of
+it, tested against a real disk. An S3-compatible engine is one `impl Storage`
+and it is not here, because writing it means choosing one of two things and
+neither is mine to choose:
+
+- **An AWS SDK.** `aws-sdk-s3` is correct, maintained and about eighty crates of
+  dependency tree, in a build whose whole dependency list currently fits on a
+  screen.
+- **SigV4 by hand.** Two hundred lines of signing that cannot be verified
+  against anything in this build — no bucket, no credentials, no MinIO — which
+  is the same "looks finished and is not" the provider adapters got.
+
+The engine is on every stored file, so a tenant can be moved one document at a
+time once one exists, and `Local` is not a placeholder: for a business that
+keeps its own records it is the shipping answer.
+
+**Say which and I will build it.** If it is the SDK, it is an afternoon.
+
+### 19 · The body limit moved from the binary into the router
+
+`MAX_BODY` was in `bin/api.rs`, so `erp_api::router()` — what the test harness
+and any second binary use — had axum's own default instead of the API's. Nothing
+depended on it until a file upload needed a different one, and then the
+difference was a test that passed for the wrong reason.
+
+It is `erp_api::routes::MAX_JSON_BODY` now, applied inside `router()`, with
+`modules/files` raising it for its two upload routes and nothing else.
+`the_raised_body_limit_applies_to_uploads_and_nowhere_else` asserts both halves.
+
+Every route with a body now declares `413`, which the contract check caught
+before I did.
 
 ---
 
@@ -1921,15 +1957,21 @@ a template cannot ask for anything, so somebody must hand it everything.
 
 ### 11c · Files, and where they actually live
 
-- [ ] `Storage` as a trait: local disk and S3-compatible object storage to start,
+- [~] `Storage` as a trait: local disk and S3-compatible object storage to start,
       and the tenant chooses. A self-hosted tenant (D15) keeps its own files, and
-      that is the point rather than a configuration detail
-- [ ] An event stores `(engine, key, checksum, size, media_type)` and **never a
+      that is the point rather than a configuration detail — the trait and
+      `Local` ship; **S3 does not**, because it needs a dependency decision that
+      is yours. See review §18
+- [x] An event stores `(engine, key, checksum, size, media_type)` and **never a
       URL**. A URL is where a file is today; a key is what it is
-- [ ] The checksum is verified on read. A document that comes back different from
-      what was stored is a failure, not a warning
-- [ ] Attachments are polymorphic — a document belongs to an invoice, a booking,
-      an employee record — and the owner is what authorizes reading it
+- [x] The checksum is verified on read. A document that comes back different from
+      what was stored is a failure, not a warning — `erp_storage::fetch` refuses,
+      and the route answers `500` with `storage.corrupt`
+- [~] Attachments are polymorphic — a document belongs to an invoice, a booking,
+      an employee record — and the owner is what authorizes reading it. **The
+      first half is built and the second is not**: "may this person see this
+      invoice's attachments" is the same question as "may this person see this
+      invoice", and this system answers neither per record yet. That is Phase 5
 
 ### 11d · Spreadsheets, both directions
 

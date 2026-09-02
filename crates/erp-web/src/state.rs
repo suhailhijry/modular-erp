@@ -28,6 +28,18 @@ pub struct AppState {
     /// to. Shared across every request this process serves — see
     /// [`crate::rate`] for what it is and honestly is not.
     pub limiter: Arc<crate::rate::Limiter>,
+    /// Where files are kept.
+    ///
+    /// `None` when the deployment has configured no storage, and then anything
+    /// that would keep a file **refuses** rather than dropping it — the same
+    /// call [`AppState::sealing`] makes. A tenant told their contract uploaded
+    /// when it went nowhere is worse served than one told it did not.
+    ///
+    /// An `Arc<dyn Storage>` rather than a concrete engine because **the tenant
+    /// chooses** (D15): a business that keeps its own documents is the reason
+    /// some of them can buy this at all, and that is a deployment fact this
+    /// crate must not have an opinion about.
+    pub storage: Option<Arc<dyn erp_storage::Storage>>,
 }
 
 impl AppState {
@@ -44,7 +56,15 @@ impl AppState {
             domain: domain.trim().trim_start_matches('.').to_lowercase().into(),
             sealing: None,
             limiter: Arc::new(crate::rate::Limiter::new()),
+            storage: None,
         }
+    }
+
+    /// The same state, with somewhere to keep files.
+    #[must_use]
+    pub fn storing_in(mut self, storage: Arc<dyn erp_storage::Storage>) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     /// The same state, able to seal secrets.

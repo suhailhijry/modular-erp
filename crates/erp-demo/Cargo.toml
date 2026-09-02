@@ -28,6 +28,8 @@ purchases = { workspace = true }
 tax_sa = { workspace = true }
 reports = { workspace = true }
 messaging = { workspace = true }
+files = { workspace = true }
+erp-storage = { workspace = true }
 erp-api = { workspace = true }
 erp-control = { workspace = true }
 erp-eventlog = { workspace = true }

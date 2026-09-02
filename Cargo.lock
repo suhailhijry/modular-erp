@@ -595,9 +595,11 @@ dependencies = [
  "erp-occupancy",
  "erp-projection",
  "erp-recurrence",
+ "erp-storage",
  "erp-testkit",
  "erp-types",
  "erp-web",
+ "files",
  "hr",
  "hr_sa",
  "ledger",
@@ -662,8 +664,10 @@ dependencies = [
  "erp-control",
  "erp-eventlog",
  "erp-projection",
+ "erp-storage",
  "erp-testkit",
  "erp-types",
+ "files",
  "hr",
  "hr_sa",
  "ledger",
@@ -776,6 +780,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "erp-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "erp-i18n",
+ "hex",
+ "serde",
+ "sha2 0.11.0",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "erp-tenant"
 version = "0.1.0"
 dependencies = [
@@ -823,6 +840,7 @@ dependencies = [
  "erp-eventlog",
  "erp-i18n",
  "erp-projection",
+ "erp-storage",
  "erp-types",
  "serde",
  "serde_json",
@@ -850,6 +868,7 @@ dependencies = [
  "erp-projection",
  "erp-testkit",
  "erp-types",
+ "files",
  "hr",
  "ledger",
  "lettre",
@@ -916,6 +935,32 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "files"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-projection",
+ "erp-storage",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+]
 
 [[package]]
 name = "find-msvc-tools"

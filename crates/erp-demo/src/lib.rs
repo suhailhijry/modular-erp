@@ -75,6 +75,8 @@ pub struct Seeded {
     pub journal_entries: usize,
     /// Customers on the record, which is what the invoices below are *for*.
     pub customers: usize,
+    /// Documents in the filing cabinet. A trade licence and a signed contract.
+    pub documents: usize,
     /// ZATCA documents built and waiting to be cleared or reported. Every
     /// invoice and every credit note is one.
     pub zatca_documents: usize,
@@ -162,6 +164,22 @@ const DEFAULT_CAPACITY: i32 = 10_000;
 /// `ttl` is how long the tenant lives before the reaper destroys it. `None`
 /// makes it an ordinary tenant that nothing will ever clean up — right for a
 /// test that drops its own database, wrong for anything reachable from outside.
+/// Somewhere for the demo to keep its documents.
+///
+/// **A real directory**, because the demo fills itself through the public API
+/// and an upload with no storage configured refuses — which is the right
+/// behaviour and would leave the filing cabinet empty. `FILES_ROOT` overrides
+/// it; the default is a directory under the system temp, which is the right
+/// place for a demo that a reaper destroys.
+#[must_use]
+pub fn with_storage(state: AppState) -> AppState {
+    let root = std::env::var("FILES_ROOT").map_or_else(
+        |_| std::env::temp_dir().join("erp-demo-files"),
+        std::path::PathBuf::from,
+    );
+    state.storing_in(std::sync::Arc::new(erp_storage::Local::at(root)))
+}
+
 pub async fn seed(
     state: &AppState,
     slug: &str,
@@ -231,6 +249,10 @@ pub async fn seed(
     // before the last projection run.
     let till_sales = seed_till(&app, slug, &token).await?;
 
+    // The filing cabinet. Late, because a document is attached to something and
+    // most of the somethings are above.
+    let documents = seed_documents(&app, slug, &token).await?;
+
     let colleague = seed_colleague(&app, slug, &token, password).await?;
 
     // Drive the projections, so the demo has something to show the moment it
@@ -276,6 +298,7 @@ pub async fn seed(
         filed,
         journal_entries,
         customers,
+        documents,
         zatca_documents,
         bookables,
         reservations,
@@ -302,6 +325,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     advance::<purchases::Purchases>(&db, &purchases::projections(), purchases::upcasters()).await?;
     advance::<tax_sa::TaxSa>(&db, &tax_sa::projections(), tax_sa::upcasters()).await?;
     advance::<reports::Reports>(&db, &reports::projections(), reports::upcasters()).await?;
+    advance::<files::Files>(&db, &files::projections(), files::upcasters()).await?;
     Ok(())
 }
 
@@ -1906,6 +1930,68 @@ async fn create_at(
         })?;
 
     send(app, "POST", path, request, expected).await
+}
+
+/// Two documents, because a filing cabinet with nothing in it demonstrates
+/// nothing.
+///
+/// The trade licence against the business itself, and a signed contract against
+/// an invoice — which are the two shapes every one of these businesses has: a
+/// paper the authority wants, and a paper a customer signed.
+async fn seed_documents(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    let documents: [(&str, &str, &str, &str, &[u8]); 2] = [
+        (
+            "DOC-LICENCE",
+            "tenant",
+            slug,
+            "السجل التجاري.pdf",
+            b"%PDF-1.7 commercial registration",
+        ),
+        (
+            "DOC-CONTRACT",
+            "invoice",
+            "INV-0001",
+            "عقد موقّع.pdf",
+            b"%PDF-1.7 a signed contract",
+        ),
+    ];
+
+    for (id, kind, owner, name, bytes) in documents {
+        let path = format!(
+            "/v1/files/{id}/content?owner_kind={kind}&owner_id={owner}&name={}",
+            urlencoded(name)
+        );
+        let request = Request::post(&path)
+            .header(header::HOST, format!("{slug}.localhost"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            // A UUID, like every other create — see `demo_id`. The document's
+            // *own* id stays in the path, because a file's id is what a link to
+            // it is made of.
+            .header("Idempotency-Key", demo_id(id))
+            .header(header::CONTENT_TYPE, "application/pdf")
+            .body(Body::from(bytes.to_vec()))
+            .map_err(|e| DemoError::Unexpected {
+                path: path.clone(),
+                body: e.to_string(),
+            })?;
+        send(app, "POST", &path, request, StatusCode::CREATED).await?;
+    }
+
+    Ok(documents.len())
+}
+
+/// Percent-encoding for a query value. Enough for a filename.
+fn urlencoded(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
 }
 
 async fn post(

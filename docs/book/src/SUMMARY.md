@@ -35,6 +35,7 @@
 - [erp-occupancy](./api/erp-occupancy.md)
 - [erp-recurrence](./api/erp-recurrence.md)
 - [erp-links](./api/erp-links.md)
+- [erp-storage](./api/erp-storage.md)
 - [erp-projection](./api/erp-projection.md)
 - [erp-tenant](./api/erp-tenant.md)
 - [erp-control](./api/erp-control.md)
@@ -57,6 +58,7 @@
 - [hr_sa](./api/hr_sa.md)
 - [reports](./api/reports.md)
 - [messaging](./api/messaging.md)
+- [files](./api/files.md)
 - [The HTTP API](./api/http.md)
 
 # Ahead

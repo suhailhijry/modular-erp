@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 erp-web = { workspace = true }
 erp-links = { workspace = true }
+erp-storage = { workspace = true }
 erp-recurrence = { workspace = true }
 erp-control = { workspace = true }
 erp-eventlog = { workspace = true }
@@ -31,6 +32,7 @@ purchases = { workspace = true }
 tax_sa = { workspace = true }
 reports = { workspace = true }
 messaging = { workspace = true }
+files = { workspace = true }
 erp-i18n = { workspace = true }
 erp-types = { workspace = true }
 uuid = { workspace = true }
@@ -61,6 +63,7 @@ purchases = { workspace = true }
 tax_sa = { workspace = true }
 reports = { workspace = true }
 messaging = { workspace = true }
+files = { workspace = true }
 erp-projection = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

@@ -11,6 +11,7 @@ erp-eventlog    the tenant log: append, load, upcasters, numbering, outbox
 erp-occupancy   capacity over time: does one more fit
 erp-recurrence  when something repeats: which days, between which two times
 erp-links       short links: a token, where it points, who followed it
+erp-storage     where a file lives: an engine, a key, a checksum verified on read
 erp-projection  groups, ProjectionCtx, the runner, shadow replay and the differ
 erp-tenant      TenantDb, the Budget trait, roles, EnabledModules, ModuleSetup
 erp-control     identities, tenants, entitlements, clusters, placement, the fleet
@@ -34,6 +35,7 @@ modules/payroll     what a business pays its people, and the entry it makes
 modules/hr_sa       GOSI, and end of service
 modules/reports     figures that agree with the books, built from the log
 modules/messaging   channels, templates that fetch their own data, and what they cost
+modules/files       documents attached to things, and proof they came back unchanged
 ```
 
 `branches` and `crm` are at the top of that list because they depend on nothing

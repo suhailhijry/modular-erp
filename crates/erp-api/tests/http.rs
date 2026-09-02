@@ -69,9 +69,18 @@ impl Fixture {
             // With a sealing key, because a deployment that stores tenant
             // secrets has one — and `no_sealing_key_refuses_rather_than_storing`
             // covers the deployment that does not.
-            app: router(AppState::new(Arc::clone(&control)).sealing_with(
-                erp_eventlog::SealingKey::new("test", &[5u8; 32]).expect("32 bytes"),
-            )),
+            app: router(
+                AppState::new(Arc::clone(&control))
+                    .sealing_with(
+                        erp_eventlog::SealingKey::new("test", &[5u8; 32]).expect("32 bytes"),
+                    )
+                    // And somewhere to keep files, because a deployment that
+                    // takes uploads has one — and `files.no_storage` covers the
+                    // deployment that does not.
+                    .storing_in(std::sync::Arc::new(erp_storage::Local::at(
+                        std::env::temp_dir().join(format!("erp-api-files-{}", std::process::id())),
+                    ))),
+            ),
             control,
             db,
         }
@@ -1823,6 +1832,13 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("set_messaging_budget", &["owner"]),
     // Sending. A clerk texts a customer; that is the counter's job.
     ("send_message", &["owner", "accountant", "clerk"]),
+    // Documents. Reading what is attached is ordinary; attaching and taking
+    // off is recording what happened, which is a clerk's job.
+    ("list_attachments", ALL_ROLES),
+    ("get_attachment", ALL_ROLES),
+    ("download_file", ALL_ROLES),
+    ("upload_file", &["owner", "accountant", "clerk"]),
+    ("remove_file", &["owner", "accountant", "clerk"]),
     // The org chart. Reading it is ordinary — a staff list is on the wall in
     // most businesses. Changing it is changing the authorization structure, and
     // granting a claim escalates every ancestor, so it is the owner's.
@@ -2034,8 +2050,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        168,
-        "expected a hundred and sixty-eight role-scoped operations"
+        173,
+        "expected a hundred and seventy-three role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -6962,4 +6978,153 @@ async fn a_stranger_follows_a_short_link_and_is_redirected() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["code"], "links.no_such_link");
+}
+
+/// **A document goes up, comes back byte for byte, and is never served inline.**
+///
+/// The last part is the security half. An uploaded file is somebody else's
+/// bytes with somebody else's declared type; serving it inline means a browser
+/// may render it **in the tenant's own origin**, and an HTML file uploaded as a
+/// "document" then runs as the tenant.
+#[tokio::test]
+async fn a_document_is_uploaded_and_comes_back_as_an_attachment() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, files::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let pdf = b"%PDF-1.7 a signed contract".to_vec();
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/files/DOC-1/content?owner_kind=invoice&owner_id=INV-1&name=%D8%B9%D9%82%D8%AF.pdf")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("Idempotency-Key", idem("DOC-1"))
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .body(Body::from(pdf.clone()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["engine"], "local");
+    assert_eq!(body["size"], 26);
+    assert!(
+        body["checksum"].as_str().is_some_and(|c| c.len() == 64),
+        "{body}"
+    );
+    // **No URL anywhere in the record.** A URL is where a file is today.
+    assert!(
+        !body.to_string().contains("http"),
+        "the record carries a URL: {body}"
+    );
+
+    fixture
+        .project::<files::Files>(tenant, &files::projections(), files::upcasters())
+        .await;
+
+    // It is listed against the invoice.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/files?owner_kind=invoice&owner_id=INV-1")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().map(Vec::len), Some(1), "{body}");
+
+    // And it comes back exactly, as an attachment.
+    let response = fixture
+        .raw(
+            Request::get("/v1/files/DOC-1/content")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/pdf")
+    );
+    let disposition = headers
+        .get(header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        disposition.starts_with("attachment;"),
+        "served inline: {disposition}"
+    );
+    assert!(
+        disposition.contains("%D8%B9%D9%82%D8%AF"),
+        "the Arabic name did not survive the header: {disposition}"
+    );
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    let back = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("body reads");
+    assert_eq!(back.as_ref(), pdf.as_slice());
+}
+
+/// **A file larger than the ceiling is refused, and a JSON body that size still
+/// is.**
+///
+/// The upload route raises the body limit for itself and for nothing else. A
+/// limit raised globally would make every JSON endpoint a way to take the
+/// process down.
+#[tokio::test]
+async fn the_raised_body_limit_applies_to_uploads_and_nowhere_else() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, files::setup()).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // Two mebibytes: over the default and well under the file ceiling.
+    let big = vec![b'x'; 2 * 1024 * 1024];
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/files/DOC-1/content?owner_kind=tenant&owner_id=SELF&name=big.bin")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("Idempotency-Key", idem("big-DOC-1"))
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(big.clone()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an upload of this size: {body}"
+    );
+
+    // The same number of bytes as JSON, at a route that is not an upload.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/crm/customers")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", idem("big"))
+                .body(Body::from(big))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "the raised limit leaked to a route that is not an upload"
+    );
 }

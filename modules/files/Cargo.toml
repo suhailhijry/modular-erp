@@ -1,0 +1,40 @@
+[package]
+name = "files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Documents attached to things: what was stored, where, and proof it came back unchanged."
+
+[lints]
+workspace = true
+
+[dependencies]
+# **No module dependencies at all.** An attachment belongs to an invoice, a
+# booking or an employee record, and this module holds the owner as an opaque
+# `(kind, id)` pair rather than linking five crates to look one of them up.
+# That is what makes attaching to the sixth thing a new enum value instead of a
+# new dependency.
+erp-web = { workspace = true }
+erp-storage = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

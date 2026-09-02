@@ -9,9 +9,13 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-/// Big enough for any request this API takes, small enough that a body is not a
-/// memory-exhaustion vector.
-const MAX_BODY: usize = 1 << 20;
+/// The hard ceiling on any request body.
+///
+/// **A file upload is the largest thing this API takes**, and it is the reason
+/// this is not a megabyte any more. The megabyte is still the default for every
+/// other route — see `DefaultBodyLimit` below — so raising this ceiling did not
+/// make every JSON endpoint a memory-exhaustion vector.
+const MAX_BODY: usize = erp_storage::MAX_BYTES;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

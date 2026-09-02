@@ -2069,6 +2069,68 @@
         ],
         "type": "object"
       },
+      "FileView": {
+        "properties": {
+          "checksum": {
+            "description": "SHA-256, hex. Checked on every download.",
+            "type": "string"
+          },
+          "engine": {
+            "description": "Which engine holds it. **Not a URL** — fetch it from\n`/v1/files/{id}/content`.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner_id": {
+            "type": "string"
+          },
+          "owner_kind": {
+            "description": "What it is attached to — `invoice`, `bill`, `reservation`, `customer`,\n`employee`, `entry` or `tenant`.",
+            "type": "string"
+          },
+          "removed_at": {
+            "description": "Set when it was taken off. The record stays either way.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "removed_why": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "stored_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "owner_kind",
+          "owner_id",
+          "engine",
+          "checksum",
+          "size",
+          "media_type",
+          "stored_at"
+        ],
+        "type": "object"
+      },
       "FiledView": {
         "properties": {
           "filed_on": {
@@ -6784,6 +6846,15 @@
         ],
         "type": "object"
       },
+      "Removal": {
+        "properties": {
+          "why": {
+            "description": "Why it came off. Kept on the record.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "Renewal": {
         "properties": {
           "at": {
@@ -8659,6 +8730,16 @@
             },
             "description": "The tenant did not enable booking"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -8902,6 +8983,16 @@
               }
             },
             "description": "No such business, it does not take bookings, or it does not take them online"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -9311,6 +9402,16 @@
             },
             "description": "No such customer or resource, or the tenant did not enable booking"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -9543,6 +9644,16 @@
             },
             "description": "No such booking or resource"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -9690,6 +9801,16 @@
             },
             "description": "No such booking, line or unit"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -9825,6 +9946,16 @@
               }
             },
             "description": "No such booking"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -10079,6 +10210,16 @@
             },
             "description": "The tenant did not enable booking"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -10295,6 +10436,16 @@
             },
             "description": "No such resource"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -10430,6 +10581,16 @@
               }
             },
             "description": "No such resource"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -10647,6 +10808,16 @@
             },
             "description": "No such resource"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -10824,6 +10995,16 @@
               }
             },
             "description": "The tenant did not enable booking"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -11128,6 +11309,16 @@
             },
             "description": "That key already opened a different branch"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -11344,6 +11535,16 @@
             },
             "description": "No such branch"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -11559,6 +11760,16 @@
               }
             },
             "description": "No such branch"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -11873,6 +12084,16 @@
             },
             "description": "That id is already a customer"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -12088,6 +12309,16 @@
               }
             },
             "description": "No such customer"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -12305,6 +12536,16 @@
             },
             "description": "No such customer"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -12442,6 +12683,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -12565,6 +12816,699 @@
         "summary": "Record that a domain's ownership has been proved.",
         "tags": [
           "tenant"
+        ]
+      }
+    },
+    "/v1/files": {
+      "get": {
+        "operationId": "list_attachments",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`invoice`, `bill`, `reservation`, `customer`, `employee`, `entry` or `tenant`.",
+            "in": "query",
+            "name": "owner_kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The thing's id.",
+            "in": "query",
+            "name": "owner_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/FileView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not something a document can be attached to"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Everything attached to one thing, newest first.",
+        "tags": [
+          "files"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/files/{file}": {
+      "delete": {
+        "description": "**The bytes stay.** A document that was on an invoice is part of what\nhappened, and erasing it on a click would erase evidence — the same call\n`crm::archive_customer` makes about never deleting a customer.",
+        "operationId": "remove_file",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The document's id.",
+            "in": "path",
+            "name": "file",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Removal"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Taken off. The bytes are untouched."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such document"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Take a document off what it is attached to.",
+        "tags": [
+          "files"
+        ]
+      },
+      "get": {
+        "operationId": "get_attachment",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The document's id.",
+            "in": "path",
+            "name": "file",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such document"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "One document's record. **Not its bytes** — those are `/content`.",
+        "tags": [
+          "files"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/files/{file}/content": {
+      "get": {
+        "description": "The checksum is recomputed from what came back and a mismatch is a `500`\nwith `storage.corrupt` (L6). Handing somebody a document that is not the\ndocument is worse than handing them nothing.",
+        "operationId": "download_file",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The document's id.",
+            "in": "path",
+            "name": "file",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The file, always as an attachment and never inline."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such document, or its bytes are not in storage"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Nowhere to read it from, or storage is unreachable"
+          }
+        },
+        "summary": "**Download it**, and prove it is the one that was stored.",
+        "tags": [
+          "files"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The body is the file. `Content-Type` is what it is, and the query says what\nit is called and what it belongs to.\n\nIdempotent on the path id (L8): a retried upload writes the same bytes to\nthe same key and records nothing twice.",
+        "operationId": "upload_file",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The document's id, chosen by the caller. Sending it again with the same `Idempotency-Key` is a retry.",
+            "in": "path",
+            "name": "file",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The caller's key for this upload. **Required**: without it, a second upload to the same id would be absorbed as a retry and the bytes overwritten.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "What it is attached to.",
+            "in": "query",
+            "name": "owner_kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The thing's id.",
+            "in": "query",
+            "name": "owner_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "What to call it.",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "What the file is. Recorded as declared and never sniffed.",
+            "in": "header",
+            "name": "Content-Type",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "The file itself, as raw bytes.",
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileView"
+                }
+              }
+            },
+            "description": "Stored, and attached."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No name, no owner, or a media type this system will not take"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That id is taken by a different upload"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Larger than this system will take"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Nowhere to keep it, or storage is unreachable"
+          }
+        },
+        "summary": "**Upload a document.**",
+        "tags": [
+          "files"
         ]
       }
     },
@@ -12981,6 +13925,16 @@
             },
             "description": "The tenant did not enable hr"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -13235,6 +14189,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -13379,6 +14343,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -13616,6 +14590,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -14051,6 +15035,16 @@
             },
             "description": "No such employee"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -14205,6 +15199,16 @@
               }
             },
             "description": "No such employee"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -14479,6 +15483,16 @@
             },
             "description": "No such employee"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -14624,6 +15638,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -14771,6 +15795,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -14916,6 +15950,16 @@
               }
             },
             "description": "No such employee"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -15172,6 +16216,16 @@
             },
             "description": "No such employee"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -15426,6 +16480,16 @@
               }
             },
             "description": "No such employee"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -16061,6 +17125,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -16280,6 +17354,16 @@
               }
             },
             "description": "Already a member here"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -16559,6 +17643,16 @@
             },
             "description": "Already a member there"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -16793,6 +17887,16 @@
             },
             "description": "That code is already open"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -16993,6 +18097,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -17119,6 +18233,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -17317,6 +18441,16 @@
             },
             "description": "Sustained contention on this entry. Retryable."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -17472,6 +18606,16 @@
               }
             },
             "description": "Already reversed by a *different* entry"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -17793,6 +18937,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -18003,6 +19157,16 @@
               }
             },
             "description": "Already a member here — change their role instead"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -18216,6 +19380,16 @@
               }
             },
             "description": "Not a member here"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -18449,6 +19623,16 @@
             },
             "description": "Not a member here"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -18649,6 +19833,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -18778,6 +19972,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -18925,6 +20129,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -19134,6 +20348,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -19663,6 +20887,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -19965,6 +21199,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -20297,6 +21541,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -20584,6 +21838,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -20974,6 +22238,16 @@
               }
             },
             "description": "The tenant did not enable payroll"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -21491,6 +22765,16 @@
             },
             "description": "That key already opened a different shift"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -21723,6 +23007,16 @@
             },
             "description": "No such shift"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -21859,6 +23153,16 @@
             },
             "description": "No such shift"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -21994,6 +23298,16 @@
               }
             },
             "description": "No such shift"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -22140,6 +23454,16 @@
               }
             },
             "description": "No such shift"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -22414,6 +23738,16 @@
             },
             "description": "The tenant did not enable pos"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -22667,6 +24001,16 @@
             },
             "description": "That id is already open"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -22900,6 +24244,16 @@
             },
             "description": "No such card"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -23037,6 +24391,16 @@
             },
             "description": "No such card"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -23172,6 +24536,16 @@
               }
             },
             "description": "No such card"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -23445,6 +24819,16 @@
             },
             "description": "That id has already been granted"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -23677,6 +25061,16 @@
             },
             "description": "No such entitlement"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -23813,6 +25207,16 @@
             },
             "description": "No such entitlement"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -23948,6 +25352,16 @@
               }
             },
             "description": "No such entitlement"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -24125,6 +25539,16 @@
               }
             },
             "description": "The tenant did not enable prepaid"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -24378,6 +25802,16 @@
               }
             },
             "description": "The tenant did not enable prepaid"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -24641,6 +26075,16 @@
             },
             "description": "That id has already started"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -24874,6 +26318,16 @@
             },
             "description": "No such subscription"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -25100,6 +26554,16 @@
             },
             "description": "No such subscription"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -25237,6 +26701,16 @@
             },
             "description": "No such subscription"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -25372,6 +26846,16 @@
               }
             },
             "description": "No such subscription"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -25619,6 +27103,16 @@
               }
             },
             "description": "Sustained contention on this bill. Retryable."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -25899,6 +27393,16 @@
               }
             },
             "description": "More than is outstanding — read the bill again and decide"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -26814,6 +28318,16 @@
             },
             "description": "Sustained contention on this invoice. Retryable."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -27095,6 +28609,16 @@
             },
             "description": "Already cancelled by a *different* credit note"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -27240,6 +28764,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -27397,6 +28931,16 @@
             },
             "description": "More than is outstanding — read the invoice again and decide"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -27552,6 +29096,16 @@
               }
             },
             "description": "More than is held — read the invoice again and decide"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -27753,6 +29307,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -28125,6 +29689,16 @@
             },
             "description": "Wrong handle or password — the same answer for both, deliberately"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -28279,6 +29853,16 @@
               }
             },
             "description": "The slug is taken"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -28596,6 +30180,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -28845,6 +30439,16 @@
               }
             },
             "description": "The period was already filed — correcting it is an amendment"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -29595,6 +31199,16 @@
             },
             "description": "No such tenant, the module is not enabled, or nothing is registered with ZATCA yet"
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
           "415": {
             "content": {
               "application/json": {
@@ -29731,6 +31345,16 @@
               }
             },
             "description": "No such tenant, the module is not enabled, or nothing is registered with ZATCA yet"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {
@@ -29878,6 +31502,16 @@
               }
             },
             "description": "No such tenant, the module is not enabled, or no key has been generated yet"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
           },
           "415": {
             "content": {

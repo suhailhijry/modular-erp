@@ -268,6 +268,10 @@ impl Modify for Conventions {
                         "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found.",
                     ));
                     also.push((
+                        "413",
+                        "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest.",
+                    ));
+                    also.push((
                         "415",
                         "The body was sent without `Content-Type: application/json`.",
                     ));
@@ -328,9 +332,19 @@ fn parts() -> (Router<AppState>, utoipa::openapi::OpenApi) {
     (router, document)
 }
 
+/// What every route that is not a file upload may take.
+///
+/// **Part of the API, not of a deployment.** It was in `bin/api.rs`, which
+/// meant a second binary — the test harness, for one — silently had axum's own
+/// default instead. `modules/files` raises it for its two upload routes and
+/// nothing else does; axum's `DefaultBodyLimit` is innermost-wins, so a module's
+/// own layer beats this one exactly where it is applied.
+const MAX_JSON_BODY: usize = 1 << 20;
+
 pub fn router(state: AppState) -> Router {
     parts()
         .0
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_JSON_BODY))
         // **Outermost, so a preflight never reaches a handler and a refusal
         // never reaches one either.** Per tenant and asynchronous, which is why
         // it is written here rather than configured from `tower-http` — see

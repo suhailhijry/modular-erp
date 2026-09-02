@@ -281,6 +281,44 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **ar** — حدث خطأ لدينا. تم تسجيل المشكلة.
 
 
+## `files`
+
+### `files.already_removed`
+
+- **en** — {id} has already been taken off.
+- **ar** — سبق رفع {id} من مكانه.
+
+### `files.database`
+
+- **en** — That could not be read. Try again.
+- **ar** — تعذّرت القراءة. أعد المحاولة.
+
+### `files.no_name`
+
+- **en** — A document needs a name.
+- **ar** — يحتاج المستند إلى اسم.
+
+### `files.no_storage`
+
+- **en** — This deployment has nowhere to keep files, so nothing was stored.
+- **ar** — لا يوجد في هذا النظام مكان لحفظ الملفات، فلم يُحفظ شيء.
+
+### `files.no_such_file`
+
+- **en** — There is no document {id}.
+- **ar** — لا يوجد مستند {id}.
+
+### `files.not_a_media_type`
+
+- **en** — {media_type} is not a media type this system will take.
+- **ar** — {media_type} ليس نوعًا يقبله هذا النظام.
+
+### `files.unknown_owner`
+
+- **en** — {owner} is not something a document can be attached to.
+- **ar** — {owner} ليس شيئًا يمكن إرفاق مستند به.
+
+
 ## `hr`
 
 ### `hr.backwards_leave`
@@ -1284,6 +1322,34 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — A confirmation is already on its way. Try again in {seconds} seconds.
 - **ar** — رسالة التأكيد في طريقها إليك. أعد المحاولة بعد {seconds} ثانية.
+
+
+## `storage`
+
+### `storage.corrupt`
+
+- **en** — That file came back different from what was stored, so it has not been given to you.
+- **ar** — عاد هذا الملف مختلفًا عمّا خُزِّن، فلم يُسلَّم إليك.
+
+### `storage.no_such_file`
+
+- **en** — That file is not in storage.
+- **ar** — هذا الملف غير موجود في التخزين.
+
+### `storage.not_a_key`
+
+- **en** — {key} is not somewhere a file may be kept.
+- **ar** — {key} ليس موضعًا يمكن حفظ ملف فيه.
+
+### `storage.too_large`
+
+- **en** — A file may not be larger than {n} bytes.
+- **ar** — لا يمكن أن يتجاوز حجم الملف {n} بايت.
+
+### `storage.unavailable`
+
+- **en** — Storage could not be reached. Try again.
+- **ar** — تعذّر الوصول إلى التخزين. أعد المحاولة.
 
 
 ## `system`

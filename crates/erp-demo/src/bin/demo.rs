@@ -54,7 +54,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // rather than assuming one has been prepared for it.
     erp_demo::bootstrap(&control, "primary", "PRIMARY_CLUSTER_URL").await?;
 
-    let seeded = erp_demo::seed(&AppState::new(control), &slug, &password, ttl).await?;
+    let seeded = erp_demo::seed(
+        &erp_demo::with_storage(AppState::new(control)),
+        &slug,
+        &password,
+        ttl,
+    )
+    .await?;
 
     println!("tenant   {}", seeded.tenant);
     println!("slug     {}", seeded.slug);

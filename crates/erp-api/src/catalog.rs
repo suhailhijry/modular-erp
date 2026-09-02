@@ -35,6 +35,10 @@ pub static CATALOG: Composite = Composite::new(&[
     // three refusals it can make are the only messages in this system a total
     // stranger reads — somebody tapping a URL in a text message.
     &erp_links::CATALOG,
+    // Nor this. Where a file lives is infrastructure, and "that came back
+    // different from what was stored" is a refusal an API has to be able to
+    // render.
+    &erp_storage::CATALOG,
     &booking::CATALOG,
     &crm::CATALOG,
     &ledger::CATALOG,
@@ -49,6 +53,7 @@ pub static CATALOG: Composite = Composite::new(&[
     &tax_sa::CATALOG,
     &reports::CATALOG,
     &messaging::CATALOG,
+    &files::CATALOG,
 ]);
 
 #[cfg(test)]

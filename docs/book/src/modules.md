@@ -185,6 +185,22 @@ or per 70 in Arabic, which here means every message — so the count is part of
 sending and a tenant finds out when they write the template rather than when the
 invoice arrives.
 
+## files
+
+Documents attached to things: an invoice, a bill, a booking, a customer, an
+employee record, a journal entry, or the business itself.
+
+**An event stores a key, never a URL.** A URL is where a file is today; a key is
+what it is, and a tenant who moves from disk to object storage has not changed
+any of their documents. Where the bytes live is the tenant's choice (D15), which
+for a business that keeps its own records is the reason they can buy this at all.
+
+**The checksum is verified on read.** A document that comes back different from
+what was stored is a failure, not a warning.
+
+**Taking one off does not erase it.** A document that was on an invoice is part
+of what happened.
+
 ## How modules learn about each other
 
 By subscribing to the log. `tax_sa` finds out an invoice was issued by reading

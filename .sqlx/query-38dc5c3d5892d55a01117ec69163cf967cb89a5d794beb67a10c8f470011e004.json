@@ -1,0 +1,162 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", name as \"name!\", owner_kind as \"owner_kind!\",\n                  owner_id as \"owner_id!\", engine as \"engine!\",\n                  storage_key as \"storage_key!\", checksum as \"checksum!\",\n                  size as \"size!\", media_type as \"media_type!\",\n                  stored_at as \"stored_at!\", removed_at, removed_why\n             FROM proj_files.file\n            WHERE owner_kind = $1 AND owner_id = $2 AND removed_at IS NULL\n            ORDER BY stored_at DESC, id\n            LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "owner_kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "owner_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "owner_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "owner_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "engine!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "engine"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "storage_key!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "storage_key"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "checksum!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "checksum"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "size!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "media_type!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "media_type"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "stored_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "stored_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "removed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "removed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "removed_why",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_files.file",
+            "name": "removed_why"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "38dc5c3d5892d55a01117ec69163cf967cb89a5d794beb67a10c8f470011e004"
+}

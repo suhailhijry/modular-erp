@@ -894,6 +894,11 @@ async fn zatca_environment(
 /// stay **permanently empty** — no bill list, no input tax, and a VAT return
 /// quietly under-reporting what can be reclaimed. Nothing else in the suite
 /// notices, which was checked by removing one and watching everything pass.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one entry per module, in a list; splitting it would hide that this \
+              is the complete set `every_module_has_a_projection_job` checks"
+)]
 fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
     vec![
         Arc::new(
@@ -979,6 +984,14 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 200,
             )
             .for_module(tax_sa::module_id()),
+        ),
+        Arc::new(
+            ProjectionJob::<files::Files>::new(
+                files::projections(),
+                Arc::new(files::upcasters().clone()),
+                200,
+            )
+            .for_module(files::module_id()),
         ),
         Arc::new(
             ProjectionJob::<reports::Reports>::new(
