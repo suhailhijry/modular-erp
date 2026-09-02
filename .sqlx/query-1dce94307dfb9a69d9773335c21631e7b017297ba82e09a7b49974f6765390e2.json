@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", number as \"number!\", customer as \"customer!\", customer_vat,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\",\n                  cancelled_on, credit_note\n             FROM proj_sales.invoice_row\n            WHERE id = $1",
+  "query": "SELECT id as \"id!\", number as \"number!\", customer as \"customer!\", customer_vat,\n                  customer_id,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\",\n                  cancelled_on, credit_note\n             FROM proj_sales.invoice_row\n            WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -49,6 +49,17 @@
       },
       {
         "ordinal": 4,
+        "name": "customer_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_row",
+            "name": "customer_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "issued_on!",
         "type_info": "Timestamptz",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "due_on",
         "type_info": "Timestamptz",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "currency!",
         "type_info": "Bpchar",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "net!",
         "type_info": "Int8",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "tax!",
         "type_info": "Int8",
         "origin": {
@@ -103,7 +114,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "gross!",
         "type_info": "Int8",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "paid!",
         "type_info": "Int8",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "outstanding!",
         "type_info": "Int8",
         "origin": {
@@ -136,7 +147,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "payments!",
         "type_info": "Int8",
         "origin": {
@@ -147,7 +158,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "note!",
         "type_info": "Text",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "cancelled_on",
         "type_info": "Timestamptz",
         "origin": {
@@ -169,7 +180,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 16,
         "name": "credit_note",
         "type_info": "Text",
         "origin": {
@@ -201,8 +212,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "31d3a52ed330c752f20020cf81aeb5e765fe13331eb5b933f8b1b38b488befbd"
+  "hash": "1dce94307dfb9a69d9773335c21631e7b017297ba82e09a7b49974f6765390e2"
 }

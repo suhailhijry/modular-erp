@@ -48,6 +48,7 @@ pub static CATALOG: Composite = Composite::new(&[
     &purchases::CATALOG,
     &tax_sa::CATALOG,
     &reports::CATALOG,
+    &messaging::CATALOG,
 ]);
 
 #[cfg(test)]

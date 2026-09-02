@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 928 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 969 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -21,7 +21,7 @@ written; they are history, not status. What is not yet true is collected under
 ## For review — decisions I made without you
 
 Written across 2026-09-01/02 while you were away: a gap-closing pass, then
-Phase 17, then Phase 9, then Phase 10. Each item below is a judgement call I
+Phase 17, then Phase 9, then Phase 10, then Phase 11's channels and links. Each item below is a judgement call I
 took rather than stopping on, and each is reversible. Read them, and delete this
 section once you have.
 
@@ -29,8 +29,10 @@ section once you have.
 public booking API with per-tenant CORS, rate limiting and an API-compatibility
 guard (Phase 17); Phase 9 — the org chart with claims travelling up it, work
 documents, skills, shifts, attendance, leave, payroll with commission, and the
-Saudi statutory arithmetic; and Phase 10 — `modules/reports`, which subscribes
-to the log rather than reading four groups, and reconciles to the books.
+Saudi statutory arithmetic; Phase 10 — `modules/reports`, which subscribes
+to the log rather than reading four groups, and reconciles to the books; and
+Phase 11a/b/e — short links, and `modules/messaging`: templates that fetch their
+own data, audiences resolved rather than frozen, and SMS billed by the segment.
 
 **Phase 9 is complete except two items, and both are blocked on something
 outside the repository**: the WPS file needs a specification this build cannot
@@ -291,6 +293,55 @@ than the gap.
 - **"Against what was banked"** is `takings.paid_out` — cash that left the
   drawer and was not a refund. Nothing in this system has seen a bank statement,
   so it is named for what it is rather than claiming a reconciliation to one.
+
+### 15 · No provider adapter ships, and that is deliberate
+
+Twilio, Unifonic, FCM, APNs and the WhatsApp Business API are five APIs with
+five sets of credentials, and this build has an account with none of them. A
+client that has never made a successful call is a file that looks finished and
+is not — the same judgement the WPS file got in §4.
+
+What ships is `messaging::Relay`: **an outbound contract this system defines**
+and documents, which an operator points at their own small service. `POST` with
+a bearer token, one JSON body, and three answers that mean retry / never / the
+address is dead. That is the same choice the email handler makes in preferring
+SMTP to one vendor's JSON, and it means the adapter for whichever provider a
+tenant uses is a forty-line service outside this repository rather than a fork
+of it.
+
+An adapter inside the crate is one `impl Transport` when somebody has an account
+to verify it against. **Say the word and I will write one against a sandbox
+account you open.**
+
+### 16 · `crm` could not change a customer's phone number
+
+`amend_customer` decided *nothing moved* by comparing the name and the VAT
+number — the only two fields the aggregate kept — so an amendment that changed
+the phone number, the email, the address or the Latin spelling wrote **no event
+and did nothing at all**. The caller got `Ok`.
+
+The comment defending it said the projection holds the rest and re-writing an
+identical row is harmless, which is true and beside the point: the check ran
+before anything looked at the rest.
+
+Found on the first day something depended on a customer's number being current,
+which is `messaging`'s first premise. The aggregate now holds every field the
+event carries, because an aggregate cannot answer "did anything move" about a
+field it does not have. `changing_anything_an_amendment_carries_writes_an_event`
+is the regression test, and it fails on the old code for four separate fields.
+
+### 17 · The tenant dispatcher had no handlers at all until now
+
+Worth stating plainly because it changes what §9e's note meant. The reason `hr`'s
+expiring-document reminder is a health finding rather than an effect was not that
+a finding is better — it was that an effect enqueued from a module would have sat
+in the outbox for ever, because nothing claimed tenant-plane effects.
+
+`messaging` registers the first four. The `hr` reminder can become a real message
+now, and it should: it is a template about an employee addressed to their branch
+manager, and every piece of that exists. **Not done in this pass** — it belongs
+with the rest of 11's producers rather than smuggled into the module that made it
+possible.
 
 ---
 
@@ -1819,15 +1870,25 @@ already passes. A channel is a `Handler`, and that is the whole integration.
 
 ### 11a · Channels as effects
 
-- [ ] `sms.send`, `push.send`, `whatsapp.send` beside `email.send`
-- [ ] One `Recipient` resolved at send time, never a phone number frozen into an
-      event — a person who changes their number should get the next message
+- [x] `sms.send`, `push.send`, `whatsapp.send` beside `email.send` — one effect
+      kind per channel, so a worker without an SMS relay leaves SMS in the
+      outbox rather than dead-lettering it during a rollout
+- [x] One `Recipient` resolved at send time, never a phone number frozen into an
+      event — a person who changes their number should get the next message. An
+      **audience** (`client`, `worker`, `branch_manager`, `operator`) resolved
+      against the read model minutes before the send
 - [ ] Delivery receipts land back as inbound events (Phase 12), so "sent" and
-      "delivered" stay different words
-- [ ] **Metering.** SMS is billed per segment, and a message that silently
-      becomes three costs three times. Segment counting is part of the handler,
-      and a per-tenant budget refuses rather than overspends (L6)
-- [ ] Push tokens expire. Cleaning them up is scheduled work, not an afterthought
+      "delivered" stay different words — **deferred to Phase 12 deliberately**:
+      a receipt is an inbound callback and there is no verified inbound surface
+      yet. Doing it first would mean accepting somebody else's word about what
+      happened to a message
+- [x] **Metering.** SMS is billed per segment, and a message that silently
+      becomes three costs three times. Segment counting is part of sending
+      (GSM 03.38 against UCS-2, so Arabic is billed at 70 characters), and a
+      per-tenant budget refuses rather than overspends (L6)
+- [x] Push tokens expire. Cleaning them up is scheduled work, not an
+      afterthought — retired by the platform's own rejection, swept after a
+      grace period by `messaging.retire_push_tokens`
 
 ### 11b · Templates that fetch their own data
 
@@ -1837,18 +1898,26 @@ classes with the copy, the business name and the gendered wording compiled in.
 Changing a reminder's wording there is a deploy. Both problems have one cause —
 a template cannot ask for anything, so somebody must hand it everything.
 
-- [ ] A template names an **audience**, not an address: the client, the employee
+- [x] A template names an **audience**, not an address: the client, the employee
       on the booking, the manager of that branch, an operator. The recipient is a
-      query against the read model at send time
-- [ ] A template declares **bindings** — `{{ booking.starts_at }}`,
-      `{{ customer.name }}` — resolved from projections when it is rendered, so
-      the caller supplies a subject and nothing else
-- [ ] Bindings are declared, so an unresolvable one fails **when the template is
-      saved**, not when a customer is waiting for a message
-- [ ] Arabic and English are the same template with two bodies, per D12. Neither
-      is a translation of a compiled string
-- [ ] Rendering happens in the worker, at send time. A reminder for a booking
-      that moved says the new time
+      query against the read model at send time. The branch manager comes off the
+      org chart — whoever at that branch reports to nobody at that branch —
+      rather than a field `branches` does not have
+- [x] A template declares **bindings** — `{{ reservation.starts_at }}`,
+      `{{ customer.name }}` — resolved from the read models when it is rendered,
+      so the caller supplies a subject and nothing else
+- [x] Bindings are declared, so an unresolvable one fails **when the template is
+      saved**, not when a customer is waiting for a message.
+      `GET /v1/messaging/vocabulary` is what an editor shows, and
+      `every_binding_in_the_vocabulary_can_be_resolved` stops the two lists
+      drifting
+- [x] Arabic and English are the same template with two bodies, per D12. Neither
+      is a translation of a compiled string, and a template missing one is
+      refused rather than falling back
+- [x] Rendering happens in the worker, at send time. A reminder for a booking
+      that moved says the new time — in the reminder **job**, minutes before the
+      send, because the dispatcher deliberately holds no connection while it
+      delivers
 
 ### 11c · Files, and where they actually live
 

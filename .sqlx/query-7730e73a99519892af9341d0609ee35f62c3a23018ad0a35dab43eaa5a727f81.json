@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE push_token SET retired_at = $2, retired_why = $3\n          WHERE token = $1 AND retired_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7730e73a99519892af9341d0609ee35f62c3a23018ad0a35dab43eaa5a727f81"
+}

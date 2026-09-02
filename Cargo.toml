@@ -34,6 +34,7 @@ hr = { path = "modules/hr" }
 payroll = { path = "modules/payroll" }
 hr_sa = { path = "modules/hr_sa" }
 reports = { path = "modules/reports" }
+messaging = { path = "modules/messaging" }
 crm = { path = "modules/crm" }
 ledger = { path = "modules/ledger" }
 sales = { path = "modules/sales" }

@@ -146,6 +146,12 @@ const REGISTERED: &[Registered] = &[
         http: reports::http::routes,
         catalog: &reports::CATALOG,
     },
+    Registered {
+        name: "messaging",
+        setup: messaging::setup,
+        http: messaging::http::routes,
+        catalog: &messaging::CATALOG,
+    },
 ];
 
 /// Every module this build offers, as `(name, setup)`.

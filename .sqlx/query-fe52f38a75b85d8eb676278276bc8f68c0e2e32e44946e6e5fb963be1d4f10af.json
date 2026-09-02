@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT channel as \"channel!\", messages as \"messages!\", segments as \"segments!\"\n             FROM message_meter WHERE period = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channel!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message_meter",
+            "name": "channel"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "messages!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "message_meter",
+            "name": "messages"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "segments!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "message_meter",
+            "name": "segments"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fe52f38a75b85d8eb676278276bc8f68c0e2e32e44946e6e5fb963be1d4f10af"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT token as \"token!\" FROM push_token\n            WHERE recipient = $1 AND retired_at IS NULL\n            ORDER BY registered_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "push_token",
+            "name": "token"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8bcd57ab6b976c7f081e8d3a4313a608b31c9d8936db60cc19675aaa876b7b32"
+}

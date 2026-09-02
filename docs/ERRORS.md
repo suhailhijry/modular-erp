@@ -562,6 +562,99 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **ar** — هذا الشخص ليس عضوًا لدى هذا المستأجر.
 
 
+## `messaging`
+
+### `messaging.database`
+
+- **en** — That could not be read. Try again.
+- **ar** — تعذّرت القراءة. أعد المحاولة.
+
+### `messaging.empty_template`
+
+- **en** — A template needs something to say.
+- **ar** — يحتاج القالب إلى نص.
+
+### `messaging.missing_language`
+
+- **en** — This template has no wording in {locale}.
+- **ar** — لا توجد صياغة بلغة {locale} في هذا القالب.
+
+### `messaging.needs_a_subject`
+
+- **en** — A message on {channel} needs a subject line.
+- **ar** — تحتاج الرسالة على {channel} إلى سطر موضوع.
+
+### `messaging.negative_budget`
+
+- **en** — A budget cannot be negative, and {limit} is.
+- **ar** — لا يمكن أن تكون الميزانية سالبة، و{limit} كذلك.
+
+### `messaging.no_subject_line`
+
+- **en** — {channel} has no subject line, so remove it.
+- **ar** — لا يوجد سطر موضوع في {channel}، فاحذفه.
+
+### `messaging.no_such_template`
+
+- **en** — There is no template called {name}, or it is switched off.
+- **ar** — لا يوجد قالب باسم {name}، أو أنه متوقف.
+
+### `messaging.not_a_month`
+
+- **en** — {period} is not a month. Write it as 2026-05.
+- **ar** — {period} ليس شهرًا. اكتبه هكذا: 2026-05.
+
+### `messaging.not_a_name`
+
+- **en** — {name} is not a template name. Use lower case, digits, dots and underscores.
+- **ar** — {name} ليس اسم قالب. استخدم حروفًا صغيرة وأرقامًا ونقاطًا وشرطات سفلية.
+
+### `messaging.over_budget`
+
+- **en** — {channel} has used its whole budget of {limit} for this month.
+- **ar** — استهلك {channel} كامل ميزانيته البالغة {limit} لهذا الشهر.
+
+### `messaging.unknown_audience`
+
+- **en** — {audience} is not an audience.
+- **ar** — {audience} ليس جمهورًا.
+
+### `messaging.unknown_binding`
+
+- **en** — {binding} is not something a message about {topic} can say.
+- **ar** — {binding} ليس مما يمكن أن تقوله رسالة عن {topic}.
+
+### `messaging.unknown_channel`
+
+- **en** — {channel} is not a channel. Use email, sms, push or whatsapp.
+- **ar** — {channel} ليس قناة. استخدم email أو sms أو push أو whatsapp.
+
+### `messaging.unknown_language`
+
+- **en** — {language} is not a language this system speaks.
+- **ar** — {language} ليست لغة يتحدثها هذا النظام.
+
+### `messaging.unknown_platform`
+
+- **en** — {platform} is not a platform. Use apns, fcm or web.
+- **ar** — {platform} ليست منصة. استخدم apns أو fcm أو web.
+
+### `messaging.unknown_topic`
+
+- **en** — {topic} is not something a message can be about.
+- **ar** — {topic} ليس موضوعًا يمكن أن تدور حوله رسالة.
+
+### `messaging.unreachable`
+
+- **en** — Nobody in {audience} can be reached on {channel}.
+- **ar** — لا يمكن الوصول إلى {audience} عبر {channel}.
+
+### `messaging.wrong_audience`
+
+- **en** — A message about {topic} cannot be addressed to {audience}.
+- **ar** — لا يمكن توجيه رسالة عن {topic} إلى {audience}.
+
+
 ## `occupancy`
 
 ### `occupancy.empty_span`

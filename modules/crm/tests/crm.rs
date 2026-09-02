@@ -460,6 +460,101 @@ async fn an_unchanged_amendment_writes_nothing() {
     fixture.cleanup().await;
 }
 
+/// **Changing a phone number changes the phone number.**
+///
+/// It did not. `amend_customer` decided *nothing moved* by comparing the name
+/// and the VAT number — the only two fields the aggregate kept — so an
+/// amendment that changed the contact details, the address, the Latin spelling
+/// or the kind wrote no event and did nothing at all. A caller got `Ok`.
+///
+/// Found by `messaging`, whose first premise is that somebody who changes their
+/// number gets the next message. The fix is that the aggregate holds every
+/// field the event carries, because an aggregate cannot answer "did anything
+/// move" about a field it does not have.
+#[tokio::test]
+async fn changing_anything_an_amendment_carries_writes_an_event() {
+    let fixture = Fixture::new().await;
+    register_customer(
+        &fixture.db,
+        &code("CUST-1"),
+        &company(),
+        on("2026-01-15"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("registers");
+
+    // Four amendments, each moving exactly one field that is not the name and
+    // not the VAT number. Every one of them used to be a silent no-op.
+    let moves: Vec<(&str, Details)> = vec![
+        (
+            "phone",
+            Details {
+                contact: Contact {
+                    phone: Some("+966500000009".to_owned()),
+                    ..company().contact
+                },
+                ..company()
+            },
+        ),
+        (
+            "email",
+            Details {
+                contact: Contact {
+                    email: Some("new@najd.example".to_owned()),
+                    ..company().contact
+                },
+                ..company()
+            },
+        ),
+        (
+            "latin name",
+            Details {
+                name_latin: Some("Najd Consulting Co.".to_owned()),
+                ..company()
+            },
+        ),
+        (
+            "address",
+            Details {
+                address: Some(Address {
+                    building: Some("2323".to_owned()),
+                    ..company().address.expect("the fixture has one")
+                }),
+                ..company()
+            },
+        ),
+    ];
+
+    let mut expected = 1;
+    for (what, details) in moves {
+        let done = amend_customer(&fixture.db, &code("CUST-1"), &details, &Metadata::default())
+            .await
+            .unwrap_or_else(|e| panic!("amending the {what} works: {e:?}"));
+        assert!(!done.did_nothing(), "changing the {what} wrote nothing");
+        expected += 1;
+
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM event")
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("counts");
+        assert_eq!(events, expected, "after the {what}");
+    }
+
+    // And the read model has the last of them. Each amendment above is built
+    // from `company()`, so only the last one's change survives — which is what
+    // an amendment is: the whole record as it now stands.
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let seen = crm::customer(&mut conn, "CUST-1")
+        .await
+        .expect("reads")
+        .expect("the customer exists");
+    assert_eq!(seen.building.as_deref(), Some("2323"));
+
+    fixture.cleanup().await;
+}
+
 /// **The one that carries the module.**
 ///
 /// `sales`, `booking` and `prepaid` will all reference a customer, so a

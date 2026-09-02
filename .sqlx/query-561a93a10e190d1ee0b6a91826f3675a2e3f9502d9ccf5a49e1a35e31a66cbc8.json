@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO push_token (token, recipient, platform, registered_at)\n         VALUES ($1, $2, $3, $4)\n         ON CONFLICT (token) DO UPDATE\n             SET recipient = EXCLUDED.recipient,\n                 platform = EXCLUDED.platform,\n                 registered_at = EXCLUDED.registered_at,\n                 retired_at = NULL,\n                 retired_why = NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "561a93a10e190d1ee0b6a91826f3675a2e3f9502d9ccf5a49e1a35e31a66cbc8"
+}

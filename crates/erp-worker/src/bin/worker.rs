@@ -59,7 +59,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Effect handlers come from modules. An empty dispatcher claims nothing —
     // the same behaviour as a worker rolled out before a module's handler
     // exists, and deliberately not an error.
-    let dispatcher = Arc::new(Dispatcher::new(RetryPolicy::default()));
+    //
+    // **`messaging` is the first module to register any.** Until Phase 11 the
+    // tenant dispatcher had none at all, which is why `hr`'s expiring-document
+    // reminder had to be a health finding: an effect enqueued from a module
+    // would have sat in the outbox for ever.
+    //
+    // A longer lease than the default, for the reason the platform's is longer:
+    // a slow gateway is the normal failure, and a lease that lapses while a
+    // message is still in flight sends it twice.
+    let mut dispatcher = Dispatcher::new(RetryPolicy {
+        lease: Duration::from_mins(2),
+        ..RetryPolicy::default()
+    });
+    for handler in messaging::handlers(message_transports()) {
+        dispatcher = dispatcher.register(handler);
+    }
+    let dispatcher = Arc::new(dispatcher);
 
     // **The control plane's dispatcher**, which is a different queue in a
     // different database. Email lives here because the things that send it —
@@ -101,6 +117,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for job in module_jobs() {
         worker = worker.with_job(job);
     }
+    worker = worker
+        .with_job(Arc::new(BookingReminders))
+        .with_job(Arc::new(RetirePushTokens));
 
     // **The ZATCA sweeps, and only with a sealing key.** They read a tenant's
     // private key to sign with, so without one there is nothing to read and the
@@ -431,6 +450,278 @@ fn mailer()
     Ok(vec![Arc::new(erp_worker::mail::EmailHandler::new(
         Arc::new(smtp),
     ))])
+}
+
+/// Every message transport this deployment is configured for.
+///
+/// # Why each one is optional, and separately
+///
+/// The same call `mailer()` makes: a worker with no SMS relay configured
+/// registers no SMS handler, so SMS effects **wait in the outbox** for a worker
+/// that has one rather than being dead-lettered during a staggered rollout.
+/// That is the dispatcher's documented behaviour and the reason a channel is an
+/// effect kind rather than a field on one.
+///
+/// Email is the exception in shape only: it goes over SMTP like the control
+/// plane's, so the transport wraps the mailer that already exists.
+fn message_transports() -> Vec<Arc<dyn messaging::Transport>> {
+    let mut transports: Vec<Arc<dyn messaging::Transport>> = Vec::new();
+
+    if let (Ok(url), Ok(from)) = (std::env::var("SMTP_URL"), std::env::var("SMTP_FROM")) {
+        match erp_worker::mail::Smtp::new(&url, &from) {
+            Ok(smtp) => {
+                tracing::info!("tenant email will be delivered over SMTP");
+                transports.push(Arc::new(Post::new(Arc::new(smtp))));
+            }
+            Err(error) => tracing::warn!(%error, "SMTP is configured and not usable"),
+        }
+    }
+
+    for (channel, prefix) in [
+        (messaging::Channel::Sms, "SMS"),
+        (messaging::Channel::Push, "PUSH"),
+        (messaging::Channel::WhatsApp, "WHATSAPP"),
+    ] {
+        let (Ok(url), Ok(token)) = (
+            std::env::var(format!("{prefix}_RELAY_URL")),
+            std::env::var(format!("{prefix}_RELAY_TOKEN")),
+        ) else {
+            tracing::warn!(
+                channel = channel.as_str(),
+                "{prefix}_RELAY_URL is not set; messages on this channel are still \
+                 promised and wait in the outbox until a relay is configured"
+            );
+            continue;
+        };
+        match messaging::Relay::new(channel, &url, &token) {
+            Ok(relay) => {
+                tracing::info!(channel = channel.as_str(), url = %url, "relay configured");
+                transports.push(Arc::new(relay));
+            }
+            Err(error) => {
+                tracing::warn!(channel = channel.as_str(), %error, "relay is not usable");
+            }
+        }
+    }
+
+    transports
+}
+
+/// The SMTP mailer, as a message transport.
+///
+/// Two traits for one act, and they are in two crates that cannot see each
+/// other: `Mailer` is `erp-worker`'s and predates modules having handlers at
+/// all, and `messaging::Transport` is a module's. This is the composition root,
+/// which is the one place allowed to know both.
+struct Post {
+    mailer: Arc<dyn erp_worker::mail::Mailer>,
+}
+
+impl Post {
+    fn new(mailer: Arc<dyn erp_worker::mail::Mailer>) -> Self {
+        Self { mailer }
+    }
+}
+
+#[async_trait::async_trait]
+impl messaging::Transport for Post {
+    fn channel(&self) -> messaging::Channel {
+        messaging::Channel::Email
+    }
+
+    async fn send(
+        &self,
+        message: &messaging::Outbound,
+        key: &str,
+    ) -> Result<(), messaging::TransportError> {
+        let email = erp_control::mail::Email {
+            to: message.to.clone(),
+            subject: message.subject.clone(),
+            body: message.body.clone(),
+            locale: message.locale,
+        };
+        self.mailer.send(&email, key).await.map_err(|e| match e {
+            erp_worker::mail::MailError::Unreachable(why) => {
+                messaging::TransportError::Unreachable(why)
+            }
+            erp_worker::mail::MailError::Refused(why) => messaging::TransportError::Refused(why),
+        })
+    }
+}
+
+/// How long before a booking a reminder goes.
+///
+/// Twenty-four hours, which is the interval every one of these businesses uses
+/// and the one a customer can still act on: far enough ahead to rearrange, near
+/// enough to be about today.
+const REMINDER_NOTICE: chrono::TimeDelta = chrono::TimeDelta::hours(24);
+
+/// How wide a slice of the diary one tick looks at.
+///
+/// The job runs on every visit, so the window only has to be wider than the gap
+/// between visits. Two hours is generous, and every send is keyed on the
+/// booking — so a booking seen on four consecutive ticks is promised once.
+const REMINDER_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(2);
+
+/// **Phase 11's exit criterion.**
+///
+/// A booking reminder that reaches a customer in their language, on whichever
+/// channel the template names, with a short link, having asked the read model
+/// for everything it says.
+///
+/// # Why the sending is here and not in the dispatcher
+///
+/// The dispatcher holds **no connection** while it delivers — a documented
+/// property, and the reason a slow relay cannot exhaust a tenant's pool — so a
+/// handler can read nothing. "At send time" therefore means *as late as
+/// possible while a connection is legitimately held*, which is here: this runs
+/// minutes before the message goes, so a booking somebody moved this morning is
+/// described as it stands this morning.
+///
+/// # Why nothing happens without a template
+///
+/// A tenant that has not written `booking.reminder` sends no reminders, and
+/// that is the correct default: this system does not get to decide what a
+/// business says to its customers, or that it says anything at all.
+struct BookingReminders;
+
+#[async_trait::async_trait]
+impl erp_worker::Job for BookingReminders {
+    fn name(&self) -> &'static str {
+        "messaging.booking_reminders"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(messaging::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        let now = chrono::Utc::now();
+        let from = now + REMINDER_NOTICE;
+        let until = from + REMINDER_WINDOW;
+
+        let due = {
+            let mut conn = db.read().await?;
+            // Confirmed only. A booking still at `reserved` has not been agreed
+            // by anybody, and one already cancelled or completed needs no
+            // reminding.
+            booking::reservations(
+                &mut conn,
+                Some(from),
+                Some(until),
+                Some("confirmed"),
+                100,
+                None,
+            )
+            .await?
+            .items
+        };
+        if due.is_empty() {
+            return Ok(Activity::Idle);
+        }
+
+        let mut sent = 0;
+        for reservation in due {
+            let mut tx = db.begin().await?;
+
+            // The link is made in the same transaction as the promise, so a
+            // rollback takes both. `shorten` is keyed on the booking, which is
+            // what makes a re-run give the customer the same URL.
+            let token = erp_links::shorten(
+                &mut tx,
+                &erp_links::New {
+                    key: format!("booking.reminder.{}", reservation.id),
+                    target: format!("/v1/booking/public/reservations/{}", reservation.id),
+                    external: false,
+                    // It stops working when the booking has been and gone. A
+                    // link into somebody's diary is not a permanent grant.
+                    expires_at: Some(reservation.ends_at),
+                    single_use: false,
+                    at: now,
+                },
+            )
+            .await?;
+
+            let sending = messaging::Sending {
+                template: "booking.reminder".to_owned(),
+                subject: messaging::Subject::new(
+                    messaging::Topic::Reservation,
+                    erp_types::AggregateId::new(&reservation.id)?,
+                ),
+                key: format!("booking.reminder.{}", reservation.id),
+                operator: None,
+                extra: std::collections::BTreeMap::from([(
+                    "link".to_owned(),
+                    format!("/l/{token}"),
+                )]),
+                locale: None,
+                at: now,
+            };
+
+            match messaging::send(&mut tx, &sending).await {
+                Ok(promised) => {
+                    tx.commit().await?;
+                    sent += promised.promised;
+                }
+                // **Every refusal rolls back, including the meter**, and none
+                // of them stops the loop. A customer with no mobile number, a
+                // tenant with no template, a month that is out of budget — all
+                // three are facts about one booking or one tenant, and none is
+                // a reason to leave the rest of the diary unreminded.
+                Err(error) => {
+                    tx.rollback().await?;
+                    tracing::debug!(
+                        booking = %reservation.id,
+                        %error,
+                        "no reminder for this booking"
+                    );
+                }
+            }
+        }
+
+        Ok(if sent > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
+
+/// How long a retired push token is kept before it is removed.
+///
+/// Long enough that somebody investigating "why did this person stop getting
+/// notifications" can still see the answer, and short enough that the table
+/// does not grow for the life of the tenant.
+const RETIRED_TOKEN_GRACE: chrono::TimeDelta = chrono::TimeDelta::days(30);
+
+/// **Push tokens expire, and cleaning them up is scheduled work.**
+///
+/// Not an afterthought and not a guess about age: a token nobody has sent to in
+/// six months may be perfectly good, and one the platform rejected this morning
+/// is not. This removes what has already been retired.
+struct RetirePushTokens;
+
+#[async_trait::async_trait]
+impl erp_worker::Job for RetirePushTokens {
+    fn name(&self) -> &'static str {
+        "messaging.retire_push_tokens"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(messaging::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        let before = chrono::Utc::now() - RETIRED_TOKEN_GRACE;
+        let mut conn = db.acquire().await?;
+        let gone = messaging::push::sweep(&mut conn, before).await?;
+
+        Ok(if gone > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
 }
 
 /// Anything a worker writes is the platform's doing, not a person's.

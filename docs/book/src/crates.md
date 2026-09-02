@@ -33,6 +33,7 @@ modules/pos         shifts, till sales, the drawer and its variance
 modules/payroll     what a business pays its people, and the entry it makes
 modules/hr_sa       GOSI, and end of service
 modules/reports     figures that agree with the books, built from the log
+modules/messaging   channels, templates that fetch their own data, and what they cost
 ```
 
 `branches` and `crm` are at the top of that list because they depend on nothing

@@ -178,12 +178,20 @@ pub async fn amend_customer(
             return Err(CrmError::Archived(key.clone()));
         }
         let name = details.name.trim();
-        if loaded.aggregate.name() == name
-            && loaded.aggregate.vat_number() == details.tax.as_ref().map(|t| t.vat_number.as_str())
-        {
-            // Cheap comparison on the two fields the aggregate keeps. The
-            // projection holds the rest, and re-writing an identical row is
-            // harmless where re-writing an identical *event* is not.
+        // **Every field, not two of them.** Comparing only the name and the VAT
+        // number is what this used to do, on the argument that the projection
+        // holds the rest — and it meant changing a customer's phone number
+        // wrote no event and did nothing at all. Found by `messaging`, whose
+        // first premise is that somebody who changes their number gets the next
+        // message.
+        if loaded.aggregate.matches(
+            name,
+            details.name_latin.as_deref(),
+            details.kind,
+            &details.contact,
+            details.address.as_ref(),
+            details.tax.as_ref(),
+        ) {
             return Ok(Decision::nothing());
         }
         Ok(Decision::one(CustomerEvent::Amended {

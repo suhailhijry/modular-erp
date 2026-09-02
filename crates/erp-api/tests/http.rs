@@ -1804,6 +1804,25 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // reconciliation is a statement about the books.
     ("people_cost", &["owner", "accountant"]),
     ("reconciliation", &["owner", "accountant"]),
+    // Messaging. Reading what the business says and what it has spent is
+    // ordinary; **writing a template is not** — it changes what every customer
+    // is told and what the tenant is billed for, which is the same kind of act
+    // as enabling a module.
+    ("vocabulary", ALL_ROLES),
+    ("list_templates", ALL_ROLES),
+    ("get_template", ALL_ROLES),
+    ("messaging_settings", ALL_ROLES),
+    ("messaging_budget", ALL_ROLES),
+    ("messaging_spend", ALL_ROLES),
+    // A device registering itself. A viewer's app may do it, because the app is
+    // whatever the person signed in is holding.
+    ("register_device", ALL_ROLES),
+    ("put_template", &["owner"]),
+    ("delete_template", &["owner"]),
+    ("set_messaging_settings", &["owner"]),
+    ("set_messaging_budget", &["owner"]),
+    // Sending. A clerk texts a customer; that is the counter's job.
+    ("send_message", &["owner", "accountant", "clerk"]),
     // The org chart. Reading it is ordinary — a staff list is on the wall in
     // most businesses. Changing it is changing the authorization structure, and
     // granting a claim escalates every ancestor, so it is the owner's.
@@ -2015,8 +2034,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        156,
-        "expected a hundred and fifty-six role-scoped operations"
+        168,
+        "expected a hundred and sixty-eight role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

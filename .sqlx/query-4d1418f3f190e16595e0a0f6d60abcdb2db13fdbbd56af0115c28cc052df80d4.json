@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM push_token WHERE retired_at IS NOT NULL AND retired_at < $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4d1418f3f190e16595e0a0f6d60abcdb2db13fdbbd56af0115c28cc052df80d4"
+}

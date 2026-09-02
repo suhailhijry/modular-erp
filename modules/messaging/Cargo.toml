@@ -1,0 +1,50 @@
+[package]
+name = "messaging"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Reaching somebody: channels, templates that fetch their own data, and what it costs."
+
+[lints]
+workspace = true
+
+[dependencies]
+# **Named for their read models**, which is the opposite of `reports`. A
+# template asks the read model for what it says at send time — that is the whole
+# point of 11b — so this module calls each of these modules' own read functions
+# and combines the answers in Rust. It never joins across their schemas, which
+# L3 forbids; `tax_sa::report` sets the precedent.
+crm = { workspace = true }
+hr = { workspace = true }
+branches = { workspace = true }
+booking = { workspace = true }
+sales = { workspace = true }
+
+erp-web = { workspace = true }
+erp-links = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+erp-control = { workspace = true }
+erp-occupancy = { workspace = true }
+erp-projection = { workspace = true }
+erp-testkit = { workspace = true }
+ledger = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

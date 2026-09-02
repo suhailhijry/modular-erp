@@ -301,6 +301,14 @@ pub struct InvoiceSummary {
     pub credit_note: Option<String>,
     pub customer: String,
     pub customer_vat: Option<String>,
+    /// The `crm` record this was matched to, when there is one.
+    ///
+    /// **Not the same as `customer`**, which is the name printed on the
+    /// document and never moves. This is the reconciliation surface — set at
+    /// issue or by `attach_customer` later — and it is what lets something
+    /// downstream find the person rather than a string that looks like their
+    /// name.
+    pub customer_id: Option<String>,
     pub issued_on: Timestamp,
     pub due_on: Option<Timestamp>,
     pub net: Money,
@@ -365,6 +373,7 @@ pub async fn invoices(
     let (issued_on, id) = resume(after)?;
     let rows = sqlx::query!(
         r#"SELECT id as "id!", number as "number!", customer as "customer!", customer_vat,
+                  customer_id,
                   issued_on as "issued_on!", due_on,
                   currency as "currency!",
                   net as "net!", tax as "tax!", gross as "gross!",
@@ -390,6 +399,7 @@ pub async fn invoices(
                 number: row.number,
                 customer: row.customer,
                 customer_vat: row.customer_vat,
+                customer_id: row.customer_id,
                 issued_on: row.issued_on,
                 due_on: row.due_on,
                 net: Money::from_minor(row.net, currency),
@@ -435,12 +445,18 @@ fn resume(after: Option<&Cursor>) -> Result<(Option<Timestamp>, Option<String>),
 /// One invoice with its lines, tax bands and payments. `None` if there is no
 /// such invoice — or if the projection has not caught up with it yet, which is
 /// what `?consistent_after=` is for.
+#[expect(
+    clippy::too_many_lines,
+    reason = "three queries and one assembly; splitting it would hide that a \
+              detail is exactly the header, the lines and the payments"
+)]
 pub async fn invoice(
     conn: &mut PgConnection,
     id: &str,
 ) -> Result<Option<InvoiceDetail>, sqlx::Error> {
     let Some(header) = sqlx::query!(
         r#"SELECT id as "id!", number as "number!", customer as "customer!", customer_vat,
+                  customer_id,
                   issued_on as "issued_on!", due_on,
                   currency as "currency!",
                   net as "net!", tax as "tax!", gross as "gross!",
@@ -498,6 +514,7 @@ pub async fn invoice(
             number: header.number,
             customer: header.customer,
             customer_vat: header.customer_vat,
+            customer_id: header.customer_id,
             issued_on: header.issued_on,
             due_on: header.due_on,
             net: Money::from_minor(header.net, currency),

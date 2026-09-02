@@ -166,6 +166,25 @@ report that is occasionally wrong in a way nobody can reproduce.
 this module's own copy of it at its own checkpoint, and a difference makes the
 tenant unhealthy rather than a cell amber.
 
+## messaging
+
+Reaching somebody: SMS, email, push and WhatsApp, from templates that ask the
+read model for what they say.
+
+**A template names an audience, not an address** — the client, the person doing
+the work, whoever runs that branch — and the address is a query run minutes
+before the message goes. Somebody who changes their number this morning gets
+this afternoon's reminder.
+
+**Bindings are declared**, so a template that says something it cannot know is
+refused when it is saved rather than sent with a gap in it. Both languages are
+the template, per D12.
+
+**Segments are counted and a budget refuses.** SMS is billed per 160 characters,
+or per 70 in Arabic, which here means every message — so the count is part of
+sending and a tenant finds out when they write the template rather than when the
+invoice arrives.
+
 ## How modules learn about each other
 
 By subscribing to the log. `tax_sa` finds out an invoice was issued by reading

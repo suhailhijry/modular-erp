@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT token as \"token!\", recipient as \"recipient!\", platform as \"platform!\",\n                  registered_at as \"registered_at!\", retired_at, retired_why\n             FROM push_token WHERE recipient = $1\n            ORDER BY registered_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "push_token",
+            "name": "token"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "recipient!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "push_token",
+            "name": "recipient"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "platform!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "push_token",
+            "name": "platform"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "registered_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "push_token",
+            "name": "registered_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "retired_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "push_token",
+            "name": "retired_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "retired_why",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "push_token",
+            "name": "retired_why"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "ba8a2f0b1af579f2a1d2c60c2ad416cdf6a8a4d5a9272b17b502e53b7da61f5d"
+}

@@ -205,6 +205,27 @@ pub struct Customer {
     archived: bool,
     name: String,
     tax: Option<TaxRegistration>,
+    /// The rest of what an amendment carries.
+    ///
+    /// # Why the aggregate keeps this at all
+    ///
+    /// It was `name` and `tax` only, on the argument that the projection holds
+    /// the rest and re-writing an identical row is harmless. That reasoning was
+    /// backwards, and it cost a real defect: `amend_customer` decided *nothing
+    /// moved* by comparing the two fields it had, so **changing a customer's
+    /// phone number wrote no event and did nothing at all.** It was found by
+    /// `messaging`, whose whole first premise is that a person who changes
+    /// their number gets the next message.
+    ///
+    /// An aggregate cannot answer "did anything move" about a field it does not
+    /// hold. So it holds them.
+    name_latin: Option<String>,
+    /// `None` until the record exists, because there is no sensible default
+    /// kind and inventing one would make an unregistered customer compare equal
+    /// to a person.
+    kind: Option<CustomerKind>,
+    contact: Contact,
+    address: Option<Address>,
 }
 
 impl Aggregate for Customer {
@@ -216,16 +237,41 @@ impl Aggregate for Customer {
 
     fn apply(&mut self, event: &Self::Event) {
         match event {
-            CustomerEvent::Registered { name, tax, .. } => {
+            CustomerEvent::Registered {
+                name,
+                name_latin,
+                kind,
+                contact,
+                address,
+                tax,
+                ..
+            } => {
                 self.registered = true;
                 self.archived = false;
-                self.name.clone_from(name);
-                self.tax.clone_from(tax);
+                self.remember(
+                    name,
+                    name_latin.as_ref(),
+                    *kind,
+                    contact,
+                    address.as_ref(),
+                    tax.as_ref(),
+                );
             }
-            CustomerEvent::Amended { name, tax, .. } => {
-                self.name.clone_from(name);
-                self.tax.clone_from(tax);
-            }
+            CustomerEvent::Amended {
+                name,
+                name_latin,
+                kind,
+                contact,
+                address,
+                tax,
+            } => self.remember(
+                name,
+                name_latin.as_ref(),
+                *kind,
+                contact,
+                address.as_ref(),
+                tax.as_ref(),
+            ),
             CustomerEvent::Archived { .. } => self.archived = true,
             CustomerEvent::Restored => self.archived = false,
         }
@@ -233,6 +279,47 @@ impl Aggregate for Customer {
 }
 
 impl Customer {
+    /// Everything the two writing events carry, which is the same set.
+    fn remember(
+        &mut self,
+        name: &str,
+        name_latin: Option<&String>,
+        kind: CustomerKind,
+        contact: &Contact,
+        address: Option<&Address>,
+        tax: Option<&TaxRegistration>,
+    ) {
+        name.clone_into(&mut self.name);
+        self.name_latin = name_latin.cloned();
+        self.kind = Some(kind);
+        self.contact.clone_from(contact);
+        self.address = address.cloned();
+        self.tax = tax.cloned();
+    }
+
+    /// **Whether an amendment would change anything.**
+    ///
+    /// Every field the event carries, not two of them. See the note on
+    /// [`Customer::kind`] — comparing a subset is how a phone number change
+    /// came to write no event at all.
+    #[must_use]
+    pub fn matches(
+        &self,
+        name: &str,
+        name_latin: Option<&str>,
+        kind: CustomerKind,
+        contact: &Contact,
+        address: Option<&Address>,
+        tax: Option<&TaxRegistration>,
+    ) -> bool {
+        self.name == name
+            && self.name_latin.as_deref() == name_latin
+            && self.kind == Some(kind)
+            && &self.contact == contact
+            && self.address.as_ref() == address
+            && self.tax.as_ref() == tax
+    }
+
     /// Whether this record exists at all.
     #[must_use]
     pub const fn exists(&self) -> bool {
