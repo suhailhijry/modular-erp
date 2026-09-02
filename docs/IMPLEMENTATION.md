@@ -1329,9 +1329,14 @@ refuses to roster anyone whose document has lapsed.
       and a module cannot reach it. So an effect enqueued here would sit in the
       outbox for ever.
 
-      What reaches somebody today is the shape `CertificateExpiry` already uses:
-      a `HealthJob` invariant. Registering one is the next small step; the
-      *email* needs a tenant-plane handler that does not exist
+      What reaches somebody today is a `HealthJob` invariant —
+      `WorkDocumentExpiry`, beside `CertificateExpiry` and for the same reason.
+      **A lapsed document is a separate finding from an expiring one**, not a
+      louder version of it: one is somebody to remind, the other is somebody who
+      must come off the rota today, and collapsing them into one severity is how
+      the second gets treated like the first.
+
+      The *email* still needs a tenant-plane handler that does not exist
 - [x] Escalation: a document that lapses is not a warning that was ignored, it
       is a person who may not be rostered. `booking::assign` refuses them, at
       the moment they would be — against `hr`'s **log**, so an iqama renewed

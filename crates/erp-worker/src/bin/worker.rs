@@ -94,7 +94,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .with(Arc::new(TrialBalance))
                 .with(Arc::new(NoOverpaidInvoice))
                 .with(Arc::new(NoOverpaidBill))
-                .with(Arc::new(CertificateExpiry)),
+                .with(Arc::new(CertificateExpiry))
+                .with(Arc::new(WorkDocumentExpiry)),
         ));
     for job in module_jobs() {
         worker = worker.with_job(job);
@@ -183,6 +184,101 @@ const EXPIRY_WARNING: chrono::TimeDelta = chrono::TimeDelta::days(60);
 /// When it lapses, every invoice stops being clearable — and the first anyone
 /// would know is a customer waiting for one. A five-year certificate is exactly
 /// the kind of deadline nobody has a reminder for.
+/// **Work documents that have lapsed, or are about to.**
+///
+/// The producer §9e asks for, in the shape that actually reaches somebody
+/// today. The plan asks for an outbox effect on a date; the tenant dispatcher
+/// has no handlers registered at all — email is control-plane, because the
+/// things that send it are control-plane rows — so an effect enqueued from `hr`
+/// would sit in the outbox for ever. A health finding is read.
+///
+/// **A lapsed document is a separate finding from an expiring one**, and not a
+/// louder version of it: one is somebody to remind, the other is somebody who
+/// must come off the rota today. Collapsing them into a single severity is how
+/// the second gets treated like the first.
+struct WorkDocumentExpiry;
+
+#[async_trait::async_trait]
+impl Invariant for WorkDocumentExpiry {
+    fn name(&self) -> &'static str {
+        "work_document_expiry"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(hr::module_id())
+    }
+
+    async fn check(
+        &self,
+        db: &erp_control::TenantDb,
+    ) -> Result<Vec<Finding>, erp_worker::BoxError> {
+        // The read model, not the aggregates (L7) — and it costs one indexed
+        // scan rather than loading every employee the business has ever had.
+        let mut conn = db.read().await?;
+        let expiring = hr::expiring(&mut conn, DOCUMENT_WARNING_DAYS, 200).await?;
+        drop(conn);
+
+        let (lapsed, soon): (Vec<_>, Vec<_>) = expiring.into_iter().partition(|d| d.days_left < 0);
+
+        let mut findings = Vec::new();
+        if !lapsed.is_empty() {
+            findings.push(Finding::new(
+                "work_document_lapsed",
+                format!(
+                    "{} work {} lapsed and the people holding them cannot be \
+                     rostered: {}",
+                    lapsed.len(),
+                    if lapsed.len() == 1 {
+                        "document has"
+                    } else {
+                        "documents have"
+                    },
+                    describe(&lapsed),
+                ),
+            ));
+        }
+        if !soon.is_empty() {
+            findings.push(Finding::new(
+                "work_document_expiring",
+                format!(
+                    "{} work {} within {DOCUMENT_WARNING_DAYS} days: {}",
+                    soon.len(),
+                    if soon.len() == 1 {
+                        "document expires"
+                    } else {
+                        "documents expire"
+                    },
+                    describe(&soon),
+                ),
+            ));
+        }
+        Ok(findings)
+    }
+}
+
+/// The first few, named. **Not all of them**: a finding that lists two hundred
+/// people is one nobody reads, and the count above already says how many there
+/// are.
+fn describe(documents: &[hr::Expiring]) -> String {
+    const NAMED: usize = 5;
+    let named: Vec<String> = documents
+        .iter()
+        .take(NAMED)
+        .map(|d| format!("{} ({}, {})", d.name, d.kind, d.expires_on))
+        .collect();
+    if documents.len() > NAMED {
+        format!("{}, and {} more", named.join("; "), documents.len() - NAMED)
+    } else {
+        named.join("; ")
+    }
+}
+
+/// How far ahead a warning is worth having.
+///
+/// Sixty days is roughly what an iqama renewal needs — long enough to act on,
+/// short enough that it is not permanently on the list.
+const DOCUMENT_WARNING_DAYS: i32 = 60;
+
 struct CertificateExpiry;
 
 #[async_trait::async_trait]
@@ -627,8 +723,47 @@ impl Invariant for NoOverpaidInvoice {
 
 #[cfg(test)]
 mod tests {
-    use super::{certificate_time, module_jobs, zatca_jobs};
+    use super::{certificate_time, describe, module_jobs, zatca_jobs};
     use std::collections::BTreeSet;
+
+    fn document(name: &str, days: i32) -> hr::Expiring {
+        hr::Expiring {
+            employee: name.to_owned(),
+            name: name.to_owned(),
+            branch: None,
+            kind: "identity".to_owned(),
+            number: "X".to_owned(),
+            expires_on: chrono::NaiveDate::from_ymd_opt(2026, 5, 31).expect("a real date"),
+            days_left: days,
+        }
+    }
+
+    /// **A finding that lists two hundred people is one nobody reads.**
+    ///
+    /// The count is already in the sentence, so the list is the first few and
+    /// then how many more.
+    #[test]
+    fn a_long_list_of_documents_is_summarised_rather_than_recited() {
+        let few: Vec<_> = (0..3).map(|n| document(&format!("p{n}"), 5)).collect();
+        let described = describe(&few);
+        assert!(described.contains("p0"));
+        assert!(described.contains("p2"));
+        assert!(
+            !described.contains("more"),
+            "a short list should be named in full: {described}"
+        );
+
+        let many: Vec<_> = (0..20).map(|n| document(&format!("p{n}"), 5)).collect();
+        let described = describe(&many);
+        assert!(
+            described.contains("and 15 more"),
+            "a long list was recited in full: {described}"
+        );
+        assert!(
+            !described.contains("p19"),
+            "a long list was recited in full: {described}"
+        );
+    }
 
     /// **Every module this build offers has a projection job here.**
     ///
