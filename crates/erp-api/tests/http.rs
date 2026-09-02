@@ -1807,6 +1807,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("revoke_claim", OWNER),
     ("record_document", OWNER),
     ("expiring_documents", ALL_ROLES),
+    ("list_skills", ALL_ROLES),
+    ("record_skills", OWNER),
     // Which websites may call this tenant's public API. Reading the list is
     // ordinary; changing it is changing who may reach a business's diary from a
     // browser, which is the owner's decision and nobody else's.
@@ -1975,8 +1977,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        130,
-        "expected a hundred and thirty role-scoped operations"
+        132,
+        "expected a hundred and thirty-two role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

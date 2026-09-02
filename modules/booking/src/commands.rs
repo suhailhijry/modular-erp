@@ -781,11 +781,31 @@ pub async fn assign(
             //
             // Against `hr`'s **log**, so an iqama renewed this morning counts
             // now rather than when a projection catches up.
+            //
+            // **One question, not two.** `eligible_for` answers documents,
+            // employment *and* skill together, because a caller who had to ask
+            // both would eventually ask one — and the two refusals mean the
+            // same thing here: this is not somebody who can do this job.
             if let Some(employee) = &resource.employee {
+                let services = booked_services(&mut *conn, id, line).await?;
                 let day = at.date_naive();
-                if !hr::may_work_on(&mut *conn, employee, day)
-                    .await
-                    .map_err(ExecuteError::Load)?
+                for service in &services {
+                    if !hr::eligible_for(&mut *conn, employee, service, day)
+                        .await
+                        .map_err(ExecuteError::Load)?
+                    {
+                        return Err(ExecuteError::Rejected(BookingError::MayNotWork(
+                            employee.to_string(),
+                        )));
+                    }
+                }
+                // A line that takes nothing still asks the employment and
+                // document half — otherwise assigning somebody to a line with
+                // no named service would skip the check entirely.
+                if services.is_empty()
+                    && !hr::may_work_on(&mut *conn, employee, day)
+                        .await
+                        .map_err(ExecuteError::Load)?
                 {
                     return Err(ExecuteError::Rejected(BookingError::MayNotWork(
                         employee.to_string(),
@@ -1046,6 +1066,29 @@ async fn check_offered(
 }
 
 /// Loads a resource and refuses one that is missing or out of service.
+/// What a line books, which is what the person assigned to it has to be able to
+/// do.
+///
+/// Read from the reservation rather than passed in, because the caller of
+/// `assign` names a *unit* and the services are already recorded on the line —
+/// asking for them again is asking a caller to repeat something the system
+/// knows, which is how the two come to disagree.
+async fn booked_services(
+    conn: &mut sqlx::PgConnection,
+    reservation: &AggregateId,
+    line: u16,
+) -> Result<Vec<AggregateId>, ExecuteError<BookingError>> {
+    let held = erp_eventlog::load::<Reservation>(&mut *conn, reservation, crate::upcasters())
+        .await
+        .map_err(ExecuteError::Load)?;
+    Ok(held
+        .aggregate
+        .lines
+        .get(line as usize)
+        .map(|l| l.takes.iter().map(|h| h.resource.clone()).collect())
+        .unwrap_or_default())
+}
+
 async fn available(
     conn: &mut sqlx::PgConnection,
     id: &AggregateId,

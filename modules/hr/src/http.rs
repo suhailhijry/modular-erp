@@ -41,6 +41,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(revoke_claim))
         .routes(routes!(record_document))
         .routes(routes!(expiring_documents))
+        .routes(routes!(list_skills, record_skills))
 }
 
 static CATALOG: erp_i18n::Composite =
@@ -221,6 +222,32 @@ struct ExpiringDocument {
     /// **Negative once it has gone.** A screen that showed "0 days left" for
     /// both tomorrow and last March is the screen somebody stops reading.
     days_left: i32,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({"skills": ["SERVICE-CUT", "SERVICE-COLOUR"]}))]
+struct NewSkills {
+    /// **The whole set**, replacing what was there.
+    ///
+    /// One at a time is deliberately not offered: an empty list means *no
+    /// restriction*, so recording the first skill starts restricting — and a
+    /// caller adding one would eventually give somebody a single skill they
+    /// were only trying to note and take everything else away.
+    ///
+    /// Each is the id of the bookable resource that service is.
+    skills: Vec<String>,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    at: Option<Timestamp>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct Skills {
+    /// What they may perform. **Empty means anything**, not nothing.
+    items: Vec<String>,
+    /// Whether the list restricts them, which is the field that stops `[]`
+    /// being read the wrong way round.
+    restricted: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -868,6 +895,111 @@ async fn expiring_documents(
             })
             .collect(),
     ))
+}
+
+/// What somebody is qualified to do.
+#[utoipa::path(
+    get,
+    path = "/v1/hr/employees/{employee}/skills",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, description = "`restricted: false` means the empty list is *anything*, not nothing.", body = Skills),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn list_skills(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Path(id): Path<String>,
+) -> Result<Json<Skills>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let employee = parse_id(&id, locale)?;
+
+    // **The projection, not the aggregate** (L7). Loading a stream to answer a
+    // query makes the cost of the answer grow with its length, which is what a
+    // read model exists to stop — and the guard in `erp-eventlog` caught the
+    // first version of this doing exactly that.
+    //
+    // The rule this renders is the same one `booking` acts on, and the two are
+    // asserted to agree rather than assumed to: see
+    // `the_who_can_do_this_list_matches_what_assign_would_allow`. A skill
+    // recorded a second ago may not be here yet, which is what
+    // `?consistent_after=` is for.
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let items = crate::skills(&mut conn, employee.as_str())
+        .await
+        .map_err(|e| database(&e, locale))?;
+    drop(conn);
+
+    Ok(Json(Skills {
+        restricted: !items.is_empty(),
+        items,
+    }))
+}
+
+/// Record what somebody is qualified to do.
+///
+/// **The whole set at once.** Sending the same set again writes nothing.
+#[utoipa::path(
+    put,
+    path = "/v1/hr/employees/{employee}/skills",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+    ),
+    request_body = NewSkills,
+    responses(
+        (status = OK, body = HrAccepted),
+        (status = BAD_REQUEST, description = "An unusable service id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such employee", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn record_skills(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(id): Path<String>,
+    Json(body): Json<NewSkills>,
+) -> Result<Json<HrAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let employee = parse_id(&id, locale)?;
+    let skills = body
+        .skills
+        .iter()
+        .map(|s| parse_id(s, locale))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let committed = crate::record_skills(
+        &tenant.db,
+        &employee,
+        &skills,
+        body.at.unwrap_or_else(chrono::Utc::now),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(HrAccepted {
+        id,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
 }
 
 #[derive(Debug, Deserialize)]

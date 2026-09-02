@@ -323,6 +323,8 @@ wants and a working list does not.
 | `GET /v1/hr/employees/{employee}/claims` | What they hold, and where each came from | Read |
 | `POST /v1/hr/employees/{employee}/claims` | Grant one | ManageTenant |
 | `DELETE /v1/hr/employees/{employee}/claims/{claim}` | Take it back | ManageTenant |
+| `GET /v1/hr/employees/{employee}/skills` | What they may perform | Read |
+| `PUT /v1/hr/employees/{employee}/skills` | Record the whole set | ManageTenant |
 | `PUT /v1/hr/employees/{employee}/documents/{kind}` | Record a document, or renew it | ManageTenant |
 | `GET /v1/hr/documents/expiring` | What has lapsed, and what is about to | Read |
 
@@ -396,6 +398,34 @@ A claim with no `branch` is **company-wide** and answers for any branch — payr
 could not be expressed otherwise. One scoped to Olaya does not answer for Malaz,
 which is what stops a branch manager gaining authority in a branch they have
 never seen.
+
+### Skills
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/hr/employees/EMP-0001/skills \
+  -d '{"skills":["SERVICE-CUT","SERVICE-COLOUR"]}'
+```
+
+Each is the id of the bookable resource that service is.
+
+**The whole set, and there is no way to add one.** An empty list means
+*anything*, not nothing — a business that has never recorded a skill has every
+stylist able to do every service, which is what every tenant starts as. So
+recording the *first* skill starts restricting, and a caller adding one at a
+time would eventually take everything else away from somebody they were only
+trying to note a qualification for.
+
+```bash
+curl -s "${AUTH[@]}" http://localhost:8080/v1/hr/employees/EMP-0001/skills
+# {"items":["SERVICE-CUT"],"restricted":true}
+```
+
+`restricted` is what stops `[]` being read the wrong way round.
+
+Assigning somebody to a line they are not qualified for is refused with the same
+code as a lapsed document — at the point of use both mean "not somebody who can
+do this job".
 
 ### Documents that expire
 

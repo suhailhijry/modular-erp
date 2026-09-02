@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT service as \"service!\" FROM proj_hr.employee_skill\n            WHERE employee = $1 ORDER BY service",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "service!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_skill",
+            "name": "service"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0ee20fb276dcfa4f5aefddd1d6cf1257192745510af28901d54dc1454f3482f2"
+}

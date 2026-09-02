@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 874 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 878 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -1144,8 +1144,17 @@ payroll, and both have to be settled before `Employee` has a field.
       tree and the claims are what everything else in this phase stands on, and
       three more aggregates before the authorization model was proved would
       have been three more things to change when it moved
-- [ ] Skills: which services a person may perform. Booking reads it to decide who
-      is eligible, so this is why `hr` lands below `booking` and not beside it
+- [x] Skills: which services a person may perform. `booking::assign` reads it,
+      which is why `hr` lands below `booking` and not beside it.
+
+      **An empty list means anything, not nothing**, or every existing tenant's
+      rota would be refused the day the module is switched on. The edge is that
+      recording the *first* skill starts restricting, which is why the API takes
+      the whole set at once and offers no way to add one — and why the read
+      answers `restricted` rather than leaving `[]` to be read either way.
+
+      `eligible_for` is **one question**: employment, documents and skill
+      together, because a caller who had to ask both would eventually ask one
 - [ ] Shifts, on Phase 8's recurrence. The same problem, so the same type
 - [ ] Attendance and leave, with balances that accrue
 

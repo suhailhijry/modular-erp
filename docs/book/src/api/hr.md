@@ -197,6 +197,52 @@ end-of-service calculation are company-wide by nature, and a boundary that
 refused them would make the module unusable in its first month. `?scope=all` is
 how a caller says so.
 
+## Skills, and the sharp edge in them
+
+Which services a person may perform, named by the bookable resource each service
+is. `hr` never looks inside those ids — the module that owns the meaning owns the
+id, the same way `erp-occupancy` does not know what a chair is.
+
+```rust
+pub fn can_perform(&self, service: &AggregateId) -> bool {
+    self.skills.is_empty() || self.skills.iter().any(|s| s == service)
+}
+```
+
+**An empty list means anything, not nothing.** A business that has never
+recorded a skill has every stylist able to do every service, which is what a
+small salon means and what every existing tenant already relies on — the
+alternative would refuse every assignment the day this module is switched on.
+
+The edge is that recording the *first* skill starts restricting, so a
+half-filled skill list is worse than none. That is exactly why the API takes
+**the whole set at once** and offers no way to add one: a caller adding a single
+skill somebody was only trying to note would take everything else away without
+meaning to.
+
+`GET .../skills` answers with `restricted`, which is what stops `[]` being read
+the wrong way round.
+
+### One question, not two
+
+```rust
+pub async fn eligible_for(conn, id, service: &AggregateId, day: NaiveDate)
+    -> Result<bool, LoadError>;
+```
+
+Employment, documents and skill together, because a caller who had to ask both
+would eventually ask one — and the refusals mean the same thing at the point of
+use: this is not somebody who can do this job.
+
+`booking::assign` reads the services from the reservation line rather than
+taking them as a parameter. Asking a caller to repeat something the system
+already knows is how the two come to disagree.
+
+`hr::who_can_perform` is the screen's half, and it applies the same rule —
+including everybody with no skills recorded. A screen that offered somebody the
+rota would refuse, or hid somebody it would allow, is worse than no screen, and
+`the_who_can_do_this_list_matches_what_assign_would_allow` asserts they agree.
+
 ## Documents that expire
 
 An expired iqama stops a person working. So this is a **refusal, not a

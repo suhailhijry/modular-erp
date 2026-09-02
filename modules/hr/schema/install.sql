@@ -81,3 +81,29 @@ CREATE TABLE IF NOT EXISTS employee_document (
 -- "What expires in the next sixty days", which is the whole screen.
 CREATE INDEX IF NOT EXISTS employee_document_by_expiry_idx
     ON employee_document (expires_on, employee);
+
+-- What somebody is qualified to do, named by the bookable resource each service
+-- is.
+--
+-- **Empty means no restriction**, not "nothing": a business that has never
+-- recorded a skill has every stylist able to do every service, which is what a
+-- small salon means and what every tenant starts as. The write side says the
+-- same, in `Employee::can_perform`.
+--
+-- One row per (person, service), replaced as a set — a skill list is read as
+-- "what can this person do" and never as a sequence of additions.
+CREATE TABLE IF NOT EXISTS employee_skill (
+    employee      TEXT NOT NULL REFERENCES employee (id) ON DELETE CASCADE,
+    -- A `proj_booking.resource` id. **No foreign key**: that is another
+    -- projection group and L3 forbids reaching into it.
+    service       TEXT NOT NULL,
+
+    recorded_at   TIMESTAMPTZ NOT NULL,
+    position      BIGINT NOT NULL,
+
+    PRIMARY KEY (employee, service)
+);
+
+-- "Who can do this service", which is the question a rota screen asks.
+CREATE INDEX IF NOT EXISTS employee_skill_by_service_idx
+    ON employee_skill (service, employee);

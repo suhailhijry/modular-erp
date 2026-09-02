@@ -191,6 +191,13 @@ impl Fixture {
         .expect("asks")
     }
 
+    async fn eligible(&self, employee: &str, service: &str, day: chrono::NaiveDate) -> bool {
+        let mut conn = self.db.acquire().await.expect("connection");
+        hr::eligible_for(&mut conn, &code(employee), &code(service), day)
+            .await
+            .expect("asks")
+    }
+
     async fn project(&self) {
         let owned = hr::projections();
         let refs: Vec<&dyn erp_projection::Projection<Group = hr::Hr>> =
@@ -844,6 +851,159 @@ async fn the_expiry_list_shows_what_has_gone_and_what_is_going() {
     );
     assert_eq!(soon[1].employee, "EMP-2");
     assert!(soon[1].days_left > 0);
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// 9a — skills
+// ---------------------------------------------------------------------------
+
+/// **An empty skill list means anything, not nothing.**
+///
+/// The alternative would refuse every assignment in every existing tenant the
+/// day this module is switched on. The sharp edge — that recording the *first*
+/// skill starts restricting — is why the API takes the whole set at once.
+#[tokio::test]
+async fn nobody_is_restricted_until_a_skill_is_recorded() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+
+    let today = chrono::Utc::now().date_naive();
+    assert!(
+        fixture.eligible("EMP-1", "SERVICE-CUT", today).await,
+        "somebody with no skills recorded was refused a service"
+    );
+
+    hr::record_skills(
+        &fixture.db,
+        &code("EMP-1"),
+        &[code("SERVICE-COLOUR")],
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    assert!(fixture.eligible("EMP-1", "SERVICE-COLOUR", today).await);
+    assert!(
+        !fixture.eligible("EMP-1", "SERVICE-CUT", today).await,
+        "recording one skill did not restrict the rest"
+    );
+
+    // Recording the set again writes nothing — a form submitted twice is not
+    // two changes.
+    let again = hr::record_skills(
+        &fixture.db,
+        &code("EMP-1"),
+        &[code("SERVICE-COLOUR")],
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a retry is not an error");
+    assert!(again.at.is_none(), "the same set wrote a second event");
+
+    fixture.cleanup().await;
+}
+
+/// Eligibility is **one question**: a lapsed document and a missing skill both
+/// mean the same thing here — not somebody who can do this job.
+#[tokio::test]
+async fn eligibility_asks_about_documents_and_skills_together() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+    hr::record_skills(
+        &fixture.db,
+        &code("EMP-1"),
+        &[code("SERVICE-CUT")],
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    let today = chrono::Utc::now().date_naive();
+    assert!(fixture.eligible("EMP-1", "SERVICE-CUT", today).await);
+
+    // Qualified, and her iqama has gone.
+    hr::record_document(
+        &fixture.db,
+        &code("EMP-1"),
+        hr::DocumentKind::Identity,
+        "2312345678",
+        today - chrono::Days::new(1),
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    assert!(
+        !fixture.eligible("EMP-1", "SERVICE-CUT", today).await,
+        "a qualified person with a lapsed document was still eligible"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The screen and the rota must agree**, so both answer from the same rule:
+/// somebody with no skills recorded can do anything, and appears in the list of
+/// who can do a service.
+#[tokio::test]
+async fn the_who_can_do_this_list_matches_what_assign_would_allow() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-ANY", "سارة", None, None).await;
+    fixture.hire("EMP-CUT", "نورة", None, None).await;
+    fixture.hire("EMP-COLOUR", "ريم", None, None).await;
+
+    hr::record_skills(
+        &fixture.db,
+        &code("EMP-CUT"),
+        &[code("SERVICE-CUT")],
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+    hr::record_skills(
+        &fixture.db,
+        &code("EMP-COLOUR"),
+        &[code("SERVICE-COLOUR")],
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let can = hr::who_can_perform(&mut conn, "SERVICE-CUT", 50)
+        .await
+        .expect("reads");
+    drop(conn);
+
+    let ids: Vec<&str> = can.iter().map(|e| e.id.as_str()).collect();
+    assert!(ids.contains(&"EMP-CUT"), "the qualified one was missing");
+    assert!(
+        ids.contains(&"EMP-ANY"),
+        "somebody with no skills recorded was left off, though `assign` \
+         would allow them — the screen and the rota disagree"
+    );
+    assert!(
+        !ids.contains(&"EMP-COLOUR"),
+        "somebody qualified for a different service was offered"
+    );
+
+    // And the two agree the other way too.
+    let today = chrono::Utc::now().date_naive();
+    for id in &ids {
+        assert!(
+            fixture.eligible(id, "SERVICE-CUT", today).await,
+            "{id} was offered by the screen and would be refused by the rota"
+        );
+    }
 
     fixture.cleanup().await;
 }

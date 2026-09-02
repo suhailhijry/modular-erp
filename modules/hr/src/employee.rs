@@ -227,6 +227,19 @@ pub enum EmployeeEvent {
     /// They came back. A rehire under the same record, which is what a business
     /// means when a seasonal worker returns.
     Rehired { at: Timestamp },
+    /// What this person is qualified to do.
+    ///
+    /// **The whole set, replacing.** A skill list is read as "what can this
+    /// person do", never as a sequence of additions, and an `Added`/`Removed`
+    /// pair would be two events to get the order of.
+    Skilled {
+        /// The services they may perform, named by the bookable resource each
+        /// one is. `hr` never looks inside these — the module that owns the
+        /// meaning owns the id, the same way `occupancy` does not know what a
+        /// chair is.
+        skills: Vec<AggregateId>,
+        at: Timestamp,
+    },
     /// A document was recorded, or renewed.
     ///
     /// **One event for both**, because a renewal is the same fact with a later
@@ -278,6 +291,7 @@ impl DomainEvent for EmployeeEvent {
             Self::Left { .. } => Self::NAMES[4],
             Self::Rehired { .. } => Self::NAMES[5],
             Self::DocumentRecorded { .. } => Self::NAMES[6],
+            Self::Skilled { .. } => Self::NAMES[7],
         })
     }
 
@@ -287,7 +301,7 @@ impl DomainEvent for EmployeeEvent {
 }
 
 impl EmployeeEvent {
-    pub const NAMES: [&'static str; 7] = [
+    pub const NAMES: [&'static str; 8] = [
         "hr.employee.hired",
         "hr.employee.amended",
         "hr.employee.reparented",
@@ -295,6 +309,7 @@ impl EmployeeEvent {
         "hr.employee.left",
         "hr.employee.rehired",
         "hr.employee.document_recorded",
+        "hr.employee.skilled",
     ];
 }
 
@@ -314,6 +329,10 @@ pub struct Employee {
     /// document used to say. The log keeps the history; this is the state a
     /// decision is made from.
     pub documents: Vec<Document>,
+    /// What they are qualified to do, named by bookable resource.
+    ///
+    /// **Empty means no restriction**, not "nothing" — see [`Self::can_perform`].
+    pub skills: Vec<AggregateId>,
 }
 
 impl Aggregate for Employee {
@@ -364,6 +383,7 @@ impl Aggregate for Employee {
             EmployeeEvent::Transferred { branch, .. } => self.branch.clone_from(branch),
             EmployeeEvent::Left { at, .. } => self.left_at = Some(*at),
             EmployeeEvent::Rehired { .. } => self.left_at = None,
+            EmployeeEvent::Skilled { skills, .. } => self.skills.clone_from(skills),
             EmployeeEvent::DocumentRecorded {
                 kind,
                 number,
@@ -422,6 +442,25 @@ impl Employee {
                 .documents
                 .iter()
                 .all(|d| !d.kind.blocks_work() || d.valid_on(day))
+    }
+
+    /// **Whether this person may perform this service.**
+    ///
+    /// # Empty means anything, and that is a deliberate sharp edge
+    ///
+    /// A business that has never recorded a skill has every stylist able to do
+    /// every service, which is what a small salon means and what every existing
+    /// tenant already relies on. The alternative — empty means nothing — would
+    /// refuse every assignment the day this module is switched on.
+    ///
+    /// The edge is that recording the *first* skill starts restricting, so a
+    /// half-filled skill list is worse than none. That is why the API records
+    /// the whole set at once rather than adding one at a time: a caller cannot
+    /// accidentally restrict somebody by giving them a single skill they were
+    /// only trying to note.
+    #[must_use]
+    pub fn can_perform(&self, service: &AggregateId) -> bool {
+        self.skills.is_empty() || self.skills.iter().any(|s| s == service)
     }
 
     /// The documents that have lapsed as at this day, for a message that says

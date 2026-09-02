@@ -1,0 +1,125 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT e.id as \"id!\", e.name as \"name!\", e.name_latin, e.email, e.phone,\n                  e.reports_to, e.branch, e.hired_on as \"hired_on!\", e.left_at\n             FROM proj_hr.employee e\n            WHERE e.left_at IS NULL\n              AND (EXISTS (SELECT 1 FROM proj_hr.employee_skill s\n                            WHERE s.employee = e.id AND s.service = $1)\n               OR NOT EXISTS (SELECT 1 FROM proj_hr.employee_skill s\n                               WHERE s.employee = e.id))\n            ORDER BY e.name, e.id\n            LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name_latin",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "name_latin"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "email",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "email"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "phone",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "phone"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "reports_to",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "reports_to"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "hired_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "hired_on"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "left_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "left_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "d0234a66c4e1658832e51ea8525290af781dd5db5d893fc77982365438c0263b"
+}

@@ -382,6 +382,61 @@ pub async fn record_document(
     .await
 }
 
+/// Records what somebody is qualified to do.
+///
+/// **The whole set at once**, and that is not an accident of the wire shape. An
+/// empty skill list means no restriction, so recording the *first* skill starts
+/// restricting — and a caller who could add one at a time would eventually give
+/// somebody a single skill they were only trying to note and take everything
+/// else away without meaning to.
+pub async fn record_skills(
+    db: &TenantDb,
+    id: &AggregateId,
+    skills: &[AggregateId],
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    let mut skills = skills.to_vec();
+    skills.sort();
+    skills.dedup();
+
+    db.execute::<Employee, _, HrError>(id, crate::upcasters(), metadata, move |loaded| {
+        let held = &loaded.aggregate;
+        if !held.exists() {
+            return Err(HrError::NoSuchEmployee(id.to_string()));
+        }
+        // The same set again writes nothing: a form submitted twice is not two
+        // changes. Both sides are sorted, so this compares sets and not order.
+        let mut current = held.skills.clone();
+        current.sort();
+        if current == skills {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(EmployeeEvent::Skilled {
+            skills: skills.clone(),
+            at,
+        }))
+    })
+    .await
+}
+
+/// **Whether this person may perform this service, on this day.**
+///
+/// One question and not two, because a caller who had to ask both would
+/// eventually ask one. It is false when they have left, when a work document
+/// has lapsed, and when the service is not one they are qualified for.
+pub async fn eligible_for(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    service: &AggregateId,
+    day: chrono::NaiveDate,
+) -> Result<bool, erp_eventlog::LoadError> {
+    let held = load::<Employee>(conn, id, crate::upcasters())
+        .await?
+        .aggregate;
+    Ok(held.may_work_on(day) && held.can_perform(service))
+}
+
 /// Whether this is somebody the business employs, or once did.
 ///
 /// The lighter question, for a caller recording a *link* rather than making a

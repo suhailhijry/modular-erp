@@ -92,22 +92,14 @@ impl Projection for EmployeeList {
                 phone,
                 ..
             } => {
-                sqlx::query(
-                    "UPDATE employee
-                        SET name = $2, name_latin = $3, national_id = $4,
-                            email = $5, phone = $6, recorded_at = $7, position = $8
-                      WHERE id = $1",
-                )
-                .bind(id)
-                .bind(&name)
-                .bind(name_latin.as_deref())
-                .bind(national_id.as_deref())
-                .bind(email.as_deref())
-                .bind(phone.as_deref())
-                .bind(ctx.event_time())
-                .bind(ctx.position().get())
-                .execute(&mut *conn)
-                .await?;
+                let details = crate::Details {
+                    name,
+                    name_latin,
+                    national_id,
+                    email,
+                    phone,
+                };
+                amended(ctx, conn, id, &details).await?;
             }
             EmployeeEvent::Reparented { reports_to, .. } => {
                 reparented(ctx, conn, id, reports_to.as_ref()).await?;
@@ -128,6 +120,9 @@ impl Projection for EmployeeList {
                 .bind(ctx.position().get())
                 .execute(&mut *conn)
                 .await?;
+            }
+            EmployeeEvent::Skilled { skills, .. } => {
+                skilled(ctx, conn, id, &skills).await?;
             }
             EmployeeEvent::DocumentRecorded {
                 kind,
@@ -196,6 +191,37 @@ async fn hired(
     Ok(())
 }
 
+/// What somebody is qualified to do, as a set.
+///
+/// Delete-then-insert, because the event carries the whole set: a skill removed
+/// has to disappear, and an upsert alone would leave it there for ever.
+async fn skilled(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    skills: &[erp_types::AggregateId],
+) -> Result<(), ProjectionError> {
+    sqlx::query("DELETE FROM employee_skill WHERE employee = $1")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+
+    for service in skills {
+        sqlx::query(
+            "INSERT INTO employee_skill (employee, service, recorded_at, position)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (employee, service) DO NOTHING",
+        )
+        .bind(id)
+        .bind(service.as_str())
+        .bind(ctx.event_time())
+        .bind(ctx.position().get())
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
 /// A document was recorded, or renewed.
 ///
 /// One row per (person, kind): a renewal replaces, because nothing here asks
@@ -222,6 +248,33 @@ async fn recorded(
     .bind(kind.as_str())
     .bind(number)
     .bind(expires_on)
+    .bind(ctx.event_time())
+    .bind(ctx.position().get())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Their details changed. **Never their reporting line** — that is `reparented`
+/// below, and the separation is what makes a move readable to an auditor.
+async fn amended(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    details: &crate::Details,
+) -> Result<(), ProjectionError> {
+    sqlx::query(
+        "UPDATE employee
+            SET name = $2, name_latin = $3, national_id = $4,
+                email = $5, phone = $6, recorded_at = $7, position = $8
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&details.name)
+    .bind(details.name_latin.as_deref())
+    .bind(details.national_id.as_deref())
+    .bind(details.email.as_deref())
+    .bind(details.phone.as_deref())
     .bind(ctx.event_time())
     .bind(ctx.position().get())
     .execute(&mut *conn)
@@ -424,6 +477,51 @@ pub async fn expiring(
             days_left: r.days_left,
         })
         .collect())
+}
+
+/// What one person is qualified to do.
+///
+/// **Empty means anything**, not nothing — the same rule the write side applies
+/// in `Employee::can_perform`, and a caller rendering this has to say so. See
+/// `Skills::restricted` on the HTTP surface.
+pub async fn skills(conn: &mut PgConnection, employee: &str) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"SELECT service as "service!" FROM proj_hr.employee_skill
+            WHERE employee = $1 ORDER BY service"#,
+        employee,
+    )
+    .fetch_all(&mut *conn)
+    .await
+}
+
+/// Who can perform a service, for a rota screen picking somebody.
+///
+/// **Includes everybody with no skills recorded**, because an empty skill list
+/// means no restriction — the same rule the write side applies, and stating it
+/// once in each place is why they are asserted to agree in `hr/tests`.
+pub async fn who_can_perform(
+    conn: &mut PgConnection,
+    service: &str,
+    limit: i64,
+) -> Result<Vec<EmployeeSummary>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT e.id as "id!", e.name as "name!", e.name_latin, e.email, e.phone,
+                  e.reports_to, e.branch, e.hired_on as "hired_on!", e.left_at
+             FROM proj_hr.employee e
+            WHERE e.left_at IS NULL
+              AND (EXISTS (SELECT 1 FROM proj_hr.employee_skill s
+                            WHERE s.employee = e.id AND s.service = $1)
+               OR NOT EXISTS (SELECT 1 FROM proj_hr.employee_skill s
+                               WHERE s.employee = e.id))
+            ORDER BY e.name, e.id
+            LIMIT $2"#,
+        service,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows.into_iter().map(|r| summarise!(r)).collect())
 }
 
 /// A cursor over `(name, id)`, ascending — a staff list reads alphabetically,
