@@ -38,6 +38,8 @@ pub enum HrError {
     NoSuchBranch(String),
     #[error("employee {0} has left")]
     Left(String),
+    #[error("a document needs its number")]
+    NoDocumentNumber,
     #[error(transparent)]
     Details(#[from] BadEmployee),
     #[error(transparent)]
@@ -59,6 +61,7 @@ impl erp_i18n::Localize for HrError {
                 Message::new(messages::NO_SUCH_BRANCH).with("branch", MessageArg::text(id))
             }
             Self::Left(id) => Message::new(messages::LEFT).with("id", MessageArg::text(id)),
+            Self::NoDocumentNumber => Message::new(messages::NO_DOCUMENT_NUMBER),
             Self::Details(BadEmployee::NoName) => Message::new(messages::NO_NAME),
             Self::Details(BadEmployee::NoContact) => Message::new(messages::NO_CONTACT),
             Self::Claims(e) => e.message(),
@@ -335,6 +338,85 @@ pub async fn record_leaving(
         }
     }
     contended(id)
+}
+
+/// Records a document, or renews one.
+///
+/// **One command for both**, because a renewal is the same fact with a later
+/// date. Recording the same document twice with the same date writes nothing.
+pub async fn record_document(
+    db: &TenantDb,
+    id: &AggregateId,
+    kind: crate::DocumentKind,
+    number: &str,
+    expires_on: chrono::NaiveDate,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    let number = number.trim().to_owned();
+    if number.is_empty() {
+        return Err(rejected(HrError::NoDocumentNumber));
+    }
+
+    db.execute::<Employee, _, HrError>(id, crate::upcasters(), metadata, move |loaded| {
+        let held = &loaded.aggregate;
+        if !held.exists() {
+            return Err(HrError::NoSuchEmployee(id.to_string()));
+        }
+        // The same document again is a no-op, not a second event: a renewal
+        // form submitted twice must not look like two renewals in the log.
+        if held
+            .documents
+            .iter()
+            .any(|d| d.kind == kind && d.number == number && d.expires_on == expires_on)
+        {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(EmployeeEvent::DocumentRecorded {
+            kind,
+            number: number.clone(),
+            expires_on,
+            at,
+        }))
+    })
+    .await
+}
+
+/// Whether this is somebody the business employs, or once did.
+///
+/// The lighter question, for a caller recording a *link* rather than making a
+/// decision — `booking` asks it when a resource names a member of staff, since
+/// a resource is declared once and rostered for years, and refusing to declare
+/// one for somebody on parental leave would be the wrong answer.
+pub async fn exists(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+) -> Result<bool, erp_eventlog::LoadError> {
+    Ok(load::<Employee>(conn, id, crate::upcasters())
+        .await?
+        .aggregate
+        .exists())
+}
+
+/// **Whether this person may be rostered on this day.**
+///
+/// The seam another module calls before it puts somebody on a job — `booking`
+/// is the first. It reads **the log**, not `proj_hr`, for the reason every
+/// other cross-module check in this codebase does: a document recorded a moment
+/// ago must already count, and a projection that has not caught up would refuse
+/// somebody whose iqama was renewed this morning.
+///
+/// False for somebody who has left, somebody who was never hired, and anybody
+/// holding a lapsed document.
+pub async fn may_work_on(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    day: chrono::NaiveDate,
+) -> Result<bool, erp_eventlog::LoadError> {
+    Ok(load::<Employee>(conn, id, crate::upcasters())
+        .await?
+        .aggregate
+        .may_work_on(day))
 }
 
 /// Grants a claim, and reports **everyone who gained it**.

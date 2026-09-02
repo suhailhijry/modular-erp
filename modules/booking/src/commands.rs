@@ -47,6 +47,13 @@ pub enum BookingError {
     NoName,
     #[error("a resource needs a name")]
     ResourceHasNoName,
+    #[error("there is no employee {0}")]
+    NoSuchEmployee(String),
+    /// **Somebody whose work documents have lapsed may not be rostered.** Not a
+    /// warning that was ignored: an expired iqama means a person who may not
+    /// legally work, and putting them on a job is the employer's offence.
+    #[error("{0} may not be rostered: a work document has lapsed, or they have left")]
+    MayNotWork(String),
     #[error("there is no open branch {0}")]
     NoSuchBranch(String),
     #[error("there is no customer {0} to book this for")]
@@ -91,6 +98,12 @@ impl erp_i18n::Localize for BookingError {
             Self::ResourceHasNoName => Message::new(messages::RESOURCE_HAS_NO_NAME),
             Self::NoSuchBranch(id) => {
                 Message::new(messages::NO_SUCH_BRANCH).with("branch", MessageArg::text(id))
+            }
+            Self::NoSuchEmployee(id) => {
+                Message::new(messages::NO_SUCH_EMPLOYEE_TO_ROSTER).with("id", MessageArg::text(id))
+            }
+            Self::MayNotWork(id) => {
+                Message::new(messages::MAY_NOT_WORK).with("id", MessageArg::text(id))
             }
             Self::NoSuchCustomer(id) => {
                 Message::new(messages::NO_SUCH_CUSTOMER).with("customer", MessageArg::text(id))
@@ -190,6 +203,14 @@ pub struct Details {
     ///
     /// `None` is a single-branch business, which is most of them.
     pub branch: Option<AggregateId>,
+    /// Which member of staff this is. **Set once**, for the same reason
+    /// `branch` is.
+    ///
+    /// `None` is a business that keeps a diary and no staff records, which is
+    /// most of them at first, and everything works exactly as it did. What
+    /// naming one buys is that `assign` will refuse somebody whose work
+    /// documents have lapsed — see [`assign`].
+    pub employee: Option<AggregateId>,
 }
 
 /// What can be changed about one afterwards.
@@ -275,6 +296,20 @@ pub async fn declare_resource(
                 )));
             }
 
+            // **The member of staff, checked the same way.** Whether they may
+            // work *today* is not asked here — a resource is declared once and
+            // rostered for years — but whether they exist is, because a
+            // resource pointing at nobody would silently never be refused.
+            if let Some(employee) = &details.employee
+                && !hr::exists(&mut *conn, employee)
+                    .await
+                    .map_err(ExecuteError::Load)?
+            {
+                return Err(ExecuteError::Rejected(BookingError::NoSuchEmployee(
+                    employee.to_string(),
+                )));
+            }
+
             // A resource keeps the name the business gave it — you book
             // `CHAIR-1`, not a UUID — so the id stays the caller's. What
             // `try_create` adds is that re-using that name for a *different*
@@ -291,6 +326,7 @@ pub async fn declare_resource(
                         kind: details.kind,
                         capacity: details.capacity,
                         branch: details.branch.clone(),
+                        employee: details.employee.clone(),
                         at,
                     }))
                 },
@@ -494,6 +530,9 @@ pub async fn fit_out(
             // not a place. A business with branches assigns them afterwards by
             // declaring its own.
             branch: None,
+            // Nor a person: a fixture describes what a trade needs, and who
+            // fills the chair is the business's own record.
+            employee: None,
         };
 
         let declared = declare_resource(db, &id, &details, at, metadata).await?;
@@ -730,7 +769,29 @@ pub async fn assign(
         let mut tx = db.begin().await?;
         let outcome = async {
             let conn = &mut *tx;
-            available(&mut *conn, unit).await?;
+            let resource = available(&mut *conn, unit).await?;
+
+            // **The escalation §9e asks for.** A document that lapsed is not a
+            // warning somebody ignored; it is a person who may not legally be
+            // rostered, and this is the moment they would be.
+            //
+            // Only when the resource names an employee: a business that keeps a
+            // diary and no staff records is unaffected, which is what makes the
+            // link optional rather than a migration.
+            //
+            // Against `hr`'s **log**, so an iqama renewed this morning counts
+            // now rather than when a projection catches up.
+            if let Some(employee) = &resource.employee {
+                let day = at.date_naive();
+                if !hr::may_work_on(&mut *conn, employee, day)
+                    .await
+                    .map_err(ExecuteError::Load)?
+                {
+                    return Err(ExecuteError::Rejected(BookingError::MayNotWork(
+                        employee.to_string(),
+                    )));
+                }
+            }
 
             let committed = try_execute::<Reservation, _, _>(
                 &mut *conn,

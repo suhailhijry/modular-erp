@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, kind as \"kind!\",\n                  capacity as \"capacity!\",\n                  branch,\n                  (withdrawn_at IS NOT NULL) as \"withdrawn!\", withdrawn_why\n             FROM proj_booking.resource\n            WHERE ($5 OR withdrawn_at IS NULL)\n              AND ($6::text IS NULL OR branch = $6)\n              AND ($2::text IS NULL OR (kind, name, id) > ($2, $3, $4))\n            ORDER BY kind, name, id\n            LIMIT $1",
+  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, kind as \"kind!\",\n                  capacity as \"capacity!\", availability as \"availability!\",\n                  branch, employee,\n                  (withdrawn_at IS NOT NULL) as \"withdrawn!\", withdrawn_why,\n                  declared_on as \"declared_on!\"\n             FROM proj_booking.resource WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -60,6 +60,17 @@
       },
       {
         "ordinal": 5,
+        "name": "availability!",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "availability"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "branch",
         "type_info": "Text",
         "origin": {
@@ -70,13 +81,24 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
+        "name": "employee",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "employee"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "withdrawn!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 7,
+        "ordinal": 9,
         "name": "withdrawn_why",
         "type_info": "Text",
         "origin": {
@@ -85,15 +107,21 @@
             "name": "withdrawn_why"
           }
         }
+      },
+      {
+        "ordinal": 10,
+        "name": "declared_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "declared_on"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Int8",
-        "Text",
-        "Text",
-        "Text",
-        "Bool",
         "Text"
       ]
     },
@@ -103,10 +131,13 @@
       true,
       false,
       false,
+      false,
+      true,
       true,
       null,
-      true
+      true,
+      false
     ]
   },
-  "hash": "ac5dcfdeedcc2b6c02d2d7b732f00a6959d7af1f1798bc772d5671c9811db95f"
+  "hash": "4e3bedeed1bfd665aa14b8d5bc080697dd5f1a426eab10ba34afc77fe1b9072d"
 }

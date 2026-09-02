@@ -54,11 +54,15 @@ mod projections;
 
 pub use claims::{Claim, ClaimError, Held, SEGREGATED, effective, holds, is_segregated};
 pub use commands::{
-    Hire, HrError, amend_employee, grant_claim, hire, record_leaving, reparent, revoke_claim,
-    transfer,
+    Hire, HrError, amend_employee, exists, grant_claim, hire, may_work_on, record_document,
+    record_leaving, reparent, revoke_claim, transfer,
 };
-pub use employee::{BadEmployee, Details, Employee, EmployeeEvent};
-pub use projections::{EmployeeList, EmployeeSummary, Hr, employee, employees, projections};
+pub use employee::{
+    BadEmployee, Details, Document, DocumentKind, Employee, EmployeeEvent, UnknownDocument,
+};
+pub use projections::{
+    EmployeeList, EmployeeSummary, Expiring, Hr, employee, employees, expiring, projections,
+};
 
 use erp_i18n::StaticCatalog;
 use erp_types::{DomainName, EventName, SchemaVersion};

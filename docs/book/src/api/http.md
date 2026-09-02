@@ -323,6 +323,8 @@ wants and a working list does not.
 | `GET /v1/hr/employees/{employee}/claims` | What they hold, and where each came from | Read |
 | `POST /v1/hr/employees/{employee}/claims` | Grant one | ManageTenant |
 | `DELETE /v1/hr/employees/{employee}/claims/{claim}` | Take it back | ManageTenant |
+| `PUT /v1/hr/employees/{employee}/documents/{kind}` | Record a document, or renew it | ManageTenant |
+| `GET /v1/hr/documents/expiring` | What has lapsed, and what is about to | Read |
 
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
@@ -394,6 +396,36 @@ A claim with no `branch` is **company-wide** and answers for any branch — payr
 could not be expressed otherwise. One scoped to Olaya does not answer for Malaz,
 which is what stops a branch manager gaining authority in a branch they have
 never seen.
+
+### Documents that expire
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/hr/employees/EMP-0001/documents/identity \
+  -d '{"number":"2312345678","expires_on":"2027-05-31"}'
+```
+
+`kind` is `identity`, `work_permit`, `medical` or `licence`. Recording and
+renewing are the same operation, because a renewal is the same fact with a later
+date; sending the same number and date twice writes nothing.
+
+**A lapsed document is a refusal, not a warning.** Once it has gone,
+`POST /v1/booking/reservations/{id}/assignments` refuses that person: an expired
+iqama means somebody who may not legally work, and rostering them is the
+employer's offence. It only applies where a bookable resource names an employee
+— a diary that names nobody is unaffected.
+
+`expires_on` is inclusive. A document expiring on the 30th is valid on the 30th.
+
+```bash
+curl -s "${AUTH[@]}" 'http://localhost:8080/v1/hr/documents/expiring?within_days=60'
+# [{"employee":"EMP-0001","name":"سارة","kind":"identity",
+#   "expires_on":"2026-08-26","days_left":-7}, …]
+```
+
+**`days_left` goes negative**, and the list shows the ones that have gone first.
+A screen that showed "0 days left" for both tomorrow and last March is the screen
+somebody stops reading.
 
 ### What these claims are not
 

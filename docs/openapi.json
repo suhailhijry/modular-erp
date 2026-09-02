@@ -723,6 +723,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "employee": {
+            "description": "Which member of staff this is, when the business keeps staff records.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -1848,6 +1855,47 @@
         ],
         "type": "object"
       },
+      "ExpiringDocument": {
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "days_left": {
+            "description": "**Negative once it has gone.** A screen that showed \"0 days left\" for\nboth tomorrow and last March is the screen somebody stops reading.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "employee": {
+            "type": "string"
+          },
+          "expires_on": {
+            "format": "date",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`identity`, `work_permit`, `medical` or `licence`.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "number": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "employee",
+          "name",
+          "kind",
+          "number",
+          "expires_on",
+          "days_left"
+        ],
+        "type": "object"
+      },
       "FiledView": {
         "properties": {
           "filed_on": {
@@ -2839,6 +2887,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "employee": {
+            "description": "Which member of staff this is, when the business keeps staff records.\n\n**Set once**, for the same reason `branch` is: a chair booked as \"Sara\"\nis not the same resource once it is \"Noura\".\n\nOptional, and a diary works without it. What naming somebody buys is\nthat assigning them is refused once a work document has lapsed — an\nexpired iqama means a person who may not legally be rostered.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "description": "Your key for this resource. Declaring the same one twice is a no-op.",
             "type": "string"
@@ -3131,6 +3186,36 @@
           "reason",
           "amount",
           "vat"
+        ],
+        "type": "object"
+      },
+      "NewDocument": {
+        "example": {
+          "expires_on": "2027-05-31",
+          "number": "2312345678"
+        },
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_on": {
+            "description": "**The last day it is valid**, inclusive — a document that says it expires\non the 30th is valid on the 30th, which is what it means and what the\nperson holding it will argue.\n\nA date and not a timestamp: an iqama expires on a day in Riyadh, not at\nan hour in UTC.",
+            "example": "2027-05-31",
+            "format": "date",
+            "type": "string"
+          },
+          "number": {
+            "description": "Its number, as printed on it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "expires_on"
         ],
         "type": "object"
       },
@@ -4537,6 +4622,13 @@
                   "format": "int32",
                   "minimum": 0,
                   "type": "integer"
+                },
+                "employee": {
+                  "description": "Which member of staff this is, when the business keeps staff records.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "id": {
                   "type": "string"
@@ -11011,6 +11103,136 @@
         }
       ]
     },
+    "/v1/hr/documents/expiring": {
+      "get": {
+        "description": "**Soonest first, and the ones that have gone come first of all** — they are\nnot warnings that were ignored, they are people who may not be rostered, and\nsorting them below the upcoming ones is how they stay buried.",
+        "operationId": "expiring_documents",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How far ahead to look. 60 by default.",
+            "in": "query",
+            "name": "within_days",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ExpiringDocument"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable hr"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Documents that have lapsed, or are about to.",
+        "tags": [
+          "hr"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
     "/v1/hr/employees": {
       "get": {
         "description": "**Scoped by default, crossable on request.** The list narrows to the\ncaller's `X-Branch`; `?branch=` looks at another and `?scope=all` looks at\nthe company.",
@@ -12062,6 +12284,161 @@
           }
         }
       ]
+    },
+    "/v1/hr/employees/{employee}/documents/{kind}": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "**One operation for both**, because a renewal is the same fact with a later\ndate. Sending the same number and date twice writes nothing.\n\nOnce recorded, a lapsed document **stops this person being rostered** —\n`booking` refuses to assign them. That is not a warning somebody may\noverride: an expired iqama means a person who may not legally work.",
+        "operationId": "record_document",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Their id.",
+            "in": "path",
+            "name": "employee",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`identity`, `work_permit`, `medical` or `licence`.",
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewDocument"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HrAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a kind this system tracks, or a document with no number"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such employee"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Record a document, or renew one.",
+        "tags": [
+          "hr"
+        ]
+      }
     },
     "/v1/hr/employees/{employee}/leaving": {
       "parameters": [

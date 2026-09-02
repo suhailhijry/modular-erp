@@ -263,6 +263,7 @@ dependencies = [
  "erp-types",
  "erp-web",
  "futures-util",
+ "hr",
  "serde",
  "serde_json",
  "sqlx",

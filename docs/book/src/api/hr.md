@@ -197,6 +197,61 @@ end-of-service calculation are company-wide by nature, and a boundary that
 refused them would make the module unusable in its first month. `?scope=all` is
 how a caller says so.
 
+## Documents that expire
+
+An expired iqama stops a person working. So this is a **refusal, not a
+warning**: a document that lapsed does not mean a reminder somebody ignored, it
+means a person who may not legally be rostered, and doing it anyway is the
+employer's offence.
+
+```rust
+pub enum DocumentKind { Identity, WorkPermit, Medical, Licence }
+```
+
+Four variants and not a free-text kind, because a rule that reads a string is a
+rule that silently does nothing when somebody types `Iqama`. A fifth is a
+compile error at every match, which is where a new rule should surface.
+
+Expiry is a **date and not an instant**: an iqama expires on a day in Riyadh,
+not at an hour in UTC, and storing an instant would make the answer depend on
+which side of midnight somebody asked. It is inclusive — a document that says it
+expires on the 30th is valid on the 30th, which is what it means and what the
+person holding it will argue.
+
+### The seam booking calls
+
+```rust
+pub async fn may_work_on(conn, id: &AggregateId, day: NaiveDate)
+    -> Result<bool, LoadError>;
+```
+
+`booking::assign` calls it at the moment somebody would be put on a job, against
+this module's **log** — so an iqama renewed this morning counts now rather than
+when a projection catches up.
+
+The link is `ResourceEvent::Declared { employee }`, **set once** like `branch`
+and **optional**. A business that keeps a diary and no staff records is
+unaffected, which is what makes this additive rather than a migration; `booking`
+gains a crate dependency on `hr` and *not* an entitlement one, the same
+distinction `sales` and `crm` already draw.
+
+**Somebody with no documents recorded may work.** A business that has not started
+recording them must not find its whole rota refused the day this module is
+switched on — the expiry list below is what tells them the records are missing.
+
+### What is not built
+
+**The email reminder.** `hr::expiring` is the read, and it shows what has gone as
+well as what is going, soonest first: burying the lapsed ones below the upcoming
+ones is how they stay buried.
+
+What is missing is the producer, and the reason is worth knowing before somebody
+tries: **the tenant outbox has no handlers registered at all.** Email lives on
+the control plane, because the things that send it are control-plane rows, and a
+module cannot reach it — so an effect enqueued here would sit in the outbox for
+ever. What reaches somebody today is the shape `CertificateExpiry` already uses,
+a `HealthJob` invariant.
+
 ## What is deliberately not here yet
 
 Skills, shifts, attendance, leave, positions, departments and contracts. Each

@@ -83,6 +83,7 @@ fn person(name: &str) -> Details {
         kind: Kind::Person,
         capacity: 1,
         branch: None,
+        employee: None,
     }
 }
 
@@ -93,6 +94,7 @@ fn place(name: &str, capacity: u16) -> Details {
         kind: Kind::Place,
         capacity,
         branch: None,
+        employee: None,
     }
 }
 
@@ -154,6 +156,12 @@ impl Fixture {
         ensure_group_schema::<crm::Crm>(&mut conn)
             .await
             .expect("crm checkpoint");
+        // `hr` is a crate dependency and not an entitlement one, but a
+        // fixture that exercises the staff link needs its tables.
+        hr::install(&mut conn).await.expect("hr installs");
+        ensure_group_schema::<hr::Hr>(&mut conn)
+            .await
+            .expect("hr checkpoint");
         booking::install(&mut conn).await.expect("booking installs");
         ensure_group_schema::<booking::Booking>(&mut conn)
             .await
@@ -1312,4 +1320,147 @@ async fn a_price_that_is_not_one_is_refused_and_takes_no_capacity() {
 #[test]
 fn the_catalog_is_complete() {
     erp_i18n::testing::assert_complete(&booking::CATALOG);
+}
+
+/// Hires somebody and gives them a chair of their own.
+///
+/// Split out because the test was over the line limit, and because the setup is
+/// not the interesting part: what the test is about starts at the first
+/// `assign`.
+async fn a_stylist_with_her_own_chair(fixture: &Fixture) {
+    hr::hire(
+        &fixture.db,
+        &code("EMP-1"),
+        &hr::Hire {
+            details: hr::Details {
+                name: "سارة".to_owned(),
+                name_latin: None,
+                national_id: None,
+                email: None,
+                phone: Some("+966500000000".to_owned()),
+            },
+            reports_to: None,
+            branch: None,
+            at: at("00"),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("hired");
+
+    // **Its own id**: the fixture already declares `chair-1`, and re-declaring
+    // it is a no-op — which is `try_create` doing exactly its job, and was
+    // worth finding here rather than in production.
+    fixture
+        .declare(
+            "sara-chair",
+            &Details {
+                name: "سارة".to_owned(),
+                name_latin: None,
+                kind: Kind::Person,
+                capacity: 1,
+                branch: None,
+                employee: Some(code("EMP-1")),
+            },
+        )
+        .await;
+
+    // The customer books *the service*, and who does it is assigned after —
+    // which is the shape a salon actually works in and the one `assign` is for.
+    fixture.declare("haircut", &place("قص", 4)).await;
+}
+
+/// **A lapsed work document stops the rota, and this is where it stops it.**
+///
+/// The escalation §9e asks for: an expired iqama is not a warning somebody
+/// ignored, it is a person who may not legally be rostered, and `assign` is the
+/// moment they would be.
+#[tokio::test]
+async fn somebody_whose_iqama_has_lapsed_cannot_be_assigned() {
+    let fixture = Fixture::new().await;
+    a_stylist_with_her_own_chair(&fixture).await;
+
+    reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(Some("CUST-1"), vec![line("قص", "14", "15", &["haircut"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the service is free");
+
+    // No documents recorded: assignable, because a business that has not
+    // started recording them must not find its rota refused.
+    assign(
+        &fixture.db,
+        &code("BK-1"),
+        0,
+        &code("sara-chair"),
+        at("14"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("nothing has lapsed");
+
+    // Her iqama expired yesterday.
+    let yesterday = at("14").date_naive() - chrono::Days::new(1);
+    hr::record_document(
+        &fixture.db,
+        &code("EMP-1"),
+        hr::DocumentKind::Identity,
+        "2312345678",
+        yesterday,
+        at("00"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    reserve(
+        &fixture.db,
+        &code("BK-2"),
+        &booking_for(Some("CUST-1"), vec![line("قص", "16", "17", &["haircut"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the service is still free");
+
+    let error = assign(
+        &fixture.db,
+        &code("BK-2"),
+        0,
+        &code("sara-chair"),
+        at("16"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("a lapsed iqama was rostered");
+    assert!(
+        format!("{error:?}").contains("MayNotWork"),
+        "refused for the wrong reason: {error:?}"
+    );
+
+    // A chair that names nobody is unaffected, which is what keeps the link
+    // optional rather than a migration.
+    fixture.declare("anybody-chair", &person("كرسي")).await;
+    reserve(
+        &fixture.db,
+        &code("BK-3"),
+        &booking_for(Some("CUST-1"), vec![line("قص", "18", "19", &["haircut"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("free");
+    assign(
+        &fixture.db,
+        &code("BK-3"),
+        0,
+        &code("anybody-chair"),
+        at("18"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a chair that is nobody has no documents to lapse");
+
+    fixture.cleanup().await;
 }

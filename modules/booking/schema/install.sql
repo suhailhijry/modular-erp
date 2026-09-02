@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS resource (
     -- joining to it.
     branch        TEXT,
 
+    -- Which member of staff this is, when the business keeps staff records.
+    -- Null for a room, a chair, and for any business that has not linked its
+    -- diary to its people — which changes nothing about how the diary works.
+    employee      TEXT,
+
     -- The timetable, as the rules were written. JSONB because it is read whole
     -- and never queried into: the question "is this resource open then" is
     -- answered from the aggregate inside the booking transaction, not from here.

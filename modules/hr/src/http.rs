@@ -39,6 +39,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(record_leaving))
         .routes(routes!(list_claims, grant_claim))
         .routes(routes!(revoke_claim))
+        .routes(routes!(record_document))
+        .routes(routes!(expiring_documents))
 }
 
 static CATALOG: erp_i18n::Composite =
@@ -186,6 +188,46 @@ struct ClaimChanged {
     /// Whether it travels up the reporting line. `false` when the claim is on
     /// the segregation-of-duties list, whatever was asked for.
     propagates: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({"number": "2312345678", "expires_on": "2027-05-31"}))]
+struct NewDocument {
+    /// Its number, as printed on it.
+    number: String,
+    /// **The last day it is valid**, inclusive — a document that says it expires
+    /// on the 30th is valid on the 30th, which is what it means and what the
+    /// person holding it will argue.
+    ///
+    /// A date and not a timestamp: an iqama expires on a day in Riyadh, not at
+    /// an hour in UTC.
+    #[schema(value_type = String, format = Date, example = "2027-05-31")]
+    expires_on: chrono::NaiveDate,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    at: Option<Timestamp>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct ExpiringDocument {
+    employee: String,
+    name: String,
+    branch: Option<String>,
+    /// `identity`, `work_permit`, `medical` or `licence`.
+    kind: String,
+    number: String,
+    #[schema(value_type = String, format = Date)]
+    expires_on: chrono::NaiveDate,
+    /// **Negative once it has gone.** A screen that showed "0 days left" for
+    /// both tomorrow and last March is the screen somebody stops reading.
+    days_left: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpiryWindow {
+    /// How far ahead to look. Sixty days by default, which is roughly the
+    /// notice an iqama renewal needs.
+    within_days: Option<i32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -710,6 +752,122 @@ async fn revoke_claim(
         holders,
         propagates: false,
     }))
+}
+
+/// Record a document, or renew one.
+///
+/// **One operation for both**, because a renewal is the same fact with a later
+/// date. Sending the same number and date twice writes nothing.
+///
+/// Once recorded, a lapsed document **stops this person being rostered** —
+/// `booking` refuses to assign them. That is not a warning somebody may
+/// override: an expired iqama means a person who may not legally work.
+#[utoipa::path(
+    put,
+    path = "/v1/hr/employees/{employee}/documents/{kind}",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+        ("kind" = String, Path, description = "`identity`, `work_permit`, `medical` or `licence`."),
+    ),
+    request_body = NewDocument,
+    responses(
+        (status = OK, body = HrAccepted),
+        (status = BAD_REQUEST, description = "Not a kind this system tracks, or a document with no number", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such employee", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn record_document(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path((id, kind)): Path<(String, String)>,
+    Json(body): Json<NewDocument>,
+) -> Result<Json<HrAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let employee = parse_id(&id, locale)?;
+    let kind: crate::DocumentKind = kind.parse().map_err(|e: crate::UnknownDocument| {
+        bad_request(crate::messages::UNKNOWN_DOCUMENT, "kind", &e.0, locale)
+    })?;
+
+    let committed = crate::record_document(
+        &tenant.db,
+        &employee,
+        kind,
+        &body.number,
+        body.expires_on,
+        body.at.unwrap_or_else(chrono::Utc::now),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(HrAccepted {
+        id,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+/// Documents that have lapsed, or are about to.
+///
+/// **Soonest first, and the ones that have gone come first of all** — they are
+/// not warnings that were ignored, they are people who may not be rostered, and
+/// sorting them below the upcoming ones is how they stay buried.
+#[utoipa::path(
+    get,
+    path = "/v1/hr/documents/expiring",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("within_days" = Option<i32>, Query, description = "How far ahead to look. 60 by default."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = Vec<ExpiringDocument>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "The tenant did not enable hr", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn expiring_documents(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(window): Query<ExpiryWindow>,
+) -> Result<Json<Vec<ExpiringDocument>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    // Clamped rather than refused, the way every limit here is. A caller asking
+    // for ten years is asking for the whole table and can have it.
+    let within = window.within_days.unwrap_or(60).clamp(0, 3650);
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let rows = crate::expiring(&mut conn, within, 500)
+        .await
+        .map_err(|e| database(&e, locale))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| ExpiringDocument {
+                employee: r.employee,
+                name: r.name,
+                branch: r.branch,
+                kind: r.kind,
+                number: r.number,
+                expires_on: r.expires_on,
+                days_left: r.days_left,
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

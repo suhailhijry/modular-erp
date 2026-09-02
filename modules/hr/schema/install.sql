@@ -51,3 +51,33 @@ CREATE INDEX IF NOT EXISTS employee_by_branch_idx ON employee (branch, name)
 -- business accumulates leavers and reads about the people who are here.
 CREATE INDEX IF NOT EXISTS employee_current_idx ON employee (name, id)
     WHERE left_at IS NULL;
+
+-- What somebody holds, one row per kind.
+--
+-- **The current one**, because a renewal replaces: nothing here asks what an
+-- expired document used to say, and the log keeps that history anyway.
+--
+-- This is the table the expiry screen and the health check read. It is **not**
+-- what `may_work_on` reads — that is the aggregate, inside the command that
+-- decides, for the same reason a claim check does not read a projection: a
+-- document recorded a moment ago must already count.
+CREATE TABLE IF NOT EXISTS employee_document (
+    employee      TEXT NOT NULL REFERENCES employee (id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL
+                  CHECK (kind IN ('identity', 'work_permit', 'medical', 'licence')),
+
+    number        TEXT NOT NULL,
+    -- **A date, not an instant.** An iqama expires on a day in Riyadh, not at
+    -- an hour in UTC, and storing an instant would make the answer depend on
+    -- which side of midnight somebody asked.
+    expires_on    DATE NOT NULL,
+
+    recorded_at   TIMESTAMPTZ NOT NULL,
+    position      BIGINT NOT NULL,
+
+    PRIMARY KEY (employee, kind)
+);
+
+-- "What expires in the next sixty days", which is the whole screen.
+CREATE INDEX IF NOT EXISTS employee_document_by_expiry_idx
+    ON employee_document (expires_on, employee);

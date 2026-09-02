@@ -123,6 +123,16 @@ struct NewBookable {
     /// it was not at.
     #[serde(default)]
     branch: Option<String>,
+    /// Which member of staff this is, when the business keeps staff records.
+    ///
+    /// **Set once**, for the same reason `branch` is: a chair booked as "Sara"
+    /// is not the same resource once it is "Noura".
+    ///
+    /// Optional, and a diary works without it. What naming somebody buys is
+    /// that assigning them is refused once a work document has lapsed — an
+    /// expired iqama means a person who may not legally be rostered.
+    #[serde(default)]
+    employee: Option<String>,
     /// Your key for this resource. Declaring the same one twice is a no-op.
     id: String,
     name: String,
@@ -159,6 +169,8 @@ struct WithdrawBookable {
 struct BookableRecord {
     /// Which branch it is at. Absent in a single-branch business.
     branch: Option<String>,
+    /// Which member of staff this is, when the business keeps staff records.
+    employee: Option<String>,
     id: String,
     name: String,
     name_latin: Option<String>,
@@ -837,6 +849,14 @@ async fn declare_bookable(
             .branch
             .as_deref()
             .map(|b| parse_id(b, locale))
+            .transpose()?,
+        // Who this is, when the business keeps staff records. Optional: a diary
+        // works without one, and naming somebody is what makes `assign` refuse
+        // them once a work document lapses.
+        employee: body
+            .employee
+            .as_deref()
+            .map(|e| parse_id(e, locale))
             .transpose()?,
     };
 
@@ -1789,6 +1809,7 @@ fn bookable(r: crate::ResourceSummary) -> BookableRecord {
         kind: r.kind,
         capacity: r.capacity,
         branch: r.branch,
+        employee: r.employee,
         withdrawn: r.withdrawn,
         withdrawn_why: r.withdrawn_why,
     }

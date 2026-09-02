@@ -66,6 +66,104 @@ impl Details {
     }
 }
 
+/// A document a person must hold to be allowed to work.
+///
+/// # Why these four and not a free-text kind
+///
+/// Because the rule differs by kind and a rule that reads a string is a rule
+/// that silently does nothing when somebody types `Iqama` instead of `iqama`.
+/// A fifth is a variant and a compile error at every match, which is where a
+/// new rule should surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentKind {
+    /// A national id or an iqama. **The one that stops somebody working.**
+    Identity,
+    /// A work permit, where the identity document is not itself one.
+    WorkPermit,
+    /// A medical certificate — food handling, a health card.
+    Medical,
+    /// A professional licence: a barber's, a physiotherapist's, an
+    /// accountant's.
+    Licence,
+}
+
+impl DocumentKind {
+    /// Whether letting this lapse stops the person working.
+    ///
+    /// **All of them, and that is not a placeholder.** Every kind here is one a
+    /// Saudi employer may not roster somebody without; a document that could
+    /// lapse harmlessly is one this module should not be tracking, because it
+    /// would train people to ignore the warnings for the ones that matter.
+    #[must_use]
+    pub const fn blocks_work(self) -> bool {
+        true
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::WorkPermit => "work_permit",
+            Self::Medical => "medical",
+            Self::Licence => "licence",
+        }
+    }
+
+    pub const ALL: [Self; 4] = [
+        Self::Identity,
+        Self::WorkPermit,
+        Self::Medical,
+        Self::Licence,
+    ];
+}
+
+impl std::fmt::Display for DocumentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0} is not a kind of document this system tracks")]
+pub struct UnknownDocument(pub String);
+
+impl std::str::FromStr for DocumentKind {
+    type Err = UnknownDocument;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == s)
+            .ok_or_else(|| UnknownDocument(s.to_owned()))
+    }
+}
+
+/// One document somebody holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Document {
+    pub kind: DocumentKind,
+    /// Its number, as printed on it.
+    pub number: String,
+    /// **The last day it is valid**, and it is a date rather than an instant on
+    /// purpose: an iqama expires on a day in Riyadh, not at an hour in UTC, and
+    /// storing an instant would make the answer depend on which side of
+    /// midnight somebody asked.
+    pub expires_on: chrono::NaiveDate,
+}
+
+impl Document {
+    /// Whether it is still valid on this day.
+    ///
+    /// Inclusive of the expiry date: a document that says it expires on the
+    /// 30th is valid on the 30th, which is what the document itself means and
+    /// what the person holding it will argue.
+    #[must_use]
+    pub fn valid_on(&self, day: chrono::NaiveDate) -> bool {
+        day <= self.expires_on
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmployeeEvent {
@@ -129,6 +227,45 @@ pub enum EmployeeEvent {
     /// They came back. A rehire under the same record, which is what a business
     /// means when a seasonal worker returns.
     Rehired { at: Timestamp },
+    /// A document was recorded, or renewed.
+    ///
+    /// **One event for both**, because a renewal is the same fact with a later
+    /// date: what matters is the document a person holds *now*, and a separate
+    /// `Renewed` would mean two places that decide which one that is.
+    DocumentRecorded {
+        kind: crate::employee::DocumentKind,
+        number: String,
+        #[serde(with = "date")]
+        expires_on: chrono::NaiveDate,
+        at: Timestamp,
+    },
+}
+
+/// A `NaiveDate` in the log, as `YYYY-MM-DD`.
+///
+/// Explicit rather than serde's default, so what the log holds is the string a
+/// person would write and not a representation that could change with a
+/// dependency.
+mod date {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's Serialize contract takes a reference"
+    )]
+    pub(super) fn serialize<S: Serializer>(
+        date: &chrono::NaiveDate,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&date.format("%Y-%m-%d").to_string())
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<chrono::NaiveDate, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        chrono::NaiveDate::parse_from_str(&raw, "%Y-%m-%d").map_err(serde::de::Error::custom)
+    }
 }
 
 impl DomainEvent for EmployeeEvent {
@@ -140,6 +277,7 @@ impl DomainEvent for EmployeeEvent {
             Self::Transferred { .. } => Self::NAMES[3],
             Self::Left { .. } => Self::NAMES[4],
             Self::Rehired { .. } => Self::NAMES[5],
+            Self::DocumentRecorded { .. } => Self::NAMES[6],
         })
     }
 
@@ -149,13 +287,14 @@ impl DomainEvent for EmployeeEvent {
 }
 
 impl EmployeeEvent {
-    pub const NAMES: [&'static str; 6] = [
+    pub const NAMES: [&'static str; 7] = [
         "hr.employee.hired",
         "hr.employee.amended",
         "hr.employee.reparented",
         "hr.employee.transferred",
         "hr.employee.left",
         "hr.employee.rehired",
+        "hr.employee.document_recorded",
     ];
 }
 
@@ -170,6 +309,11 @@ pub struct Employee {
     pub reports_to: Option<AggregateId>,
     pub branch: Option<AggregateId>,
     pub left_at: Option<Timestamp>,
+    /// What they hold, one per kind — **the current one**, because a renewal
+    /// replaces rather than accumulates and nothing here asks what an expired
+    /// document used to say. The log keeps the history; this is the state a
+    /// decision is made from.
+    pub documents: Vec<Document>,
 }
 
 impl Aggregate for Employee {
@@ -220,6 +364,22 @@ impl Aggregate for Employee {
             EmployeeEvent::Transferred { branch, .. } => self.branch.clone_from(branch),
             EmployeeEvent::Left { at, .. } => self.left_at = Some(*at),
             EmployeeEvent::Rehired { .. } => self.left_at = None,
+            EmployeeEvent::DocumentRecorded {
+                kind,
+                number,
+                expires_on,
+                ..
+            } => {
+                let recorded = Document {
+                    kind: *kind,
+                    number: number.clone(),
+                    expires_on: *expires_on,
+                };
+                match self.documents.iter_mut().find(|d| d.kind == *kind) {
+                    Some(held) => *held = recorded,
+                    None => self.documents.push(recorded),
+                }
+            }
         }
     }
 }
@@ -238,6 +398,40 @@ impl Employee {
     #[must_use]
     pub const fn is_employed(&self) -> bool {
         self.hired && self.left_at.is_none()
+    }
+
+    /// **Whether this person may be rostered on this day.**
+    ///
+    /// The seam `booking` calls before it puts somebody on a job, and the
+    /// reason 9e says *refuses* rather than *warns*: an expired iqama does not
+    /// mean a reminder somebody ignored, it means a person who may not legally
+    /// work, and rostering them is the employer's offence.
+    ///
+    /// Somebody who has left may not work either — that is the same question
+    /// asked one step earlier, and answering it here means a caller cannot get
+    /// one right and forget the other.
+    ///
+    /// A person with **no documents recorded at all** may work. That is
+    /// deliberate: a business that has not started recording documents must not
+    /// find its whole rota refused the day this module is enabled, and the
+    /// health check below is what tells them the records are missing.
+    #[must_use]
+    pub fn may_work_on(&self, day: chrono::NaiveDate) -> bool {
+        self.is_employed()
+            && self
+                .documents
+                .iter()
+                .all(|d| !d.kind.blocks_work() || d.valid_on(day))
+    }
+
+    /// The documents that have lapsed as at this day, for a message that says
+    /// *which*.
+    #[must_use]
+    pub fn lapsed_on(&self, day: chrono::NaiveDate) -> Vec<&Document> {
+        self.documents
+            .iter()
+            .filter(|d| d.kind.blocks_work() && !d.valid_on(day))
+            .collect()
     }
 
     #[must_use]

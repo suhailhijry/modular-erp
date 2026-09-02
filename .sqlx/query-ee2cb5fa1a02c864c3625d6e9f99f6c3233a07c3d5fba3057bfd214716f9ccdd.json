@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, kind as \"kind!\",\n                  capacity as \"capacity!\", availability as \"availability!\",\n                  branch,\n                  (withdrawn_at IS NOT NULL) as \"withdrawn!\", withdrawn_why,\n                  declared_on as \"declared_on!\"\n             FROM proj_booking.resource WHERE id = $1",
+  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, kind as \"kind!\",\n                  capacity as \"capacity!\",\n                  branch, employee,\n                  (withdrawn_at IS NOT NULL) as \"withdrawn!\", withdrawn_why\n             FROM proj_booking.resource\n            WHERE ($5 OR withdrawn_at IS NULL)\n              AND ($6::text IS NULL OR branch = $6)\n              AND ($2::text IS NULL OR (kind, name, id) > ($2, $3, $4))\n            ORDER BY kind, name, id\n            LIMIT $1",
   "describe": {
     "columns": [
       {
@@ -60,23 +60,23 @@
       },
       {
         "ordinal": 5,
-        "name": "availability!",
-        "type_info": "Jsonb",
-        "origin": {
-          "Table": {
-            "table": "proj_booking.resource",
-            "name": "availability"
-          }
-        }
-      },
-      {
-        "ordinal": 6,
         "name": "branch",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "proj_booking.resource",
             "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "employee",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "employee"
           }
         }
       },
@@ -96,21 +96,15 @@
             "name": "withdrawn_why"
           }
         }
-      },
-      {
-        "ordinal": 9,
-        "name": "declared_on!",
-        "type_info": "Timestamptz",
-        "origin": {
-          "Table": {
-            "table": "proj_booking.resource",
-            "name": "declared_on"
-          }
-        }
       }
     ],
     "parameters": {
       "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
         "Text"
       ]
     },
@@ -120,12 +114,11 @@
       true,
       false,
       false,
-      false,
+      true,
       true,
       null,
-      true,
-      false
+      true
     ]
   },
-  "hash": "39977fe42992e72450c5d9c10d5c1ab9d9c0589d74b8b79ee79bfb9bb3a8dfc3"
+  "hash": "ee2cb5fa1a02c864c3625d6e9f99f6c3233a07c3d5fba3057bfd214716f9ccdd"
 }

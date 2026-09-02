@@ -1,0 +1,96 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.employee as \"employee!\", e.name as \"name!\", e.branch,\n                  d.kind as \"kind!\", d.number as \"number!\",\n                  d.expires_on as \"expires_on!\",\n                  (d.expires_on - CURRENT_DATE)::int as \"days_left!\"\n             FROM proj_hr.employee_document d\n             JOIN proj_hr.employee e ON e.id = d.employee\n            WHERE e.left_at IS NULL\n              AND d.expires_on <= CURRENT_DATE + ($1::int)\n            ORDER BY d.expires_on, d.employee\n            LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "employee!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_document",
+            "name": "employee"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_document",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "number!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_document",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "expires_on!",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_document",
+            "name": "expires_on"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "days_left!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "0debe069e90e34a7d6a028ad87d269a35e0bdd04b0d3f1156a16d640695fc8ef"
+}

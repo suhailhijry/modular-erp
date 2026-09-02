@@ -2,6 +2,8 @@
 
 use erp_i18n::{Locale, MessageCode, Template};
 
+pub const NO_SUCH_EMPLOYEE_TO_ROSTER: MessageCode = MessageCode::new("booking.no_such_employee");
+pub const MAY_NOT_WORK: MessageCode = MessageCode::new("booking.may_not_work");
 pub const NO_SUCH_BRANCH: MessageCode = MessageCode::new("booking.no_such_branch");
 pub const NOTHING_TO_BOOK: MessageCode = MessageCode::new("booking.nothing_to_book");
 pub const NO_NAME: MessageCode = MessageCode::new("booking.no_name");
@@ -35,6 +37,8 @@ pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("booking.amount_ou
 
 pub static CODES: &[MessageCode] = &[
     NO_SUCH_BRANCH,
+    NO_SUCH_EMPLOYEE_TO_ROSTER,
+    MAY_NOT_WORK,
     NOTHING_TO_BOOK,
     NO_NAME,
     RESOURCE_HAS_NO_NAME,
@@ -67,6 +71,28 @@ pub static CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NO_SUCH_EMPLOYEE_TO_ROSTER,
+        Locale::English,
+        Template::Simple("There is no employee {id}."),
+    ),
+    (
+        NO_SUCH_EMPLOYEE_TO_ROSTER,
+        Locale::Arabic,
+        Template::Simple("لا يوجد موظف {id}."),
+    ),
+    (
+        MAY_NOT_WORK,
+        Locale::English,
+        Template::Simple(
+            "{id} may not be rostered: a work document has lapsed, or they have left.",
+        ),
+    ),
+    (
+        MAY_NOT_WORK,
+        Locale::Arabic,
+        Template::Simple("{id} لا يمكن إسناده: انتهت صلاحية وثيقة عمل، أو لم يعد على رأس العمل."),
+    ),
     (
         NO_SUCH_BRANCH,
         Locale::English,

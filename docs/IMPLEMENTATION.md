@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 870 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 874 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -1311,12 +1311,41 @@ Phase 16 built the dimension. Everything in `hr` carries it: `Employee`,
 An expired iqama stops a person working. The module warns before the date and
 refuses to roster anyone whose document has lapsed.
 
-- [ ] Identity documents, work permits, medical certificates, professional
-      licences — each with an expiry
-- [ ] The reminder is an outbox effect (D9) on a date. The mechanism exists;
-      this is a producer for it
-- [ ] Escalation: a document that lapses is not a warning that was ignored, it is
-      a person who may not be rostered. Booking refuses them
+- [x] Identity documents, work permits, medical certificates, professional
+      licences — each with an expiry. A **date and not an instant**: an iqama
+      expires on a day in Riyadh, not at an hour in UTC, and storing an instant
+      would make the answer depend on which side of midnight somebody asked.
+
+      Four variants and not a free-text kind, because a rule that reads a string
+      is a rule that silently does nothing when somebody types `Iqama`
+- [~] The reminder. `hr::expiring` is the read — what has gone *and* what is
+      going, soonest first, because burying the lapsed ones below the upcoming
+      ones is how they stay buried.
+
+      **The outbox producer is not built, and the reason is worth recording:**
+      the tenant dispatcher has *no handlers registered at all*
+      (`bin/worker.rs`: "an empty dispatcher claims nothing"). Email lives on
+      the control plane, because the things that send it are control-plane rows,
+      and a module cannot reach it. So an effect enqueued here would sit in the
+      outbox for ever.
+
+      What reaches somebody today is the shape `CertificateExpiry` already uses:
+      a `HealthJob` invariant. Registering one is the next small step; the
+      *email* needs a tenant-plane handler that does not exist
+- [x] Escalation: a document that lapses is not a warning that was ignored, it
+      is a person who may not be rostered. `booking::assign` refuses them, at
+      the moment they would be — against `hr`'s **log**, so an iqama renewed
+      this morning counts now.
+
+      The link is `ResourceEvent::Declared { employee }`, **set once** like
+      `branch` and **optional**: a business that keeps a diary and no staff
+      records is unaffected, which is what makes this additive rather than a
+      migration. `booking` gains a crate dependency on `hr` and **not** an
+      entitlement one — the same distinction `sales` and `crm` already draw.
+
+      Somebody with no documents recorded may work. A business that has not
+      started recording them must not find its whole rota refused the day the
+      module is switched on
 
 ### 9f · `modules/payroll`
 

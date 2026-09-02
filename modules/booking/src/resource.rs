@@ -89,6 +89,21 @@ pub enum ResourceEvent {
         /// existed. That is a single-branch business, which is most of them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<AggregateId>,
+        /// **Which member of staff this is**, when the resource is a person.
+        ///
+        /// Set once, like `branch` and for the same reason: a chair booked as
+        /// "Sara" is not the same resource once it is "Noura", and moving this
+        /// field would retroactively re-attribute every booking to somebody who
+        /// did not do the work.
+        ///
+        /// Optional, and the module works exactly as before without it. A
+        /// business that keeps a diary and no staff records — most of them, at
+        /// first — declares a person resource with no employee and nothing
+        /// changes. What naming one buys is the refusal in `assign`: somebody
+        /// whose iqama has lapsed may not legally be rostered, and this is what
+        /// lets `booking` know.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        employee: Option<AggregateId>,
         at: Timestamp,
     },
     Amended {
@@ -157,6 +172,8 @@ pub struct Resource {
     /// Where it is. `None` on a resource declared before branches existed, or
     /// by a business that has one.
     pub branch: Option<AggregateId>,
+    /// Which member of staff this is, when the business keeps staff records.
+    pub employee: Option<AggregateId>,
     /// What it is set to when it is in service. **Not** what the engine holds
     /// while it is withdrawn, which is zero — see [`Self::effective_capacity`].
     pub capacity: u16,
@@ -179,6 +196,7 @@ impl Aggregate for Resource {
                 kind,
                 capacity,
                 branch,
+                employee,
                 ..
             } => {
                 self.declared = true;
@@ -187,6 +205,7 @@ impl Aggregate for Resource {
                 self.kind = Some(*kind);
                 self.capacity = *capacity;
                 self.branch.clone_from(branch);
+                self.employee.clone_from(employee);
             }
             ResourceEvent::Amended {
                 name,

@@ -20,6 +20,11 @@ erp-occupancy = { workspace = true }
 # nothing, checked against its log at declare time — declaring a resource posts
 # nothing, so there is no journal entry to inherit `post_entry_in`'s check.
 branches = { workspace = true }
+# The staff link is optional and the entitlement dependency is unchanged — a
+# crate dependency and an entitlement dependency are different things, the same
+# way `sales` names `crm` without requiring it. What this buys is that a person
+# whose work documents have lapsed cannot be rostered.
+hr = { workspace = true }
 crm = { workspace = true }
 erp-web = { workspace = true }
 tracing = { workspace = true }
@@ -40,6 +45,7 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+hr = { workspace = true }
 erp-control = { workspace = true }
 erp-testkit = { workspace = true }
 erp-i18n = { workspace = true }

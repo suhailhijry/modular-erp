@@ -73,13 +73,14 @@ impl Projection for Resources {
                 kind,
                 capacity,
                 branch,
+                employee,
                 at,
             } => {
                 sqlx::query(
                     "INSERT INTO resource
-                         (id, name, name_latin, kind, capacity, branch,
+                         (id, name, name_latin, kind, capacity, branch, employee,
                           declared_on, recorded_at, position)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
                 )
                 .bind(id)
                 .bind(&name)
@@ -87,6 +88,7 @@ impl Projection for Resources {
                 .bind(kind.as_str())
                 .bind(i32::from(capacity))
                 .bind(branch.as_ref().map(erp_types::AggregateId::as_str))
+                .bind(employee.as_ref().map(erp_types::AggregateId::as_str))
                 .bind(at)
                 .bind(ctx.event_time())
                 .bind(ctx.position().get())
@@ -331,6 +333,8 @@ pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = Booking>>> {
 pub struct ResourceSummary {
     /// Where it is. `None` in a single-branch business.
     pub branch: Option<String>,
+    /// Which member of staff this is, when the business keeps staff records.
+    pub employee: Option<String>,
     pub id: String,
     pub name: String,
     pub name_latin: Option<String>,
@@ -371,7 +375,7 @@ pub async fn resources(
     let rows = sqlx::query!(
         r#"SELECT id as "id!", name as "name!", name_latin, kind as "kind!",
                   capacity as "capacity!",
-                  branch,
+                  branch, employee,
                   (withdrawn_at IS NOT NULL) as "withdrawn!", withdrawn_why
              FROM proj_booking.resource
             WHERE ($5 OR withdrawn_at IS NULL)
@@ -398,6 +402,7 @@ pub async fn resources(
                 kind: r.kind,
                 capacity: u16::try_from(r.capacity).unwrap_or(u16::MAX),
                 branch: r.branch,
+                employee: r.employee,
                 withdrawn: r.withdrawn,
                 withdrawn_why: r.withdrawn_why,
             })
@@ -415,7 +420,7 @@ pub async fn resource(
     let Some(row) = sqlx::query!(
         r#"SELECT id as "id!", name as "name!", name_latin, kind as "kind!",
                   capacity as "capacity!", availability as "availability!",
-                  branch,
+                  branch, employee,
                   (withdrawn_at IS NOT NULL) as "withdrawn!", withdrawn_why,
                   declared_on as "declared_on!"
              FROM proj_booking.resource WHERE id = $1"#,
@@ -435,6 +440,7 @@ pub async fn resource(
             kind: row.kind,
             capacity: u16::try_from(row.capacity).unwrap_or(u16::MAX),
             branch: row.branch,
+            employee: row.employee,
             withdrawn: row.withdrawn,
             withdrawn_why: row.withdrawn_why,
         },

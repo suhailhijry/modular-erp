@@ -72,7 +72,7 @@ chapter uses a type you have not already met.
 | 20 | [`booking`](./booking.md) | Reservations, rotas, availability, pricing |
 | 21 | [`prepaid`](./prepaid.md) | Packages, deposits, subscriptions, loyalty, deferred revenue |
 | 22 | [`pos`](./pos.md) | Shifts, till sales, the drawer and its variance |
-| | [The HTTP API](./http.md) | All 142 operations, with curl for each |
+| | [The HTTP API](./http.md) | All 144 operations, with curl for each |
 
 `erp-occupancy` sits at 4 rather than beside `booking` because that is where its
 dependencies put it: it knows about `erp-types` and nothing else, and `booking`

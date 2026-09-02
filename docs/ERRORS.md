@@ -91,6 +91,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — {reference} cannot be used as a reference.
 - **ar** — لا يمكن استخدام {reference} كمرجع.
 
+### `booking.may_not_work`
+
+- **en** — {id} may not be rostered: a work document has lapsed, or they have left.
+- **ar** — {id} لا يمكن إسناده: انتهت صلاحية وثيقة عمل، أو لم يعد على رأس العمل.
+
 ### `booking.mixed_currencies`
 
 - **en** — Every amount on a booking must be in the same currency.
@@ -110,6 +115,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — There is no customer {customer}.
 - **ar** — لا يوجد عميل {customer}.
+
+### `booking.no_such_employee`
+
+- **en** — There is no employee {id}.
+- **ar** — لا يوجد موظف {id}.
 
 ### `booking.no_such_line`
 

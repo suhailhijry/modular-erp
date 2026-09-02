@@ -180,6 +180,32 @@ impl Fixture {
             .expect("reads")
     }
 
+    async fn may_work(&self, employee: &str, day: &str) -> bool {
+        let mut conn = self.db.acquire().await.expect("connection");
+        hr::may_work_on(
+            &mut conn,
+            &code(employee),
+            day.parse().expect("a valid date"),
+        )
+        .await
+        .expect("asks")
+    }
+
+    async fn project(&self) {
+        let owned = hr::projections();
+        let refs: Vec<&dyn erp_projection::Projection<Group = hr::Hr>> =
+            owned.iter().map(AsRef::as_ref).collect();
+        let url = erp_testkit::database_url();
+        let base = url.rsplit_once('/').map_or(url.as_str(), |(h, _)| h);
+        let pool = sqlx::PgPool::connect(&format!("{base}/{}", self.database))
+            .await
+            .expect("connects");
+        erp_projection::run_to_head::<hr::Hr>(&pool, &refs, hr::upcasters(), 200)
+            .await
+            .expect("hr projects");
+        pool.close().await;
+    }
+
     async fn cleanup(self) {
         drop(self.db);
         let _ = erp_testkit::drop_named_database(&self.database).await;
@@ -674,6 +700,150 @@ async fn nobody_is_hired_into_a_branch_that_is_not_open() {
     // reads the log.
     fixture.open_branch("BR-OLAYA", "العليا").await;
     fixture.hire("EMP-1", "سارة", None, Some("BR-OLAYA")).await;
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// 9e — documents that expire
+// ---------------------------------------------------------------------------
+
+fn day(s: &str) -> chrono::NaiveDate {
+    s.parse().expect("a valid date")
+}
+
+/// **A lapsed document is a refusal, not a warning.**
+///
+/// An expired iqama does not mean a reminder somebody ignored. It means a
+/// person who may not legally work, and rostering them is the employer's
+/// offence.
+#[tokio::test]
+async fn somebody_whose_document_has_lapsed_may_not_be_rostered() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+
+    // Nothing recorded: they may work. A business that has not started
+    // recording documents must not find its whole rota refused the day this
+    // module is switched on.
+    assert!(fixture.may_work("EMP-1", "2026-06-01").await);
+
+    hr::record_document(
+        &fixture.db,
+        &code("EMP-1"),
+        hr::DocumentKind::Identity,
+        "2312345678",
+        day("2026-05-31"),
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    // Valid **on** its expiry date, which is what the document itself means and
+    // what the person holding it will argue.
+    assert!(fixture.may_work("EMP-1", "2026-05-31").await);
+    assert!(
+        !fixture.may_work("EMP-1", "2026-06-01").await,
+        "somebody with a lapsed iqama was cleared to work"
+    );
+
+    // Renewed: the same command, and they may work again.
+    hr::record_document(
+        &fixture.db,
+        &code("EMP-1"),
+        hr::DocumentKind::Identity,
+        "2312345678",
+        day("2027-05-31"),
+        on("2026-05-20"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("renewed");
+    assert!(fixture.may_work("EMP-1", "2026-06-01").await);
+
+    fixture.cleanup().await;
+}
+
+/// Somebody who has left may not be rostered either — the same question one
+/// step earlier, so a caller cannot get one right and forget the other.
+#[tokio::test]
+async fn somebody_who_has_left_may_not_be_rostered() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+    assert!(fixture.may_work("EMP-1", "2026-06-01").await);
+
+    hr::record_leaving(
+        &fixture.db,
+        &code("EMP-1"),
+        "استقالت",
+        on("2026-03-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    assert!(!fixture.may_work("EMP-1", "2026-06-01").await);
+    fixture.cleanup().await;
+}
+
+/// The expiry screen shows what has gone **and** what is about to, soonest
+/// first — burying the lapsed ones below the upcoming ones is how they stay
+/// buried.
+#[tokio::test]
+async fn the_expiry_list_shows_what_has_gone_and_what_is_going() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+    fixture.hire("EMP-2", "نورة", None, None).await;
+
+    let today = chrono::Utc::now().date_naive();
+    let recorded = [
+        // Gone a week ago.
+        (
+            "EMP-1",
+            hr::DocumentKind::Identity,
+            today - chrono::Days::new(7),
+        ),
+        // Going in ten days.
+        (
+            "EMP-2",
+            hr::DocumentKind::Medical,
+            today + chrono::Days::new(10),
+        ),
+        // Two years out, and not this screen's business.
+        (
+            "EMP-2",
+            hr::DocumentKind::Licence,
+            today + chrono::Days::new(730),
+        ),
+    ];
+    for (who, kind, expires) in recorded {
+        hr::record_document(
+            &fixture.db,
+            &code(who),
+            kind,
+            "X-1",
+            expires,
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("recorded");
+    }
+
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let soon = hr::expiring(&mut conn, 60, 50).await.expect("reads");
+    drop(conn);
+
+    assert_eq!(soon.len(), 2, "a two-year licence was reported as expiring");
+    assert_eq!(soon[0].employee, "EMP-1", "the lapsed one was not first");
+    assert!(
+        soon[0].days_left < 0,
+        "a lapsed document reported as though it had time left"
+    );
+    assert_eq!(soon[1].employee, "EMP-2");
+    assert!(soon[1].days_left > 0);
 
     fixture.cleanup().await;
 }

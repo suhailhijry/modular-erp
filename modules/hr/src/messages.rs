@@ -11,6 +11,8 @@ pub const LEFT: MessageCode = MessageCode::new("hr.left");
 pub const CYCLE: MessageCode = MessageCode::new("hr.cycle");
 pub const DATABASE: MessageCode = MessageCode::new("hr.database");
 pub const NOT_A_CLAIM: MessageCode = MessageCode::new("hr.not_a_claim");
+pub const NO_DOCUMENT_NUMBER: MessageCode = MessageCode::new("hr.no_document_number");
+pub const UNKNOWN_DOCUMENT: MessageCode = MessageCode::new("hr.unknown_document");
 
 pub const CODES: &[MessageCode] = &[
     NO_NAME,
@@ -22,6 +24,8 @@ pub const CODES: &[MessageCode] = &[
     CYCLE,
     DATABASE,
     NOT_A_CLAIM,
+    NO_DOCUMENT_NUMBER,
+    UNKNOWN_DOCUMENT,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -104,6 +108,26 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         DATABASE,
         Locale::Arabic,
         Template::Simple("تعذّرت قراءة الهيكل التنظيمي. أعد المحاولة."),
+    ),
+    (
+        NO_DOCUMENT_NUMBER,
+        Locale::English,
+        Template::Simple("A document needs its number."),
+    ),
+    (
+        NO_DOCUMENT_NUMBER,
+        Locale::Arabic,
+        Template::Simple("الوثيقة تحتاج إلى رقمها."),
+    ),
+    (
+        UNKNOWN_DOCUMENT,
+        Locale::English,
+        Template::Simple("{kind} is not a kind of document this system tracks."),
+    ),
+    (
+        UNKNOWN_DOCUMENT,
+        Locale::Arabic,
+        Template::Simple("{kind} ليس نوع وثيقة يتتبعه هذا النظام."),
     ),
     (
         NOT_A_CLAIM,
