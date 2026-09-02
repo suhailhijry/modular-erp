@@ -7686,6 +7686,11 @@ async fn a_client_outside_the_version_range_is_refused_and_told_what_to_build_ag
 /// all refused with one answer, and the same event delivered three times is one
 /// effect.
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "four refusals and three deliveries of one callback; splitting it \
+              would mean four fixtures for one story"
+)]
 async fn a_webhook_is_verified_once_and_deduplicated_however_often_it_arrives() {
     let mut fixture = Fixture::new().await;
     let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
@@ -7815,4 +7820,222 @@ async fn a_webhook_is_verified_once_and_deduplicated_however_often_it_arrives() 
     let (status, body, _) = fixture.send(good(&now, &second)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     assert_eq!(body["duplicate"], false);
+}
+
+/// **Signing in with a phone number, and the two limiters that bound it.**
+///
+/// Phase 12e. The code is never in a response, a wrong guess is the same answer
+/// as an expired one, and asking again too soon is refused with the wait.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one code's whole life — requested, throttled, guessed, used, spent \
+              — and splitting it would mean five fixtures for one story"
+)]
+async fn a_phone_number_signs_in_with_a_code_that_is_single_use() {
+    let fixture = Fixture::new().await;
+    let phone = "+966500000001";
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/codes")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "phone": "00966 50 000 0001" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["phone"], phone, "the number was normalised: {body}");
+    // **The code is never in a response.** It is in a text message, and this is
+    // the assertion that keeps it that way.
+    assert!(
+        !body.to_string().contains("code"),
+        "a code reached the caller: {body}"
+    );
+
+    // **The request limiter.** One went a moment ago.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/codes")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "phone": phone }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["code"], "codes.too_soon");
+    assert!(
+        body["args"]["seconds"]["value"]
+            .as_i64()
+            .is_some_and(|s| s > 0),
+        "the refusal has to say how long: {body}"
+    );
+
+    // The code itself, out of the promised text — which is where a phone would
+    // read it from.
+    let code = promised_code(&fixture, phone).await;
+
+    // **A wrong guess**, and the answer says nothing about why.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/sessions/code")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "phone": phone, "code": "000000" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "codes.not_valid");
+
+    // A number nobody has ever asked for gets the same answer.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/sessions/code")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "phone": "+966500009999", "code": "000000" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "codes.not_valid");
+
+    // **The real code.**
+    let response = fixture
+        .raw(
+            Request::post("/v1/sessions/code")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "phone": phone, "code": code }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // **Two surfaces, one session.** The cookie and the body carry the same
+    // token, and the cookie is not readable by a script.
+    let cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    assert!(cookie.contains("Secure"), "{cookie}");
+
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("body reads");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let token = body["token"].as_str().expect("a token").to_owned();
+    assert!(cookie.contains(&token), "the cookie is a different session");
+
+    // **Both surfaces authenticate.** This identity is a member of no tenant,
+    // so `/v1/tenant` answers 404 — and the contrast with the 401 below is the
+    // assertion: 404 means the session was accepted and only the membership was
+    // missing.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/tenant")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the bearer was refused: {body}"
+    );
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/tenant")
+                .header(header::COOKIE, format!("erp_session={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the cookie was refused: {body}"
+    );
+
+    let (status, body, _) = fixture
+        .send(Request::get("/v1/tenant").body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "no credential should not reach a tenant lookup: {body}"
+    );
+
+    // **Single use.** The same code again is nothing.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/sessions/code")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "phone": phone, "code": code }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+/// Not a phone number is a `400`, and it says what one looks like.
+#[tokio::test]
+async fn something_that_is_not_a_phone_number_is_refused() {
+    let fixture = Fixture::new().await;
+
+    for raw in ["0500000000", "500000000", "not a number", ""] {
+        let (status, body, _) = fixture
+            .send(
+                Request::post("/v1/codes")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({ "phone": raw }).to_string()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{raw} was accepted: {body}"
+        );
+        assert_eq!(body["code"], "codes.not_a_phone_number");
+    }
+}
+
+/// The code, out of the text the control plane promised — which is where a
+/// phone would read it from, and the only place it exists.
+async fn promised_code(fixture: &Fixture, phone: &str) -> String {
+    let payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM outbox
+          WHERE kind = 'sms.send' AND payload->>'to' = $1
+          ORDER BY id DESC LIMIT 1",
+    )
+    .bind(phone)
+    .fetch_one(fixture.db.pool())
+    .await
+    .expect("a text was promised");
+
+    let found = payload["body"].as_str().and_then(|body| {
+        body.split_whitespace()
+            .find(|word| word.len() == 6 && word.chars().all(|c| c.is_ascii_digit()))
+    });
+    match found {
+        Some(code) => code.to_owned(),
+        None => panic!("no code in {payload}"),
+    }
 }

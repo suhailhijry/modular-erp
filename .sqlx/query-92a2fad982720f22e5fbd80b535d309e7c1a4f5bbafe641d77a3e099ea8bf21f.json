@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE one_time_code\n                  SET used_at = now()\n                WHERE id = (\n                        SELECT id FROM one_time_code\n                         WHERE handle = $1\n                           AND used_at IS NULL\n                           AND expires_at > now()\n                           AND attempts < $3\n                         ORDER BY created_at DESC\n                         LIMIT 1\n                      )\n                  AND code_hash = $2\n            RETURNING identity_id as \"identity: IdentityId\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "identity: IdentityId",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "one_time_code",
+            "name": "identity_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "92a2fad982720f22e5fbd80b535d309e7c1a4f5bbafe641d77a3e099ea8bf21f"
+}

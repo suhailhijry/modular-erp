@@ -59,6 +59,7 @@
 - [reports](./api/reports.md)
 - [messaging](./api/messaging.md)
 - [files](./api/files.md)
+- [Signing in](./api/sessions.md)
 - [API keys](./api/keys.md)
 - [API versioning](./api/versioning.md)
 - [Inbound webhooks](./api/webhooks.md)

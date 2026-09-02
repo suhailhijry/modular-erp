@@ -58,6 +58,19 @@ pub const SIGNUP_SUBJECT: MessageCode = MessageCode::new("mail.signup_subject");
 /// The body of a signup confirmation.
 pub const SIGNUP_BODY: MessageCode = MessageCode::new("mail.signup_body");
 pub const LAST_OWNER: MessageCode = MessageCode::new("members.last_owner");
+/// Not a phone number this system can send to.
+pub const NOT_A_PHONE_NUMBER: MessageCode = MessageCode::new("codes.not_a_phone_number");
+/// A code went to this number moments ago, so the next one waits. Answered as a
+/// 429, carrying the seconds — "too soon" with no number is a button people
+/// press again.
+pub const CODE_TOO_SOON: MessageCode = MessageCode::new("codes.too_soon");
+/// **One answer for every way a verification fails.** Wrong, expired, spent, out
+/// of attempts and never issued all render as this, because distinguishing them
+/// says whether the number is known and whether a code is outstanding.
+pub const CODE_NOT_VALID: MessageCode = MessageCode::new("codes.not_valid");
+/// The text a one-time code arrives in. **Outgoing, not a refusal** — the third
+/// message in this system that is, after the two email bodies.
+pub const CODE_TEXT: MessageCode = MessageCode::new("mail.code_text");
 /// A scope that is not one. `module:capability`, or `*:capability`.
 pub const NOT_A_SCOPE: MessageCode = MessageCode::new("keys.not_a_scope");
 /// The key is real and does not carry the scope this route needs. A 403, and it
@@ -100,6 +113,10 @@ pub static CODES: &[MessageCode] = &[
     NOT_A_SCOPE,
     OUT_OF_SCOPE,
     NO_SUCH_KEY,
+    NOT_A_PHONE_NUMBER,
+    CODE_TOO_SOON,
+    CODE_NOT_VALID,
+    CODE_TEXT,
 ];
 
 // ---------------------------------------------------------------------------
@@ -107,6 +124,66 @@ pub static CODES: &[MessageCode] = &[
 // ---------------------------------------------------------------------------
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    // -- one-time codes ----------------------------------------------------
+    // **Short on purpose.** An SMS is billed per 160 characters, or per 70 in
+    // Arabic — see `messaging::channel` — and a code text that runs to two
+    // segments costs twice for the length of a sentence nobody reads.
+    (
+        CODE_TEXT,
+        Locale::English,
+        Template::Simple("{code} is your sign-in code."),
+    ),
+    (
+        CODE_TEXT,
+        Locale::Arabic,
+        Template::Simple("{code} رمز الدخول."),
+    ),
+    (
+        NOT_A_PHONE_NUMBER,
+        Locale::English,
+        Template::Simple(
+            "{number} is not a phone number. Include the country code, like +966500000000.",
+        ),
+    ),
+    (
+        NOT_A_PHONE_NUMBER,
+        Locale::Arabic,
+        Template::Simple("{number} ليس رقم هاتف. أدخِل رمز الدولة، مثل ‎+966500000000."),
+    ),
+    (
+        CODE_TOO_SOON,
+        Locale::English,
+        Template::Plural {
+            zero: None,
+            one: Some("A code was just sent. Try again in a second."),
+            two: None,
+            few: None,
+            many: None,
+            other: "A code was just sent. Try again in {n} seconds.",
+        },
+    ),
+    (
+        CODE_TOO_SOON,
+        Locale::Arabic,
+        Template::Plural {
+            zero: Some("أُرسل رمز للتو. أعد المحاولة."),
+            one: Some("أُرسل رمز للتو. أعد المحاولة بعد ثانية."),
+            two: Some("أُرسل رمز للتو. أعد المحاولة بعد ثانيتين."),
+            few: Some("أُرسل رمز للتو. أعد المحاولة بعد {n} ثوانٍ."),
+            many: Some("أُرسل رمز للتو. أعد المحاولة بعد {n} ثانية."),
+            other: "أُرسل رمز للتو. أعد المحاولة بعد {n} ثانية.",
+        },
+    ),
+    (
+        CODE_NOT_VALID,
+        Locale::English,
+        Template::Simple("That code is not valid. Ask for a new one."),
+    ),
+    (
+        CODE_NOT_VALID,
+        Locale::Arabic,
+        Template::Simple("هذا الرمز غير صالح. اطلب رمزًا جديدًا."),
+    ),
     // -- api keys ----------------------------------------------------------
     (
         NOT_A_SCOPE,

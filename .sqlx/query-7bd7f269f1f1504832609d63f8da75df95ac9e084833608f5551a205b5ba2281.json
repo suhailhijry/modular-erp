@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXTRACT(EPOCH FROM (now() - created_at))::BIGINT as \"age!\"\n                 FROM one_time_code\n                WHERE handle = $1\n                ORDER BY created_at DESC\n                LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "age!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7bd7f269f1f1504832609d63f8da75df95ac9e084833608f5551a205b5ba2281"
+}

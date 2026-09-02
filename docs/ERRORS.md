@@ -220,6 +220,24 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **ar** — {country} ليس رمز دولة من حرفين وفق ISO 3166-1.
 
 
+## `codes`
+
+### `codes.not_a_phone_number`
+
+- **en** — {number} is not a phone number. Include the country code, like +966500000000.
+- **ar** — {number} ليس رقم هاتف. أدخِل رمز الدولة، مثل ‎+966500000000.
+
+### `codes.not_valid`
+
+- **en** — That code is not valid. Ask for a new one.
+- **ar** — هذا الرمز غير صالح. اطلب رمزًا جديدًا.
+
+### `codes.too_soon`
+
+- **en** — A code was just sent. Try again in {n} seconds.
+- **ar** — أُرسل رمز للتو. أعد المحاولة بعد {n} ثانية.
+
+
 ## `crm`
 
 ### `crm.archived`
@@ -568,6 +586,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 
 ## `mail`
+
+### `mail.code_text`
+
+- **en** — {code} is your sign-in code.
+- **ar** — {code} رمز الدخول.
 
 ### `mail.invitation_body`
 

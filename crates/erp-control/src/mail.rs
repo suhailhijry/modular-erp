@@ -91,6 +91,73 @@ impl Email {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Text messages
+// ---------------------------------------------------------------------------
+
+/// The kind every text message is enqueued under.
+///
+/// **The same kind `messaging` uses**, deliberately. A one-time code is
+/// control-plane — identities are — and a booking reminder is a tenant's, but
+/// they are the same act and a worker should not need two handlers to perform
+/// it. The payload below is `messaging::Outbound`'s shape on the wire, which is
+/// what makes one handler answer for both.
+#[must_use]
+pub fn sms_kind() -> EffectKind {
+    EffectKind::new("sms.send")
+        .unwrap_or_else(|_| unreachable!("a literal that satisfies EffectKind"))
+}
+
+/// One text message, ready to send.
+///
+/// Field-for-field `messaging::Outbound` minus the subject a text does not
+/// have. Two types rather than one because the crates cannot see each other —
+/// `erp-control` is below every module — and the contract between them is this
+/// comment plus `a_control_plane_text_is_what_the_messaging_handler_reads`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Text {
+    /// Always `sms`. Present because the handler reads it, and a message that
+    /// did not say which channel it was for would decode as whatever the
+    /// handler happened to be.
+    pub channel: &'static str,
+    /// E.164.
+    pub to: String,
+    pub body: String,
+    pub locale: Locale,
+}
+
+impl Text {
+    /// Renders one from the catalog, in the language the request asked for.
+    pub fn rendered(catalog: &dyn Catalog, locale: Locale, to: String, body: &Message) -> Self {
+        Self {
+            channel: "sms",
+            to,
+            body: catalog.render_or_code(locale, body),
+            locale,
+        }
+    }
+
+    /// The effect that promises to send it.
+    ///
+    /// The key is the caller's, for the reason [`Email::promised`]'s is: the
+    /// control plane has no event log and therefore no position to derive one
+    /// from.
+    #[must_use]
+    pub fn promised(&self, key: String) -> erp_eventlog::Effect {
+        erp_eventlog::Effect::with_key(
+            sms_kind(),
+            key,
+            serde_json::to_value(self).unwrap_or(serde_json::Value::Null),
+        )
+    }
+}
+
+/// The one-time code message.
+#[must_use]
+pub fn code_message(code: &str) -> Message {
+    Message::new(crate::messages::CODE_TEXT).with("code", MessageArg::text(code.to_owned()))
+}
+
 /// The invitation email, as the two messages it is made of.
 ///
 /// A free function rather than a method on `Invitation` because it needs the

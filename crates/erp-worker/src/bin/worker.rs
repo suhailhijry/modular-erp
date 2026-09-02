@@ -90,6 +90,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for handler in mailer()? {
         platform = platform.register(handler);
     }
+    // **The same handlers the tenant plane gets.** A one-time code is
+    // control-plane — identities are — and a booking reminder is a tenant's,
+    // but they are the same act: `erp_control::mail::Text` is
+    // `messaging::Outbound`'s shape on the wire, so one handler answers for
+    // both rather than two that could drift.
+    for handler in messaging::handlers(message_transports()) {
+        platform = platform.register(handler);
+    }
     let platform = Arc::new(platform);
 
     let config = WorkerConfig {
@@ -119,7 +127,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     worker = worker
         .with_job(Arc::new(BookingReminders))
-        .with_job(Arc::new(RetirePushTokens));
+        .with_job(Arc::new(RetirePushTokens))
+        .with_platform_job(Arc::new(SweepOneTimeCodes));
 
     // **The ZATCA sweeps, and only with a sealing key.** They read a tenant's
     // private key to sign with, so without one there is nothing to read and the
@@ -716,6 +725,35 @@ impl erp_worker::Job for RetirePushTokens {
         let mut conn = db.acquire().await?;
         let gone = messaging::push::sweep(&mut conn, before).await?;
 
+        Ok(if gone > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
+
+/// **Removes one-time codes that have expired.**
+///
+/// A row costs an index entry and nothing else, so this is unhurried; the reason
+/// it exists is that a table nobody deletes from grows for the life of the
+/// deployment, and this one grows with every sign-in attempt anybody makes.
+///
+/// A `PlatformJob` rather than a `Job`: codes are control-plane, because
+/// identities are, and there is no tenant database they could sensibly live in.
+struct SweepOneTimeCodes;
+
+#[async_trait::async_trait]
+impl erp_worker::PlatformJob for SweepOneTimeCodes {
+    fn name(&self) -> &'static str {
+        "control.sweep_one_time_codes"
+    }
+
+    async fn tick(
+        &self,
+        control: &erp_control::ControlPlane,
+    ) -> Result<Activity, erp_worker::BoxError> {
+        let gone = control.sweep_codes().await?;
         Ok(if gone > 0 {
             Activity::Worked
         } else {

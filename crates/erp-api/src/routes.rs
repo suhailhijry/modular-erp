@@ -313,6 +313,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(crate::links::routes())
         .merge(crate::keys::routes())
         .merge(crate::hooks::routes())
+        .merge(crate::codes::routes())
         // Every module's own routes, from the one list that also says what to
         // install. See `crate::modules::REGISTERED`.
         .merge(crate::modules::mounted())
@@ -418,6 +419,9 @@ struct Credentials {
 #[derive(Debug, Serialize, ToSchema)]
 struct SessionCreated {
     /// Send as `Authorization: Bearer <token>`.
+    ///
+    /// **Also set as an `HttpOnly` cookie**, and they are the same session. A
+    /// browser can ignore this field.
     token: String,
     #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     expires_at: erp_types::Timestamp,
@@ -446,8 +450,14 @@ async fn log_in(
         .await
         .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
 
+    // **The cookie as well as the body**, and they are the same session — see
+    // `crate::codes::session_cookie`. A browser can ignore the token entirely.
     Ok((
         StatusCode::CREATED,
+        [(
+            axum::http::header::SET_COOKIE,
+            crate::codes::session_cookie(&token),
+        )],
         Json(SessionCreated {
             token: token.expose().to_owned(),
             expires_at: session.expires_at,
@@ -469,13 +479,23 @@ async fn log_out(
     State(state): State<AppState>,
     Language(locale): Language,
     auth: Authenticated,
-) -> Result<StatusCode, Problem> {
+) -> Result<impl IntoResponse, Problem> {
     state
         .control
         .log_out(&auth.token)
         .await
         .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
-    Ok(StatusCode::NO_CONTENT)
+
+    // **The cookie goes too.** The session row is gone either way, so leaving
+    // the cookie behind costs nothing but a confusing round trip — a browser
+    // that still holds one gets a 401 on its next request and no explanation.
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(
+            axum::http::header::SET_COOKIE,
+            crate::codes::cleared_cookie(),
+        )],
+    ))
 }
 
 #[derive(Debug, Serialize, ToSchema)]

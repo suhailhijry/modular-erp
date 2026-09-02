@@ -149,9 +149,19 @@ impl FromRequestParts<AppState> for Authenticated {
             .await
             .unwrap_or(Language(Locale::DEFAULT));
 
-        let token = bearer(parts).ok_or_else(|| {
-            ApiError::Auth(erp_control::AuthError::NoSession).into_problem(locale, &crate::CATALOG)
-        })?;
+        // **Two surfaces, one session.** A browser holds the token in an
+        // `HttpOnly` cookie and everything else sends it as a bearer; they name
+        // the same row, so authorization has one answer rather than two.
+        //
+        // The bearer wins when both are present. A request that took the
+        // trouble to send a header meant it, and a stale cookie left in a
+        // browser should not quietly override it.
+        let token = bearer(parts)
+            .or_else(|| cookie(parts, SESSION_COOKIE))
+            .ok_or_else(|| {
+                ApiError::Auth(erp_control::AuthError::NoSession)
+                    .into_problem(locale, &crate::CATALOG)
+            })?;
 
         // **The prefix decides, and it is the key's own.** A session token is
         // hex and an API key says `sk_`, so there is no value that could be
@@ -416,6 +426,31 @@ fn not_found(locale: Locale) -> Problem {
 /// length or a charset: it has to be something a secret scanner can grep for in
 /// a repository, which is the whole reason keys have prefixes at all.
 const API_KEY_PREFIX: &str = "sk_";
+
+/// The cookie a browser session lives in.
+///
+/// Named here as well as where it is set, because this is the only place that
+/// *reads* it and a constant defined in the writer would make `erp-web` depend
+/// on `erp-api`.
+pub(crate) const SESSION_COOKIE: &str = "erp_session";
+
+/// One cookie out of a `Cookie` header.
+///
+/// Written rather than pulled in: the header is `a=1; b=2`, the name is a
+/// literal, and the parser is four lines. **No percent-decoding**: a session
+/// token is hex, so anything that needed decoding is not one.
+fn cookie(parts: &Parts, name: &str) -> Option<String> {
+    parts
+        .headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
 
 /// The 429, in one place.
 ///

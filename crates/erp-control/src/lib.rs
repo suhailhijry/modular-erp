@@ -32,6 +32,7 @@ pub mod mail;
 mod members;
 pub mod messages;
 mod model;
+mod otp;
 mod placement;
 mod pools;
 mod provision;
@@ -59,6 +60,11 @@ pub use leases::{Claimed, WorkSchedule};
 pub use members::{Member, MemberError};
 pub use model::{
     Actor, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant, TenantStatus,
+};
+pub use otp::{
+    CODE_LIFETIME_SECONDS, MAX_ATTEMPTS as MAX_CODE_ATTEMPTS, OtpError,
+    REQUEST_INTERVAL_SECONDS as CODE_REQUEST_INTERVAL_SECONDS, Requested,
+    normalise as normalise_phone,
 };
 pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
 pub use pools::{ClusterRegistry, PoolConfig, TenantPools};

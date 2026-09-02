@@ -1380,6 +1380,59 @@
         },
         "type": "object"
       },
+      "CodeRequest": {
+        "example": {
+          "phone": "+966500000000"
+        },
+        "properties": {
+          "phone": {
+            "description": "With the country code. `+966500000000`, or `00966500000000`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phone"
+        ],
+        "type": "object"
+      },
+      "CodeSent": {
+        "properties": {
+          "expires_at": {
+            "description": "When the code stops working.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "phone": {
+            "description": "The number as it was understood, so a caller can show it back.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phone",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "CodeVerification": {
+        "example": {
+          "code": "123456",
+          "phone": "+966500000000"
+        },
+        "properties": {
+          "code": {
+            "description": "The six digits from the text.",
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "phone",
+          "code"
+        ],
+        "type": "object"
+      },
       "ConfiguredAccounts": {
         "allOf": [
           {
@@ -7735,7 +7788,7 @@
             "type": "string"
           },
           "token": {
-            "description": "Send as `Authorization: Bearer <token>`.",
+            "description": "Send as `Authorization: Bearer <token>`.\n\n**Also set as an `HttpOnly` cookie**, and they are the same session. A\nbrowser can ignore this field.",
             "type": "string"
           }
         },
@@ -7920,6 +7973,23 @@
           "bands",
           "net",
           "tax"
+        ],
+        "type": "object"
+      },
+      "SignedIn": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "token": {
+            "description": "Send as `Authorization: Bearer <token>`.\n\n**Also set as an `HttpOnly` cookie**, and they are the same session. A\nbrowser can ignore this field entirely.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "expires_at"
         ],
         "type": "object"
       },
@@ -12217,6 +12287,123 @@
           }
         }
       ]
+    },
+    "/v1/codes": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Answers the same way whether or not the number is known: `202` and an expiry.\nSaying \"no account\" would make this a way to ask whether somebody has one.\n\nNothing is created. An identity is made when a code is *verified*, because\ncreating one on request would let anybody fill the table by typing numbers.",
+        "operationId": "request_code",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodeSent"
+                }
+              }
+            },
+            "description": "A code is on its way, if that number can receive one."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a phone number"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "One went moments ago. `args.seconds` says how long to wait."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "**Send a one-time code to a phone number.**",
+        "tags": [
+          "sessions"
+        ]
+      }
     },
     "/v1/crm/customers": {
       "get": {
@@ -31606,6 +31793,123 @@
         },
         "security": [],
         "summary": "Log in.",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/code": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "One answer for every way this fails — wrong, expired, spent, out of attempts,\nnever issued. Distinguishing them would say whether the number is known and\nwhether a code is outstanding, which are two things a caller should already\nknow.",
+        "operationId": "sign_in_with_code",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeVerification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignedIn"
+                }
+              }
+            },
+            "description": "Signed in. The token is in the body and in an `HttpOnly` cookie; they are the same session."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a phone number"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That code is not valid — one answer for every reason"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "**Sign in with the code.**",
         "tags": [
           "sessions"
         ]

@@ -28,3 +28,9 @@ control/0012_api_keys.sql  add-constraint  The constraint is **widened**, not
     that this refuses and the previous constraint allowed. The check the rule
     exists for is the other direction, and the scan cannot tell one from the other
     from the SQL alone.
+
+control/0013_one_time_codes.sql  add-constraint  Widened again, for the same
+    reason 0012 was: `kind IN ('password', 'api_key')` becomes
+    `kind IN ('password', 'api_key', 'phone')`. Every row a draining pod can
+    write satisfied the old rule and satisfies the new one, so there is nothing
+    this refuses that the previous constraint allowed.

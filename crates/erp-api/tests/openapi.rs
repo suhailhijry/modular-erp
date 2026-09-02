@@ -247,6 +247,13 @@ fn only_the_deliberately_public_routes_are_public() {
         // matches a secret the tenant configured, and the timestamp is inside
         // the signature so a copy somebody kept cannot be re-sent.
         ("post", "/v1/hooks/{provider}"),
+        // **Signing in.** Both are how somebody without a session gets one, so
+        // requiring one would be a circle. Neither says whether the number is
+        // known — asking for a code answers the same way either way — and
+        // `erp_control::otp` bounds both, with two limiters because requesting
+        // and guessing fail differently.
+        ("post", "/v1/codes"),
+        ("post", "/v1/sessions/code"),
     ];
 
     for (path, method, operation) in operations(&document()) {

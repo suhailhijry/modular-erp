@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,016 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,023 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -35,8 +35,9 @@ Phase 11a/b/c/e — short links; `modules/messaging`, with templates that fetch
 their own data, audiences resolved rather than frozen and SMS billed by the
 segment; `modules/files`, where a document's record is a key and a checksum rather
 than a URL; 11d — every list is a spreadsheet on `Accept: text/csv`, and an
-import takes the good rows and reports the bad ones; and Phase 12b/12c/12d — verified inbound
-callbacks, API keys in pairs, and a version a client can be refused on by name.
+import takes the good rows and reports the bad ones; and Phase 12b/12c/12d/12e — verified inbound
+callbacks, API keys in pairs, a version a client can be refused on by name, and
+signing in with a phone number.
 
 **Phase 9 is complete except two items, and both are blocked on something
 outside the repository**: the WPS file needs a specification this build cannot
@@ -466,6 +467,30 @@ is checked exactly as much.
 
 Say the word and it becomes `hmac`; the tests do not change either way, which is
 the point.
+
+### 25 · Phase 12a is the one thing left, and it needs your decision
+
+Everything else in Phase 12 is built. What is not is **taking a payment**, and
+the reason is the same one the messaging providers and the S3 engine gave: this
+build has an account with no gateway, and a client that has never made a
+successful call is a file that looks finished and is not.
+
+What is ready for it, all of it landed this pass:
+
+- **The inbound half.** A verified, deduplicated webhook that promises
+  `webhook.<provider>` and waits for a handler (12b).
+- **Effects with a retry policy, a lease and a dead letter** (D9, Phase 2).
+- **The ledger seam.** `sales::pay_in` and `ledger::post_entry_in` already
+  compose inside one transaction, which is what settlement and fees will need.
+- **A shared secret per provider**, sealed (12b).
+
+What it needs from you is one answer: **which gateway**, and whether an SDK may
+be added to the dependency list. With that, 12a is a module, a handler and the
+posting rules — and the parts of it that are *domain* rather than vendor (a
+refund against a cleared invoice is a credit note; a payout reconciles to
+payments minus fees; a fee is an expense and never a smaller revenue; a BNPL
+receivable is settled by a third party) are specifiable without one, if you would
+rather I build those first and leave the call for last.
 
 ---
 
@@ -2193,17 +2218,29 @@ still be served.
 
 ### 12e · Signing in without a password
 
-- [ ] One-time codes over SMS, for a market where a phone number is the identity
-      and an email address often is not
-- [ ] Two rate limiters, not one: requesting a code and verifying a code fail
-      differently and must be limited separately
-- [ ] A code is single use, short lived, and constant-time compared
-- [ ] Cookie sessions for a browser and bearer tokens for everything else, over
-      one session model — two authentication surfaces, one authorization answer
+- [x] One-time codes over SMS, for a market where a phone number is the identity
+      and an email address often is not. The text is promised in the same
+      transaction as the code (D9), on the **same effect kind** `messaging`
+      uses — so one handler answers for a sign-in code and a booking reminder
+- [x] Two rate limiters, not one: requesting a code and verifying a code fail
+      differently and must be limited separately. A cooldown per number against
+      somebody using this to send texts, and attempts per code against guessing.
+      Both in the database, so they hold across pods
+- [x] A code is single use, short lived, and constant-time compared — claimed in
+      **one statement**, so two requests racing with the same code resolve to
+      one. `0013_one_time_codes.sql` says plainly what the stored digest is and
+      is not worth for six digits
+- [x] Cookie sessions for a browser and bearer tokens for everything else, over
+      one session model — two authentication surfaces, one authorization answer.
+      `HttpOnly; SameSite=Strict; Secure`, and the bearer wins when both are
+      sent
 
 **Exit:** a customer pays with a saved card, the webhook confirms it once however
 often it arrives, the payout reconciles to the ledger, and an outdated client is
-told what to build against.
+told what to build against. **Three of the four**: the webhook confirms once
+however often it arrives (12b), an outdated client is told what to build against
+(12d), and the keys and passwordless sign-in it all runs on are done (12c, 12e).
+The payment itself is 12a and is the one waiting on you — see review §15 and §23.
 
 ---
 
