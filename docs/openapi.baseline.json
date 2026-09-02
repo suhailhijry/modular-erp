@@ -8144,6 +8144,106 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/l/{token}": {
+      "get": {
+        "description": "Records the visit, then redirects. A link that has expired or has already\nbeen used answers `410 Gone` rather than `404`, because the two are\ndifferent things to whoever is holding it.\n\n**Never cached.** A single-use link that a proxy served twice from its cache\nwould be a single-use link used twice, and a visit count nobody incremented\nis a visit count nobody can trust.",
+        "operationId": "follow_link",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The token from the link.",
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Where it points, in `Location`. The only 2xx-adjacent answer this route has — a redirect *is* the success."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such link, or no such tenant"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Expired, or already used — the message says which"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Rate limited. `args.seconds` says how long to wait."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "Follow a short link.",
+        "tags": [
+          "service"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
     "/v1/booking/fit-out": {
       "parameters": [
         {

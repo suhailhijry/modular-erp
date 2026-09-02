@@ -1,0 +1,27 @@
+[package]
+name = "erp-links"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Short links: a token, where it points, and who followed it."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Deliberately thin, like `erp-occupancy`. No `erp-tenant`, no `erp-eventlog`:
+# this writes no events and loads no aggregates. It takes a connection and
+# answers what a token points at.
+erp-i18n = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+chrono = { workspace = true }
+serde = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+erp-eventlog = { workspace = true }
+erp-testkit = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

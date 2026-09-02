@@ -1876,11 +1876,15 @@ a template cannot ask for anything, so somebody must hand it everything.
 
 ### 11e · Short links for anything
 
-- [ ] A link points at an internal target or an external URL, and anything can
+- [x] A link points at an internal target or an external URL, and anything can
       make one in a line. SMS is billed by length, which is the practical reason
-- [ ] Optional expiry, optional single use, and a visit record
-- [ ] Infrastructure, not domain (D11) — it holds no business meaning and every
-      module may use it
+      — `erp_links::shorten`, one call in the caller's own transaction
+- [x] Optional expiry, optional single use, and a visit record — the record is a
+      count and the two ends rather than a row per hit, which is what a person
+      asks for first and what does not grow without a reader
+- [x] Infrastructure, not domain (D11) — it holds no business meaning and every
+      module may use it. `crates/erp-links`, with its table in the tenant
+      migration chain where a rebuild cannot reach it
 
 **Exit:** a booking reminder reaches a customer in Arabic, on SMS, with a link,
 having asked the read model for everything it says.

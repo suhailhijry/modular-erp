@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE short_link\n              SET visits = visits + 1,\n                  first_visit_at = COALESCE(first_visit_at, $2),\n                  last_visit_at = $2\n            WHERE token = $1\n              AND (expires_at IS NULL OR expires_at > $2)\n              AND (NOT single_use OR visits = 0)\n        RETURNING target as \"target!\", external as \"external!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "target!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "target"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "external!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "external"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "3ba940939712d6db1d4417976ddc5c12173d16e336ac2d8dc7d85837f9c14cc9"
+}

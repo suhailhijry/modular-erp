@@ -1,0 +1,136 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT token as \"token!\", key as \"key!\", target as \"target!\",\n                  external as \"external!\", expires_at, single_use as \"single_use!\",\n                  visits as \"visits!\", first_visit_at, last_visit_at,\n                  created_at as \"created_at!\"\n             FROM short_link WHERE token = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "token"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "key!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "key"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "target!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "target"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "external!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "external"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "single_use!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "single_use"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "visits!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "visits"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "first_visit_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "first_visit_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "last_visit_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "last_visit_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "4172cb8cb00d10a49642a856f2c86576e18e7e017b44396cdc2124e343847acc"
+}

@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT expires_at, single_use as \"single_use!\", visits as \"visits!\"\n             FROM short_link WHERE token = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "single_use!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "single_use"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "visits!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "visits"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "159f4802140662408d02f15e0aa548b83b411fa99acbd68888d6de30180c87cb"
+}

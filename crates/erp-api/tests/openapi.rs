@@ -114,8 +114,13 @@ fn every_operation_declares_its_answers() {
             .unwrap_or_else(|| panic!("{method} {path} declares no responses"));
 
         let where_it_is = format!("{method} {path}");
+        // **A 3xx counts.** `GET /l/{token}` succeeds by redirecting — there is
+        // no 2xx it could honestly declare, and adding one so this passes would
+        // be documenting an answer the route never gives.
         assert!(
-            responses.keys().any(|s| s.starts_with('2')),
+            responses
+                .keys()
+                .any(|s| s.starts_with('2') || s.starts_with('3')),
             "{where_it_is} has no success response"
         );
         assert!(
@@ -227,6 +232,13 @@ fn only_the_deliberately_public_routes_are_public() {
         // unless the business turned it on, it never confirms what it takes,
         // and it never names a customer record on the caller's word.
         ("post", "/v1/booking/public/reservations"),
+        // **A short link, and the token in the path is the credential.**
+        //
+        // The person tapping it has never signed in and never will — it arrived
+        // in a text message. It reads one row and answers with a `Location`, it
+        // enters the tenant through `erp_web::Public` like the three above, and
+        // an unguessable token is the whole of the authorization.
+        ("get", "/l/{token}"),
     ];
 
     for (path, method, operation) in operations(&document()) {

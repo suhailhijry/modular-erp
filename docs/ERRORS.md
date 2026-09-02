@@ -478,6 +478,29 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **ar** — لا يمكن أن يكون السطر بقيمة صفر.
 
 
+## `links`
+
+### `links.already_used`
+
+- **en** — That link has already been used. It only works once.
+- **ar** — سبق استخدام هذا الرابط. وهو يعمل مرة واحدة فقط.
+
+### `links.expired`
+
+- **en** — That link has expired. Ask for a new one.
+- **ar** — انتهت صلاحية هذا الرابط. اطلب رابطًا جديدًا.
+
+### `links.no_such_link`
+
+- **en** — That link does not go anywhere. Check it was copied whole.
+- **ar** — هذا الرابط لا يؤدي إلى شيء. تأكد من نسخه كاملًا.
+
+### `links.not_a_target`
+
+- **en** — {target} is not somewhere a link may point.
+- **ar** — {target} ليس موضعًا يمكن أن يشير إليه رابط.
+
+
 ## `mail`
 
 ### `mail.invitation_body`

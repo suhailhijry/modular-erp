@@ -10,6 +10,7 @@ erp-i18n        message codes, locales, the Localize trait
 erp-eventlog    the tenant log: append, load, upcasters, numbering, outbox
 erp-occupancy   capacity over time: does one more fit
 erp-recurrence  when something repeats: which days, between which two times
+erp-links       short links: a token, where it points, who followed it
 erp-projection  groups, ProjectionCtx, the runner, shadow replay and the differ
 erp-tenant      TenantDb, the Budget trait, roles, EnabledModules, ModuleSetup
 erp-control     identities, tenants, entitlements, clusters, placement, the fleet
@@ -31,6 +32,7 @@ modules/prepaid     packages, deposits, subscriptions, loyalty
 modules/pos         shifts, till sales, the drawer and its variance
 modules/payroll     what a business pays its people, and the entry it makes
 modules/hr_sa       GOSI, and end of service
+modules/reports     figures that agree with the books, built from the log
 ```
 
 `branches` and `crm` are at the top of that list because they depend on nothing

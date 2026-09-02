@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO short_link\n               (key, target, external, created_at, expires_at, single_use)\n           VALUES ($1, $2, $3, $4, $5, $6)\n           ON CONFLICT (key) DO UPDATE SET key = short_link.key\n           RETURNING token as \"token!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "short_link",
+            "name": "token"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Bool",
+        "Timestamptz",
+        "Timestamptz",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "df6b0d7b629f6267f49f6b2ed7ecef236ceb1fe64f2985ddce961e0301b2ecdc"
+}

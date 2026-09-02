@@ -31,6 +31,10 @@ pub static CATALOG: Composite = Composite::new(&[
     // diary's opening hours and the rota's shifts — so it sits below both and
     // its refusals render from here for the same reason occupancy's do.
     &erp_recurrence::CATALOG,
+    // Nor is this. A short link is infrastructure every module may use, and the
+    // three refusals it can make are the only messages in this system a total
+    // stranger reads — somebody tapping a URL in a text message.
+    &erp_links::CATALOG,
     &booking::CATALOG,
     &crm::CATALOG,
     &ledger::CATALOG,

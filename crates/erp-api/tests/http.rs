@@ -6841,3 +6841,106 @@ async fn a_stranger_cannot_book_until_the_business_opens_the_diary() {
 
     fixture.cleanup().await;
 }
+
+/// **A stranger follows a link from a text message.**
+///
+/// Phase 11e's whole surface: no account, no token, no header but `Host`, and a
+/// `Location` back. The three answers are three different instructions to the
+/// person holding the phone, and this asserts all three.
+#[tokio::test]
+async fn a_stranger_follows_a_short_link_and_is_redirected() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+
+    let made = {
+        let mut conn = db.acquire().await.expect("connection");
+        let good = erp_links::shorten(
+            &mut conn,
+            &erp_links::New {
+                key: "booking.reminder.BK-1".to_owned(),
+                target: "/v1/booking/public/services".to_owned(),
+                external: false,
+                expires_at: None,
+                single_use: false,
+                at: "2026-05-01T00:00:00Z".parse().expect("an instant"),
+            },
+        )
+        .await
+        .expect("shortens");
+
+        // One that has already run out. `chrono::Utc::now()` is what the route
+        // measures against, so the expiry has to be a real instant in the past
+        // rather than a fixture date.
+        let stale = erp_links::shorten(
+            &mut conn,
+            &erp_links::New {
+                key: "booking.reminder.BK-2".to_owned(),
+                target: "/v1/booking/public/services".to_owned(),
+                external: false,
+                expires_at: Some("2020-01-01T00:00:00Z".parse().expect("an instant")),
+                single_use: false,
+                at: "2019-01-01T00:00:00Z".parse().expect("an instant"),
+            },
+        )
+        .await
+        .expect("shortens");
+
+        (good, stale)
+    };
+    drop(db);
+
+    // Followed with nothing but a host: this is somebody who has never signed
+    // in and never will.
+    let response = fixture
+        .raw(
+            Request::get(format!("/l/{}", made.0))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("/v1/booking/public/services"),
+        "an internal target goes out relative, so it resolves against this host"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store, private"),
+        "a cached redirect is a single-use link used twice"
+    );
+
+    // Expired is `410 Gone`, not `404`: "ask for a new one", not "check you
+    // copied it whole".
+    let (status, body, _) = fixture
+        .send(
+            Request::get(format!("/l/{}", made.1))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    assert_eq!(body["code"], "links.expired");
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/l/0123456789abcdef")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "links.no_such_link");
+}

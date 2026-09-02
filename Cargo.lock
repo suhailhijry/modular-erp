@@ -591,6 +591,7 @@ dependencies = [
  "erp-control",
  "erp-eventlog",
  "erp-i18n",
+ "erp-links",
  "erp-occupancy",
  "erp-projection",
  "erp-recurrence",
@@ -709,6 +710,21 @@ dependencies = [
  "serde_json",
  "tracing",
  "utoipa",
+]
+
+[[package]]
+name = "erp-links"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-testkit",
+ "erp-types",
+ "serde",
+ "sqlx",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

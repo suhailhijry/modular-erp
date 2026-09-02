@@ -34,6 +34,7 @@
 - [erp-eventlog](./api/erp-eventlog.md)
 - [erp-occupancy](./api/erp-occupancy.md)
 - [erp-recurrence](./api/erp-recurrence.md)
+- [erp-links](./api/erp-links.md)
 - [erp-projection](./api/erp-projection.md)
 - [erp-tenant](./api/erp-tenant.md)
 - [erp-control](./api/erp-control.md)
