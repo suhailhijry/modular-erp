@@ -29,7 +29,7 @@ use erp_web::{
     After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Public, Read,
 };
 use erp_web::{Consistency, nudge};
-use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
+use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, publicly, require_module};
 
 use crate::{Availability, BookingError, Details, Draft, DraftLine, Held, Kind, Stage};
 
@@ -50,6 +50,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         // tenant with booking switched off has no public booking site.
         .routes(routes!(public_services))
         .routes(routes!(public_availability))
+        .routes(routes!(public_reserve))
         .routes(routes!(tariff, set_tariff))
         // Unauthenticated on purpose, like `ledger::list_charts`: a signup form
         // needs to show a salon what a salon gets before anybody has an
@@ -500,6 +501,7 @@ struct FreeQuery {
         (status = OK, description = "One page of what can be booked. `next` is absent when the list ended.", body = Paged<ServiceView>),
         (status = BAD_REQUEST, description = "An unreadable cursor", body = Problem),
         (status = NOT_FOUND, description = "No such business, it is not trading, or it does not take bookings", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "This surface is bounded per origin and per business. The message says how long to wait.", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
     ),
 )]
@@ -555,6 +557,7 @@ async fn public_services(
         (status = OK, body = FreeView),
         (status = BAD_REQUEST, description = "A span that is backwards, empty, or longer than this system will answer for", body = Problem),
         (status = NOT_FOUND, description = "No such business, no such service, or it does not take bookings", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "This surface is bounded per origin and per business. The message says how long to wait.", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
     ),
 )]
@@ -587,6 +590,154 @@ async fn public_availability(
         resource: query.resource,
         free,
     }))
+}
+
+/// A booking a customer makes for themselves.
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "customer_name": "سارة",
+    "customer_phone": "+966500000000",
+    "lines": [{"resource": "CHAIR-1", "from": "2026-05-01T09:00:00Z", "until": "2026-05-01T10:00:00Z"}]
+}))]
+struct PublicReservation {
+    /// What the diary prints. **No `customer` id**, unlike the counter's
+    /// version: a stranger does not get to say which of a business's customer
+    /// records they are, and accepting one would let anybody attach a booking
+    /// to somebody else's file.
+    customer_name: String,
+    customer_phone: Option<String>,
+    lines: Vec<PublicLine>,
+    #[serde(default)]
+    note: String,
+}
+
+/// One slot a customer is asking for.
+#[derive(Debug, Deserialize, ToSchema)]
+struct PublicLine {
+    /// The service being booked.
+    resource: String,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    from: Timestamp,
+    /// Exclusive, so a line ending at 11:00 and one starting at 11:00 are back
+    /// to back and do not clash.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    until: Timestamp,
+    /// What the customer calls it, for the diary. Never read by any rule.
+    #[serde(default)]
+    what: String,
+}
+
+/// What a customer is told after booking.
+#[derive(Debug, Serialize, ToSchema)]
+struct PublicReservationTaken {
+    id: String,
+    /// Always `reserved`. **A public booking is never confirmed by the act of
+    /// making it** — the business confirms, which is the whole difference
+    /// between a request and a promise.
+    stage: &'static str,
+    /// What the business will ask for to hold it, in basis points of the
+    /// booking. **Zero unless configured, and not collected by this build** —
+    /// card payments are Phase 12a. It is here so a site can say what will be
+    /// asked, not so it can claim it was taken.
+    deposit_bp: u32,
+}
+
+/// Book a slot.
+///
+/// # Off unless the business turned it on
+///
+/// Letting strangers write into a diary is a decision a business makes, not a
+/// default they discover. It is a tenant setting — see [`crate::PublicBooking`]
+/// — whose absence is a **no**, so a salon that never asked for online booking
+/// cannot find their week full of appointments nobody intends to keep.
+///
+/// # What it does not do
+///
+/// **It takes no money.** A deposit is the honest answer to no-shows and
+/// `prepaid` already models one; the half that is missing is the gateway, which
+/// is Phase 12a. So a booking made here is held at `reserved` and the business
+/// confirms it — which is what a shop with no online payment does anyway.
+#[utoipa::path(
+    post,
+    path = "/v1/booking/public/reservations",
+    tag = "booking",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — which is how a public request names the business."),
+    ),
+    request_body = PublicReservation,
+    security(),
+    responses(
+        (status = CREATED, body = PublicReservationTaken),
+        (status = BAD_REQUEST, description = "No name, nothing booked, or a span that is not one", body = Problem),
+        (status = NOT_FOUND, description = "No such business, it does not take bookings, or it does not take them online", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The slot went while the form was open", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "This surface is bounded per origin and per business. The message says how long to wait.", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn public_reserve(
+    caller: Public,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    key: IdempotencyKey,
+    Json(body): Json<PublicReservation>,
+) -> Result<(StatusCode, Json<PublicReservationTaken>), Problem> {
+    require_module(&caller.db, &crate::module_id(), locale)?;
+
+    let settings = {
+        let mut conn = caller.db.read().await.map_err(|e| pool(&e, locale))?;
+        crate::PublicBooking::resolve(&mut conn)
+            .await
+            .map_err(|e| {
+                Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG)
+            })?
+    };
+    if !settings.open {
+        // **A 404, not a 403.** The route does not exist for this business, and
+        // saying "forbidden" would confirm that it would work if only the
+        // caller were somebody else — which is not true and not their business.
+        return Err(Problem::new(
+            StatusCode::NOT_FOUND,
+            &erp_i18n::Message::new(erp_web::messages::MODULE_NOT_ENABLED).with(
+                "module",
+                erp_i18n::MessageArg::text(crate::module_id().as_str().to_owned()),
+            ),
+            locale,
+            &CATALOG,
+        ));
+    }
+
+    let draft = Draft {
+        customer: crate::Customer {
+            // **Never from the request.** A stranger does not name which
+            // customer record this is; the business matches it afterwards, the
+            // same reconciliation `sales` does for old invoices.
+            id: None,
+            name: body.customer_name,
+            phone: body.customer_phone,
+        },
+        lines: public_lines(&body.lines, locale)?,
+        note: body.note,
+        // The business's clock, not the caller's. A public caller sending a
+        // booking date in the past is either confused or trying something.
+        at: chrono::Utc::now(),
+    };
+
+    let id = key.id().clone();
+    let committed = crate::reserve(&caller.db, &id, &draft, &publicly(&key))
+        .await
+        .map_err(|e| problem_for(&e, locale))?;
+    let _ = committed;
+
+    nudge(&state, caller.db.tenant()).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(PublicReservationTaken {
+            id: id.to_string(),
+            stage: "reserved",
+            deposit_bp: settings.deposit_bp,
+        }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1495,6 +1646,36 @@ async fn fit_out(
 // ---------------------------------------------------------------------------
 // Translation
 // ---------------------------------------------------------------------------
+
+/// A public caller's lines.
+///
+/// **No `charge`, and that is the point.** The counter's shape lets a member
+/// send the rate, because a member is the business deciding what to charge. A
+/// stranger sending one would be choosing their own price — so this shape has
+/// no field for it and the booking carries none, which leaves what it costs
+/// where it belongs: the tariff, and the business.
+///
+/// One resource per line rather than a set, for the same reason: a customer
+/// books a chair, and which stylist *and* which room that consumes is the
+/// business's arrangement of its own capacity.
+fn public_lines(sent: &[PublicLine], locale: Locale) -> Result<Vec<DraftLine>, Problem> {
+    sent.iter()
+        .map(|line| {
+            let span = Span::new(line.from, line.until).map_err(|e| {
+                Problem::new(StatusCode::BAD_REQUEST, &e.message(), locale, &CATALOG)
+            })?;
+            Ok(DraftLine {
+                what: line.what.clone(),
+                span,
+                takes: vec![Held {
+                    resource: parse_id(&line.resource, locale)?,
+                    quantity: 1,
+                }],
+                charge: None,
+            })
+        })
+        .collect()
+}
 
 fn lines(sent: &[NewReservationLine], locale: Locale) -> Result<Vec<DraftLine>, Problem> {
     sent.iter()

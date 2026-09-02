@@ -271,6 +271,32 @@ impl FromRequestParts<AppState> for Public {
                     .into_problem(locale, &crate::CATALOG)
             })?;
 
+        // **Charged here and not in each handler**, for the same reason the
+        // branch is read here: a public route added tomorrow is bounded without
+        // anybody remembering to bound it. Charged *after* the tenant resolves,
+        // so a flood aimed at names that do not exist cannot consume a real
+        // tenant's budget — and before the database is opened, so a refused
+        // request costs no connection.
+        let caller = parts
+            .headers
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous");
+        if let Err(seconds) = state.limiter.check(tenant.slug.as_str(), caller) {
+            // The wait is in the message's `args`, not a `Retry-After` header —
+            // which is what signup's 429 already does, and one shape for one
+            // answer beats a second mechanism for the same fact.
+            return Err(Problem::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                &erp_i18n::Message::new(crate::messages::TOO_MANY_REQUESTS).with(
+                    "seconds",
+                    erp_i18n::MessageArg::Count(i64::try_from(seconds).unwrap_or(i64::MAX)),
+                ),
+                locale,
+                &crate::CATALOG,
+            ));
+        }
+
         let db = state
             .control
             .enter_for_the_public(tenant.id)

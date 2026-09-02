@@ -35,6 +35,8 @@ pub const MODULE_REQUIRES: MessageCode = MessageCode::new("request.module_requir
 pub const MODULE_REQUIRES_ONE_OF: MessageCode = MessageCode::new("request.module_requires_one_of");
 /// 404. The tenant did not enable the module this route belongs to.
 pub const MODULE_NOT_ENABLED: MessageCode = MessageCode::new("request.module_not_enabled");
+/// 429. Too many public requests to one business, too fast.
+pub const TOO_MANY_REQUESTS: MessageCode = MessageCode::new("request.too_many_requests");
 pub const UNKNOWN_VAT_CATEGORY: MessageCode = MessageCode::new("request.unknown_vat_category");
 pub const NO_SUCH_INVOICE: MessageCode = MessageCode::new("request.no_such_invoice");
 pub const NO_SUCH_BILL: MessageCode = MessageCode::new("request.no_such_bill");
@@ -85,6 +87,7 @@ pub static CODES: &[MessageCode] = &[
     MODULE_REQUIRES,
     MODULE_REQUIRES_ONE_OF,
     MODULE_NOT_ENABLED,
+    TOO_MANY_REQUESTS,
     UNKNOWN_VAT_CATEGORY,
     NO_SUCH_INVOICE,
     NO_SUCH_BILL,
@@ -481,6 +484,16 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         MODULE_NOT_ENABLED,
         Locale::Arabic,
         Template::Simple("وحدة {module} غير مفعَّلة لدى هذا المستأجر."),
+    ),
+    (
+        TOO_MANY_REQUESTS,
+        Locale::English,
+        Template::Simple("Too many requests. Try again in {seconds} seconds."),
+    ),
+    (
+        TOO_MANY_REQUESTS,
+        Locale::Arabic,
+        Template::Simple("طلبات كثيرة جدًا. أعد المحاولة بعد {seconds} ثانية."),
     ),
     (
         UNKNOWN_VAT_CATEGORY,

@@ -6620,3 +6620,169 @@ async fn revoking_an_origin_takes_effect_at_once() {
 
     fixture.cleanup().await;
 }
+
+/// **The public surface is bounded, and a business's own staff are not.**
+///
+/// The bound has to hold without a session to attribute abuse to, and it must
+/// not be the thing that takes the shop offline: a booking form under attack
+/// stops answering strangers, and the people at the counter keep working.
+#[tokio::test]
+async fn a_flood_at_the_booking_page_does_not_close_the_counter() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // Hammer the public page until it says no.
+    let mut refused = None;
+    for _ in 0..800 {
+        let (status, body, _) = fixture
+            .send(
+                get("/v1/booking/public/services")
+                    .header(header::ORIGIN, "https://flood.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            refused = Some(body);
+            break;
+        }
+    }
+
+    let body = refused.expect("the public surface answered 800 requests unbounded");
+    assert_eq!(body["code"], "request.too_many_requests");
+    assert!(
+        body["args"]["seconds"]["value"].as_i64().unwrap_or(0) > 0,
+        "a caller was refused without being told when to come back: {body}"
+    );
+
+    // The counter is unaffected: a member with a session goes through the
+    // authenticated path, which this limiter never sees.
+    let (status, body, _) = fixture
+        .send(
+            get("/v1/booking/resources")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a flood at the public page closed the shop: {body}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Online booking is off until a business turns it on**, and what it takes
+/// when it is on is a request rather than a promise.
+#[tokio::test]
+async fn a_stranger_cannot_book_until_the_business_opens_the_diary() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/booking/resources")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", idem("CHAIR-1"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "CHAIR-1", "name": "كرسي", "kind": "person", "capacity": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let booking = || {
+        Request::post("/v1/booking/public/reservations")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("Idempotency-Key", idem("PUBLIC-BOOKING-1"))
+            .body(Body::from(
+                serde_json::json!({
+                    "customer_name": "سارة",
+                    "customer_phone": "+966500000000",
+                    "lines": [{
+                        "resource": "CHAIR-1",
+                        "from": "2026-05-01T09:00:00Z",
+                        "until": "2026-05-01T10:00:00Z"
+                    }]
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    // Closed by default — and a 404, which does not confirm that it would work
+    // for somebody else.
+    let (status, body, _) = fixture.send(booking()).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a stranger booked a diary nobody opened: {body}"
+    );
+
+    // The business opens it.
+    {
+        let db = fixture
+            .control
+            .enter_for_maintenance(tenant)
+            .await
+            .expect("maintenance entry");
+        let mut conn = db.acquire().await.expect("connection");
+        erp_eventlog::configuration::set(
+            &mut conn,
+            booking::PublicBooking::KEY,
+            &booking::PublicBooking {
+                open: true,
+                deposit_bp: 2_000,
+            },
+            None,
+        )
+        .await
+        .expect("stores the setting");
+    }
+
+    let (status, body, _) = fixture.send(booking()).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["stage"], "reserved",
+        "a public booking promised something the business had not agreed to"
+    );
+    assert_eq!(
+        body["deposit_bp"], 2_000,
+        "the site was not told what will be asked for"
+    );
+
+    // A retry of the same submit — a phone that lost signal — books once.
+    let (status, again, _) = fixture.send(booking()).await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_eq!(again["id"], body["id"], "a retry booked a second slot");
+
+    // And the slot is genuinely held: the chair takes one at a time.
+    let (status, free, _) = fixture
+        .send(
+            get("/v1/booking/public/availability?resource=CHAIR-1&from=2026-05-01T09:00:00Z&until=2026-05-01T10:00:00Z")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{free}");
+    assert_eq!(free["free"], 0, "the booking did not hold the slot");
+
+    fixture.cleanup().await;
+}

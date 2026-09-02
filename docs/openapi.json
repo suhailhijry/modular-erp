@@ -5321,6 +5321,98 @@
         ],
         "type": "object"
       },
+      "PublicLine": {
+        "description": "One slot a customer is asking for.",
+        "properties": {
+          "from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "resource": {
+            "description": "The service being booked.",
+            "type": "string"
+          },
+          "until": {
+            "description": "Exclusive, so a line ending at 11:00 and one starting at 11:00 are back\nto back and do not clash.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "what": {
+            "description": "What the customer calls it, for the diary. Never read by any rule.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource",
+          "from",
+          "until"
+        ],
+        "type": "object"
+      },
+      "PublicReservation": {
+        "description": "A booking a customer makes for themselves.",
+        "example": {
+          "customer_name": "سارة",
+          "customer_phone": "+966500000000",
+          "lines": [
+            {
+              "from": "2026-05-01T09:00:00Z",
+              "resource": "CHAIR-1",
+              "until": "2026-05-01T10:00:00Z"
+            }
+          ]
+        },
+        "properties": {
+          "customer_name": {
+            "description": "What the diary prints. **No `customer` id**, unlike the counter's\nversion: a stranger does not get to say which of a business's customer\nrecords they are, and accepting one would let anybody attach a booking\nto somebody else's file.",
+            "type": "string"
+          },
+          "customer_phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/PublicLine"
+            },
+            "type": "array"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "customer_name",
+          "lines"
+        ],
+        "type": "object"
+      },
+      "PublicReservationTaken": {
+        "description": "What a customer is told after booking.",
+        "properties": {
+          "deposit_bp": {
+            "description": "What the business will ask for to hold it, in basis points of the\nbooking. **Zero unless configured, and not collected by this build** —\ncard payments are Phase 12a. It is here so a site can say what will be\nasked, not so it can claim it was taken.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "stage": {
+            "description": "Always `reserved`. **A public booking is never confirmed by the act of\nmaking it** — the business confirms, which is the whole difference\nbetween a request and a promise.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "stage",
+          "deposit_bp"
+        ],
+        "type": "object"
+      },
       "RatesView": {
         "example": {
           "standard": 1500
@@ -6694,6 +6786,16 @@
             },
             "description": "No such business, no such service, or it does not take bookings"
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This surface is bounded per origin and per business. The message says how long to wait."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -6735,6 +6837,134 @@
           }
         }
       ]
+    },
+    "/v1/booking/public/reservations": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "# Off unless the business turned it on\n\nLetting strangers write into a diary is a decision a business makes, not a\ndefault they discover. It is a tenant setting — see [`crate::PublicBooking`]\n— whose absence is a **no**, so a salon that never asked for online booking\ncannot find their week full of appointments nobody intends to keep.\n\n# What it does not do\n\n**It takes no money.** A deposit is the honest answer to no-shows and\n`prepaid` already models one; the half that is missing is the gateway, which\nis Phase 12a. So a booking made here is held at `reserved` and the business\nconfirms it — which is what a shop with no online payment does anyway.",
+        "operationId": "public_reserve",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicReservation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicReservationTaken"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No name, nothing booked, or a span that is not one"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such business, it does not take bookings, or it does not take them online"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The slot went while the form was open"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This surface is bounded per origin and per business. The message says how long to wait."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "Book a slot.",
+        "tags": [
+          "booking"
+        ]
+      }
     },
     "/v1/booking/public/services": {
       "get": {
@@ -6809,6 +7039,16 @@
               }
             },
             "description": "No such business, it is not trading, or it does not take bookings"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This surface is bounded per origin and per business. The message says how long to wait."
           },
           "500": {
             "content": {

@@ -223,6 +223,10 @@ fn only_the_deliberately_public_routes_are_public() {
         // its capacity; `availability` answers one number.
         ("get", "/v1/booking/public/services"),
         ("get", "/v1/booking/public/availability"),
+        // The one public **write**, and the only one in the build. It is off
+        // unless the business turned it on, it never confirms what it takes,
+        // and it never names a customer record on the caller's word.
+        ("post", "/v1/booking/public/reservations"),
     ];
 
     for (path, method, operation) in operations(&document()) {

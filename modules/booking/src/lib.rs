@@ -64,7 +64,9 @@ pub use commands::{
     customer_resource, declare_resource, fit_out, move_to, reschedule, reserve, restore_resource,
     schedule_resource, withdraw_resource,
 };
-pub use pricing::{Allowance, Applied, Band, Charge, Charged, PriceError, Tariff, price};
+pub use pricing::{
+    Allowance, Applied, Band, Charge, Charged, PriceError, PublicBooking, Tariff, price,
+};
 pub use projections::{
     Booking, ReservationDetail, ReservationLine, ReservationSummary, Reservations, ResourceDetail,
     ResourceSummary, Resources, projections, reservation, reservations, resource, resources,

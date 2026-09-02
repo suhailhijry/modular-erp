@@ -24,6 +24,10 @@ pub struct AppState {
     /// protects; there is no version of it that is safe to keep unsealed
     /// because an environment variable was missing.
     pub sealing: Option<erp_eventlog::SealingKey>,
+    /// What bounds the public surface, which has no session to attribute abuse
+    /// to. Shared across every request this process serves — see
+    /// [`crate::rate`] for what it is and honestly is not.
+    pub limiter: Arc<crate::rate::Limiter>,
 }
 
 impl AppState {
@@ -39,6 +43,7 @@ impl AppState {
             control,
             domain: domain.trim().trim_start_matches('.').to_lowercase().into(),
             sealing: None,
+            limiter: Arc::new(crate::rate::Limiter::new()),
         }
     }
 

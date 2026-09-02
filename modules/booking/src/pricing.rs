@@ -78,6 +78,61 @@ pub struct Band {
     pub uplift: i32,
 }
 
+/// Whether strangers may write into this business's diary, and on what terms.
+///
+/// # Why this is off until somebody turns it on
+///
+/// The two public *reads* are safe by their nature: a shop's own front page is
+/// what they are. A public **write** claims a real slot in a real diary, and an
+/// unauthenticated one can be made by anybody — so a salon that has never asked
+/// for online booking must not find their week full of appointments nobody
+/// intends to keep.
+///
+/// The rate limiter bounds how *fast* that can happen; it does not make it
+/// something a business did not agree to. So this is a tenant's own decision,
+/// stored where their other decisions are, and its default is no.
+///
+/// # Why a deposit is not enforceable here yet
+///
+/// A deposit is the honest answer to no-shows and `prepaid` already models one
+/// — an entitlement with no uses, held against the booking it secures. What is
+/// missing is the half that takes the money: card payments are Phase 12a, and
+/// there is no gateway.
+///
+/// So [`Self::deposit_bp`] is recorded and **not charged**. A tenant who sets it
+/// is describing what they will ask for; nothing in this build collects it, and
+/// pretending otherwise would be a public booking that claims to be secured and
+/// is not. It is here rather than added later because the shape is known and a
+/// setting that arrives with the gateway is a setting nobody had configured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicBooking {
+    /// Off by default. **The absence of a setting is a no**, not a yes.
+    pub open: bool,
+    /// What fraction of the booking a deposit would be, in basis points.
+    ///
+    /// Recorded, not charged — see above. Zero means none.
+    #[serde(default)]
+    pub deposit_bp: u32,
+}
+
+impl PublicBooking {
+    /// Where a tenant's choice is stored.
+    pub const KEY: &'static str = "booking.public";
+
+    /// What this tenant has configured, or the closed default.
+    ///
+    /// A tenant who has stored something unusable gets an error rather than the
+    /// default, the same way `Tariff` does — but note the asymmetry that makes
+    /// this safe either way: the default here is *closed*, so the failure mode
+    /// of an unreadable setting is a booking page that stops working, never one
+    /// that opens up.
+    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, erp_eventlog::ConfigError> {
+        Ok(erp_eventlog::configuration::get::<Self>(conn, Self::KEY)
+            .await?
+            .map_or_else(Self::default, |configured| configured.value))
+    }
+}
+
 /// A tenant's price bands. Configuration, resolved at the moment of booking.
 ///
 /// **Bands, not prices.** What a service costs is the caller's to send; when it

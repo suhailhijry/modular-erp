@@ -160,6 +160,20 @@ pub fn creating<C: Capability>(tenant: &Allowed<C>, key: &crate::IdempotencyKey)
     metadata(tenant).with_fingerprint(key.fingerprint())
 }
 
+/// The metadata a **public** write runs under.
+///
+/// `actor` is deliberately `None` and not a placeholder string. Nobody is
+/// behind this request: writing `"public"` into the field a member's identity
+/// goes in would make an audit trail that reads as though somebody did it, and
+/// the honest record of an anonymous act is the absence of a name.
+///
+/// It still carries the fingerprint, because a public create is exactly the one
+/// most likely to be retried — a phone that lost signal mid-submit.
+#[must_use]
+pub fn publicly(key: &crate::IdempotencyKey) -> Metadata {
+    Metadata::default().with_fingerprint(key.fingerprint())
+}
+
 pub fn parse_id(raw: &str, locale: Locale) -> Result<AggregateId, Problem> {
     AggregateId::new(raw).map_err(|_| bad_request(crate::messages::INVALID_ID, "id", raw, locale))
 }

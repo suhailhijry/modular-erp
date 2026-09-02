@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 841 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 852 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -80,7 +80,29 @@ git rebase --exec 'git commit --amend --no-edit -S' -i <the commit before them>
 
 Nothing else about them differs.
 
-### 5 · The "5,000 tenants" prose was not stale
+### 5 · Phase 17's deposits are recorded, not charged
+
+`booking.public` carries a `deposit_bp`, the public booking response reports it,
+and **nothing collects it** — card payments are Phase 12a and there is no
+gateway. The alternative was to leave the setting out until the gateway lands,
+which means it arrives configured by nobody.
+
+If you would rather the field did not exist until it works, say so and it comes
+out; the argument for keeping it is that the shape is known and a site can
+honestly tell a customer what will be asked for.
+
+### 6 · Public booking writes are gated on an opt-in I invented
+
+Nothing in the plan asked for `booking.public`. The plan's answer to abuse of a
+public write is the deposit, and the deposit does not work yet — so a public
+booking that anybody can make would let a script fill a salon's week with
+appointments nobody intends to keep, bounded only by a rate limiter.
+
+So it is off unless a business turns it on. That is a product decision I made
+rather than a technical one, and it is the one thing in this phase I would most
+expect you to want changed.
+
+### 7 · The "5,000 tenants" prose was not stale
 
 I had this on the gap list from an earlier session. It is wrong: `ARCHITECTURE.md`,
 `pools.rs` and `placement.rs` all quote 5,000, and this document's own target is
@@ -1804,44 +1826,93 @@ pages, the Arabic and English rendering, the embed snippet and the Instagram-bio
 link all leave this repository. What arrives in their place is the thing a
 same-origin server-rendered site would never have needed.
 
-- [ ] **CORS, which does not exist here at all.** Not a line of it, because until
-      now every caller was same-origin. It cannot be a blanket `*`: this surface
-      reads a tenant's diary and takes deposits. Allowed origins are **per
-      tenant** — a tenant configuration value, and therefore a security boundary
-      that a tenant edits, which is a shape nothing here has yet
-- [ ] **Tenant resolution is the decision to take first.** The tenant *is* the
-      subdomain, read from `Host`, and `extract.rs` carries a careful note about
-      why that header is safe to trust for it. A browser sitting on `salon.com`
-      calling a shared `api.erp.com` breaks that: the `Host` is the API's, and
-      the tenant would have to be named some other way — a new resolution path,
-      and a new way to get tenant isolation wrong.
+- [x] **The surface itself.** `erp_web::Public` is the first thing in this build
+      to open a tenant with **no person behind it**, and what makes it safe is
+      construction rather than care: the handle carries no access, so
+      `TenantDb::role()` is `None` and every capability check refuses it. A
+      public handler cannot reach a guarded command by forgetting something — it
+      would have to call a module function directly, which is a visible line
+      rather than a missing one.
 
-      **Recommended: the site calls `salon.erp.com`.** The React app's API base
-      URL is per tenant, the subdomain stays the single source of tenant
-      identity, and the existing safety argument stays true. CORS then does the
-      cross-origin work, which is what it is for
-- [ ] **Custom domains mostly leave.** ACME and certificate automation belong to
-      wherever the React site is hosted, which is the larger half and no longer
-      this repository's. What stays is **domain verification** — proving a
-      tenant owns `salon.com` before it goes on their CORS allowlist — because
-      that half was never about certificates
-- [ ] Deposits at booking, which is the honest answer to no-shows and is a
-      `prepaid` liability like everything else. Unchanged, and now the only
-      money-taking part of the phase that lives here
-- [ ] **A public surface changes the threat model, and a cross-origin one
-      sharpens it.** Signup was the only unauthenticated write path and it took
-      two rounds to make safe; this adds a second, per tenant, taking money —
-      with **no session to attribute abuse to**. Rate limiting per caller
-      (Phase 12c) stops being deferrable and becomes the only defence, which
-      means it is scoped by something other than an identity: origin, IP, and
-      the tenant being booked
-- [ ] **`docs/openapi.json` stops being documentation and becomes a contract.**
-      It is already generated and already guarded by
-      `the_document_matches_the_router`, which is most of the way there. What it
-      does not have is any statement about **breaking change**: with one
-      repository a renamed field was a compile error, and with two it is a
-      deployment that silently stops working. The versioning discipline the
-      `/v1` prefix implies has to become a rule somebody can check
+      It is also the first caller of **`Lane::Client`**, which has existed since
+      Phase 1 and been used only by tests. "A tenant's customers, through their
+      app or website. The flood" is what the lane was written for, and using it
+      is what stops a bot on a booking form starving the counter staff serving
+      people in the shop.
+- [x] **Three public routes, deliberately narrower than their authenticated
+      counterparts.** `services` never shows a withdrawn resource and never its
+      capacity; `availability` answers one number; `reservations` takes a
+      booking with **no price and no customer id on it** — a stranger choosing
+      their own rate, or naming which of a business's customer records they are,
+      are both things the counter's shapes allow and this one must not.
+- [x] **CORS, which did not exist here at all.** Allowed origins are per tenant
+      and checked through the control plane's entry cache — one staleness story,
+      not two. Written here rather than configured from `tower-http` because
+      that layer decides an origin with a *synchronous* predicate and this
+      answer is an `await`; feeding a sync predicate would need a second cache
+      refreshed on its own schedule.
+
+      Never a wildcard, never credentials, and **never a suffix match** — a
+      tenant that allows `https://salon.com` must not admit
+      `https://salon.com.attacker.example`. Verified by falsification: writing
+      the check as `ends_with` fails the test.
+- [x] **Tenant resolution: settled as recommended.** The site calls
+      `salon.erp.com`, so the subdomain stays the single source of tenant
+      identity and `extract.rs`'s safety argument stays true unchanged. CORS
+      does the cross-origin work, which is what it is for. `tenant_label` is now
+      shared between the extractor and the middleware, because two
+      implementations of "which tenant is this host" is how one of them comes to
+      admit `a.b.acme.erp.com`.
+- [x] **Domain verification**, and custom domains otherwise gone as planned. A
+      domain is claimed and proved; only a proved domain licenses origins, so
+      adding `https://www.salon.com` after `https://salon.com` is a row and not
+      a second proof. The verification token is minted **inside the control
+      plane** so no caller can choose a predictable one — the same lesson
+      `sales` learned about the journal entry id.
+
+      **What proves it is not built**, and the module says so: reaching out to
+      DNS or a well-known URL is an outbound call, an outbound call is an outbox
+      effect (D9), and that handler does not exist. `POST .../verification` is
+      an operator recording that the check was made by hand, audited as
+      `tenant.domain_verified`.
+- [x] **Rate limiting, which stopped being deferrable.** Two fixed windows per
+      node: per (business, origin) and per business. Charged in the extractor
+      rather than in each handler, so a public route added tomorrow is bounded
+      without anybody remembering to bound it — and charged *after* the tenant
+      resolves, so a flood aimed at names that do not exist cannot consume a
+      real tenant's budget.
+
+      **Honestly per node**, and the numbers are chosen knowing it. Fleet-wide
+      means Redis on the request path: failing open would be exactly the
+      degradation L6 refuses, and failing closed makes a cache outage an outage.
+      Per-node is the honest third answer, and the sharper key — a thing the
+      caller *holds* rather than asserts — is Phase 12c's API key.
+- [~] **Deposits at booking.** `prepaid` already models one: an entitlement with
+      no uses, held against the booking it secures. What is missing is the half
+      that takes the money, and card payments are Phase 12a.
+
+      So the setting exists and is **recorded rather than charged**, which the
+      response says: a site can tell a customer what will be asked for, and
+      nothing in this build claims to have collected it. Building it any other
+      way would be a booking that reports itself secured and is not.
+- [ ] **`docs/openapi.json` as a contract.** Still the open item. It is
+      generated and guarded by `the_document_matches_the_router`, and it now
+      declares which operations are public and which statuses each answers —
+      including the 429, which the contract check caught the moment the limiter
+      started returning one. What it still has no statement about is **breaking
+      change**: with one repository a renamed field was a compile error, with
+      two it is a deployment that silently stops working.
+
+**One decision worth keeping.** Online booking is **off until a business turns
+it on**, and the absence of the setting is a no. The two public *reads* are safe
+by their nature — a shop's front page is what they are. A public **write** claims
+a real slot in a real diary, and a salon that never asked for online booking must
+not find their week full of appointments nobody intends to keep. The rate limiter
+bounds how fast that can happen; it does not make it something the business
+agreed to.
+
+Refusing is a **404 and not a 403**, because "forbidden" would confirm the route
+would work for somebody else, which is neither true nor the caller's business.
 
 ---
 

@@ -134,7 +134,12 @@ fn every_handler_that_creates_passes_the_idempotency_key() {
             let Some(command) = calls else { continue };
             checked += 1;
 
-            if !body.contains("creating(&tenant") {
+            // `publicly(&key)` is the third form, and it carries the same
+            // fingerprint. A public create is the one most likely to be
+            // retried — a phone that lost signal mid-submit — so it is held to
+            // exactly this rule; what it does not carry is an actor, because
+            // nobody was behind it.
+            if !body.contains("creating(&tenant") && !body.contains("publicly(&key)") {
                 offenders.push(format!(
                     "{name}::http::{handler} calls {command}, which creates, but passes no \
                      idempotency key — use `creating(&tenant, &key)` rather than \

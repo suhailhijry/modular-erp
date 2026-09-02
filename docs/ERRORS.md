@@ -803,6 +803,11 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **en** — A password needs at least {n} characters.
 - **ar** — تحتاج كلمة المرور إلى {n} حرف على الأقل.
 
+### `request.too_many_requests`
+
+- **en** — Too many requests. Try again in {seconds} seconds.
+- **ar** — طلبات كثيرة جدًا. أعد المحاولة بعد {seconds} ثانية.
+
 ### `request.unknown_account_kind`
 
 - **en** — {kind} is not an account type. Use asset, liability, equity, revenue or expense.
