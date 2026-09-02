@@ -107,3 +107,32 @@ CREATE TABLE IF NOT EXISTS employee_skill (
 -- "Who can do this service", which is the question a rota screen asks.
 CREATE INDEX IF NOT EXISTS employee_skill_by_service_idx
     ON employee_skill (service, employee);
+
+-- What somebody is paid, as a payroll screen shows it.
+--
+-- **Not what a payroll run reads.** A run computes from the aggregate inside
+-- the command that posts, for the reason a claim check does: money leaving the
+-- business on the strength of a table that may be a second behind is the one
+-- kind of lag nobody accepts.
+--
+-- The components are JSON rather than rows, because nothing queries inside them
+-- — a payslip prints them and a report sums the totals beside them.
+CREATE TABLE IF NOT EXISTS employee_salary (
+    employee      TEXT PRIMARY KEY REFERENCES employee (id) ON DELETE CASCADE,
+
+    -- All in minor units, and all in the same currency: a salary is paid in one.
+    basic         BIGINT NOT NULL,
+    -- Basic plus allowances. **Stored rather than derived**, because it is what
+    -- GOSI and end-of-service are computed from and a report that recomputed it
+    -- from a JSON blob would be a second implementation of the rule.
+    gross         BIGINT NOT NULL,
+    -- Gross less deductions: what actually gets paid.
+    net           BIGINT NOT NULL,
+    currency      TEXT NOT NULL,
+
+    allowances    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    deductions    JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+    recorded_at   TIMESTAMPTZ NOT NULL,
+    position      BIGINT NOT NULL
+);

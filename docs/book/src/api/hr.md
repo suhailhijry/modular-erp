@@ -243,6 +243,38 @@ including everybody with no skills recorded. A screen that offered somebody the
 rota would refuse, or hid somebody it would allow, is worse than no screen, and
 `the_who_can_do_this_list_matches_what_assign_would_allow` asserts they agree.
 
+## What somebody is paid
+
+```rust
+pub struct Salary {
+    pub basic: Money,
+    pub allowances: Vec<Component>,  // added
+    pub deductions: Vec<Component>,  // taken off
+}
+```
+
+On the employee and not its own aggregate, because every question anybody asks
+of it is asked about a *person* — and the log keeps every change, which is the
+history a contract aggregate would have been for.
+
+**Amounts, not percentages.** A housing allowance quoted as 25% of basic is
+stored as the riyals it came to: a rate here would be recomputed on every run,
+and a basic-pay rise would silently restate last month's payslip.
+
+`deductions` is what the business takes off. **Not tax and not GOSI** — those are
+statutory, computed from the gross by `hr_sa`, and a business that could type
+them in here would be able to get them wrong.
+
+`gross` is basic plus allowances and is what statutory contributions and
+end-of-service are computed from, so it is one function rather than an expression
+repeated at each call site — and it is **stored** in the read model rather than
+derived, because a report recomputing it from a JSON blob would be a second
+implementation of the rule.
+
+`payroll` reads it from the **aggregate** inside the transaction that posts:
+money leaving the business on the strength of a table that may be a second
+behind is the one kind of lag nobody accepts.
+
 ## Documents that expire
 
 An expired iqama stops a person working. So this is a **refusal, not a

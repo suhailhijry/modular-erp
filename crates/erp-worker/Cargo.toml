@@ -22,6 +22,7 @@ sales = { workspace = true }
 prepaid = { workspace = true }
 branches = { workspace = true }
 hr = { workspace = true }
+payroll = { workspace = true }
 pos = { workspace = true }
 purchases = { workspace = true }
 tax_sa = { workspace = true }

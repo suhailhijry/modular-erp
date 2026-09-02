@@ -596,8 +596,10 @@ dependencies = [
  "erp-types",
  "erp-web",
  "hr",
+ "hr_sa",
  "ledger",
  "openssl",
+ "payroll",
  "pos",
  "prepaid",
  "purchases",
@@ -658,7 +660,9 @@ dependencies = [
  "erp-testkit",
  "erp-types",
  "hr",
+ "hr_sa",
  "ledger",
+ "payroll",
  "pos",
  "prepaid",
  "purchases",
@@ -813,6 +817,7 @@ dependencies = [
  "hr",
  "ledger",
  "lettre",
+ "payroll",
  "pos",
  "prepaid",
  "purchases",
@@ -1116,6 +1121,33 @@ dependencies = [
  "erp-testkit",
  "erp-types",
  "erp-web",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+]
+
+[[package]]
+name = "hr_sa"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "branches",
+ "chrono",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-projection",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "hr",
  "serde",
  "serde_json",
  "sqlx",
@@ -1690,6 +1722,34 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "payroll"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "branches",
+ "chrono",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-projection",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "hr",
+ "ledger",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+]
 
 [[package]]
 name = "percent-encoding"

@@ -1809,6 +1809,23 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("expiring_documents", ALL_ROLES),
     ("list_skills", ALL_ROLES),
     ("record_skills", OWNER),
+    ("record_salary", OWNER),
+    // Payroll. Drafting posts nothing and approving posts, so both sit with
+    // the other recording work — an accountant runs payroll.
+    ("list_runs", ALL_ROLES),
+    ("get_run", ALL_ROLES),
+    ("run_payslips", ALL_ROLES),
+    ("draft_run", &["owner", "accountant", "clerk"]),
+    ("approve_run", &["owner", "accountant", "clerk"]),
+    ("payroll_accounts", ALL_ROLES),
+    ("set_payroll_accounts", &["owner", "accountant"]),
+    // The Kingdom's own arithmetic. Both calculations answer and record
+    // nothing, so anybody may ask; the schedule they are computed from is the
+    // shape of the books.
+    ("gosi_schedule", ALL_ROLES),
+    ("gosi_for", ALL_ROLES),
+    ("end_of_service_for", ALL_ROLES),
+    ("set_gosi_schedule", &["owner", "accountant"]),
     // Which websites may call this tenant's public API. Reading the list is
     // ordinary; changing it is changing who may reach a business's diary from a
     // browser, which is the owner's decision and nobody else's.
@@ -1977,8 +1994,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        132,
-        "expected a hundred and thirty-two role-scoped operations"
+        144,
+        "expected a hundred and forty-four role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

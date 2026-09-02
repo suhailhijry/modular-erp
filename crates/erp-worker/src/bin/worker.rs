@@ -606,6 +606,14 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
             .for_module(prepaid::module_id()),
         ),
         Arc::new(
+            ProjectionJob::<payroll::Payroll>::new(
+                payroll::projections(),
+                Arc::new(payroll::upcasters().clone()),
+                200,
+            )
+            .for_module(payroll::module_id()),
+        ),
+        Arc::new(
             ProjectionJob::<hr::Hr>::new(hr::projections(), Arc::new(hr::upcasters().clone()), 200)
                 .for_module(hr::module_id()),
         ),
@@ -778,8 +786,13 @@ mod tests {
     /// workspace stay green.
     #[test]
     fn every_module_has_a_projection_job() {
+        // **A module with no projection groups needs no job**, and `hr_sa` is
+        // the first: it is arithmetic and one configuration key, so there is
+        // nothing to project. Keyed off the setup rather than a list of names,
+        // because a name here is one somebody has to remember to remove.
         let offered: BTreeSet<String> = erp_api::modules()
             .into_iter()
+            .filter(|(_, setup)| !setup.groups.is_empty())
             .map(|(_, setup)| setup.module.as_str().to_owned())
             .collect();
 

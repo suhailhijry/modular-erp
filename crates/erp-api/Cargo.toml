@@ -17,6 +17,8 @@ erp-eventlog = { workspace = true }
 booking = { workspace = true }
 crm = { workspace = true }
 hr = { workspace = true }
+payroll = { workspace = true }
+hr_sa = { workspace = true }
 erp-occupancy = { workspace = true }
 ledger = { workspace = true }
 sales = { workspace = true }

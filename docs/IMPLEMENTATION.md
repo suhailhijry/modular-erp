@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 878 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 902 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -20,9 +20,19 @@ written; they are history, not status. What is not yet true is collected under
 
 ## For review — decisions I made without you
 
-Written during the gap-closing pass of 2026-09-01/02, while you were away. Each
-is a judgement call I took rather than stopping on; each is reversible. Read
-them, and delete this section once you have.
+Written across 2026-09-01/02 while you were away: a gap-closing pass, then
+Phase 17, then Phase 9. Each item below is a judgement call I took rather than
+stopping on, and each is reversible. Read them, and delete this section once you
+have.
+
+**What landed, in order:** the closable gaps and two defects they exposed; the
+public booking API with per-tenant CORS, rate limiting and an API-compatibility
+guard (Phase 17); the org chart with claims travelling up it, work documents,
+skills, payroll and the Saudi statutory arithmetic (Phase 9a–9g, less shifts,
+attendance, commission and WPS).
+
+**The one to read first is §5**, because it is about numbers that come out of
+this system and go to a government.
 
 ### 1 · Two views over the invoice, rather than one
 
@@ -68,7 +78,58 @@ waits, so a timing window is plausible.
 Left as-is rather than papered over with a retry. If it recurs, the suspect is
 that `kill_connection` returns before the backend has finished rolling back.
 
-### 4 · Two commits are unsigned
+### 4 · Phase 9 decisions I took without you
+
+The org chart went in overnight, and four calls in it are product decisions
+rather than technical ones.
+
+**The root is a superuser.** The union makes the top of the tree hold every
+claim in the company. I settled that as *intended* — the person nobody reports
+to is the owner — and put anybody who must sit outside it (an auditor, a
+bookkeeper on retainer) outside the tree entirely, as a platform membership.
+The alternative is an explicit "outside the hierarchy" flag on `Employee`.
+
+**`SEGREGATED` is a constant, not configuration.** A tenant cannot switch off
+the segregation-of-duties list, on the grounds that what an auditor requires is
+not a preference a business expresses. If a customer needs a different list, it
+becomes tenant configuration and the argument above stops being true.
+
+**An empty skill list means *anything*.** The alternative — empty means nothing
+— would refuse every assignment in every existing tenant the day the module is
+switched on. The cost is that recording the first skill starts restricting,
+which is why the API takes the whole set at once and offers no way to add one.
+
+**A part-period joiner refuses the payroll run.** Pro-rating is real arithmetic
+and Saudi contracts differ on working days versus calendar days, so I stopped
+rather than guessed. That means a business hiring mid-month cannot run payroll
+for that month until somebody builds pro-rating. If you would rather it paid a
+full month, or a simple calendar-day proration, say which.
+
+### 5 · The GOSI defaults ship, and I am not certain they are current
+
+`hr_sa::gosi::Schedule::default()` carries 9.75% employee / 11.75% employer for
+Saudis, 2% employer for non-Saudis, and a 45,000 ceiling. Those are the
+long-standing figures. **I could not verify them against the authority's current
+schedule from here**, and the 2024 pension reform put new entrants on a
+different and rising scale that this shape does not express at all — it has one
+rate per footing, not one per cohort.
+
+What I did about it: the rates are configuration rather than constants, the
+schedule read answers `configured` so a tenant can see nobody has confirmed
+them, and it is said in the module docs, the book and this document.
+
+**What you may want instead**, and I would understand either:
+
+- **No defaults.** `resolve` refuses until a tenant configures, so a payroll run
+  cannot happen on numbers nobody checked. More consistent with L6 — stop rather
+  than degrade — and it is money withheld from people's pay and remitted to a
+  government, which is not the same as an account code that a reclassification
+  entry can fix.
+- **A cohort on the employee.** If new entrants really are on a separate scale,
+  `Footing` needs a third case or a date, and that is a change to the shape
+  rather than to the numbers.
+
+### 6 · The overnight commits are unsigned
 
 `gpg` needs a pinentry TTY for your key's passphrase and I have neither, so the
 gap-closing commits went in with `--no-gpg-sign`. Re-sign them when you are
@@ -78,9 +139,11 @@ back:
 git rebase --exec 'git commit --amend --no-edit -S' -i <the commit before them>
 ```
 
-Nothing else about them differs.
+Nothing else about them differs. **Every commit from the gap-closing pass
+onward** is unsigned, not just two — the count in this heading is out of date
+the moment another lands, so treat it as "the overnight run".
 
-### 5 · Phase 17's deposits are recorded, not charged
+### 7 · Phase 17's deposits are recorded, not charged
 
 `booking.public` carries a `deposit_bp`, the public booking response reports it,
 and **nothing collects it** — card payments are Phase 12a and there is no
@@ -91,7 +154,7 @@ If you would rather the field did not exist until it works, say so and it comes
 out; the argument for keeping it is that the shape is known and a site can
 honestly tell a customer what will be asked for.
 
-### 6 · Public booking writes are gated on an opt-in I invented
+### 8 · Public booking writes are gated on an opt-in I invented
 
 Nothing in the plan asked for `booking.public`. The plan's answer to abuse of a
 public write is the deposit, and the deposit does not work yet — so a public
@@ -102,7 +165,7 @@ So it is off unless a business turns it on. That is a product decision I made
 rather than a technical one, and it is the one thing in this phase I would most
 expect you to want changed.
 
-### 7 · The "5,000 tenants" prose was not stale
+### 9 · The "5,000 tenants" prose was not stale
 
 I had this on the gap list from an earlier session. It is wrong: `ARCHITECTURE.md`,
 `pools.rs` and `placement.rs` all quote 5,000, and this document's own target is
@@ -1363,30 +1426,121 @@ refuses to roster anyone whose document has lapsed.
 
 ### 9f · `modules/payroll`
 
-- [ ] Salary structure: basic, allowances, deductions
-- [ ] A run produces a journal entry, posted to `ledger` by subscription — the
-      direction `tax_sa → sales` already runs
+- [x] Salary structure: basic, allowances, deductions — on `Employee`, because
+      every question anybody asks of it is asked about a *person*, and the log
+      keeps the history a contract aggregate would have been for.
+
+      **Amounts, not percentages.** A housing allowance quoted as 25% of basic
+      is stored as the riyals it came to, because a rate stored here would be
+      recomputed on every run and a basic-pay rise would silently restate last
+      month's payslip
+- [x] A run produces a journal entry — **posted inline through
+      `ledger::post_entry_in`, not by subscription.** The plan said subscription,
+      pointing at `tax_sa → sales`; that direction is right for *reading* a
+      module's events and wrong for money. A run that existed and had not posted
+      yet is a state nobody could explain, so it commits with its entry the way
+      an invoice does.
+
+      **Drafting and approving are two steps.** Drafting posts nothing, so a
+      business reads it, fixes the two people whose overtime is wrong, and runs
+      it over. A single-step run would have posted the first attempt before
+      anybody looked.
 - [ ] Commission from booking: a person earns on the services they performed,
-      which is where the three modules meet
+      which is where the three modules meet. **The seam it needs now exists** —
+      `booking`'s resources name an employee, so "who performed this" is
+      answerable — and what is missing is the rate and the line on the run
+
+**Three things this got wrong first, all caught by a test.**
+
+- `5100` is **Rent** in every shipped chart, and the first `PostingAccounts`
+  used it for wages. The kind of default that posts a year of salary somewhere
+  nobody looks until an audit. `2210 Payroll deductions` did not exist and now
+  ships in every chart, for the reason `2400` and `5910` do
+- `try_create` plus catching `AlreadyExists` looked like a way to detect an
+  existing run. That variant is about a *different request* reusing an id, so
+  with no fingerprint a second draft looked like a retry and redrafting silently
+  did nothing. Fixed by not needing the distinction: a run is named by the
+  caller and redrafting is the operation, so it is `try_execute`
+- `salary_for` took a day and **ignored it** — the compiler said so. Employment
+  was answered as "now", which would have refused a leaver their last month and
+  paid a full month to somebody who started on the 20th. It is
+  `was_employed_throughout` now, and a part-period joiner refuses the run rather
+  than being guessed at
 
 ### 9g · `modules/hr_sa` — a country module, mirroring `tax_sa`
 
-- [ ] **GOSI** contributions, employee and employer shares
+- [x] **GOSI** contributions, employee and employer shares.
+
+      **The rates are configuration and the shipped ones are a starting point**,
+      which is the load-bearing decision: the authority sets the schedule and
+      has changed it — most recently for people entering after the 2024 pension
+      reform, who are on a different and rising scale. A build that hard-coded a
+      percentage would be quietly wrong for some employees from the day it
+      shipped. `GET .../gosi/schedule` answers with `configured`, so nobody
+      discovers on a payslip that they were on numbers nobody had checked.
+
+      The ceiling caps the **base**, not the contribution — capping the
+      contribution would give the employee and the employer different effective
+      bases, which is the subtle version of the bug and the one a payslip does
+      not show. Whether somebody is Saudi is **stated, not inferred**: nothing
+      here can work it out from a name
 - [ ] **WPS** — the monthly salary file the Ministry mandates. The same shape as
       the ZATCA submission already built: a generated document, a schema, a
-      transmission, a receipt, a status
-- [ ] **End-of-service benefit** — statutory gratuity by a defined formula over
-      service length. Exact, because `Money` is integer minor units
+      transmission, a receipt, a status.
+
+      **Deliberately not guessed at.** The specification — field order,
+      encoding, each bank's own variations — is not something this build can
+      verify from where it stands, and a file that is *almost* right is one the
+      bank rejects on the day wages are due. Same position `tax_sa` was in
+      before somebody had a sandbox to submit against
+- [x] **End-of-service benefit** — Articles 84 and 85, as a pure function.
+      Exact, and the workspace's ban on floating-point arithmetic is what made
+      it so: the first version computed months as an `f64` and the lint refused
+      it, which turned out to be a precision *improvement* as well as a rule —
+      912 days is 1.24931506… months, not the 1.2493 the decimal version gave.
+
+      One numerator over one denominator, so the rounding happens once and away
+      from zero. **365 days and not 360**: the Labour Law speaks in years and a
+      calendar year is what a court would read, and a tenant who wants the other
+      convention should have to argue for it.
+
+      Why somebody left is **stated and not inferred** — Article 87's marriage
+      and childbirth cases and Article 80's dismissal for cause are facts about
+      *why*, which nothing here can work out
 
 **Exit:** a payroll run posts, a WPS file validates, and an expiring document
 reaches somebody.
 
-**And the org half, which is a separate claim and needs its own:** a branch
-manager holds every claim her cashiers hold without anyone granting it twice; a
-claim marked non-propagating stops at the person it was given to, so the invoice
-raiser and the payment approver still cannot be the same authority; re-parenting
-a department moves its claims and says so in the log; and a company-wide payroll
-run reads every branch while a branch manager's employee list defaults to one.
+### 9g's shape, and why `hr_sa` has no schema
+
+It holds **no state at all**. Every function is arithmetic over what it is
+given, and the one thing it stores — the GOSI schedule — is a configuration
+value in the shared store. So `install` does nothing and there is no projection
+group.
+
+Two guards in the worker had to learn that: *every module has a projection job*
+and *every module can be rebuilt* now key off `setup.groups.is_empty()` rather
+than a list of exceptions, so the next arithmetic-only module needs no edit
+there. That is the second time this week a guard was right and the fix was to
+teach it the rule rather than add a name to it.
+
+**And the org half, which is a separate claim and needs its own: met.**
+`a_claim_travels_up_the_reporting_line` has a branch manager holding what her
+cashier holds without a second grant; `a_segregated_claim_travels_nowhere` keeps
+the invoice raiser and the payment approver apart;
+`moving_somebody_moves_what_their_team_holds` re-parents and asserts both the
+gain and the loss; and `GET /v1/hr/employees` defaults to the caller's branch
+with `?scope=all` for the company-wide read a payroll run needs.
+
+**Exit, as it stands.** Two of three. A payroll run posts and the trial balance
+is still square (`a_payroll_run_posts_and_the_books_balance`); an expiring
+document reaches somebody (`WorkDocumentExpiry`). **The WPS file does not
+validate, because it is not built** — see §9g for why that is a refusal rather
+than an omission.
+
+**What is left in the phase**, all additive and none of it changing anything
+built: shifts, attendance and leave (§9a); commission from booking (§9f); and
+WPS (§9g), which is blocked on a specification this build cannot verify.
 
 ---
 

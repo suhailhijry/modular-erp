@@ -1,0 +1,138 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", period as \"period!\", gross as \"gross!\",\n                  deductions as \"deductions!\", net as \"net!\", currency as \"currency!\",\n                  people as \"people!\", drafted_at as \"drafted_at!\", approved_at, entry\n             FROM proj_payroll.run\n            WHERE ($2::text = '' OR (period, id) < ($2, $3))\n            ORDER BY period DESC, id DESC\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "period!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "period"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "gross"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "deductions!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "deductions"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "people!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "people"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "drafted_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "drafted_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "approved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "approved_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "entry",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.run",
+            "name": "entry"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "3a225f4a58ea2cfecf716d24eb3897d7a291e2eb8f6a8b8b8aeb932e2579fa9b"
+}

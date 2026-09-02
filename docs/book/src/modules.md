@@ -119,6 +119,33 @@ the count somebody took, and the variance. Only cash is in the box, and the
 variance posts — a shortage that is recorded but not booked leaves the ledger
 saying the drawer holds what it does not.
 
+## payroll
+
+What a business pays its people, and the entry it makes.
+
+**Drafting posts nothing and approving posts.** A business reads the draft, fixes
+the two people whose overtime is wrong, and runs it over — a single-step run
+would have posted the first attempt before anybody looked.
+
+A hundred employees is a hundred payslips and one journal entry. Gross is the
+expense and net is what is owed; what is withheld is a liability, because it is
+somebody else's money. GOSI and the WPS file are Saudi statute and belong in a
+country module, for the reason VAT lives in `tax_sa`.
+
+## hr_sa
+
+What the Kingdom requires of an employer: GOSI contributions, and the
+end-of-service benefit.
+
+A country module, mirroring `tax_sa`, for the same reason VAT is not in `sales`.
+It holds no state at all: every function is arithmetic over what it is given,
+and the one thing it stores — the GOSI schedule — is a configuration value.
+
+**The rates are configuration and the shipped ones are a starting point.** The
+authority sets the schedule and has changed it; a build that hard-coded a
+percentage would be quietly wrong for somebody from the day it shipped. The API
+says whether anybody has confirmed them.
+
 ## How modules learn about each other
 
 By subscribing to the log. `tax_sa` finds out an invoice was issued by reading

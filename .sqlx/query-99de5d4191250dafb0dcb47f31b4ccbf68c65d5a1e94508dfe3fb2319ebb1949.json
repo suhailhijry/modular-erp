@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.basic as \"basic!\", s.gross as \"gross!\", s.currency as \"currency!\",\n                  e.hired_on as \"hired_on!\", e.left_at\n             FROM proj_hr.employee_salary s\n             JOIN proj_hr.employee e ON e.id = s.employee\n            WHERE s.employee = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "basic!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_salary",
+            "name": "basic"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_salary",
+            "name": "gross"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_salary",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "hired_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "hired_on"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "left_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "left_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "99de5d4191250dafb0dcb47f31b4ccbf68c65d5a1e94508dfe3fb2319ebb1949"
+}

@@ -1,0 +1,37 @@
+[package]
+name = "hr_sa"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "What the Kingdom requires of an employer: GOSI, and end of service."
+
+[lints]
+workspace = true
+
+[dependencies]
+erp-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+hr = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+branches = { workspace = true }
+erp-projection = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

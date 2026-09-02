@@ -40,6 +40,10 @@ pub enum HrError {
     Left(String),
     #[error("a document needs its number")]
     NoDocumentNumber,
+    #[error("a salary needs positive basic pay, and every part in one currency")]
+    NotASalary,
+    #[error("what is taken off comes to more than what is paid")]
+    DeductionsExceedPay,
     #[error(transparent)]
     Details(#[from] BadEmployee),
     #[error(transparent)]
@@ -62,6 +66,8 @@ impl erp_i18n::Localize for HrError {
             }
             Self::Left(id) => Message::new(messages::LEFT).with("id", MessageArg::text(id)),
             Self::NoDocumentNumber => Message::new(messages::NO_DOCUMENT_NUMBER),
+            Self::NotASalary => Message::new(messages::NOT_A_SALARY),
+            Self::DeductionsExceedPay => Message::new(messages::DEDUCTIONS_EXCEED_PAY),
             Self::Details(BadEmployee::NoName) => Message::new(messages::NO_NAME),
             Self::Details(BadEmployee::NoContact) => Message::new(messages::NO_CONTACT),
             Self::Claims(e) => e.message(),
@@ -380,6 +386,95 @@ pub async fn record_document(
         }))
     })
     .await
+}
+
+/// Records what somebody is paid.
+///
+/// **Its own command and its own event.** A rise is not an amendment of a phone
+/// number, and it is the change somebody will ask to see dated.
+///
+/// Refuses a mixed-currency salary: a person is paid in one, and allowing two
+/// would make `gross` a number that cannot be added up.
+pub async fn record_salary(
+    db: &TenantDb,
+    id: &AggregateId,
+    salary: &crate::Salary,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    if !salary.basic.is_positive() {
+        return Err(rejected(HrError::NotASalary));
+    }
+    // Every part in the basic's currency, and every part positive. A negative
+    // allowance is a deduction somebody typed in the wrong box, and letting it
+    // through would make the payslip arithmetic right and the payslip wrong.
+    let currency = salary.basic.currency();
+    let parts = salary.allowances.iter().chain(salary.deductions.iter());
+    if parts
+        .clone()
+        .any(|p| p.amount.currency() != currency || !p.amount.is_positive())
+    {
+        return Err(rejected(HrError::NotASalary));
+    }
+    // And what is taken off cannot exceed what is paid: a negative payslip is
+    // not a payslip, it is an invoice to the employee.
+    let net = salary.net().map_err(|_| rejected(HrError::NotASalary))?;
+    if net.is_negative() {
+        return Err(rejected(HrError::DeductionsExceedPay));
+    }
+
+    let salary = salary.clone();
+    db.execute::<Employee, _, HrError>(id, crate::upcasters(), metadata, move |loaded| {
+        let held = &loaded.aggregate;
+        if !held.exists() {
+            return Err(HrError::NoSuchEmployee(id.to_string()));
+        }
+        // The same salary again writes nothing: a form submitted twice is not
+        // two rises.
+        if held.salary.as_ref() == Some(&salary) {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(EmployeeEvent::Contracted {
+            salary: salary.clone(),
+            at,
+        }))
+    })
+    .await
+}
+
+/// **What one person is paid, for a payroll run.**
+///
+/// Read from the aggregate inside the caller's transaction, not from
+/// `proj_hr` — money leaving the business on the strength of a table that may
+/// be a second behind is the one kind of lag nobody accepts.
+///
+/// `None` when they were not on the books for the **whole** window, or have no
+/// salary recorded.
+///
+/// **The whole window, not "employed now".** A May run approved in June must pay
+/// somebody who resigned on the 10th of June, and must not pay a full month to
+/// somebody who left on the 3rd of May. Somebody who joined or left part way
+/// through answers `None` and the caller refuses, because pro-rating is real
+/// arithmetic — working days or calendar days, and Saudi contracts differ — and
+/// a run that silently paid a whole month to a half-month joiner is the error
+/// nobody catches until they are asked to give it back.
+///
+/// **Employment, not `may_work_on`.** Somebody whose iqama lapsed mid-month is
+/// still owed for the days they worked; refusing to pay them would turn a
+/// compliance problem into wage theft.
+pub async fn salary_for(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
+) -> Result<Option<crate::Salary>, erp_eventlog::LoadError> {
+    let held = load::<Employee>(conn, id, crate::upcasters())
+        .await?
+        .aggregate;
+    Ok(held
+        .was_employed_throughout(from, until)
+        .then_some(held.salary)
+        .flatten())
 }
 
 /// Records what somebody is qualified to do.

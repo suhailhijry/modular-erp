@@ -77,6 +77,16 @@ const REGISTERED: &[Registered] = &[
         http: hr::http::routes,
     },
     Registered {
+        name: "payroll",
+        setup: payroll::setup,
+        http: payroll::http::routes,
+    },
+    Registered {
+        name: "hr_sa",
+        setup: hr_sa::setup,
+        http: hr_sa::http::routes,
+    },
+    Registered {
         name: "ledger",
         setup: ledger::setup,
         http: ledger::http::routes,

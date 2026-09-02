@@ -145,6 +145,17 @@ static SERVICES: &[TemplateAccount] = &[
         "رواتب مستحقة",
         AccountKind::Liability,
     ),
+    // **What is held back from pay on somebody's behalf** — an advance being
+    // repaid, a loan instalment. In every template for the reason `2400` and
+    // `5910` are: a business that runs payroll with a single deduction on its
+    // first month needs this on its first month, and netting it against the
+    // wage cost instead would understate what the business spent on wages.
+    account(
+        "2210",
+        "Payroll deductions",
+        "استقطاعات الرواتب",
+        AccountKind::Liability,
+    ),
     account(
         "2300",
         "Zakat payable",
@@ -252,6 +263,17 @@ static RETAIL: &[TemplateAccount] = &[
         "2200",
         "Salaries payable",
         "رواتب مستحقة",
+        AccountKind::Liability,
+    ),
+    // **What is held back from pay on somebody's behalf** — an advance being
+    // repaid, a loan instalment. In every template for the reason `2400` and
+    // `5910` are: a business that runs payroll with a single deduction on its
+    // first month needs this on its first month, and netting it against the
+    // wage cost instead would understate what the business spent on wages.
+    account(
+        "2210",
+        "Payroll deductions",
+        "استقطاعات الرواتب",
         AccountKind::Liability,
     ),
     account(

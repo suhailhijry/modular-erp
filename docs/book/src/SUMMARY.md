@@ -51,6 +51,8 @@
 - [booking](./api/booking.md)
 - [prepaid](./api/prepaid.md)
 - [pos](./api/pos.md)
+- [payroll](./api/payroll.md)
+- [hr_sa](./api/hr_sa.md)
 - [The HTTP API](./api/http.md)
 
 # Ahead

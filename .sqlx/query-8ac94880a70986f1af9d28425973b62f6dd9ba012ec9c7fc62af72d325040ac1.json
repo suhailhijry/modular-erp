@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT employee as \"employee!\", name as \"name!\", basic as \"basic!\",\n                  gross as \"gross!\", deductions as \"deductions!\", net as \"net!\",\n                  currency as \"currency!\"\n             FROM proj_payroll.payslip WHERE run = $1 ORDER BY name, employee",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "employee!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.payslip",
+            "name": "employee"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.payslip",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "basic!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.payslip",
+            "name": "basic"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.payslip",
+            "name": "gross"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "deductions!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.payslip",
+            "name": "deductions"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.payslip",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.payslip",
+            "name": "currency"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8ac94880a70986f1af9d28425973b62f6dd9ba012ec9c7fc62af72d325040ac1"
+}

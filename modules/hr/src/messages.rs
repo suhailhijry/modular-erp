@@ -13,6 +13,8 @@ pub const DATABASE: MessageCode = MessageCode::new("hr.database");
 pub const NOT_A_CLAIM: MessageCode = MessageCode::new("hr.not_a_claim");
 pub const NO_DOCUMENT_NUMBER: MessageCode = MessageCode::new("hr.no_document_number");
 pub const UNKNOWN_DOCUMENT: MessageCode = MessageCode::new("hr.unknown_document");
+pub const NOT_A_SALARY: MessageCode = MessageCode::new("hr.not_a_salary");
+pub const DEDUCTIONS_EXCEED_PAY: MessageCode = MessageCode::new("hr.deductions_exceed_pay");
 
 pub const CODES: &[MessageCode] = &[
     NO_NAME,
@@ -26,6 +28,8 @@ pub const CODES: &[MessageCode] = &[
     NOT_A_CLAIM,
     NO_DOCUMENT_NUMBER,
     UNKNOWN_DOCUMENT,
+    NOT_A_SALARY,
+    DEDUCTIONS_EXCEED_PAY,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -118,6 +122,26 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_DOCUMENT_NUMBER,
         Locale::Arabic,
         Template::Simple("الوثيقة تحتاج إلى رقمها."),
+    ),
+    (
+        NOT_A_SALARY,
+        Locale::English,
+        Template::Simple("A salary needs positive basic pay, and every part in one currency."),
+    ),
+    (
+        NOT_A_SALARY,
+        Locale::Arabic,
+        Template::Simple("الراتب يحتاج إلى أساسي موجب، وكل بند بعملة واحدة."),
+    ),
+    (
+        DEDUCTIONS_EXCEED_PAY,
+        Locale::English,
+        Template::Simple("What is taken off comes to more than what is paid."),
+    ),
+    (
+        DEDUCTIONS_EXCEED_PAY,
+        Locale::Arabic,
+        Template::Simple("مجموع الاستقطاعات يتجاوز المستحق."),
     ),
     (
         UNKNOWN_DOCUMENT,

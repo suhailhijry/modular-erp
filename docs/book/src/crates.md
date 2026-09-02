@@ -28,6 +28,8 @@ modules/tax_sa      the Saudi rate, the VAT return, ZATCA
 modules/booking     reservations, rotas, availability, pricing
 modules/prepaid     packages, deposits, subscriptions, loyalty
 modules/pos         shifts, till sales, the drawer and its variance
+modules/payroll     what a business pays its people, and the entry it makes
+modules/hr_sa       GOSI, and end of service
 ```
 
 `branches` and `crm` are at the top of that list because they depend on nothing

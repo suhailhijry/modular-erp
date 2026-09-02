@@ -43,6 +43,7 @@ fn no_session_scoped_set_outside_a_ddl_path() {
         "modules/pos/src/lib.rs",
         "modules/branches/src/lib.rs",
         "modules/hr/src/lib.rs",
+        "modules/payroll/src/lib.rs",
         "modules/ledger/src/lib.rs",
         "modules/sales/src/lib.rs",
         "modules/purchases/src/lib.rs",

@@ -251,6 +251,12 @@ async fn rebuild(
                 owned.iter().map(std::convert::AsRef::as_ref).collect();
             rebuild_swap::<prepaid::Prepaid>(&pool, sql, &refs, upcasters, 500).await?
         }
+        "payroll" => {
+            let owned = payroll::projections();
+            let refs: Vec<&dyn Projection<Group = payroll::Payroll>> =
+                owned.iter().map(std::convert::AsRef::as_ref).collect();
+            rebuild_swap::<payroll::Payroll>(&pool, sql, &refs, upcasters, 500).await?
+        }
         "hr" => {
             let owned = hr::projections();
             let refs: Vec<&dyn Projection<Group = hr::Hr>> =
@@ -424,6 +430,7 @@ mod tests {
             "ledger",
             "prepaid",
             "hr",
+            "payroll",
             "pos",
             "sales",
             "purchases",
@@ -431,6 +438,12 @@ mod tests {
         ];
 
         for (name, setup) in erp_api::modules() {
+            // A module with no projection groups has no read models to rebuild.
+            // Keyed off the setup rather than an exception list, so the next
+            // arithmetic-only module needs no edit here.
+            if setup.groups.is_empty() {
+                continue;
+            }
             assert!(
                 REBUILDABLE.contains(&setup.module.as_str()),
                 "{name} has no arm in `rebuild`, so a change to its read models \

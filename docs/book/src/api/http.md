@@ -325,6 +325,7 @@ wants and a working list does not.
 | `DELETE /v1/hr/employees/{employee}/claims/{claim}` | Take it back | ManageTenant |
 | `GET /v1/hr/employees/{employee}/skills` | What they may perform | Read |
 | `PUT /v1/hr/employees/{employee}/skills` | Record the whole set | ManageTenant |
+| `PUT /v1/hr/employees/{employee}/salary` | What they are paid | ManageTenant |
 | `PUT /v1/hr/employees/{employee}/documents/{kind}` | Record a document, or renew it | ManageTenant |
 | `GET /v1/hr/documents/expiring` | What has lapsed, and what is about to | Read |
 
@@ -426,6 +427,30 @@ curl -s "${AUTH[@]}" http://localhost:8080/v1/hr/employees/EMP-0001/skills
 Assigning somebody to a line they are not qualified for is refused with the same
 code as a lapsed document — at the point of use both mean "not somebody who can
 do this job".
+
+### What somebody is paid
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/hr/employees/EMP-0001/salary -d '{
+    "basic":      {"minor": 800000, "currency": "SAR"},
+    "allowances": [{"what":"بدل سكن","amount":{"minor":200000,"currency":"SAR"}}],
+    "deductions": [{"what":"سلفة","amount":{"minor":50000,"currency":"SAR"}}]
+  }'
+```
+
+**Amounts, not percentages.** A housing allowance quoted as 25% of basic is sent
+as the riyals it comes to: a rate stored here would be recomputed on every run,
+and a basic-pay rise would silently restate last month's payslip.
+
+`deductions` is what the business takes off — an advance being repaid, a loan.
+**Not tax and not GOSI**: those are statutory, computed from the gross by the
+country module, and a business that could type them in here would be able to get
+them wrong. Deductions coming to more than the pay are refused, because a
+negative payslip is not a payslip.
+
+A rise is its own operation and its own event, because it is the change somebody
+will ask to see dated. Sending the same salary again writes nothing.
 
 ### Documents that expire
 
@@ -1422,6 +1447,154 @@ Every unredeemed entitlement, every unearned subscription month and every
 unhonoured count, per currency. **It must equal the deferred revenue account's
 balance in the ledger.** If it does not, the pipeline is broken rather than the
 arithmetic.
+
+## Payroll
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/payroll/runs` | Newest period first | Read |
+| `GET /v1/payroll/runs/{run}` | One of them | Read |
+| `PUT /v1/payroll/runs/{run}` | Draft it. **Posts nothing** | PostEntries |
+| `GET /v1/payroll/runs/{run}/payslips` | Who was paid what | Read |
+| `POST /v1/payroll/runs/{run}/approval` | Approve it, which posts | PostEntries |
+| `GET` `PUT` | `/v1/payroll/posting-accounts` | Read / ManageAccounts |
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/payroll/runs/2026-05 -d '{
+    "period":    "2026-05",
+    "employees": ["EMP-0001", "EMP-0002"]
+  }'
+```
+
+**Drafting posts nothing**, which is the whole reason it is a step of its own: a
+business reads the draft, finds the two people whose overtime is wrong, fixes
+them and runs it over. Drafting again replaces — a run that accumulated drafts
+would pay somebody twice.
+
+**The caller says who is in the run.** That is deliberate: enumerating employees
+means reading a read model, and a payroll run is money leaving the business — it
+must not be computed from a table that may be a second behind. List staff from
+`GET /v1/hr/employees` and send the ones to pay.
+
+Somebody employed for only part of the period, or with no salary recorded,
+**refuses the whole run** with `payroll.not_payable`. A run that quietly left
+somebody out is one somebody notices on payday; one that silently paid a full
+month to a half-month joiner is worse, because nobody notices it at all.
+Pro-rating is not built.
+
+```bash
+curl -sX POST "${AUTH[@]}" \
+  http://localhost:8080/v1/payroll/runs/2026-05/approval
+# {"id":"2026-05","position":…}
+```
+
+Approving posts **one** journal entry for the whole run:
+
+```text
+Dr  Salaries and wages      gross
+    Cr  Salaries payable            net
+    Cr  Payroll deductions          deductions
+```
+
+Gross is the expense and net is what is owed. Deductions are money held on
+somebody's behalf, so they are a liability — netting them against the cost would
+understate what the business spent on wages.
+
+**The entry is dated to the last day of the period**, not the day it was
+approved: a February run approved in March belongs in February.
+
+Approving an approved run reports the entry it already made rather than posting
+a second one, which is what makes an approval that timed out safe to send again.
+
+```bash
+curl -s "${AUTH[@]}" http://localhost:8080/v1/payroll/runs/2026-05/payslips
+# [{"employee":"EMP-0001","name":"سارة","gross":{"minor":1000000,"currency":"SAR"},…}]
+```
+
+`name` is **as it was when the run was made**. A payslip says who it was for, and
+somebody who marries next month does not get a new copy of last month's.
+
+**GOSI and the WPS file are not here.** Both are Saudi statute and belong in a
+country module, for the reason VAT lives in `tax_sa`. Nor is the payment itself:
+money leaving the bank is a separate act, days later, in one transfer covering
+everybody.
+
+## GOSI, and end of service
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/hr_sa/gosi/schedule` | The rates, and whether anybody confirmed them | Read |
+| `PUT /v1/hr_sa/gosi/schedule` | Set them | ManageAccounts |
+| `GET /v1/hr_sa/gosi/contribution` | What contributions come to on a base | Read |
+| `GET /v1/hr_sa/employees/{employee}/end-of-service` | What somebody is owed | Read |
+
+**Both calculations answer and record nothing.** Asking what an end-of-service
+comes to is a question, and the answer changes as a salary and service do;
+recording that it was *paid* is a payroll line.
+
+### The rates are yours to confirm
+
+```bash
+curl -s "${AUTH[@]}" http://localhost:8080/v1/hr_sa/gosi/schedule
+# {"saudi_employee_bp":975,"saudi_employer_bp":1175,
+#  "non_saudi_employee_bp":0,"non_saudi_employer_bp":200,
+#  "ceiling_minor":4500000,"configured":false}
+```
+
+**`configured: false` means these are what shipped and nobody has checked them.**
+GOSI's schedule is set by the authority and has changed — most recently for
+people entering after the 2024 pension reform. The defaults here are a starting
+point, not an authority, and a tenant running payroll should confirm them
+against the current schedule and `PUT` what they find.
+
+```bash
+curl -s "${AUTH[@]}" \
+  'http://localhost:8080/v1/hr_sa/gosi/contribution?base=1000000&currency=SAR&footing=saudi'
+# {"base":{"minor":1000000,…},"employee":{"minor":97500,…},
+#  "employer":{"minor":117500,…},"total":{"minor":215000,…}}
+```
+
+`base` is **basic plus housing, not the whole salary** and not net. Which
+allowances count is a question about the contract and the authority's
+definition, so it is sent rather than guessed.
+
+`footing` is `saudi` or `non_saudi`, and it is **a fact about the person** —
+nothing here can work it out from a name or an iqama number. A non-Saudi
+employee has nothing withheld; hazards cover is the employer's alone.
+
+The ceiling caps the **base**, so both sides see the same one.
+
+### End of service
+
+```bash
+curl -s "${AUTH[@]}" \
+  'http://localhost:8080/v1/hr_sa/employees/EMP-0001/end-of-service?reason=resigned'
+# {"entitlement":{"minor":7500000,…},"payable":{"minor":7500000,…},
+#  "days":3650,"wage":{"minor":1000000,…}}
+```
+
+Half a month of wage for each of the first five years, a full month for each
+after — pro-rated by the day. A resignation is reduced by length of service:
+nothing under two years, a third to five, two thirds to ten, in full beyond.
+
+`reason` is `dismissed`, `resigned`, `in_full` or `for_cause`. The last two are
+facts about *why* somebody left that the system is not told and must not guess:
+`in_full` covers Article 87's marriage and childbirth cases and a fixed-term
+contract expiring, and `for_cause` is Article 80, which pays nothing.
+
+The answer carries `wage` and `days` back, because this is a figure somebody
+will be asked to justify.
+
+Somebody still employed gets a figure **as at today** — the "what would we owe
+her" a business asks before making an offer.
+
+The wage is basic plus allowances, which is what the Labour Law says; basic
+alone is the common shortcut and it underpays.
+
+**The WPS file is not here.** The monthly file the Ministry mandates has a
+specification this build cannot verify, and a file that is almost right is one
+the bank rejects on the day wages are due.
 
 ## Status codes
 

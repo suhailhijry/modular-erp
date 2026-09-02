@@ -66,6 +66,63 @@ impl Details {
     }
 }
 
+/// One part of what somebody is paid, or has taken off.
+///
+/// A name and an amount. **Not a percentage**: a housing allowance quoted as
+/// 25% of basic is stored as the riyals it came to, because a rate stored here
+/// would be recomputed on every run and a basic-pay rise would silently restate
+/// last month's payslip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Component {
+    /// The business's own word for it: `بدل سكن`, `Transport`, `Advance`.
+    pub what: String,
+    pub amount: erp_types::Money,
+}
+
+/// What somebody is paid.
+///
+/// # Why this is on the employee and not its own aggregate
+///
+/// Because every question anybody asks of it — "what does this person earn",
+/// "what do we pay them this month" — is asked about a *person*, and a
+/// contract aggregate would mean a second load and a second id for a fact that
+/// belongs to the first. The log keeps every change, which is the history a
+/// separate aggregate would have been for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Salary {
+    /// Basic pay for a full month.
+    pub basic: erp_types::Money,
+    /// Added: housing, transport, a phone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowances: Vec<Component>,
+    /// Taken off: an advance being repaid, a loan.
+    ///
+    /// **Not tax and not GOSI.** Those are statutory, computed by the country
+    /// module from the gross, and a business that could type them in here would
+    /// be able to get them wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deductions: Vec<Component>,
+}
+
+impl Salary {
+    /// Basic plus allowances, before anything is taken off.
+    ///
+    /// **The number GOSI and end-of-service are computed from**, which is why
+    /// it is one function and not an expression repeated at each call site.
+    pub fn gross(&self) -> Result<erp_types::Money, erp_types::MoneyError> {
+        self.allowances
+            .iter()
+            .try_fold(self.basic, |total, part| total.checked_add(part.amount))
+    }
+
+    /// What actually gets paid: gross less deductions.
+    pub fn net(&self) -> Result<erp_types::Money, erp_types::MoneyError> {
+        self.deductions
+            .iter()
+            .try_fold(self.gross()?, |total, part| total.checked_sub(part.amount))
+    }
+}
+
 /// A document a person must hold to be allowed to work.
 ///
 /// # Why these four and not a free-text kind
@@ -227,6 +284,14 @@ pub enum EmployeeEvent {
     /// They came back. A rehire under the same record, which is what a business
     /// means when a seasonal worker returns.
     Rehired { at: Timestamp },
+    /// What this person is paid.
+    ///
+    /// **Replacing, and its own event.** A rise is not an amendment of their
+    /// phone number, and it is the change somebody will ask to see dated.
+    Contracted {
+        salary: crate::employee::Salary,
+        at: Timestamp,
+    },
     /// What this person is qualified to do.
     ///
     /// **The whole set, replacing.** A skill list is read as "what can this
@@ -292,6 +357,7 @@ impl DomainEvent for EmployeeEvent {
             Self::Rehired { .. } => Self::NAMES[5],
             Self::DocumentRecorded { .. } => Self::NAMES[6],
             Self::Skilled { .. } => Self::NAMES[7],
+            Self::Contracted { .. } => Self::NAMES[8],
         })
     }
 
@@ -301,7 +367,7 @@ impl DomainEvent for EmployeeEvent {
 }
 
 impl EmployeeEvent {
-    pub const NAMES: [&'static str; 8] = [
+    pub const NAMES: [&'static str; 9] = [
         "hr.employee.hired",
         "hr.employee.amended",
         "hr.employee.reparented",
@@ -310,6 +376,7 @@ impl EmployeeEvent {
         "hr.employee.rehired",
         "hr.employee.document_recorded",
         "hr.employee.skilled",
+        "hr.employee.contracted",
     ];
 }
 
@@ -323,12 +390,19 @@ pub struct Employee {
     pub phone: Option<String>,
     pub reports_to: Option<AggregateId>,
     pub branch: Option<AggregateId>,
+    /// When they joined. Needed to answer whether they were employed for the
+    /// *whole* of a payroll period, which is a different question from whether
+    /// they are employed now.
+    pub hired_on: Option<Timestamp>,
     pub left_at: Option<Timestamp>,
     /// What they hold, one per kind — **the current one**, because a renewal
     /// replaces rather than accumulates and nothing here asks what an expired
     /// document used to say. The log keeps the history; this is the state a
     /// decision is made from.
     pub documents: Vec<Document>,
+    /// What they are paid. `None` until a salary is recorded — a business can
+    /// keep an org chart without keeping salaries, and most start that way.
+    pub salary: Option<Salary>,
     /// What they are qualified to do, named by bookable resource.
     ///
     /// **Empty means no restriction**, not "nothing" — see [`Self::can_perform`].
@@ -352,9 +426,10 @@ impl Aggregate for Employee {
                 phone,
                 reports_to,
                 branch,
-                ..
+                at,
             } => {
                 self.hired = true;
+                self.hired_on = Some(*at);
                 self.name.clone_from(name);
                 self.name_latin.clone_from(name_latin);
                 self.national_id.clone_from(national_id);
@@ -384,6 +459,7 @@ impl Aggregate for Employee {
             EmployeeEvent::Left { at, .. } => self.left_at = Some(*at),
             EmployeeEvent::Rehired { .. } => self.left_at = None,
             EmployeeEvent::Skilled { skills, .. } => self.skills.clone_from(skills),
+            EmployeeEvent::Contracted { salary, .. } => self.salary = Some(salary.clone()),
             EmployeeEvent::DocumentRecorded {
                 kind,
                 number,
@@ -418,6 +494,32 @@ impl Employee {
     #[must_use]
     pub const fn is_employed(&self) -> bool {
         self.hired && self.left_at.is_none()
+    }
+
+    /// **Whether they were on the books for the whole of this window.**
+    ///
+    /// Not "are they employed now": a payroll run for May approved in June must
+    /// pay somebody who resigned on the 10th of June, and must not pay a full
+    /// month to somebody who left on the 3rd of May.
+    ///
+    /// Somebody who joined or left **part way through** answers `false`, and
+    /// the caller refuses rather than guessing. Pro-rating is real arithmetic —
+    /// working days, or calendar days, and Saudi contracts differ — and a run
+    /// that silently paid a whole month to a half-month joiner is the error
+    /// nobody catches until they are asked to give the money back.
+    #[must_use]
+    pub fn was_employed_throughout(
+        &self,
+        from: chrono::NaiveDate,
+        until: chrono::NaiveDate,
+    ) -> bool {
+        let Some(hired_on) = self.hired_on else {
+            return false;
+        };
+        if hired_on.date_naive() > from {
+            return false;
+        }
+        self.left_at.is_none_or(|left| left.date_naive() >= until)
     }
 
     /// **Whether this person may be rostered on this day.**

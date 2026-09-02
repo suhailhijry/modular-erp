@@ -7,7 +7,7 @@
 
 use erp_eventlog::Envelope;
 use erp_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
-use erp_types::{Cursor, Page, Timestamp};
+use erp_types::{Cursor, Money, Page, Timestamp};
 use sqlx::PgConnection;
 
 use crate::employee::EmployeeEvent;
@@ -121,6 +121,9 @@ impl Projection for EmployeeList {
                 .execute(&mut *conn)
                 .await?;
             }
+            EmployeeEvent::Contracted { salary, .. } => {
+                contracted(ctx, conn, id, &salary).await?;
+            }
             EmployeeEvent::Skilled { skills, .. } => {
                 skilled(ctx, conn, id, &skills).await?;
             }
@@ -184,6 +187,56 @@ async fn hired(
     .bind(reports_to.map(erp_types::AggregateId::as_str))
     .bind(branch.map(erp_types::AggregateId::as_str))
     .bind(at)
+    .bind(ctx.event_time())
+    .bind(ctx.position().get())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// What somebody is paid.
+///
+/// `gross` and `net` are stored, not derived on read: they are what GOSI and
+/// end-of-service are computed from, and a report recomputing them from a JSON
+/// blob would be a second implementation of the rule.
+///
+/// A total that will not fit **stops the group** rather than storing a wrong
+/// one (L6). It means the log holds a salary this build cannot represent, which
+/// is a corruption somebody has to look at — silently clamping it would put a
+/// number nobody chose on a payslip.
+async fn contracted(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    salary: &crate::employee::Salary,
+) -> Result<(), ProjectionError> {
+    let fail = |what: &str| {
+        ProjectionError::Rejected(format!(
+            "{what} for {id} does not fit in Money, at position {}",
+            ctx.position()
+        ))
+    };
+    let gross = salary.gross().map_err(|_| fail("gross pay"))?;
+    let net = salary.net().map_err(|_| fail("net pay"))?;
+
+    sqlx::query(
+        "INSERT INTO employee_salary
+             (employee, basic, gross, net, currency, allowances, deductions,
+              recorded_at, position)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (employee) DO UPDATE
+             SET basic = EXCLUDED.basic, gross = EXCLUDED.gross, net = EXCLUDED.net,
+                 currency = EXCLUDED.currency, allowances = EXCLUDED.allowances,
+                 deductions = EXCLUDED.deductions,
+                 recorded_at = EXCLUDED.recorded_at, position = EXCLUDED.position",
+    )
+    .bind(id)
+    .bind(salary.basic.minor())
+    .bind(gross.minor())
+    .bind(net.minor())
+    .bind(salary.basic.currency().to_string())
+    .bind(serde_json::to_value(&salary.allowances).unwrap_or_default())
+    .bind(serde_json::to_value(&salary.deductions).unwrap_or_default())
     .bind(ctx.event_time())
     .bind(ctx.position().get())
     .execute(&mut *conn)
@@ -477,6 +530,53 @@ pub async fn expiring(
             days_left: r.days_left,
         })
         .collect())
+}
+
+/// What one person is paid, and the dates that bound their service.
+///
+/// Everything an end-of-service calculation needs, in one read. Together rather
+/// than two calls because the two are always wanted together and a caller who
+/// had to make both would eventually make one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayDetails {
+    /// Basic plus allowances, which is the wage the Labour Law computes the
+    /// award on.
+    pub gross: Money,
+    pub basic: Money,
+    pub hired_on: Timestamp,
+    /// `None` while they are still employed, which is the "what would we owe
+    /// her" case.
+    pub left_at: Option<Timestamp>,
+}
+
+/// What one person is paid, with their dates.
+///
+/// `None` when there is no salary recorded — which is different from a salary
+/// of zero, and the caller has to be able to tell them apart.
+pub async fn pay_details(
+    conn: &mut PgConnection,
+    employee: &str,
+) -> Result<Option<PayDetails>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"SELECT s.basic as "basic!", s.gross as "gross!", s.currency as "currency!",
+                  e.hired_on as "hired_on!", e.left_at
+             FROM proj_hr.employee_salary s
+             JOIN proj_hr.employee e ON e.id = s.employee
+            WHERE s.employee = $1"#,
+        employee,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    let Some(r) = row else { return Ok(None) };
+    let currency =
+        erp_types::CurrencyCode::new(&r.currency).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    Ok(Some(PayDetails {
+        gross: Money::from_minor(r.gross, currency),
+        basic: Money::from_minor(r.basic, currency),
+        hired_on: r.hired_on,
+        left_at: r.left_at,
+    }))
 }
 
 /// What one person is qualified to do.

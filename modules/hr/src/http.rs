@@ -42,6 +42,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(record_document))
         .routes(routes!(expiring_documents))
         .routes(routes!(list_skills, record_skills))
+        .routes(routes!(record_salary))
 }
 
 static CATALOG: erp_i18n::Composite =
@@ -248,6 +249,42 @@ struct Skills {
     /// Whether the list restricts them, which is the field that stops `[]`
     /// being read the wrong way round.
     restricted: bool,
+}
+
+/// One part of what somebody is paid, or has taken off.
+#[derive(Debug, Deserialize, ToSchema)]
+struct NewComponent {
+    /// The business's own word for it: `بدل سكن`, `Transport`, `Advance`.
+    what: String,
+    amount: erp_web::Amount,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "basic": { "minor": 800_000, "currency": "SAR" },
+    "allowances": [{ "what": "بدل سكن", "amount": { "minor": 200_000, "currency": "SAR" } }]
+}))]
+struct NewSalary {
+    /// Basic pay for a full month.
+    basic: erp_web::Amount,
+    /// Added: housing, transport, a phone.
+    ///
+    /// **Amounts, not percentages.** A housing allowance quoted as 25% of basic
+    /// is sent as the riyals it comes to, because a rate stored here would be
+    /// recomputed on every run and a basic-pay rise would silently restate last
+    /// month's payslip.
+    #[serde(default)]
+    allowances: Vec<NewComponent>,
+    /// Taken off: an advance being repaid, a loan.
+    ///
+    /// **Not tax and not GOSI.** Those are statutory and computed from the
+    /// gross by the country module; a business that could type them in here
+    /// would be able to get them wrong.
+    #[serde(default)]
+    deductions: Vec<NewComponent>,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    at: Option<Timestamp>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1000,6 +1037,73 @@ async fn record_skills(
         id,
         position: committed.at.map(erp_types::LogPosition::get),
     }))
+}
+
+/// Record what somebody is paid.
+///
+/// **Its own operation and its own event.** A rise is not an amendment of a
+/// phone number, and it is the change somebody will ask to see dated. Sending
+/// the same salary again writes nothing.
+#[utoipa::path(
+    put,
+    path = "/v1/hr/employees/{employee}/salary",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+    ),
+    request_body = NewSalary,
+    responses(
+        (status = OK, body = HrAccepted),
+        (status = BAD_REQUEST, description = "Basic pay that is not positive, parts in more than one currency, or deductions that come to more than the pay", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such employee", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn record_salary(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(id): Path<String>,
+    Json(body): Json<NewSalary>,
+) -> Result<Json<HrAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let employee = parse_id(&id, locale)?;
+
+    let salary = crate::Salary {
+        basic: body.basic.parse(locale)?,
+        allowances: components(&body.allowances, locale)?,
+        deductions: components(&body.deductions, locale)?,
+    };
+
+    let committed = crate::record_salary(
+        &tenant.db,
+        &employee,
+        &salary,
+        body.at.unwrap_or_else(chrono::Utc::now),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(HrAccepted {
+        id,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+fn components(sent: &[NewComponent], locale: Locale) -> Result<Vec<crate::Component>, Problem> {
+    sent.iter()
+        .map(|part| {
+            Ok(crate::Component {
+                what: part.what.clone(),
+                amount: part.amount.parse(locale)?,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]

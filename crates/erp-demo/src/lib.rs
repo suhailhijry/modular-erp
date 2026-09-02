@@ -91,6 +91,8 @@ pub struct Seeded {
     /// People on the books, arranged as an org chart with claims travelling up
     /// it.
     pub employees: usize,
+    /// People in the payroll run that was approved and posted.
+    pub paid: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -219,6 +221,10 @@ pub async fn seed(
     // hiring into a branch that does not exist yet is refused.
     let employees = seed_org(&app, slug, &token).await?;
 
+    // A month's pay. **After the people**, obviously, and after the chart —
+    // approving posts, and a posting needs accounts to post into.
+    let paid = seed_payroll(&app, slug, &token).await?;
+
     // The counter. After the customers for the same reason the diary is, and
     // before the last projection run.
     let till_sales = seed_till(&app, slug, &token).await?;
@@ -275,6 +281,7 @@ pub async fn seed(
         till_sales,
         branches,
         employees,
+        paid,
     })
 }
 
@@ -285,6 +292,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     advance::<prepaid::Prepaid>(&db, &prepaid::projections(), prepaid::upcasters()).await?;
     advance::<branches::Branches>(&db, &branches::projections(), branches::upcasters()).await?;
     advance::<hr::Hr>(&db, &hr::projections(), hr::upcasters()).await?;
+    advance::<payroll::Payroll>(&db, &payroll::projections(), payroll::upcasters()).await?;
     advance::<pos::Pos>(&db, &pos::projections(), pos::upcasters()).await?;
     advance::<crm::Crm>(&db, &crm::projections(), crm::upcasters()).await?;
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
@@ -1469,6 +1477,8 @@ async fn seed_org(app: &axum::Router, slug: &str, token: &str) -> Result<usize, 
         .await?;
     }
 
+    seed_salaries(app, slug, token).await?;
+
     // **The grant that makes the point.** Given to the clerk, held by three.
     post(
         app,
@@ -1495,6 +1505,86 @@ async fn seed_org(app: &axum::Router, slug: &str, token: &str) -> Result<usize, 
     .await?;
 
     Ok(people.len())
+}
+
+/// What the four of them are paid.
+///
+/// Split out because `seed_org` was over the line limit, and because the two
+/// are different facts: the chart is who reports to whom, and this is what the
+/// business owes them.
+async fn seed_salaries(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
+    // Four salaries, one with a deduction, because a run where nothing is
+    // withheld demonstrates half the entry.
+    // Minor units, so 3_000_000 is thirty thousand riyals.
+    let pay = [
+        ("EMP-OWNER", 3_000_000, 0),
+        ("EMP-REGION", 1_800_000, 0),
+        ("EMP-OLAYA", 1_200_000, 0),
+        ("EMP-CLERK", 600_000, 50_000),
+    ];
+    for (id, basic, deduction) in &pay {
+        let mut body = serde_json::json!({
+            "basic": { "minor": basic, "currency": "SAR" },
+            "allowances": [
+                { "what": "بدل سكن", "amount": { "minor": basic / 4, "currency": "SAR" } }
+            ],
+            "at": "2026-01-01T00:00:00Z"
+        });
+        if *deduction > 0 {
+            body["deductions"] = serde_json::json!([
+                { "what": "سلفة", "amount": { "minor": deduction, "currency": "SAR" } }
+            ]);
+        }
+        put(
+            app,
+            slug,
+            &format!("/v1/hr/employees/{}/salary", demo_id(id)),
+            token,
+            &body,
+            StatusCode::OK,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// One month's pay, drafted and approved.
+///
+/// # Why the demo approves it rather than leaving it drafted
+///
+/// Because a drafted run demonstrates arithmetic and an approved one
+/// demonstrates the **entry** — which is the module's actual claim, and the half
+/// a spreadsheet cannot make. `GET /v1/ledger/accounts` shows wages as a cost
+/// and what is owed as a liability, and the trial balance still balances.
+async fn seed_payroll(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    let people: Vec<serde_json::Value> = ["EMP-OWNER", "EMP-REGION", "EMP-OLAYA", "EMP-CLERK"]
+        .iter()
+        .map(|id| serde_json::json!(demo_id(id)))
+        .collect();
+    let paid = people.len();
+
+    put(
+        app,
+        slug,
+        "/v1/payroll/runs/PAY-2026-05",
+        token,
+        &serde_json::json!({ "period": "2026-05", "employees": people }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    post(
+        app,
+        slug,
+        "/v1/payroll/runs/PAY-2026-05/approval",
+        Some(token),
+        &serde_json::json!({}),
+        StatusCode::OK,
+    )
+    .await?;
+
+    Ok(paid)
 }
 
 /// A day at the counter: a shift opened, sales rung, and the drawer counted.

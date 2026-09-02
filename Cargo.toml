@@ -29,6 +29,8 @@ erp-demo = { path = "crates/erp-demo" }
 booking = { path = "modules/booking" }
 branches = { path = "modules/branches" }
 hr = { path = "modules/hr" }
+payroll = { path = "modules/payroll" }
+hr_sa = { path = "modules/hr_sa" }
 crm = { path = "modules/crm" }
 ledger = { path = "modules/ledger" }
 sales = { path = "modules/sales" }

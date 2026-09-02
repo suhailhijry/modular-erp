@@ -75,6 +75,28 @@
         ],
         "type": "object"
       },
+      "Accounts": {
+        "properties": {
+          "expense": {
+            "description": "The cost. `5100` in every shipped chart.",
+            "type": "string"
+          },
+          "payable": {
+            "description": "What is owed to people until it is paid. `2200`.",
+            "type": "string"
+          },
+          "withheld": {
+            "description": "What is held on their behalf. `2210`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expense",
+          "payable",
+          "withheld"
+        ],
+        "type": "object"
+      },
       "AccountsView": {
         "example": {
           "output_vat": "2100",
@@ -467,6 +489,34 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "AwardView": {
+        "properties": {
+          "days": {
+            "description": "How long they served.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "entitlement": {
+            "$ref": "#/components/schemas/SaCash",
+            "description": "Before any reduction for resigning."
+          },
+          "payable": {
+            "$ref": "#/components/schemas/SaCash",
+            "description": "What is actually owed."
+          },
+          "wage": {
+            "$ref": "#/components/schemas/SaCash",
+            "description": "The wage the award was computed on, so the figure can be checked."
+          }
+        },
+        "required": [
+          "entitlement",
+          "payable",
+          "days",
+          "wage"
+        ],
         "type": "object"
       },
       "BandView": {
@@ -1272,6 +1322,33 @@
             "type": "object"
           }
         ]
+      },
+      "ContributionView": {
+        "properties": {
+          "base": {
+            "$ref": "#/components/schemas/SaCash",
+            "description": "What the contribution was computed on, **after the ceiling**."
+          },
+          "employee": {
+            "$ref": "#/components/schemas/SaCash",
+            "description": "Withheld from their pay."
+          },
+          "employer": {
+            "$ref": "#/components/schemas/SaCash",
+            "description": "Paid by the business on top of it."
+          },
+          "total": {
+            "$ref": "#/components/schemas/SaCash",
+            "description": "Both together, which is what reaches the authority."
+          }
+        },
+        "required": [
+          "base",
+          "employee",
+          "employer",
+          "total"
+        ],
+        "type": "object"
       },
       "Credentials": {
         "example": {
@@ -3012,6 +3089,23 @@
         ],
         "type": "object"
       },
+      "NewComponent": {
+        "description": "One part of what somebody is paid, or has taken off.",
+        "properties": {
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "what": {
+            "description": "The business's own word for it: `بدل سكن`, `Transport`, `Advance`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "what",
+          "amount"
+        ],
+        "type": "object"
+      },
       "NewCount": {
         "properties": {
           "at": {
@@ -3231,6 +3325,40 @@
         },
         "required": [
           "domain"
+        ],
+        "type": "object"
+      },
+      "NewDraft": {
+        "example": {
+          "employees": [
+            "EMP-0001",
+            "EMP-0002"
+          ],
+          "period": "2026-05"
+        },
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "employees": {
+            "description": "Who is in the run.\n\n**The caller says, and that is deliberate.** Enumerating employees means\nreading `hr`'s read model, and a payroll run is money leaving the\nbusiness — it must not be computed from a table that may be a second\nbehind. List staff from `GET /v1/hr/employees` and send the ones to pay.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "period": {
+            "description": "`YYYY-MM`. The entry posts on the **last day of it**, not the day the\nrun was approved: a February run approved in March belongs in February.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "period",
+          "employees"
         ],
         "type": "object"
       },
@@ -4043,6 +4171,54 @@
         ],
         "type": "object"
       },
+      "NewSalary": {
+        "example": {
+          "allowances": [
+            {
+              "amount": {
+                "currency": "SAR",
+                "minor": 200000
+              },
+              "what": "بدل سكن"
+            }
+          ],
+          "basic": {
+            "currency": "SAR",
+            "minor": 800000
+          }
+        },
+        "properties": {
+          "allowances": {
+            "description": "Added: housing, transport, a phone.\n\n**Amounts, not percentages.** A housing allowance quoted as 25% of basic\nis sent as the riyals it comes to, because a rate stored here would be\nrecomputed on every run and a basic-pay rise would silently restate last\nmonth's payslip.",
+            "items": {
+              "$ref": "#/components/schemas/NewComponent"
+            },
+            "type": "array"
+          },
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "basic": {
+            "$ref": "#/components/schemas/Amount",
+            "description": "Basic pay for a full month."
+          },
+          "deductions": {
+            "description": "Taken off: an advance being repaid, a loan.\n\n**Not tax and not GOSI.** Those are statutory and computed from the\ngross by the country module; a business that could type them in here\nwould be able to get them wrong.",
+            "items": {
+              "$ref": "#/components/schemas/NewComponent"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "basic"
+        ],
+        "type": "object"
+      },
       "NewSale": {
         "example": {
           "currency": "SAR",
@@ -4110,6 +4286,53 @@
           "currency",
           "lines",
           "tenders"
+        ],
+        "type": "object"
+      },
+      "NewSchedule": {
+        "description": "What to set the schedule to.\n\n**Its own type, without `configured`.** The answer says whether anybody has\nconfirmed the numbers; the request cannot, because sending it *is* the\nconfirmation. One type for both would accept a field it ignored, which is a\ncaller believing they said something.",
+        "example": {
+          "ceiling_minor": 4500000,
+          "non_saudi_employee_bp": 0,
+          "non_saudi_employer_bp": 200,
+          "saudi_employee_bp": 975,
+          "saudi_employer_bp": 1175
+        },
+        "properties": {
+          "ceiling_minor": {
+            "description": "Absent means no ceiling.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "non_saudi_employee_bp": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "non_saudi_employer_bp": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "saudi_employee_bp": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "saudi_employer_bp": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "saudi_employee_bp",
+          "saudi_employer_bp",
+          "non_saudi_employee_bp",
+          "non_saudi_employer_bp"
         ],
         "type": "object"
       },
@@ -5397,6 +5620,77 @@
         ],
         "type": "object"
       },
+      "Paged_RunRecord": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "approved_at": {
+                  "description": "Set once it has posted. **An approved run cannot be redrafted.**",
+                  "format": "date-time",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "deductions": {
+                  "$ref": "#/components/schemas/PayrollCash"
+                },
+                "drafted_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "entry": {
+                  "description": "The journal entry it made. Read it at `GET /v1/ledger/entries/{entry}`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "gross": {
+                  "$ref": "#/components/schemas/PayrollCash"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "net": {
+                  "$ref": "#/components/schemas/PayrollCash"
+                },
+                "people": {
+                  "format": "int32",
+                  "type": "integer"
+                },
+                "period": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "period",
+                "gross",
+                "deductions",
+                "net",
+                "people",
+                "drafted_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "Paged_ServiceView": {
         "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
         "properties": {
@@ -5663,6 +5957,54 @@
           "amount",
           "received_on",
           "account"
+        ],
+        "type": "object"
+      },
+      "PayrollCash": {
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "minor": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "minor",
+          "currency"
+        ],
+        "type": "object"
+      },
+      "PayslipRecord": {
+        "properties": {
+          "basic": {
+            "$ref": "#/components/schemas/PayrollCash"
+          },
+          "deductions": {
+            "$ref": "#/components/schemas/PayrollCash"
+          },
+          "employee": {
+            "type": "string"
+          },
+          "gross": {
+            "$ref": "#/components/schemas/PayrollCash"
+          },
+          "name": {
+            "description": "**As it was when the run was made.** A payslip says who it was for, and\nsomebody who marries next month does not get a new copy of last month's.",
+            "type": "string"
+          },
+          "net": {
+            "$ref": "#/components/schemas/PayrollCash"
+          }
+        },
+        "required": [
+          "employee",
+          "name",
+          "basic",
+          "gross",
+          "deductions",
+          "net"
         ],
         "type": "object"
       },
@@ -6227,6 +6569,92 @@
         ],
         "type": "object"
       },
+      "RunAccepted": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "RunRecord": {
+        "properties": {
+          "approved_at": {
+            "description": "Set once it has posted. **An approved run cannot be redrafted.**",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deductions": {
+            "$ref": "#/components/schemas/PayrollCash"
+          },
+          "drafted_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "entry": {
+            "description": "The journal entry it made. Read it at `GET /v1/ledger/entries/{entry}`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gross": {
+            "$ref": "#/components/schemas/PayrollCash"
+          },
+          "id": {
+            "type": "string"
+          },
+          "net": {
+            "$ref": "#/components/schemas/PayrollCash"
+          },
+          "people": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "period": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "period",
+          "gross",
+          "deductions",
+          "net",
+          "people",
+          "drafted_at"
+        ],
+        "type": "object"
+      },
+      "SaCash": {
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "minor": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "minor",
+          "currency"
+        ],
+        "type": "object"
+      },
       "SaleCustomer": {
         "properties": {
           "id": {
@@ -6297,6 +6725,61 @@
           "sale",
           "number",
           "total"
+        ],
+        "type": "object"
+      },
+      "ScheduleView": {
+        "example": {
+          "ceiling_minor": 4500000,
+          "configured": false,
+          "non_saudi_employee_bp": 0,
+          "non_saudi_employer_bp": 200,
+          "saudi_employee_bp": 975,
+          "saudi_employer_bp": 1175
+        },
+        "properties": {
+          "ceiling_minor": {
+            "description": "The most of one month's pay contributions are computed on, in minor\nunits. Absent means no ceiling.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "configured": {
+            "description": "**Whether these are the shipped defaults or something this tenant\nchose.**\n\nThe shipped ones are a starting point, not an authority: GOSI's schedule\nis set by the authority and has changed. This field is what tells\nsomebody they are still on numbers nobody has confirmed.",
+            "type": "boolean"
+          },
+          "non_saudi_employee_bp": {
+            "description": "Withheld from a non-Saudi employee. Zero: hazards cover is the\nemployer's alone.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "non_saudi_employer_bp": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "saudi_employee_bp": {
+            "description": "Withheld from a Saudi employee's pay, in basis points.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "saudi_employer_bp": {
+            "description": "Paid by the employer for a Saudi employee, in basis points.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "saudi_employee_bp",
+          "saudi_employer_bp",
+          "non_saudi_employee_bp",
+          "non_saudi_employer_bp",
+          "configured"
         ],
         "type": "object"
       },
@@ -12780,6 +13263,152 @@
         ]
       }
     },
+    "/v1/hr/employees/{employee}/salary": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "**Its own operation and its own event.** A rise is not an amendment of a\nphone number, and it is the change somebody will ask to see dated. Sending\nthe same salary again writes nothing.",
+        "operationId": "record_salary",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Their id.",
+            "in": "path",
+            "name": "employee",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSalary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HrAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Basic pay that is not positive, parts in more than one currency, or deductions that come to more than the pay"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such employee"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Record what somebody is paid.",
+        "tags": [
+          "hr"
+        ]
+      }
+    },
     "/v1/hr/employees/{employee}/skills": {
       "get": {
         "operationId": "list_skills",
@@ -13032,6 +13661,496 @@
         "summary": "Record what somebody is qualified to do.",
         "tags": [
           "hr"
+        ]
+      }
+    },
+    "/v1/hr_sa/employees/{employee}/end-of-service": {
+      "get": {
+        "description": "Reads their salary and their dates from `hr`, so the figure and the record\ncannot disagree — and answers with the inputs, because this is a number\nsomebody will be asked to justify.",
+        "operationId": "end_of_service_for",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Their id.",
+            "in": "path",
+            "name": "employee",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`dismissed`, `resigned`, `in_full` or `for_cause`.",
+            "in": "query",
+            "name": "reason",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for `hr`'s read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AwardView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a reason for leaving"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such employee"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No salary recorded"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "What somebody is owed at the end of their service.",
+        "tags": [
+          "hr_sa"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/hr_sa/gosi/contribution": {
+      "get": {
+        "description": "A calculation and not a record: it answers, and stores nothing.",
+        "operationId": "gosi_for",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Basic plus housing, in minor units. Not the whole salary.",
+            "in": "query",
+            "name": "base",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "ISO 4217.",
+            "in": "query",
+            "name": "currency",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`saudi` or `non_saudi`.",
+            "in": "query",
+            "name": "footing",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContributionView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a footing, or a currency that did not parse"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "What contributions come to on a base.",
+        "tags": [
+          "hr_sa"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/hr_sa/gosi/schedule": {
+      "get": {
+        "description": "**`configured` says whether anybody has confirmed it.** The shipped defaults\nare a starting point: the authority sets the schedule and has changed it.",
+        "operationId": "gosi_schedule",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "This tenant's GOSI schedule.",
+        "tags": [
+          "hr_sa"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "set_gosi_schedule",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSchedule"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Stored."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Set it.",
+        "tags": [
+          "hr_sa"
         ]
       }
     },
@@ -16009,6 +17128,849 @@
         "summary": "Stop answering one origin.",
         "tags": [
           "tenant"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/payroll/posting-accounts": {
+      "get": {
+        "operationId": "payroll_accounts",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accounts"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Where payroll posts.",
+        "tags": [
+          "payroll"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "set_payroll_accounts",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Accounts"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Stored."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unusable account code"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Choose them.",
+        "tags": [
+          "payroll"
+        ]
+      }
+    },
+    "/v1/payroll/runs": {
+      "get": {
+        "operationId": "list_runs",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From a previous page's `next`.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows per page. Clamped, never refused.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_RunRecord"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unreadable cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable payroll"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Payroll runs, newest period first.",
+        "tags": [
+          "payroll"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/payroll/runs/{run}": {
+      "get": {
+        "operationId": "get_run",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Its id.",
+            "in": "path",
+            "name": "run",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunRecord"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "One run.",
+        "tags": [
+          "payroll"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Drafting again replaces the previous draft, so a business can fix two\npayslips and run it over. An approved run refuses — the entry is in the books\nand the payslips are what people were told.",
+        "operationId": "draft_run",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Your key for this run. `2026-05` reads well.",
+            "in": "path",
+            "name": "run",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAccepted"
+                }
+              }
+            },
+            "description": "Drafted. Nothing has posted."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a month, or nobody to pay"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable payroll"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Somebody is not on the books or has no salary, or the run is already approved"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Draft a run: compute what everybody would be paid, and **post nothing**.",
+        "tags": [
+          "payroll"
+        ]
+      }
+    },
+    "/v1/payroll/runs/{run}/approval": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The entry is dated to the last day of the period. Approving an approved run\nreports the entry it already made rather than posting a second one.",
+        "operationId": "approve_run",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Its id.",
+            "in": "path",
+            "name": "run",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAccepted"
+                }
+              }
+            },
+            "description": "Posted. Already-approved is the same answer."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such run"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The period is closed, or the ledger refused it"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Approve a run, which **posts it**.",
+        "tags": [
+          "payroll"
+        ]
+      }
+    },
+    "/v1/payroll/runs/{run}/payslips": {
+      "get": {
+        "operationId": "run_payslips",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Its id.",
+            "in": "path",
+            "name": "run",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PayslipRecord"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "The payslips in a run.",
+        "tags": [
+          "payroll"
         ]
       },
       "parameters": [
