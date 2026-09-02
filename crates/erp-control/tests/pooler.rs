@@ -25,9 +25,9 @@
 /// statement can land on a different backend with a different search path, and
 /// the symptom is a query reading an empty table rather than an error.
 ///
-/// The twelve sites that exist are all install, provisioning or rebuild, and
+/// The thirteen sites that exist are all install, provisioning or rebuild, and
 /// they run on connections opened from `maintenance_options`, which is
-/// `Role::Direct`. If a thirteenth appears somewhere else, this fails and asks
+/// `Role::Direct`. If a fourteenth appears somewhere else, this fails and asks
 /// for `SET LOCAL` instead.
 #[test]
 fn no_session_scoped_set_outside_a_ddl_path() {
@@ -48,6 +48,7 @@ fn no_session_scoped_set_outside_a_ddl_path() {
         "modules/sales/src/lib.rs",
         "modules/purchases/src/lib.rs",
         "modules/tax_sa/src/lib.rs",
+        "modules/reports/src/lib.rs",
     ];
 
     let mut offenders = Vec::new();

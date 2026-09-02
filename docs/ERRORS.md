@@ -868,6 +868,34 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **ar** — فرق التوقيت هو عدد الدقائق عن التوقيت العالمي، بين -{limit} و {limit}.
 
 
+## `reports`
+
+### `reports.backwards`
+
+- **en** — A report ends after it starts. {from} is later than {until}.
+- **ar** — ينتهي التقرير بعد أن يبدأ. {from} بعد {until}.
+
+### `reports.database`
+
+- **en** — That could not be read. Try again.
+- **ar** — تعذّرت القراءة. أعد المحاولة.
+
+### `reports.does_not_reconcile`
+
+- **en** — These figures do not agree with the books: {n} discrepancies. Nothing is shown until they are resolved.
+- **ar** — هذه الأرقام لا تطابق الدفاتر: {n} فرق. لا يُعرض شيء حتى تتم تسويتها.
+
+### `reports.not_a_period`
+
+- **en** — {period} is not a month. Write it as 2026-05.
+- **ar** — {period} ليس شهرًا. اكتبه هكذا: 2026-05.
+
+### `reports.range_too_long`
+
+- **en** — A report may cover at most {n} months.
+- **ar** — لا يغطي التقرير أكثر من {n} شهر.
+
+
 ## `request`
 
 ### `request.certificate_key_mismatch`

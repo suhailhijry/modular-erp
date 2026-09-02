@@ -1,0 +1,114 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT period as \"period!\", resource as \"resource!\",\n                  booked as \"booked!\", completed as \"completed!\",\n                  no_shows as \"no_shows!\", cancelled as \"cancelled!\",\n                  minutes as \"minutes!\", lead_minutes as \"lead_minutes!\"\n             FROM proj_reports.utilisation\n            WHERE period >= $1 AND period <= $2\n            ORDER BY period, resource\n            LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "period!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.utilisation",
+            "name": "period"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "resource!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.utilisation",
+            "name": "resource"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "booked!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.utilisation",
+            "name": "booked"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "completed!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.utilisation",
+            "name": "completed"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "no_shows!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.utilisation",
+            "name": "no_shows"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "cancelled!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.utilisation",
+            "name": "cancelled"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "minutes!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.utilisation",
+            "name": "minutes"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "lead_minutes!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.utilisation",
+            "name": "lead_minutes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "158f4420bf6d98e4dd3266f395c86d99a63e24d49d8d3e6ff285a0a8e9485f41"
+}

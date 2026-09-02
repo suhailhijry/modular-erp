@@ -287,6 +287,12 @@ async fn rebuild(
                 owned.iter().map(AsRef::as_ref).collect();
             rebuild_swap::<tax_sa::TaxSa>(&pool, sql, &refs, upcasters, 500).await?
         }
+        "reports" => {
+            let owned = reports::projections();
+            let refs: Vec<&dyn Projection<Group = reports::Reports>> =
+                owned.iter().map(AsRef::as_ref).collect();
+            rebuild_swap::<reports::Reports>(&pool, sql, &refs, upcasters, 500).await?
+        }
         other => return Err(format!("{other} has no rebuild in bin/migrator").into()),
     };
 
@@ -435,6 +441,7 @@ mod tests {
             "sales",
             "purchases",
             "tax_sa",
+            "reports",
         ];
 
         for (name, setup) in erp_api::modules() {

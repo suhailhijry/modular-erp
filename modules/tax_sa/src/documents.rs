@@ -362,6 +362,11 @@ async fn unregistered(
 
 /// The registration in force at this point in the log.
 async fn registration(conn: &mut PgConnection) -> Result<Option<Registration>, ProjectionError> {
+    // projection-read: `taxpayer`, written by this projection when the business
+    // registered. Every document must be stamped with the registration **in
+    // force at that point in the log** — a VAT number recorded later must not
+    // restate a document already issued — and the invoice event cannot carry
+    // it, because `sales` does not know this module exists.
     let row: Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT registration FROM taxpayer WHERE id = 'self'")
             .fetch_optional(&mut *conn)
@@ -377,6 +382,11 @@ async fn registration(conn: &mut PgConnection) -> Result<Option<Registration>, P
 
 /// The next position in the chain, and the hash it points back at.
 async fn next_link(conn: &mut PgConnection) -> Result<Link, ProjectionError> {
+    // projection-read: `zatca_document`, written by this projection on every
+    // document before this one. The ZATCA chain is a hash of its predecessor,
+    // so the predecessor is what a link needs and nothing can put it in the
+    // event — the invoice that caused it does not know its own position in the
+    // chain. Same group, earlier in log order, so a rebuild reproduces it.
     let row: Option<(i64, String)> = sqlx::query_as(
         "SELECT icv, invoice_hash FROM zatca_document
           WHERE icv IS NOT NULL ORDER BY icv DESC LIMIT 1",
@@ -396,6 +406,10 @@ async fn invoice_of(
     conn: &mut PgConnection,
     source: &str,
 ) -> Result<Option<Document>, ProjectionError> {
+    // projection-read: `zatca_document`, written by this projection when the
+    // invoice was issued. A credit note points at the invoice it credits, and
+    // `sales.invoice.cancelled` carries the credit note rather than the
+    // invoice's document — rightly, because the invoice has not changed.
     let row: Option<(Option<serde_json::Value>,)> = sqlx::query_as(
         "SELECT document FROM zatca_document
           WHERE source_id = $1 AND type_code = 388 LIMIT 1",

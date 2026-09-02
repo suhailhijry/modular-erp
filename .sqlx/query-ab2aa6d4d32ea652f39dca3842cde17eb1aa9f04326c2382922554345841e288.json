@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id as \"invoice!\", i.currency as \"currency!\",\n                  (i.net + i.tax)::BIGINT as \"document!\",\n                  i.entry as \"entry!\",\n                  e.debits as \"posted?\"\n             FROM proj_reports.invoiced i\n             LEFT JOIN proj_reports.entry e ON e.id = i.entry\n            WHERE i.position < $1\n              AND (e.id IS NULL OR e.debits <> i.net + i.tax)\n              -- A document that came to nothing posts nothing, and the ledger\n              -- drops zero lines rather than writing an entry with no effect.\n              -- Reporting that as unposted would flag every zero-rated\n              -- placeholder a business ever issues.\n              AND (i.net + i.tax) <> 0\n            ORDER BY i.id\n            LIMIT 100",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "invoice!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.invoiced",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.invoiced",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "document!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "entry!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.invoiced",
+            "name": "entry"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "posted?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.entry",
+            "name": "debits"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "ab2aa6d4d32ea652f39dca3842cde17eb1aa9f04326c2382922554345841e288"
+}

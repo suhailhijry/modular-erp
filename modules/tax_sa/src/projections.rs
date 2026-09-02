@@ -340,6 +340,10 @@ async fn signed(
     qr: &str,
     at: Timestamp,
 ) -> Result<(), ProjectionError> {
+    // projection-read: `zatca_document`, written by this projection when the
+    // document was built. The signature event carries what could not be derived
+    // — the stamp and what it covers — and the document it applies to is what
+    // this group already holds.
     let row: Option<(Option<serde_json::Value>,)> =
         sqlx::query_as("SELECT document FROM zatca_document WHERE id = $1")
             .bind(document)

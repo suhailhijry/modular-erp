@@ -146,6 +146,26 @@ authority sets the schedule and has changed it; a build that hard-coded a
 percentage would be quietly wrong for somebody from the day it shipped. The API
 says whether anybody has confirmed them.
 
+## reports
+
+Figures that agree with the books: what was sold, how the diary went, what the
+tills took, and what people cost.
+
+**The one module that consumes other modules' events rather than serving its
+own.** A dashboard mixing four subjects looks like it must read four projection
+groups, and L3 forbids that: four checkpoints can sit at four positions, so a
+total across them is a number that was never true. This subscribes to the log
+instead, and keeps one checkpoint.
+
+The price is that it remembers things — what each invoice came to, what each
+booking holds, who has which till open — because the events it reads carry what
+changed and not what did not. That is a working table, and it is cheaper than a
+report that is occasionally wrong in a way nobody can reproduce.
+
+**A discrepancy is a failure.** Every figure reconciles against the ledger, from
+this module's own copy of it at its own checkpoint, and a difference makes the
+tenant unhealthy rather than a cell amber.
+
 ## How modules learn about each other
 
 By subscribing to the log. `tax_sa` finds out an invoice was issued by reading

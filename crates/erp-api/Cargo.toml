@@ -28,6 +28,7 @@ branches = { workspace = true }
 pos = { workspace = true }
 purchases = { workspace = true }
 tax_sa = { workspace = true }
+reports = { workspace = true }
 erp-i18n = { workspace = true }
 erp-types = { workspace = true }
 uuid = { workspace = true }
@@ -56,6 +57,7 @@ branches = { workspace = true }
 pos = { workspace = true }
 purchases = { workspace = true }
 tax_sa = { workspace = true }
+reports = { workspace = true }
 erp-projection = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

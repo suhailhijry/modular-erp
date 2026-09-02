@@ -54,6 +54,7 @@
 - [pos](./api/pos.md)
 - [payroll](./api/payroll.md)
 - [hr_sa](./api/hr_sa.md)
+- [reports](./api/reports.md)
 - [The HTTP API](./api/http.md)
 
 # Ahead

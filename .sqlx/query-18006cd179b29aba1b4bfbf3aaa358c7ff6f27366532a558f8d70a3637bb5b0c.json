@@ -1,0 +1,102 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT period as \"period!\", currency as \"currency!\",\n                  gross as \"gross!\", commission as \"commission!\",\n                  deductions as \"deductions!\", net as \"net!\", people as \"people!\"\n             FROM proj_reports.people_cost\n            WHERE period >= $1 AND period <= $2\n            ORDER BY period, currency\n            LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "period!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.people_cost",
+            "name": "period"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.people_cost",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.people_cost",
+            "name": "gross"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "commission!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.people_cost",
+            "name": "commission"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "deductions!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.people_cost",
+            "name": "deductions"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.people_cost",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "people!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.people_cost",
+            "name": "people"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "18006cd179b29aba1b4bfbf3aaa358c7ff6f27366532a558f8d70a3637bb5b0c"
+}

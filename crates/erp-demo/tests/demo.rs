@@ -443,7 +443,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
     let demo = Demo::build("demo-replay").await;
     let pool = demo.tenant_pool().await;
 
-    let reports = vec![
+    let replays = vec![
         replay!(pool, booking, booking::Booking, "reservation"),
         replay!(pool, crm, crm::Crm, "customer"),
         replay!(pool, prepaid, prepaid::Prepaid, "entitlement"),
@@ -455,6 +455,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
         replay!(pool, sales, sales::Sales, "invoice"),
         replay!(pool, purchases, purchases::Purchases, "bill"),
         replay!(pool, tax_sa, tax_sa::TaxSa, "zatca_document"),
+        replay!(pool, reports, reports::Reports, "revenue"),
     ];
 
     pool.close().await;
@@ -462,7 +463,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
     // **Nothing was left out.** The demo enables every module, so every group
     // every module owns exists in this tenant and must have been rebuilt.
     let replayed: std::collections::BTreeSet<&str> =
-        reports.iter().map(|report| report.group).collect();
+        replays.iter().map(|report| report.group).collect();
     let declared: std::collections::BTreeSet<&str> = erp_api::modules()
         .iter()
         .flat_map(|(_, setup)| setup.groups.iter().map(|(name, _)| *name))
@@ -475,12 +476,12 @@ async fn the_demo_replays_to_exactly_what_is_live() {
     // A report over an empty log is trivially reproducible, so the position they
     // were all compared at has to be somewhere.
     assert!(
-        reports[0].position.get() > 20,
+        replays[0].position.get() > 20,
         "the demo should have written a substantial log, got {}",
-        reports[0].position
+        replays[0].position
     );
 
-    for report in &reports {
+    for report in &replays {
         assert!(
             report.is_reproducible(),
             "{} does not rebuild to what is live: {:?}",
@@ -517,6 +518,23 @@ async fn the_demo_passes_every_invariant() {
 
     let overpaid = sales::overpaid(&mut conn).await.expect("reads");
     assert!(overpaid.is_empty(), "an invoice is overpaid: {overpaid:?}");
+
+    // **§10b, against a whole business rather than a fixture.** Every figure
+    // the reports module offers is built from the same log the ledger is, and
+    // this asserts they agree — over a demo that issues invoices, credits some,
+    // rings up till sales, takes deposits and runs payroll.
+    //
+    // A discrepancy is a failure, not a coloured cell (L6), and this is where
+    // that becomes a failing build rather than a claim in a doc comment.
+    let discrepancies = reports::reconciles(&mut conn).await.expect("reads");
+    assert!(
+        discrepancies.is_empty(),
+        "the demo's figures do not agree with its books: {:?}",
+        discrepancies
+            .iter()
+            .map(reports::Discrepancy::describe)
+            .collect::<Vec<_>>()
+    );
 
     let outbox = erp_eventlog::outbox_health(&mut conn).await.expect("reads");
     assert_eq!(outbox.dead, 0, "the demo dead-lettered an effect");

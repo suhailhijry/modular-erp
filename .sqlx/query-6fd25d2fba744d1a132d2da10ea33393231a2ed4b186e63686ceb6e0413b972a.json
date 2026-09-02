@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT currency as \"currency!\",\n                  (sum(debits) + sum(credits))::BIGINT as \"difference!\"\n             FROM proj_reports.entry\n            GROUP BY currency\n           HAVING sum(debits) + sum(credits) <> 0\n            ORDER BY currency",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.entry",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "difference!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "6fd25d2fba744d1a132d2da10ea33393231a2ed4b186e63686ceb6e0413b972a"
+}

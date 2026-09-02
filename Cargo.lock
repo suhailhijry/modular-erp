@@ -605,6 +605,7 @@ dependencies = [
  "pos",
  "prepaid",
  "purchases",
+ "reports",
  "sales",
  "serde",
  "serde_json",
@@ -668,6 +669,7 @@ dependencies = [
  "pos",
  "prepaid",
  "purchases",
+ "reports",
  "sales",
  "serde_json",
  "sqlx",
@@ -836,6 +838,7 @@ dependencies = [
  "pos",
  "prepaid",
  "purchases",
+ "reports",
  "sales",
  "serde",
  "serde_json",
@@ -2062,6 +2065,40 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "reports"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "booking",
+ "branches",
+ "chrono",
+ "crm",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-occupancy",
+ "erp-projection",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "hr",
+ "ledger",
+ "payroll",
+ "pos",
+ "sales",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+]
 
 [[package]]
 name = "reqwest"

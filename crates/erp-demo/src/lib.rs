@@ -301,6 +301,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     advance::<sales::Sales>(&db, &sales::projections(), sales::upcasters()).await?;
     advance::<purchases::Purchases>(&db, &purchases::projections(), purchases::upcasters()).await?;
     advance::<tax_sa::TaxSa>(&db, &tax_sa::projections(), tax_sa::upcasters()).await?;
+    advance::<reports::Reports>(&db, &reports::projections(), reports::upcasters()).await?;
     Ok(())
 }
 

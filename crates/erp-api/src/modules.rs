@@ -140,6 +140,12 @@ const REGISTERED: &[Registered] = &[
         http: tax_sa::http::routes,
         catalog: &tax_sa::CATALOG,
     },
+    Registered {
+        name: "reports",
+        setup: reports::setup,
+        http: reports::http::routes,
+        catalog: &reports::CATALOG,
+    },
 ];
 
 /// Every module this build offers, as `(name, setup)`.

@@ -1792,6 +1792,18 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("issue_invoice", &["owner", "accountant", "clerk"]),
     ("refund_payment", &["owner", "accountant", "clerk"]),
     ("unmatched_customers", ALL_ROLES),
+    // The dashboard. A viewer may read what the business sold, how the diary
+    // went and what the tills took — those are the numbers a shop floor runs
+    // on, and `shift_takings` already says a viewer may see a drawer's
+    // variance.
+    ("revenue", ALL_ROLES),
+    ("utilisation", ALL_ROLES),
+    ("takings", ALL_ROLES),
+    // **Not the wage bill.** What the people in the room are paid is not a
+    // figure a receptionist with a dashboard should be able to total, and the
+    // reconciliation is a statement about the books.
+    ("people_cost", &["owner", "accountant"]),
+    ("reconciliation", &["owner", "accountant"]),
     // The org chart. Reading it is ordinary — a staff list is on the wall in
     // most businesses. Changing it is changing the authorization structure, and
     // granting a claim escalates every ancestor, so it is the owner's.
@@ -2003,8 +2015,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        151,
-        "expected a hundred and fifty-one role-scoped operations"
+        156,
+        "expected a hundred and fifty-six role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

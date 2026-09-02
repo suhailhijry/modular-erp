@@ -1,0 +1,50 @@
+[package]
+name = "reports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Figures that agree with the books, built from the log rather than from other read models."
+
+[lints]
+workspace = true
+
+[dependencies]
+erp-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+# **Named for their events, not for their read models.** This module subscribes
+# to the log — it decodes `sales::InvoiceEvent` and the rest — and never reads
+# another module's projection group, which L3 forbids. The dependency is on the
+# event *shapes*, the same way `tax_sa` names `sales`.
+sales = { workspace = true }
+booking = { workspace = true }
+pos = { workspace = true }
+payroll = { workspace = true }
+ledger = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+branches = { workspace = true }
+# The booking fixture builds a `Span`, which is the occupancy engine's.
+erp-occupancy = { workspace = true }
+crm = { workspace = true }
+hr = { workspace = true }
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+erp-i18n = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

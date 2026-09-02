@@ -6262,6 +6262,43 @@
         ],
         "type": "object"
       },
+      "PeopleCostView": {
+        "properties": {
+          "commission": {
+            "description": "Part of `gross`, not on top of it.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "deductions": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "gross": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "people": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "period": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "period",
+          "gross",
+          "commission",
+          "deductions",
+          "net",
+          "people"
+        ],
+        "type": "object"
+      },
       "PerformedBy": {
         "properties": {
           "currency": {
@@ -6474,6 +6511,26 @@
         },
         "required": [
           "standard"
+        ],
+        "type": "object"
+      },
+      "ReconciliationView": {
+        "properties": {
+          "discrepancies": {
+            "description": "One line each, empty when it reconciles.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reconciles": {
+            "description": "**True is the only acceptable answer.** See below.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reconciles",
+          "discrepancies"
         ],
         "type": "object"
       },
@@ -6791,6 +6848,46 @@
           "output",
           "input",
           "payable"
+        ],
+        "type": "object"
+      },
+      "RevenueView": {
+        "properties": {
+          "branch": {
+            "description": "Empty on a business with no branches, which is honest about there being\nnone rather than inventing a name for it.",
+            "type": "string"
+          },
+          "credited": {
+            "description": "Documents credited in this period. A period can show both, and the pair\nis a different fact from a single net figure.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "documents": {
+            "description": "Documents issued in this period.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "net": {
+            "description": "**Net of credit notes**, in minor units. What the business kept.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "period": {
+            "description": "`2026-05`.",
+            "type": "string"
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period",
+          "branch",
+          "net",
+          "tax",
+          "documents",
+          "credited"
         ],
         "type": "object"
       },
@@ -7547,6 +7644,55 @@
         ],
         "type": "object"
       },
+      "TakingsView": {
+        "properties": {
+          "method": {
+            "description": "`cash`, `card` or `transfer`.",
+            "type": "string"
+          },
+          "operator": {
+            "description": "Whoever had the till open. An identity, not a `crm` record.",
+            "type": "string"
+          },
+          "paid_out": {
+            "description": "Cash out that was not a refund — a banking run, a float moved, a\nsupplier paid in notes. The closest the log comes to \"what was banked\",\nand named for what it is: nothing here has seen a bank statement.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "period": {
+            "type": "string"
+          },
+          "refunded": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "shifts": {
+            "description": "Shifts this operator **closed**. A till still taking money has no\nvariance yet.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "taken": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "variance": {
+            "description": "**What the drawer disagreed by**, summed over the shifts this operator\nclosed. Negative is short.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period",
+          "operator",
+          "method",
+          "taken",
+          "refunded",
+          "variance",
+          "paid_out",
+          "shifts"
+        ],
+        "type": "object"
+      },
       "TariffBand": {
         "description": "A price band on the wire.",
         "example": {
@@ -7889,6 +8035,60 @@
           "gross",
           "currency",
           "last_issued"
+        ],
+        "type": "object"
+      },
+      "UtilisationView": {
+        "properties": {
+          "average_lead_minutes": {
+            "description": "Average notice a booking gave, in minutes.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "booked": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "cancelled": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "completed": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "minutes": {
+            "description": "Diary minutes the completed work took — the denominator for revenue per\nresource-hour.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "no_show_rate_bp": {
+            "description": "No-shows as a share of what was booked, in **basis points**. Integer, so\nit is the same number on every client.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "no_shows": {
+            "description": "**Counted, not inferred**: a no-show is a stage somebody moved a booking\nto. Deriving it from \"booked and not completed\" would count everything\nstill in the diary the moment a month ended.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "period": {
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "period",
+          "resource",
+          "booked",
+          "completed",
+          "no_shows",
+          "cancelled",
+          "minutes",
+          "no_show_rate_bp",
+          "average_lead_minutes"
         ],
         "type": "object"
       },
@@ -23986,6 +24186,672 @@
           "purchases"
         ]
       }
+    },
+    "/v1/reports/people-cost": {
+      "get": {
+        "operationId": "people_cost",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "First month, inclusive. `2026-01`.",
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Last month, inclusive. `2026-12`.",
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PeopleCostView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a month, backwards, or longer than ten years"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "What people are paid is not a figure every viewer may read"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "What people cost, by month. **Approved payroll runs only** — a draft is not\na cost, and counting one would make this move when somebody opened a screen.",
+        "tags": [
+          "reports"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/reports/reconciliation": {
+      "get": {
+        "description": "The invariant behind every other route here. It compares what this module\nsays was invoiced against the journal entries those documents posted, and\nchecks that every currency's postings still sum to zero — both against this\ngroup's **own** copy of the ledger, at its own checkpoint, so a\ndisagreement is a disagreement and never one group being behind another.\n\nA discrepancy is a failure, not a coloured cell (L6). This route reports\nthem; the worker's health check refuses a tenant that has any.",
+        "operationId": "reconciliation",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconciliationView"
+                }
+              }
+            },
+            "description": "`reconciles` is true and the list is empty, or something disagrees"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "**Whether these figures agree with the books.**",
+        "tags": [
+          "reports"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/reports/revenue": {
+      "get": {
+        "description": "**Net of credit notes**: a cancelled invoice takes its own numbers back out,\nin the month the credit was dated to. A December invoice credited in January\nis December revenue that January took back — moving it would restate a month\nsomebody has already filed a return against.",
+        "operationId": "revenue",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "First month, inclusive. `2026-01`.",
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Last month, inclusive. `2026-12`.",
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RevenueView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a month, backwards, or longer than ten years"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, not yours, or the reports module is not enabled here"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "What was sold, by month and branch.",
+        "tags": [
+          "reports"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/reports/takings": {
+      "get": {
+        "operationId": "takings",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "First month, inclusive. `2026-01`.",
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Last month, inclusive. `2026-12`.",
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TakingsView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a month, backwards, or longer than ten years"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "What the tills took, by month, person and method.",
+        "tags": [
+          "reports"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/reports/utilisation": {
+      "get": {
+        "operationId": "utilisation",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "First month, inclusive. `2026-01`.",
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Last month, inclusive. `2026-12`.",
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UtilisationView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a month, backwards, or longer than ten years"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "How well the diary was used, by month and resource.",
+        "tags": [
+          "reports"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/sales/invoices": {
       "get": {

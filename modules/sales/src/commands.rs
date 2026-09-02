@@ -774,6 +774,28 @@ fn issue_entry(invoice: &AggregateId) -> Result<AggregateId, ExecuteError<SalesE
         .map_err(|_| ExecuteError::Rejected(SalesError::NotIssued(invoice.as_str().to_owned())))
 }
 
+/// **The name of the journal entry an invoice's issue posts under.**
+///
+/// Public because a report has to be able to say *which postings this document
+/// made* — the §10b reconciliation is "the debits of the entry this invoice
+/// posted equal what this invoice came to", and it cannot ask `proj_sales` or
+/// `proj_ledger` for the answer without the cross-group read L3 forbids.
+///
+/// The alternative was for `reports` to reimplement `si.{invoice}`, which is
+/// the shape of bug that stays quiet until somebody changes the prefix here.
+/// The scheme belongs to this module; naming it out loud is cheaper than a
+/// second copy of it.
+#[must_use]
+pub fn issue_entry_of(invoice: &str) -> String {
+    format!("si.{invoice}")
+}
+
+/// The name of the entry a credit note posts under. See [`issue_entry_of`].
+#[must_use]
+pub fn credit_entry_of(invoice: &str, credit_note: &str) -> String {
+    format!("cn.{invoice}.{credit_note}")
+}
+
 /// The journal entry a payment or a refund posts under. Scoped by invoice as
 /// well as reference: two customers can both call their transfer "march".
 fn money_entry(
@@ -994,3 +1016,27 @@ const _: fn() = || {
     }
     let _ = commands_are_send;
 };
+
+#[cfg(test)]
+mod entry_name_tests {
+    use super::*;
+
+    /// **The public names and the private derivation must agree**, or a report
+    /// reconciles against entries that do not exist and reports every document
+    /// as a discrepancy.
+    #[test]
+    fn the_published_entry_names_are_the_ones_that_get_posted() {
+        let invoice = AggregateId::new("inv-1").expect("a valid id");
+
+        assert_eq!(
+            issue_entry(&invoice).expect("derives").as_str(),
+            issue_entry_of("inv-1")
+        );
+        assert_eq!(
+            derived_id("cn", &[invoice.as_str(), "cn-9"])
+                .expect("derives")
+                .as_str(),
+            credit_entry_of("inv-1", "cn-9")
+        );
+    }
+}

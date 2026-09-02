@@ -1,0 +1,102 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT period as \"period!\", branch as \"branch!\", currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\",\n                  documents as \"documents!\", credited as \"credited!\"\n             FROM proj_reports.revenue\n            WHERE period >= $1 AND period <= $2\n            ORDER BY period, branch, currency\n            LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "period!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.revenue",
+            "name": "period"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "branch!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.revenue",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.revenue",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.revenue",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "tax!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.revenue",
+            "name": "tax"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "documents!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.revenue",
+            "name": "documents"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "credited!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.revenue",
+            "name": "credited"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f6d26fd9d17fd61f4444649f20dc321ce2af78500de475009e534c691f25b8e9"
+}

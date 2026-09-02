@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_job(Arc::new(
             HealthJob::every(Duration::from_mins(5))
                 .with(Arc::new(TrialBalance))
+                .with(Arc::new(ReportsReconcile))
                 .with(Arc::new(NoOverpaidInvoice))
                 .with(Arc::new(NoOverpaidBill))
                 .with(Arc::new(CertificateExpiry))
@@ -168,6 +169,45 @@ impl Invariant for TrialBalance {
                     ),
                 )
             })
+            .collect())
+    }
+}
+
+/// **The report group against the books** (§10b).
+///
+/// The invariant that makes a figure on a dashboard worth reading. It lives
+/// here for the same reason [`TrialBalance`] does: the kernel must not know what
+/// a report is, and a module must not depend on the worker.
+///
+/// A discrepancy is a **failure**, not a coloured cell (L6) — so it is a health
+/// finding, which is what makes the tenant unhealthy, rather than a field on
+/// the response that a front end would render in amber.
+///
+/// The warning this answers, from the system this phase was read against: its
+/// customer statement is built from invoices rather than from the ledger,
+/// because the ledger was unfinished. Two financial truths that disagree is
+/// what this exists to catch on the day it starts rather than at an audit.
+struct ReportsReconcile;
+
+#[async_trait::async_trait]
+impl Invariant for ReportsReconcile {
+    fn name(&self) -> &'static str {
+        "reports_reconcile"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(reports::module_id())
+    }
+
+    async fn check(
+        &self,
+        db: &erp_control::TenantDb,
+    ) -> Result<Vec<Finding>, erp_worker::BoxError> {
+        let mut conn = db.acquire().await?;
+        Ok(reports::reconciles(&mut conn)
+            .await?
+            .iter()
+            .map(|found| Finding::new("reports_reconcile", found.describe()))
             .collect())
     }
 }
@@ -648,6 +688,14 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 200,
             )
             .for_module(tax_sa::module_id()),
+        ),
+        Arc::new(
+            ProjectionJob::<reports::Reports>::new(
+                reports::projections(),
+                Arc::new(reports::upcasters().clone()),
+                200,
+            )
+            .for_module(reports::module_id()),
         ),
     ]
 }

@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 921 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 928 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -21,15 +21,16 @@ written; they are history, not status. What is not yet true is collected under
 ## For review — decisions I made without you
 
 Written across 2026-09-01/02 while you were away: a gap-closing pass, then
-Phase 17, then Phase 9. Each item below is a judgement call I took rather than
-stopping on, and each is reversible. Read them, and delete this section once you
-have.
+Phase 17, then Phase 9, then Phase 10. Each item below is a judgement call I
+took rather than stopping on, and each is reversible. Read them, and delete this
+section once you have.
 
 **What landed, in order:** the closable gaps and two defects they exposed; the
 public booking API with per-tenant CORS, rate limiting and an API-compatibility
-guard (Phase 17); and Phase 9 — the org chart with claims travelling up it, work
+guard (Phase 17); Phase 9 — the org chart with claims travelling up it, work
 documents, skills, shifts, attendance, leave, payroll with commission, and the
-Saudi statutory arithmetic.
+Saudi statutory arithmetic; and Phase 10 — `modules/reports`, which subscribes
+to the log rather than reading four groups, and reconciles to the books.
 
 **Phase 9 is complete except two items, and both are blocked on something
 outside the repository**: the WPS file needs a specification this build cannot
@@ -215,6 +216,81 @@ through its own smaller composite; what was missing was the reference a client
 reads. `Registered` carries a `catalog` now, so there is nowhere to add a module
 that does not also say what it can say, and `every_module_reaches_the_reference`
 fails if one slips through.
+
+### 11 · A report module reads its own tables while projecting, and that needed a rule
+
+`crates/erp-projection/tests/purity.rs` says a projection **writes and does not
+read**, for three reasons: an N+1 per event, an undeclared ordering constraint
+between projections, and — the one that matters — a dependence on rows that may
+be absent mid-replay, which is L2 lost.
+
+`reports` cannot obey it. It subscribes to *other modules'* events and cannot put
+anything into them: `sales.invoice.cancelled` carries the credit note and not the
+invoice's amounts, and `pos.shift.sold` carries tenders and not the operator —
+both correctly, because neither has changed. Netting a credit off, or grouping
+takings by person, means the report has to have remembered.
+
+**What I did instead of exempting the module:** refined the rule and
+strengthened the guard.
+
+- A read of your **own group's** working table, written by **this same
+  projection earlier in log order**, is allowed — it costs the N+1 and costs
+  neither of the other two, and the shadow replay proves it. It must be declared
+  on the line above it with `// projection-read:` and a sentence saying which
+  table and why.
+- The guard now follows the helpers `apply` calls, transitively. It previously
+  scanned only the inline body, so it was blind to a read one function away.
+
+That second change found **four undeclared reads that already existed** in
+`tax_sa` — the ZATCA chain's previous link, the invoice a credit note points at,
+the document a signature applies to, and the registration in force at that point
+in the log. All four are the same legitimate shape, all four are now declared,
+and none of them was visible to the guard before.
+
+Reverse it by deleting the marker rule and the helper hop; the four `tax_sa`
+reads go back to being invisible, which is what they were.
+
+### 12 · `sales` now publishes the names of the entries it posts
+
+`sales::issue_entry_of` and `sales::credit_entry_of` are public. The §10b
+reconciliation is *"the debits of the entry this invoice posted equal what the
+invoice came to"*, and naming that entry is the only way to ask the question
+without a cross-group read.
+
+The alternative was for `reports` to reimplement `si.{invoice}`, which is the
+kind of copy that stays right until somebody changes the prefix. A unit test
+asserts the published names and the private derivation agree.
+
+### 13 · What the reconciliation compares, and what it deliberately does not
+
+It compares **per document**, not per account. I tried the account-level version
+first — reported revenue against the revenue accounts' balance — and it produces
+false alarms: `prepaid` moves money in and out of revenue as packages are
+granted and redeemed, and a manual journal to `4000` is a legitimate thing a
+business does. **An invariant that fires on something normal is one somebody
+switches off**, so it is per-document and account-agnostic.
+
+It also skips the last invoice in the log. An invoice and its journal entry
+commit together and take consecutive positions, but a projection batch may end
+between them — reporting that as "made no entry" would be reporting a batch
+boundary as a broken ledger. `invoiced.position` is what excludes it.
+
+**What that leaves uncovered**, honestly: a journal entry posted by hand that
+should not exist, and a document from before this module was enabled. Neither is
+reachable from what a report can see, and inventing an answer would be worse
+than the gap.
+
+### 14 · Three of Phase 10a's figures are not built, and one is a duplicate
+
+- **Revenue by product** needs invoice lines, which is a working table the width
+  of every line ever issued. Not built; the same question is answerable per
+  document today.
+- **Headcount and expiring documents** are answered by `hr` from its own group.
+  No cross-group total is involved, so a copy in `reports` would be duplication
+  for its own sake. Deliberately absent rather than pending.
+- **"Against what was banked"** is `takings.paid_out` — cash that left the
+  drawer and was not a refund. Nothing in this system has seen a bank statement,
+  so it is named for what it is rather than claiming a reconciliation to one.
 
 ---
 
@@ -1691,22 +1767,41 @@ consistent, L3 satisfied.
 
 ### 10a · `modules/reports`
 
-- [ ] Sales: revenue by period, branch and product; tax summary
-- [ ] Booking: utilisation, no-show rate, lead time, revenue per resource-hour
-- [ ] People: headcount, cost, documents about to expire
-- [ ] Cash: takings by method and by person, against what was banked
+- [~] Sales: revenue by period, branch and product; tax summary — period,
+      branch, net, tax, documents and credits. **Product is not built**: it needs
+      a working table the width of every invoice line ever issued, and the same
+      question is answerable per document today. See review §14
+- [x] Booking: utilisation, no-show rate, lead time, revenue per resource-hour —
+      `booked`/`completed`/`no_shows`/`cancelled`, `minutes` as the
+      resource-hour denominator, and lead time in **domain** time, not commit
+      time
+- [~] People: headcount, cost, documents about to expire — cost is built, from
+      **approved** runs only. Headcount and expiry are `hr`'s own group and no
+      cross-group total is involved, so a copy here would be duplication. See
+      review §14
+- [x] Cash: takings by method and by person, against what was banked — taken,
+      refunded, variance, `paid_out`. Nothing here has seen a bank statement, so
+      the last column is named for what it is
 
 ### 10b · The invariant that makes a report trustworthy
 
-- [ ] A report group reconciles to the trial balance, asserted the way
-      `an_unbalanced_entry_is_refused` is asserted
-- [ ] A discrepancy is a **failure**, not a coloured cell. L6
-- [ ] The warning from that system, taken seriously: its customer statement is
+- [x] A report group reconciles to the trial balance, asserted the way
+      `an_unbalanced_entry_is_refused` is asserted — `reports::reconciles`, and
+      `every_figure_agrees_with_the_books` / `the_demo_passes_every_invariant`
+- [x] A discrepancy is a **failure**, not a coloured cell. L6 — the worker's
+      `reports_reconcile` health check makes the tenant unhealthy, and
+      `a_figure_that_disagrees_with_the_books_is_a_failure` proves the check can
+      fail
+- [x] The warning from that system, taken seriously: its customer statement is
       built from invoices rather than from the ledger, because the ledger was
       unfinished and its books were going to be deleted and rebuilt. Two
       financial truths that disagree is what this section exists to prevent
 
 **Exit:** every figure on a dashboard is derivable from the log, and reconciles.
+**Met**, with the three deliberate gaps in 10a above. The module subscribes to
+`sales`, `booking`, `pos`, `payroll` and `ledger` events, keeps one checkpoint,
+reads no other group — `this_module_names_no_other_projection_group` — and
+replays to exactly what is live.
 
 ---
 
