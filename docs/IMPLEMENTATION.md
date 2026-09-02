@@ -32,7 +32,8 @@ skills, payroll and the Saudi statutory arithmetic (Phase 9a–9g, less shifts,
 attendance, commission and WPS).
 
 **The one to read first is §5**, because it is about numbers that come out of
-this system and go to a government.
+this system and go to a government. **§10 is a decision I stopped on** rather
+than took, and it blocks the last buildable piece of Phase 9.
 
 ### 1 · Two views over the invoice, rather than one
 
@@ -171,6 +172,25 @@ I had this on the gap list from an earlier session. It is wrong: `ARCHITECTURE.m
 `pools.rs` and `placement.rs` all quote 5,000, and this document's own target is
 2,000–5,000. Sizing against the top of the stated range is correct. Nothing
 changed; the item is struck.
+
+
+### 10 · Shifts need a crate move, and a code rename I did not make
+
+`hr` shifts want `booking::Availability` and cannot have it: `booking` already
+depends on `hr`, so the reverse would close a cycle. The type moves to a crate of
+its own — the argument that made `erp-occupancy` a crate — and the mechanical
+part is easy.
+
+What stopped me is that `Availability` carries seven client-facing error codes
+under the `booking.` prefix, and this API's own documentation tells clients to
+branch on the code. Renaming them to `recurrence.*` is right and costs nothing
+today because nothing is released; keeping `booking.*` in a crate that is not
+booking would have `hr` refusing a shift with a code naming a module the tenant
+may not have enabled.
+
+**Renaming a client-facing identifier is your call, not one to take overnight.**
+Say the word and it is an afternoon's work, shifts included. §9a has the same
+note.
 
 ---
 
@@ -1218,7 +1238,33 @@ payroll, and both have to be settled before `Employee` has a field.
 
       `eligible_for` is **one question**: employment, documents and skill
       together, because a caller who had to ask both would eventually ask one
-- [ ] Shifts, on Phase 8's recurrence. The same problem, so the same type
+- [ ] Shifts, on Phase 8's recurrence. The same problem, so the same type —
+      **and that is now blocked on a decision, not on work.**
+
+      `booking::Availability` is exactly the shape a shift needs: which days,
+      and between which two times on those days. `hr` cannot use it, because
+      `booking` already depends on `hr` (a resource names an employee, so a
+      lapsed iqama stops the rota) and the other direction would close a cycle.
+
+      So it moves to a crate of its own — the same argument that made
+      `erp-occupancy` a crate rather than part of `booking`, and `erp-occupancy`
+      already says as much: *"when a resource is offered is a recurrence, and it
+      belongs in `booking`"*, which was true when only booking needed it.
+
+      **The decision it needs is the error codes.** `Availability` carries
+      `booking.not_a_window`, `booking.not_a_time_of_day` and five more, and a
+      code is a client-facing identifier — the API's own documentation says
+      *branch on the code, never on `detail`*. Moving the type means either:
+
+      - **renaming them to `recurrence.*`**, which is a breaking change to the
+        catalogue and free today because nothing is released, and expensive the
+        moment something is; or
+      - **keeping the `booking.` prefix** in a crate that is not booking, which
+        is stable and misleading — and would have `hr` refusing a shift with a
+        code naming a module the tenant may not have enabled.
+
+      The first is right and it is not mine to take at four in the morning. The
+      move itself is mechanical once it is settled
 - [ ] Attendance and leave, with balances that accrue
 
 **The org is a tree, and it is the point.** Employees are not a flat list with a
