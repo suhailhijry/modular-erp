@@ -724,7 +724,11 @@ async fn a_return_hands_the_money_back_and_credits_the_sale() {
 
     // The drawer is back where it started, and so are the books.
     let shift = fixture.shift("SHIFT-1").await.expect("there");
-    assert_eq!(shift.expected, money(0), "the cash did not leave the drawer");
+    assert_eq!(
+        shift.expected,
+        money(0),
+        "the cash did not leave the drawer"
+    );
     assert_eq!(fixture.balance("1000").await, money(0), "cash on hand");
     assert_eq!(fixture.balance("4000").await, money(0), "revenue reversed");
     assert_eq!(fixture.balance("2100").await, money(0), "VAT reversed");
@@ -779,8 +783,27 @@ async fn a_retried_return_is_harmless() {
     }
 
     fixture.project().await;
+
+    // The ledger is the half `sales` already protects, and asserting only this
+    // is what let a real bug through: the credit note and the money deduplicate
+    // by reference inside `sales`, so these stayed at zero while the drawer
+    // came down once per retry.
     assert_eq!(fixture.balance("1000").await, money(0), "refunded twice");
     assert_eq!(fixture.balance("4000").await, money(0));
+
+    // The drawer is the half this module owns, and it is the one that broke.
+    let shift = fixture.shift("SHIFT-1").await.expect("there");
+    assert_eq!(
+        shift.expected,
+        money(0),
+        "the drawer came down once per retry"
+    );
+    let takings = fixture.takings("SHIFT-1").await;
+    let cash = takings
+        .iter()
+        .find(|t| t.method == "cash")
+        .expect("cash was taken");
+    assert_eq!(cash.refunded, gross(), "the takings counted it three times");
 
     fixture.cleanup().await;
 }

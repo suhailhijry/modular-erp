@@ -28,7 +28,7 @@ use erp_web::{
 use erp_web::{Consistency, Read, nudge};
 use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
 
-use crate::{Basket, Method, Opening, PayOut, PosError, Tender};
+use crate::{Basket, Method, Opening, PayOut, PosError, Return, Tender};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -36,6 +36,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get_shift))
         .routes(routes!(shift_takings))
         .routes(routes!(ring_sale))
+        .routes(routes!(take_back))
         .routes(routes!(pay_out))
         .routes(routes!(close_shift))
         .routes(routes!(till_accounts, set_till_accounts))
@@ -142,6 +143,21 @@ struct NewPayOut {
     amount: Amount,
     /// The account code the money went to.
     to: String,
+    #[serde(default)]
+    why: String,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    at: Option<Timestamp>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+struct NewReturn {
+    /// Your key. Sending it twice is a no-op.
+    reference: String,
+    /// What the customer is handed back, and how. Must come to the whole sale:
+    /// this credits the document, and a partial credit note is not something
+    /// `sales` can write.
+    tenders: Vec<NewTender>,
     #[serde(default)]
     why: String,
     #[serde(default)]
@@ -473,6 +489,59 @@ async fn ring_sale(
             position: rung.committed.at.map(erp_types::LogPosition::get),
         }),
     ))
+}
+
+/// Hand a sale back: the money, the credit note and the drawer, in one write.
+///
+/// The sale is named in the path because the document being credited is the one
+/// that was rung, and `reference` is the caller's own key for *this* return —
+/// two different things, which is why they are two fields.
+#[utoipa::path(
+    post,
+    path = "/v1/pos/shifts/{shift}/sales/{sale}/returns",
+    tag = "pos",
+    params(
+        ("shift" = String, Path, description = "The key it was opened under."),
+        ("sale" = String, Path, description = "The sale being handed back."),
+    ),
+    request_body = NewReturn,
+    responses(
+        (status = OK, body = PosAccepted),
+        (status = BAD_REQUEST, description = "Nothing handed back, or a value that did not parse", body = Problem),
+        (status = NOT_FOUND, description = "No such shift", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the sale is not one that can be credited, or the ledger refused it", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn take_back(
+    tenant: Allowed<PostEntries>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path((shift, sale)): Path<(String, String)>,
+    Json(body): Json<NewReturn>,
+) -> Result<Json<PosAccepted>, Problem> {
+    require_module(&tenant, &crate::module_id(), locale)?;
+    let id = parse_id(&shift, locale)?;
+    let sale = parse_id(&sale, locale)?;
+
+    let returning = Return {
+        reference: body.reference,
+        tenders: tenders(&body.tenders, locale)?,
+        why: body.why,
+        at: body.at.unwrap_or_else(chrono::Utc::now),
+    };
+
+    let committed = crate::take_back(&tenant.db, &id, &sale, &returning, &metadata(&tenant))
+        .await
+        .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(PosAccepted {
+        id: shift,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
 }
 
 /// Take cash out of the drawer for something that is not a refund.

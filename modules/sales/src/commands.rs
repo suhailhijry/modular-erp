@@ -416,6 +416,86 @@ pub async fn record_payment(
     Err(contended(invoice))
 }
 
+/// **Matches a `crm` record to an invoice that was issued without one.**
+///
+/// The reconciliation surface Phase 7a asked for, and the reason that phase
+/// says *surface* rather than *foreign key*: invoices issued before `crm`
+/// existed name a buyer no record matches, and a constraint would have refused
+/// every one of them at once instead of letting somebody work through the list.
+///
+/// **It writes the reference and never the printed name.** What the document
+/// says about its buyer was frozen at issue and stays frozen (L5); this is the
+/// pointer that makes "everything for this customer" answerable.
+///
+/// Attaching the same record twice writes nothing. Attaching a *different* one
+/// is a correction and does write, because a match made to the wrong customer
+/// has to be fixable — and the log keeps both, so the correction is visible.
+pub async fn attach_customer(
+    db: &TenantDb,
+    invoice: &AggregateId,
+    customer: &AggregateId,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    for _ in 1..=MAX_ATTEMPTS {
+        let mut tx = db.begin().await?;
+        let outcome = async {
+            let conn = &mut *tx;
+
+            // Against the log, not `proj_crm` — the same question `issue_in`
+            // asks and for the same reason: a projection lags, and a
+            // reconciliation run right after creating the record would be
+            // refused for a customer that plainly exists.
+            if !crm::accepts_documents(&mut *conn, customer)
+                .await
+                .map_err(ExecuteError::Load)?
+            {
+                return Err(ExecuteError::Rejected(SalesError::NoSuchCustomer(
+                    customer.to_string(),
+                )));
+            }
+
+            try_execute::<Invoice, _, SalesError>(
+                &mut *conn,
+                invoice,
+                crate::upcasters(),
+                metadata,
+                |loaded| {
+                    let held = &loaded.aggregate;
+                    if !held.issued {
+                        return Err(SalesError::NotIssued(invoice.as_str().to_owned()));
+                    }
+                    if held.points_at(customer) {
+                        return Ok(Decision::nothing());
+                    }
+                    Ok(Decision::one(InvoiceEvent::CustomerAttached {
+                        customer: customer.clone(),
+                        at,
+                    }))
+                },
+            )
+            .await
+        }
+        .await;
+
+        match outcome {
+            Ok(committed) => {
+                tx.commit().await.map_err(ExecuteError::from)?;
+                return Ok(committed);
+            }
+            Err(e) if e.is_conflict() => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+            }
+            Err(e) => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+                return Err(e.into());
+            }
+        }
+    }
+
+    Err(contended(invoice))
+}
+
 /// Money handed back to a customer.
 ///
 /// **The mirror of a payment, and the thing this module had no concept of.**
@@ -649,9 +729,7 @@ pub async fn cancel_invoice(
     on: Timestamp,
     metadata: &Metadata,
 ) -> NumberedOutcome {
-    let unusable = |_| {
-        ExecuteError::Rejected(SalesError::NotIssued(invoice.as_str().to_owned()))
-    };
+    let unusable = |_| ExecuteError::Rejected(SalesError::NotIssued(invoice.as_str().to_owned()));
     let entry_id = derived_id("si", &[invoice.as_str()]).map_err(unusable)?;
     let credit_id = derived_id("cn", &[invoice.as_str(), credit_note]).map_err(unusable)?;
     let memo = format!("Credit note {credit_note} · invoice {invoice}");
@@ -688,12 +766,6 @@ pub async fn cancel_invoice(
     Err(contended(invoice))
 }
 
-/// One attempt at crediting: the ledger reversal and the invoice's own event,
-/// in the caller's transaction.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "every one is a value computed before the transaction opened"
-)]
 /// The journal entry an invoice's issue posts under.
 ///
 /// One function, because `cancel_in` reverses it by name and the two must agree.
@@ -745,6 +817,12 @@ pub async fn credit_in(
     .await
 }
 
+/// One attempt at crediting: the ledger reversal and the invoice's own event,
+/// in the caller's transaction.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every one is a value computed before the transaction opened"
+)]
 async fn cancel_in(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,

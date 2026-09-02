@@ -21,7 +21,7 @@ use erp_web::Problem;
 use erp_web::{
     After, Amount, Json, Paged, Query, bad_request, creating, metadata, parse_id, require_module,
 };
-use erp_web::{Allowed, IdempotencyKey, Language, ManageAccounts, PostEntries, Read};
+use erp_web::{Allowed, IdempotencyKey, Language, ManageAccounts, ManageTenant, PostEntries, Read};
 use erp_web::{Consistency, nudge};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -29,7 +29,10 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_invoices, issue_invoice))
         .routes(routes!(get_invoice))
         .routes(routes!(receivables))
+        .routes(routes!(unmatched_customers))
+        .routes(routes!(attach_customer))
         .routes(routes!(record_payment))
+        .routes(routes!(refund_payment))
         .routes(routes!(credit_note))
         // Typed on purpose. The store underneath is key-value; this is not, so
         // a value that reaches it has already been through the type that gives
@@ -183,6 +186,50 @@ struct NewPayment {
     received_on: Timestamp,
     /// The cash or bank account it landed in.
     account: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "reference": "BANK-88245",
+    "amount": { "minor": 575_000, "currency": "SAR" },
+    "refunded_on": "2026-08-22T00:00:00Z",
+    "account": "1000"
+}))]
+struct NewRefund {
+    /// Your reference for handing the money back. Sending the same one twice
+    /// against the same invoice is a no-op.
+    reference: String,
+    amount: Amount,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    refunded_on: Timestamp,
+    /// The cash or bank account it went out of.
+    account: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+struct MatchCustomer {
+    /// The `crm` record this invoice's buyer turned out to be.
+    customer: String,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    at: Option<Timestamp>,
+}
+
+/// A buyer named on invoices that no record has been matched to yet.
+#[derive(Debug, Serialize, ToSchema)]
+struct UnmatchedCustomerView {
+    /// Exactly as the invoices printed it.
+    name: String,
+    /// Where any of them carried one. The strongest clue for matching.
+    vat_number: Option<String>,
+    invoices: i64,
+    /// What those invoices came to, in minor units. Largest first, so the
+    /// backlog worth clearing sorts to the top.
+    gross: i64,
+    currency: String,
+    /// The most recent of them, so a name last seen years ago can be left.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    last_issued: Timestamp,
 }
 
 /// A statutory document that now exists.
@@ -512,6 +559,70 @@ async fn record_payment(
     }))
 }
 
+/// Hand money back against an invoice.
+///
+/// The mirror of a payment, and what makes a paid invoice creditable: a credit
+/// note is refused while the business is still holding the customer's money, so
+/// the refund comes first and the credit note after.
+///
+/// Refunding more than is held is refused for the same reason overpaying is —
+/// handing back money that was never taken is a decision somebody needs to see,
+/// and a negative balance is how it never gets made.
+#[utoipa::path(
+    post,
+    path = "/v1/sales/invoices/{invoice}/refunds",
+    tag = "sales",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("invoice" = String, Path, description = "The invoice the money is going back against."),
+    ),
+    request_body = NewRefund,
+    responses(
+        (status = OK, description = "Refunded, or already refunded under this reference.", body = PaymentRecorded),
+        (status = BAD_REQUEST, description = "A non-positive amount, or an unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "More than is held — read the invoice again and decide", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such invoice, or one that was never issued", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn refund_payment(
+    tenant: Allowed<PostEntries>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+    Json(body): Json<NewRefund>,
+) -> Result<Json<PaymentRecorded>, Problem> {
+    require_module(&tenant, &crate::module_id(), locale)?;
+
+    let raw = params.get("invoice").map_or("", String::as_str);
+    let invoice = parse_id(raw, locale)?;
+    let account = parse_id(&body.account, locale)?;
+
+    let committed = crate::refund_invoice(
+        &tenant.db,
+        &invoice,
+        &Receipt {
+            reference: body.reference,
+            amount: body.amount.parse(locale)?,
+            received_on: body.refunded_on,
+            into: account,
+        },
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| sales_problem(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+
+    Ok(Json(PaymentRecorded {
+        id: raw.to_owned(),
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
 /// Cancels an invoice by crediting it.
 ///
 /// A `POST`, not a `DELETE`: the invoice stays, its journal entry is reversed,
@@ -730,6 +841,124 @@ async fn receivables(
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
 
     Ok(Json(Paged::of(page, aged_view)))
+}
+
+/// Buyer names on invoices that no customer record has been matched to.
+///
+/// The worklist for reconciling invoices issued before `crm` existed, or before
+/// this buyer was recorded. One row per spelling, largest backlog first, because
+/// the job is matching people and forty invoices for one name is one decision.
+#[utoipa::path(
+    get,
+    path = "/v1/sales/unmatched-customers",
+    tag = "sales",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("limit" = Option<i64>, Query, description = "Rows to return. Clamped, not refused."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
+    ),
+    responses(
+        (status = OK, description = "The worklist, biggest first. Empty means everything is matched.", body = Vec<UnmatchedCustomerView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such tenant, not yours, or the sales module is not enabled here", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "The projection did not reach `consistent_after` in time. Retryable.", body = Problem),
+    ),
+)]
+async fn unmatched_customers(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(query): Query<After>,
+) -> Result<Json<Vec<UnmatchedCustomerView>>, Problem> {
+    require_module(&tenant, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let limit = query.limit(PAGE, PAGE);
+
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+
+    let rows = crate::unmatched_customers(&mut conn, limit)
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| UnmatchedCustomerView {
+                name: row.name,
+                vat_number: row.vat_number,
+                invoices: row.invoices,
+                gross: row.gross.minor(),
+                currency: row.gross.currency().to_string(),
+                last_issued: row.last_issued,
+            })
+            .collect(),
+    ))
+}
+
+/// Match a customer record to an invoice that was issued without one.
+///
+/// **This sets the reference and never the printed name.** What the invoice says
+/// about its buyer was frozen when it was issued and stays frozen — that is what
+/// the law requires the document to say, and a reconciliation does not get to
+/// restate a document somebody has already filed a return against.
+///
+/// Sending the same record twice is a no-op. Sending a *different* one is a
+/// correction and is recorded as one, because a match made to the wrong customer
+/// has to be fixable.
+#[utoipa::path(
+    post,
+    path = "/v1/sales/invoices/{invoice}/customer",
+    tag = "sales",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("invoice" = String, Path, description = "The invoice being matched."),
+    ),
+    request_body = MatchCustomer,
+    responses(
+        (status = OK, description = "Matched, or already matched to this record.", body = PaymentRecorded),
+        (status = BAD_REQUEST, description = "An unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such invoice, one that was never issued, or no such customer", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn attach_customer(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+    Json(body): Json<MatchCustomer>,
+) -> Result<Json<PaymentRecorded>, Problem> {
+    require_module(&tenant, &crate::module_id(), locale)?;
+
+    let raw = params.get("invoice").map_or("", String::as_str);
+    let invoice = parse_id(raw, locale)?;
+    let customer = parse_id(&body.customer, locale)?;
+
+    let committed = crate::attach_customer(
+        &tenant.db,
+        &invoice,
+        &customer,
+        body.at.unwrap_or_else(chrono::Utc::now),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| sales_problem(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+
+    Ok(Json(PaymentRecorded {
+        id: raw.to_owned(),
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
 }
 
 /// One invoice, with its lines, its tax breakdown and its payments.

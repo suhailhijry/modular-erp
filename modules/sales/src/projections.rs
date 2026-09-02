@@ -147,6 +147,17 @@ impl Projection for Invoices {
                 .execute(&mut *conn)
                 .await?;
             }
+            InvoiceEvent::CustomerAttached { customer, .. } => {
+                // **Only the reference.** `customer` — the name the document
+                // printed — is not in this statement and never will be: it is
+                // what the invoice says, and a reconciliation does not get to
+                // restate a filed document.
+                sqlx::query("UPDATE invoice SET customer_id = $2 WHERE id = $1")
+                    .bind(id)
+                    .bind(customer.as_str())
+                    .execute(&mut *conn)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -360,7 +371,7 @@ pub async fn invoices(
                   paid as "paid!", outstanding as "outstanding!",
                   payments as "payments!", note as "note!",
                   cancelled_on, credit_note
-             FROM proj_sales.invoice_status
+             FROM proj_sales.invoice_row
             WHERE $2::timestamptz IS NULL OR (issued_on, id) < ($2, $3)
             ORDER BY issued_on DESC, id DESC
             LIMIT $1"#,
@@ -436,7 +447,7 @@ pub async fn invoice(
                   paid as "paid!", outstanding as "outstanding!",
                   payments as "payments!", note as "note!",
                   cancelled_on, credit_note
-             FROM proj_sales.invoice_status
+             FROM proj_sales.invoice_row
             WHERE id = $1"#,
         id,
     )
@@ -663,6 +674,68 @@ pub struct Overpaid {
     pub invoice: String,
     pub gross: Money,
     pub paid: Money,
+}
+
+/// A buyer named on invoices that no `crm` record has been matched to.
+///
+/// The worklist for the Phase 7a reconciliation: one row per spelling, so the
+/// person doing the matching sees how big the job is and which names are worth
+/// starting with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmatchedCustomer {
+    /// The name the invoices froze, exactly as they printed it.
+    pub name: String,
+    /// The buyer's VAT number, where any of the invoices carried one. The single
+    /// strongest clue for matching, which is why it is here and not left to a
+    /// second lookup.
+    pub vat_number: Option<String>,
+    pub invoices: i64,
+    /// What those invoices came to, so the largest backlog sorts to the top.
+    pub gross: Money,
+    /// The most recent one, so a name last seen in 2019 can be left alone.
+    pub last_issued: Timestamp,
+}
+
+/// Buyer names with no record behind them, largest first.
+///
+/// **Grouped by the frozen name and not by invoice**, because the job is
+/// matching *people* and forty invoices for one spelling is one decision.
+///
+/// A name that appears with two different VAT numbers comes back as two rows:
+/// they are two buyers who share a spelling, and merging them here would hide
+/// exactly the case the person is looking for.
+pub async fn unmatched_customers(
+    conn: &mut PgConnection,
+    limit: i64,
+) -> Result<Vec<UnmatchedCustomer>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT customer as "name!", customer_vat,
+                  count(*) as "invoices!",
+                  sum(gross)::BIGINT as "gross!",
+                  max(issued_on) as "last_issued!",
+                  currency as "currency!"
+             FROM proj_sales.invoice
+            WHERE customer_id IS NULL
+            GROUP BY customer, customer_vat, currency
+            ORDER BY sum(gross) DESC, customer
+            LIMIT $1"#,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let currency = parse_currency(&row.currency)?;
+            Ok(UnmatchedCustomer {
+                name: row.name,
+                vat_number: row.customer_vat,
+                invoices: row.invoices,
+                gross: Money::from_minor(row.gross, currency),
+                last_issued: row.last_issued,
+            })
+        })
+        .collect()
 }
 
 /// The health check this module contributes. Empty is healthy.

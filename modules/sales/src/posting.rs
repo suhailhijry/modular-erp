@@ -115,6 +115,24 @@ fn negate(amount: Money) -> Result<Money, Unbalanced> {
     amount.checked_neg().map_err(Unbalanced::Money)
 }
 
+/// Money handed back: out of the account it came from, back onto the receivable.
+///
+/// Exactly [`entry_for_payment`] with the sides swapped, because that is exactly
+/// what a refund is. Written out rather than expressed as a negation of the
+/// other, because a `BalancedLines` of negative amounts is a different thing
+/// from the same entry the other way round, and a reader should not have to work
+/// out which one this is.
+pub fn entry_for_refund(
+    amount: Money,
+    out_of: &AggregateId,
+    accounts: &PostingAccounts,
+) -> Result<BalancedLines, Unbalanced> {
+    BalancedLines::new(vec![
+        Line::new(accounts.receivable.clone(), amount),
+        Line::new(out_of.clone(), negate(amount)?),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,22 +259,4 @@ mod tests {
         assert_eq!(amount_on(&entry, "1100"), 1_500);
         assert_eq!(amount_on(&entry, "2100"), -1_500);
     }
-}
-
-/// Money handed back: out of the account it came from, back onto the receivable.
-///
-/// Exactly [`entry_for_payment`] with the sides swapped, because that is exactly
-/// what a refund is. Written out rather than expressed as a negation of the
-/// other, because a `BalancedLines` of negative amounts is a different thing
-/// from the same entry the other way round, and a reader should not have to work
-/// out which one this is.
-pub fn entry_for_refund(
-    amount: Money,
-    out_of: &AggregateId,
-    accounts: &PostingAccounts,
-) -> Result<BalancedLines, Unbalanced> {
-    BalancedLines::new(vec![
-        Line::new(accounts.receivable.clone(), amount),
-        Line::new(out_of.clone(), negate(amount)?),
-    ])
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", number as \"number!\", customer as \"customer!\", customer_vat,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\",\n                  cancelled_on, credit_note\n             FROM proj_sales.invoice_status\n            WHERE $2::timestamptz IS NULL OR (issued_on, id) < ($2, $3)\n            ORDER BY issued_on DESC, id DESC\n            LIMIT $1",
+  "query": "SELECT id as \"id!\", number as \"number!\", customer as \"customer!\", customer_vat,\n                  issued_on as \"issued_on!\", due_on,\n                  currency as \"currency!\",\n                  net as \"net!\", tax as \"tax!\", gross as \"gross!\",\n                  paid as \"paid!\", outstanding as \"outstanding!\",\n                  payments as \"payments!\", note as \"note!\",\n                  cancelled_on, credit_note\n             FROM proj_sales.invoice_row\n            WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -9,7 +9,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "id"
           }
         }
@@ -20,7 +20,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "number"
           }
         }
@@ -31,7 +31,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "customer"
           }
         }
@@ -42,7 +42,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "customer_vat"
           }
         }
@@ -53,7 +53,7 @@
         "type_info": "Timestamptz",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "issued_on"
           }
         }
@@ -64,7 +64,7 @@
         "type_info": "Timestamptz",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "due_on"
           }
         }
@@ -75,7 +75,7 @@
         "type_info": "Bpchar",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "currency"
           }
         }
@@ -86,7 +86,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "net"
           }
         }
@@ -97,7 +97,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "tax"
           }
         }
@@ -108,7 +108,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "gross"
           }
         }
@@ -119,7 +119,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "paid"
           }
         }
@@ -130,7 +130,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "outstanding"
           }
         }
@@ -141,7 +141,7 @@
         "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "payments"
           }
         }
@@ -152,7 +152,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "note"
           }
         }
@@ -163,7 +163,7 @@
         "type_info": "Timestamptz",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "cancelled_on"
           }
         }
@@ -174,7 +174,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "proj_sales.invoice_status",
+            "table": "proj_sales.invoice_row",
             "name": "credit_note"
           }
         }
@@ -182,8 +182,6 @@
     ],
     "parameters": {
       "Left": [
-        "Int8",
-        "Timestamptz",
         "Text"
       ]
     },
@@ -206,5 +204,5 @@
       true
     ]
   },
-  "hash": "053e02f2b7e1be6e826efcb99e49f41d116770070809561b881459f5764c77a4"
+  "hash": "31d3a52ed330c752f20020cf81aeb5e765fe13331eb5b933f8b1b38b488befbd"
 }

@@ -11,10 +11,69 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 717 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 841 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
+
+---
+
+## For review — decisions I made without you
+
+Written during the gap-closing pass of 2026-09-01/02, while you were away. Each
+is a judgement call I took rather than stopping on; each is reversible. Read
+them, and delete this section once you have.
+
+### 1 · Two views over the invoice, rather than one
+
+`invoice_status` grouped every invoice in the tenant to return one page of
+twenty. Measured on 200,000 invoices and 400,000 payments: **410 ms and 443,000
+buffers**. Rewriting it to correlate makes that **0.3 ms and 118 buffers** — but
+makes the receivables report and the overpayment health check about **3× slower**
+(292 → 760 ms, 273 → 945 ms), because each of the 200,000 invoices then costs an
+index lookup.
+
+So there are now two views over the same numbers: `invoice_status` for readers
+that scan, `invoice_row` for readers that want one invoice or one page. A test
+asserts they agree, since two shapes of one rule is exactly how a rule drifts.
+
+**The alternative I did not take** is a maintained `paid` column on `invoice`,
+which would be fastest for everything. The schema comment argues against it
+deliberately — "a second thing that can be wrong" — and overriding a documented
+decision on the strength of a benchmark I wrote myself seemed like your call.
+
+### 2 · Matching a customer to an old invoice is re-matchable
+
+Phase 7a's reconciliation is built. `attach_customer` sets the *reference* and
+never the printed name.
+
+The judgement: **re-matching to a different record is allowed.** A match made to
+the wrong Ahmed has to be correctable, and the log keeps every attachment so the
+correction is visible. The stricter alternative — refuse once matched — leaves
+no way to fix a mistake at all, which seemed worse. Say the word and it becomes
+a refusal with a `sales.already_matched` code.
+
+`attach_customer` is scoped to **owner** (`ManageTenant`), on the grounds that
+re-pointing a document at a different customer changes what a report says about
+that customer. If a clerk should be doing the backlog, it wants `PostEntries`.
+
+### 3 · A flaky test I could not reproduce
+
+`erp-eventlog::crash a_crash_during_a_claim_leaves_the_effect_owed` failed once
+in a full-workspace run and then passed 5/5 in isolation, 3/3 under `-j 16`
+within its own package, and in two subsequent full-workspace runs. It kills a
+backend mid-transaction with `pg_terminate_backend`, which signals rather than
+waits, so a timing window is plausible.
+
+Left as-is rather than papered over with a retry. If it recurs, the suspect is
+that `kill_connection` returns before the backend has finished rolling back.
+
+### 4 · The "5,000 tenants" prose was not stale
+
+I had this on the gap list from an earlier session. It is wrong: `ARCHITECTURE.md`,
+`pools.rs` and `placement.rs` all quote 5,000, and this document's own target is
+2,000–5,000. Sizing against the top of the stated range is correct. Nothing
+changed; the item is struck.
 
 ---
 
@@ -606,8 +665,16 @@ this customer". Booking cannot start without it, because a reservation is made
       is what the law requires the document to say. Validated against `crm`'s
       *log* and not its projection, because a projection lags and an invoice
       would be refused to a customer created a moment earlier
-- [ ] Backfill: existing invoices name a customer that no record matches, so the
-      first migration is a reconciliation surface, not a foreign key
+- [x] Backfill: existing invoices name a customer that no record matches, so the
+      first migration is a reconciliation surface, not a foreign key.
+      `unmatched_customers` is the worklist — one row per frozen spelling,
+      largest backlog first, because the job is matching *people* and forty
+      invoices for one name is one decision. `attach_customer` works through it,
+      writing the **reference** and never the printed name: what the document
+      says about its buyer was frozen at issue and a reconciliation does not get
+      to restate a filed document. Validated against `crm`'s log, so a record
+      created a moment ago can be matched at once. Re-matching is allowed and is
+      itself an event — see [For review](#for-review--decisions-i-made-without-you)
 - [x] Receivables groups by customer id where one exists and by name where none
       does, and says which — `AgedCustomer::identified`
 
@@ -2091,6 +2158,77 @@ events we must read — a v1 event is readable forever or the log is corrupt.
 
 Both are small. Neither is done, and D17 is marked accordingly in the decision
 index.
+
+### 8. Commands that existed and no route could reach — done
+
+Found by auditing the API surface against the module exports rather than by
+using either feature, which is the only way this class shows up.
+
+`pos::take_back` and `sales::refund_invoice` were both built, tested, exported —
+and mounted nowhere. A till could take a return from Rust and not over HTTP, and
+a refund outside a till had no route at all. `POST /v1/pos/shifts/{shift}/sales/{sale}/returns`
+and `POST /v1/sales/invoices/{invoice}/refunds` now exist.
+
+The same audit found `ShiftEvent::Refunded` had been unreachable since Phase 15,
+which is what prompted looking.
+
+**The lesson worth keeping:** the role matrix in `crates/erp-api/tests/http.rs`
+caught both the moment they were mounted, because it fails on a served operation
+with no row. Nothing caught them while they were *unmounted* — a command with no
+route is invisible to every guard in the build. The nearest cheap check would be
+a test that every `pub async fn` taking `&TenantDb` is named by some handler.
+
+### 9. A retried till return took the drawer down twice — done
+
+`pos::take_back` checked `Shift::has_pay_out` for its idempotency, and
+`ShiftEvent::Refunded` recorded no key at all. So a retry deduplicated perfectly
+in `sales` — the credit note and the money are keyed by reference there — while
+the shift appended a second `Refunded` every time. Three retries of a 17.25
+return left a drawer that should have held nothing holding **−34.50**.
+
+`a_retried_return_is_harmless` passed throughout, because it asserted the ledger
+balances and the ledger was the half somebody else was already protecting.
+
+`Refunded` now carries its own `reference`, `Shift::has_return` answers for it,
+and the test asserts the drawer as well as the books. Verified by falsification:
+reverting the one-line fix fails the test with the −34.50.
+
+Two seen-lists rather than one shared list, because a banking run and a return
+are different caller namespaces.
+
+### 10. A full entry cache refused the traffic that was arriving — done
+
+`TtlCache::put` skipped the insert when the map was full and nothing had expired.
+The comment defended it — "a cache that thrashes is worse than one that
+occasionally misses" — and it is the wrong call here: what survives is whatever
+arrived first, so the cache sits at capacity serving a working set it has stopped
+tracking, and every request that is actually happening misses.
+
+Under a five-second TTL the oldest entry is one that was about to expire anyway,
+so evicting it is the expiry sweep running a moment early rather than a thrash.
+It now evicts the oldest tenth. `a_full_cache_makes_room_for_what_is_arriving`
+is the test.
+
+The capacity itself (`ENTRY_CACHE_CAPACITY = 50_000`, five caches) is unchanged.
+It was on the gap list as "undersized", but the number is not the defect — the
+behaviour at the boundary was.
+
+### 11. The book documented four of nine modules — done
+
+`modules.md` described `ledger`, `sales`, `purchases` and `tax_sa` and stopped
+there; `crates.md` listed the same four plus no `erp-occupancy`; the API index
+said "All 105 operations" when there were 120, and had no chapter for `pos` or
+`branches` at all.
+
+All nine modules are now in both, `pos` and `branches` have chapters, `http.md`
+has their route sections and the `X-Branch` header it had never documented, and
+the count is generated rather than remembered.
+
+**One thing the pass corrected rather than added:** `sales.md` still said a
+credit note is refused on an invoice that "has payments", which stopped being
+true when refunds landed — the rule is *still holding*, paid less refunded. A
+test's doc comment said the same. Prose that was true when written is the kind
+of stale that survives, because nothing compiles it.
 
 ### Then, and only then
 

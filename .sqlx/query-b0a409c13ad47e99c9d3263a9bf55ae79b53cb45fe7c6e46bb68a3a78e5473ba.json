@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT customer as \"name!\", customer_vat,\n                  count(*) as \"invoices!\",\n                  sum(gross)::BIGINT as \"gross!\",\n                  max(issued_on) as \"last_issued!\",\n                  currency as \"currency!\"\n             FROM proj_sales.invoice\n            WHERE customer_id IS NULL\n            GROUP BY customer, customer_vat, currency\n            ORDER BY sum(gross) DESC, customer\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice",
+            "name": "customer"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "customer_vat",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice",
+            "name": "customer_vat"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "invoices!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "gross!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_issued!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice",
+            "name": "currency"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      null,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "b0a409c13ad47e99c9d3263a9bf55ae79b53cb45fe7c6e46bb68a3a78e5473ba"
+}

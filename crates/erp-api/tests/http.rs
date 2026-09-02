@@ -1766,6 +1766,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("post_entry", &["owner", "accountant", "clerk"]),
     ("reverse_entry", &["owner", "accountant", "clerk"]),
     ("issue_invoice", &["owner", "accountant", "clerk"]),
+    ("refund_payment", &["owner", "accountant", "clerk"]),
+    ("unmatched_customers", ALL_ROLES),
+    ("attach_customer", OWNER),
     ("record_payment", &["owner", "accountant", "clerk"]),
     ("credit_note", &["owner", "accountant", "clerk"]),
     ("record_bill", &["owner", "accountant", "clerk"]),
@@ -1787,6 +1790,7 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("cancel_subscription", &["owner", "accountant", "clerk"]),
     ("open_shift", &["owner", "accountant", "clerk"]),
     ("ring_sale", &["owner", "accountant", "clerk"]),
+    ("take_back", &["owner", "accountant", "clerk"]),
     ("pay_out", &["owner", "accountant", "clerk"]),
     ("close_shift", &["owner", "accountant", "clerk"]),
     ("open_card", &["owner", "accountant", "clerk"]),
@@ -1924,8 +1928,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        109,
-        "expected a hundred and nine role-scoped operations"
+        113,
+        "expected a hundred and thirteen role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

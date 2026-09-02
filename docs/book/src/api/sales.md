@@ -33,7 +33,7 @@ and nothing else.
 | [`invoice.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/invoice.rs) | `Invoice`, `InvoiceEvent`, `Customer`, `Address`, lines, discounts |
 | [`vat.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/vat.rs) | `Vat`, `TaxBand`, `Totals`, `total` |
 | [`posting.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/posting.rs) | `PostingAccounts`, `entry_for_issue`, `entry_for_payment` |
-| [`commands.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/commands.rs) | `issue_invoice`, `record_payment`, `cancel_invoice` |
+| [`commands.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/commands.rs) | `issue_invoice`, `record_payment`, `refund_invoice`, `cancel_invoice`, `attach_customer` |
 | [`projections.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/projections.rs) | The `Sales` group, invoices, the VAT return, receivables |
 | [`http.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/http.rs) | The routes |
 
@@ -239,6 +239,9 @@ pub async fn issue_invoice(db: &TenantDb, id: &AggregateId, draft: &Draft,
 pub async fn record_payment(db: &TenantDb, invoice: &AggregateId,
     receipt: &Receipt, metadata: &Metadata) -> Result<Committed<InvoiceEvent>, …>;
 
+pub async fn refund_invoice(db: &TenantDb, invoice: &AggregateId,
+    receipt: &Receipt, metadata: &Metadata) -> Result<Committed<InvoiceEvent>, …>;
+
 pub async fn cancel_invoice(db: &TenantDb, invoice: &AggregateId,
     credit_note: &str, reason: &str, on: Timestamp, metadata: &Metadata)
     -> Result<Numbered, CommandError<SalesError>>;
@@ -269,9 +272,74 @@ books end up showing both it and the credit. Same reason the ledger reverses.
 with lines of its own, and nobody has asked for one. When they do, it is a second
 command and this one stays as the whole-invoice case.
 
-An invoice with payments is refused. Money came in against it, and cancelling
-without addressing that leaves a payment against a document that no longer says
-anything is owed.
+**An invoice the business is still holding money against is refused** — not one
+that was ever paid, one where `held()` (paid less refunded) is not zero.
+Cancelling without addressing that leaves a payment against a document that no
+longer says anything is owed.
+
+### refund_invoice
+
+The mirror of a payment, and the thing this module had no concept of until a
+till needed it.
+
+The rule above used to be `payments.is_empty()` — *ever paid*, not *still
+holding* — and **every till sale is paid the instant it happens**, so no till
+sale could be credited through any route at all. The rule was not wrong so much
+as too blunt: what a credit note may not do is undo a supply while the business
+keeps the cash.
+
+So the money goes back first and the credit note follows, and `pos::take_back`
+does both in one transaction — which is also the only order in which the books
+are never briefly wrong.
+
+Refunding more than is held is refused for the reason overpaying is: a business
+handing back money it never took has made a decision somebody needs to see, and
+a negative balance is how that decision never gets made.
+
+`InvoiceEvent::Refunded` carries the amount and the account it went out of, so
+the entry is `Dr` the customer, `Cr` wherever the money left — the exact reverse
+of the payment, and the reason `invoice_payment` accepts a negative `amount`
+with the sign carrying the meaning.
+
+### attach_customer
+
+```rust
+pub async fn attach_customer(db: &TenantDb, invoice: &AggregateId,
+    customer: &AggregateId, at: Timestamp, metadata: &Metadata)
+    -> Result<Committed<InvoiceEvent>, …>;
+```
+
+**The reconciliation surface Phase 7a asked for, and the reason that phase says
+*surface* and not *foreign key*.** Invoices issued before `crm` existed name a
+buyer that no record matches. A constraint would have refused every one of them
+at once; this lets somebody work through the backlog an invoice at a time.
+
+It writes the **reference** and never the printed name. What the document says
+about its buyer was frozen at issue and stays frozen (L5) — a reconciliation
+does not get to restate a document somebody has already filed a return against.
+That separation is the whole argument in the [`crm`](./crm.md) chapter, and this
+is the command that depends on it being true.
+
+The customer is validated against `crm`'s **log**, so a record created a moment
+ago can be matched immediately rather than being refused for lagging behind its
+own projection.
+
+Matching the same record twice writes nothing. Matching a *different* one is a
+correction and does write: a match made to the wrong Ahmed has to be fixable,
+and the log keeps both so the correction is visible rather than silent.
+
+The worklist it works from:
+
+```rust
+pub async fn unmatched_customers(conn, limit: i64)
+    -> Result<Vec<UnmatchedCustomer>, sqlx::Error>;
+```
+
+Grouped by the frozen name, largest backlog first, because the job is matching
+*people* and forty invoices for one spelling is one decision. A name that
+appears with two different VAT numbers comes back as two rows — they are two
+buyers who share a spelling, and merging them would hide the exact case the
+person is looking for.
 
 ## Numbering
 
@@ -293,6 +361,26 @@ series is the other common shape and is a bigger change than a format string.
 
 The mechanism is `erp_eventlog::numbering`, and the `reserve` / `consume` pairing
 is why re-issuing does not move the series.
+
+## Two views over the same numbers
+
+`invoice_status` groups; `invoice_row` correlates. They answer identically and a
+test asserts it, because two shapes of one rule is exactly how a rule comes to
+be written twice and drift.
+
+They exist separately because `GROUP BY i.id` cannot preserve `issued_on DESC`
+order, so a paged read through the grouped view has to aggregate **every**
+invoice in the tenant, sort the lot, and throw away all but twenty rows.
+Measured on 200,000 invoices and 400,000 payments:
+
+| | grouped | correlated |
+|---|---|---|
+| one page of invoices | 410 ms, 443k buffers | **0.3 ms, 118 buffers** |
+| the receivables report | **292 ms** | 760 ms |
+| the overpayment check | **273 ms** | 945 ms |
+
+Neither is better in general, which is why there are two and not a replacement.
+One view per access pattern, each fast at the thing it is for.
 
 ## Read models
 
@@ -399,6 +487,9 @@ is the same kind of canary as the trial balance, and is registered in
 | `GET` `POST` | `/v1/sales/invoices` | Read / PostEntries |
 | `GET` | `/v1/sales/invoices/{invoice}` | Read |
 | `POST` | `/v1/sales/invoices/{invoice}/payments` | PostEntries |
+| `POST` | `/v1/sales/invoices/{invoice}/refunds` | PostEntries |
+| `POST` | `/v1/sales/invoices/{invoice}/customer` | ManageTenant |
+| `GET` | `/v1/sales/unmatched-customers` | Read |
 | `POST` | `/v1/sales/invoices/{invoice}/credit-note` | PostEntries |
 | `GET` | `/v1/sales/receivables` | Read |
 | `GET` `PUT` | `/v1/sales/posting-accounts` | Read / ManageAccounts |

@@ -77,9 +77,7 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
     (
         NO_SUCH_BRANCH,
         Locale::Arabic,
-        Template::Simple(
-            "لا يوجد فرع مفتوح {branch}. المورد لا يُسنَد إلا لفرع قائم وما زال يعمل.",
-        ),
+        Template::Simple("لا يوجد فرع مفتوح {branch}. المورد لا يُسنَد إلا لفرع قائم وما زال يعمل."),
     ),
     (
         NOTHING_TO_BOOK,

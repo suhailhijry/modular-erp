@@ -41,6 +41,22 @@ collide with the one another till chose, which is why only a UUID is accepted.
 Anything that is not a create keeps its own idempotency: a payment, a redemption
 or an earning is keyed by the `reference` in its body.
 
+**`X-Branch`** names the place a write happened, and it travels on the request
+rather than in any body. One header, read once, folded into the event metadata
+of everything the request writes — so an invoice, its journal entry, its payment
+and the till event it came from all carry the same branch without a single
+module holding a `branch` field.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" -H 'X-Branch: BR-OLAYA' \
+  http://localhost:8080/v1/sales/invoices -d '{ … }'
+```
+
+It is checked once, where every posting funnels through, and a closed branch
+refuses new documents. On a read it is a **default and not a wall**: the rota
+narrows to your branch, and `?branch=` sees another one.
+
 **Every error is `application/problem+json`** with a stable `code`. Branch on the
 code, never on `detail`.
 
@@ -292,6 +308,54 @@ exactly as it was.
 
 Passing `?archived=true` to the list includes them, which is what a search box
 wants and a working list does not.
+
+## Branches
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/branches` | Alphabetically, which is the one list in this API that is | Read |
+| `POST /v1/branches` | Open a place to trade from | ManageTenant |
+| `GET /v1/branches/{branch}` | One of them | Read |
+| `PUT /v1/branches/{branch}` | Move it, or rename it | ManageTenant |
+| `POST /v1/branches/{branch}/closure` | Stop it trading. It keeps everything it issued | ManageTenant |
+| `DELETE /v1/branches/{branch}/closure` | Trade again | ManageTenant |
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  http://localhost:8080/v1/branches -d '{
+    "name":       "فرع العليا",
+    "name_latin": "Olaya Branch",
+    "address": {
+      "street":  "طريق الملك فهد",
+      "city":    "الرياض",
+      "country": "SA"
+    }
+  }'
+```
+
+The country is two letters and it is checked, because ZATCA prints it on every
+document this branch issues and a two-letter field is the one a caller gets
+wrong.
+
+**Amending is a `PUT` and it is still an event.** A branch that moved is not a
+row to overwrite: a trial balance for Olaya run in March and again in June would
+differ with nothing able to say why. The old details stay in the log, so the
+March report can still say what it said.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/branches/BR-OLAYA/closure \
+  -d '{"why":"انتقل الفرع"}'
+```
+
+A closed branch **refuses new documents and keeps its old ones** — the same
+distinction an archived customer draws, and for the same reason. It is checked
+where every posting funnels through, so every module gets the rule without
+holding it.
+
+Closing is not deletion, and there is no route that deletes: a dimension that
+vanished would take the meaning of its own history with it.
 
 ## Booking
 
@@ -605,6 +669,9 @@ invoices, because an invoice and its journal entry commit together.
 | `POST /v1/sales/invoices` | Issue one, and post it | PostEntries |
 | `GET /v1/sales/invoices/{invoice}` | One, with lines, tax bands and payments | Read |
 | `POST /v1/sales/invoices/{invoice}/payments` | Record money received | PostEntries |
+| `POST /v1/sales/invoices/{invoice}/refunds` | Hand money back | PostEntries |
+| `POST /v1/sales/invoices/{invoice}/customer` | Match a record to an old invoice | ManageTenant |
+| `GET /v1/sales/unmatched-customers` | Buyers with no record behind them | Read |
 | `POST /v1/sales/invoices/{invoice}/credit-note` | Cancel by crediting | PostEntries |
 | `GET /v1/sales/receivables` | Who owes what, and for how long | Read |
 | `GET /v1/sales/posting-accounts` | What sales posts to | Read |
@@ -665,6 +732,22 @@ curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
 The same `reference` twice is a no-op. Overpaying is refused with
 `sales.overpayment`, which carries what is outstanding.
 
+Hand it back:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/sales/invoices/INV-0001/refunds -d '{
+    "reference":   "BANK-8842",
+    "amount":      {"minor": 60000, "currency": "SAR"},
+    "refunded_on": "2026-03-18T00:00:00Z",
+    "account":     "1010"
+  }'
+```
+
+The mirror of a payment, and **what makes a paid invoice creditable**: the money
+goes back first and the credit note follows. Refunding more than is held is
+refused with `sales.overrefund`, for the same reason overpaying is.
+
 Credit it:
 
 ```bash
@@ -673,8 +756,40 @@ curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   -d '{"id":"CN-0001","on":"2026-03-20T00:00:00Z","reason":"Cancelled order"}'
 ```
 
-Whole-invoice only, and refused with `sales.has_payments` if money came in
-against it.
+Whole-invoice only, and refused with `sales.has_payments` while the business is
+**still holding** the customer's money — paid less refunded, not *ever paid*.
+What a credit note may not do is undo a supply while the cash stays in the till.
+
+### Matching old invoices to customer records
+
+Invoices issued before anybody kept a customer list name a buyer that no record
+matches. Rather than a foreign key that would refuse all of them at once, there
+is a worklist and a way to work through it.
+
+```bash
+curl -s "${AUTH[@]}" http://localhost:8080/v1/sales/unmatched-customers
+# [{"name":"نجد للاستشارات","vat_number":null,"invoices":2,
+#   "gross":150000,"currency":"SAR","last_issued":"2026-03-01T00:00:00Z"}]
+```
+
+One row per spelling, biggest backlog first — the job is matching people, and
+forty invoices for one name is one decision. A name that appears with two
+different VAT numbers is two rows, because it is two buyers.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/sales/invoices/INV-0001/customer \
+  -d '{"customer":"CUST-0001"}'
+```
+
+**This sets the reference and never the printed name.** What the invoice says
+about its buyer was frozen when it was issued — that is what the law requires
+the document to say, and a reconciliation does not get to restate a document
+somebody has already filed a return against.
+
+Sending the same record twice is a no-op. Sending a different one is a
+correction and is recorded as one, because a match made to the wrong customer
+has to be fixable.
 
 Receivables:
 
@@ -686,6 +801,92 @@ curl -s "${AUTH[@]}" \
 Grouped by customer **and currency**, aged from the due date and falling back to
 the issue date. `as_of` is a parameter, so an accountant closing March gets the
 ageing as it stood on 31 March.
+
+## The counter
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/pos/shifts` | Today's tills, newest first | Read |
+| `POST /v1/pos/shifts` | Open one, with what is in the drawer | PostEntries |
+| `GET /v1/pos/shifts/{shift}` | One, with what the drawer should hold | Read |
+| `GET /v1/pos/shifts/{shift}/takings` | Split by how the money arrived | Read |
+| `POST /v1/pos/shifts/{shift}/sales` | Ring a sale | PostEntries |
+| `POST /v1/pos/shifts/{shift}/sales/{sale}/returns` | Hand one back | PostEntries |
+| `POST /v1/pos/shifts/{shift}/pay-outs` | Cash out that is not a refund | PostEntries |
+| `POST /v1/pos/shifts/{shift}/count` | Count the drawer and shut the till | PostEntries |
+| `GET /v1/pos/till-accounts` | Where the drawer posts | Read |
+| `PUT /v1/pos/till-accounts` | Choose them | ManageAccounts |
+
+**There is no `GET /v1/pos/sales`,** and the absence is the module's design. A
+till sale *is* a ZATCA simplified invoice, so it is in `GET /v1/sales/invoices`
+with every other one. A second list would be a second answer to "what did we
+sell", and the VAT return would have to pick one.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" -H 'X-Branch: BR-OLAYA' \
+  http://localhost:8080/v1/pos/shifts -d '{
+    "till": "١", "operator": "staff-1", "float": {"minor": 50000, "currency": "SAR"}
+  }'
+```
+
+Opening posts nothing. A float is cash moved from a safe to a drawer and both
+are `1000 Cash on hand`, so the business is no richer for having moved it.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  http://localhost:8080/v1/pos/shifts/SHIFT-1/sales -d '{
+    "customer": {"name": "زبون"},
+    "lines":    [{"description": "قهوة", "net": 1500, "vat": "standard"}],
+    "currency": "SAR",
+    "tenders":  [{"method": "cash", "amount": {"minor": 1725, "currency": "SAR"}}]
+  }'
+# 201 {"sale":"…","number":"INV-00001","total":{"minor":1725,"currency":"SAR"},"position":…}
+```
+
+It answers with the **statutory number and the total**, because that is what a
+receipt prints. The invoice itself is `sales`' and is read at
+`GET /v1/sales/invoices/{sale}`.
+
+The number comes from **the same gapless series as every other invoice**, which
+is the point: one series means one sequence to prove to ZATCA, and a till that
+numbered itself would be a second one nobody had to keep gapless.
+
+The tenders must come to **exactly** the sale. Less is an invoice on credit and
+not a till sale; more is an overpayment, which `sales` refuses and is right to —
+change handed back is a counter concern and not a record.
+
+`method` is `cash`, `card` or `transfer`, and **only `cash` moves the drawer**.
+Counting card takings into the expected count makes every honest till look short
+by exactly the day's card sales, and a manager who sees that twice stops reading
+the number.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/pos/shifts/SHIFT-1/sales/SALE-1/returns -d '{
+    "reference": "RET-1",
+    "tenders":   [{"method": "cash", "amount": {"minor": 1725, "currency": "SAR"}}],
+    "why":       "أعاد المنتج"
+  }'
+```
+
+The money, the credit note and the drawer in one write. `reference` is your key
+for *this* return, so sending it again is a no-op; the sale in the path is the
+document being credited, which is why they are two fields and not one.
+
+A return credits the **whole** sale: a partial credit note is not something
+`sales` can write.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/pos/shifts/SHIFT-1/count \
+  -d '{"declared": {"minor": 61500, "currency": "SAR"}}'
+```
+
+`variance` is `declared - expected`, and **negative is short**. It posts: a till
+that records a shortage without booking it leaves the ledger saying the drawer
+holds what it does not, for ever, and the next reconciliation inherits the lie.
 
 ## Purchases
 

@@ -8,6 +8,7 @@ and on modules below them.
 erp-types       newtypes, Money, NonEmpty. No I/O, so a frontend could share it
 erp-i18n        message codes, locales, the Localize trait
 erp-eventlog    the tenant log: append, load, upcasters, numbering, outbox
+erp-occupancy   capacity over time: does one more fit
 erp-projection  groups, ProjectionCtx, the runner, shadow replay and the differ
 erp-tenant      TenantDb, the Budget trait, roles, EnabledModules, ModuleSetup
 erp-control     identities, tenants, entitlements, clusters, placement, the fleet
@@ -17,11 +18,20 @@ erp-api         the core's own routes, the module list, the composition root
 erp-demo        the seeded tenant, and bin/demo
 erp-testkit     template databases, fault injection, the differ
 
+modules/branches    places to trade from; the dimension on every document
+modules/crm         customers as records
 modules/ledger      accounts, journal entries, periods, VAT, charts
-modules/sales       invoices, credit notes, payments, receivables
+modules/sales       invoices, credit notes, payments, refunds, receivables
 modules/purchases   bills, payments out, input tax
 modules/tax_sa      the Saudi rate, the VAT return, ZATCA
+modules/booking     reservations, rotas, availability, pricing
+modules/prepaid     packages, deposits, subscriptions, loyalty
+modules/pos         shifts, till sales, the drawer and its variance
 ```
+
+`branches` and `crm` are at the top of that list because they depend on nothing
+and everything else names them. `pos` is at the bottom because it depends on
+three of the others and writes no document of its own.
 
 ## Why erp-tenant exists
 

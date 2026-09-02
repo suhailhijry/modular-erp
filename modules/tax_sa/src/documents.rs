@@ -207,7 +207,15 @@ impl Projection for ZatcaDocuments {
             // is the same fact in the other direction. **What ZATCA sees when a
             // sale is undone is the credit note**, which arrives as `Cancelled`
             // above and is a document of its own.
-            InvoiceEvent::PaymentRecorded { .. } | InvoiceEvent::Refunded { .. } => Ok(()),
+            //
+            // An attached customer changes nothing either, and that is the
+            // point of it: it sets the *reference* used for reporting, while
+            // the buyer ZATCA was given is the name the document froze at issue.
+            // A cleared invoice whose buyer details moved afterwards would be a
+            // document that no longer matches the one the authority holds.
+            InvoiceEvent::PaymentRecorded { .. }
+            | InvoiceEvent::Refunded { .. }
+            | InvoiceEvent::CustomerAttached { .. } => Ok(()),
         }
     }
 }

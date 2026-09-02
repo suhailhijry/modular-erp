@@ -41,6 +41,7 @@
 - [erp-api](./api/erp-api.md)
 - [erp-demo](./api/erp-demo.md)
 - [erp-testkit](./api/erp-testkit.md)
+- [branches](./api/branches.md)
 - [crm](./api/crm.md)
 - [ledger](./api/ledger.md)
 - [sales](./api/sales.md)
@@ -48,6 +49,7 @@
 - [tax_sa](./api/tax_sa.md)
 - [booking](./api/booking.md)
 - [prepaid](./api/prepaid.md)
+- [pos](./api/pos.md)
 - [The HTTP API](./api/http.md)
 
 # Ahead

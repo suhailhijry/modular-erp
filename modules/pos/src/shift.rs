@@ -188,6 +188,12 @@ pub enum ShiftEvent {
     },
     /// Money handed back. The credit note is `sales`'; this is the drawer half.
     Refunded {
+        /// The caller's key. Handing the same return back twice is a no-op —
+        /// **its own key and not the pay-out list**, which is the bug this
+        /// field exists to have fixed: `sales` deduplicated the credit note and
+        /// the money, so the ledger stayed right while the drawer came down
+        /// once per retry.
+        reference: String,
         sale: AggregateId,
         total: Money,
         tenders: Vec<Tender>,
@@ -262,6 +268,10 @@ pub struct Shift {
     pub sales: Vec<AggregateId>,
     /// Pay-out keys already seen, for the same reason.
     pub pay_outs: Vec<String>,
+    /// Return keys already seen. Separate from `pay_outs`: they are different
+    /// caller namespaces, and sharing one would make a banking run and a return
+    /// that happened to agree on a reference silence each other.
+    pub returns: Vec<String>,
 }
 
 impl Aggregate for Shift {
@@ -290,7 +300,10 @@ impl Aggregate for Shift {
                     self.takings.add(*tender);
                 }
             }
-            ShiftEvent::Refunded { tenders, .. } => {
+            ShiftEvent::Refunded {
+                reference, tenders, ..
+            } => {
+                self.returns.push(reference.clone());
                 for tender in tenders {
                     self.refunds.add(*tender);
                 }
@@ -332,6 +345,11 @@ impl Shift {
     #[must_use]
     pub fn has_pay_out(&self, reference: &str) -> bool {
         self.pay_outs.iter().any(|seen| seen == reference)
+    }
+
+    #[must_use]
+    pub fn has_return(&self, reference: &str) -> bool {
+        self.returns.iter().any(|seen| seen == reference)
     }
 
     /// **What the drawer should hold**: the float, plus cash taken, less cash
@@ -436,6 +454,7 @@ mod tests {
         let mut shift = opened(20_000);
         sold(&mut shift, 1, vec![Tender::new(Method::Cash, sar(10_000))]);
         shift.apply(&ShiftEvent::Refunded {
+            reference: "RET-1".to_owned(),
             sale: AggregateId::new("S-1").unwrap_or_else(|_| unreachable!("a literal")),
             total: sar(2_500),
             tenders: vec![Tender::new(Method::Cash, sar(2_500))],

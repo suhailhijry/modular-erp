@@ -457,7 +457,10 @@ async fn list_bookables(
         // and `?branch=` overrides it, because a manager at one counter looking
         // at another's rota is a normal thing to want and refusing it would
         // make the header a wall rather than a default.
-        query.branch.as_deref().or(tenant.branch.as_ref().map(erp_types::AggregateId::as_str)),
+        query
+            .branch
+            .as_deref()
+            .or(tenant.branch.as_ref().map(erp_types::AggregateId::as_str)),
         query.withdrawn,
         query.page.limit(50, 200),
         after.as_ref(),

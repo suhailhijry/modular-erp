@@ -215,8 +215,13 @@ SELECT i.credit_note   AS document_id,
 --
 -- A `paid` column on `invoice` would be a second thing that can be wrong, and
 -- keeping it in step is the projection code most likely to double-count. Same
--- reasoning as `proj_ledger.account_balance`, and the same upgrade path if a
--- tenant ever has enough invoices for the scan to matter.
+-- reasoning as `proj_ledger.account_balance`.
+--
+-- **This shape is for readers that scan**: the receivables report and the
+-- overpayment health check both visit every unpaid invoice, and a merge join
+-- with one grouped pass is the cheapest way to do that. `invoice_row` below is
+-- the same numbers for readers that want one invoice or one page, and the two
+-- are asserted equal in `sales/tests`.
 CREATE OR REPLACE VIEW invoice_status AS
 SELECT i.id,
        i.number,
@@ -246,3 +251,49 @@ SELECT i.id,
   FROM invoice i
   LEFT JOIN invoice_payment p ON p.invoice_id = i.id
  GROUP BY i.id;
+
+-- The same numbers, for a reader that wants one invoice or one page of them.
+--
+-- # Why this exists rather than one view for everything
+--
+-- `GROUP BY i.id` cannot preserve `issued_on DESC` order, so a paged read
+-- through `invoice_status` has to aggregate **every** invoice in the tenant,
+-- sort the lot, and throw away all but twenty rows. Measured on 200,000
+-- invoices and 400,000 payments: 410 ms and 443,000 buffers to return one page.
+--
+-- Correlating the sum per row instead lets the planner walk `invoice_by_date_idx`,
+-- stop after twenty, and look up only those twenty invoices' payments. Same
+-- measurement: **0.3 ms and 118 buffers**.
+--
+-- It is not the better shape in general, which is why it is a second view and
+-- not a replacement. Run the receivables report through this one and each of
+-- the 200,000 invoices costs an index lookup: 760 ms against the grouped view's
+-- 292 ms. One view per access pattern, each fast at the thing it is for.
+CREATE OR REPLACE VIEW invoice_row AS
+SELECT i.id,
+       i.number,
+       i.customer,
+       i.customer_vat,
+       i.customer_id,
+       i.issued_on,
+       i.due_on,
+       i.currency,
+       i.net,
+       i.tax,
+       i.gross,
+       i.note,
+       i.cancelled_on,
+       i.credit_note,
+       i.recorded_at,
+       p.paid,
+       CASE WHEN i.cancelled_on IS NOT NULL THEN 0
+            ELSE (i.gross - p.paid)
+       END::BIGINT AS outstanding,
+       p.payments
+  FROM invoice i
+  LEFT JOIN LATERAL (
+      SELECT COALESCE(sum(amount), 0)::BIGINT AS paid,
+             count(*)                         AS payments
+        FROM invoice_payment
+       WHERE invoice_id = i.id
+  ) p ON TRUE;

@@ -3,6 +3,30 @@
 Tenants switch these on individually, and each one depends only on the modules
 above it.
 
+## branches
+
+Places the business trades from, and the dimension every document is reported by.
+
+It depends on nothing, which is what lets everything else name a place without
+depending on each other. Opening, moving, renaming and closing are all events, so
+a trial balance for one branch run in March still says in June what it said then
+— a dimension edited in place rewrites its own history.
+
+The branch travels on the request as a header, folded into event metadata by one
+extractor and checked once where every posting funnels through. **No module holds
+a `branch` field.**
+
+## crm
+
+Customers as records: who a document was for.
+
+An invoice freezes the buyer's name, so two spellings were two rows and nothing
+could answer *everything for this customer*. The fix is the reference and the
+frozen copy, both — never either.
+
+Archiving is not deletion. The customer is on documents that have been issued,
+filed against and cleared with ZATCA.
+
 ## ledger
 
 Double-entry accounting: accounts, journal entries, fiscal periods and VAT rates.
@@ -44,6 +68,42 @@ ZATCA.
 The Saudi rate arrives as seeded data when a tenant enables the module, kept
 separate from the schema because a tenant's data and a tenant's tables are
 different things.
+
+## booking
+
+Reservations, rotas, availability and pricing.
+
+Whether one more fits is answered by `erp-occupancy`, which is a crate and not a
+module for a reason: a read model can be rebuilt and an accepted booking cannot
+be un-accepted. A resource belongs to a branch and is set once — a chair that
+physically moves is a new resource, because changing it would retroactively
+re-attribute every booking it ever held to a place it was not at.
+
+## prepaid
+
+Packages, deposits, subscriptions and loyalty — everything a customer has paid
+for and not yet had.
+
+The money is a liability until it is honoured, so all of it is deferred revenue
+until it is not, and `GET /v1/prepaid/outstanding` must equal the deferred
+revenue account's balance. Loyalty points are allocated by IFRS 15 relative
+standalone selling price with no shortcut, which is why 100 riyals earning 100
+points worth 0.10 each defers 9.09 and not 10.00.
+
+## pos
+
+The counter: a shift, a till sale, and the variance a manager reads.
+
+**It writes no document of its own.** A till transaction *is* a ZATCA simplified
+invoice, so `pos` composes `sales` — the invoice, its payment and the drawer land
+in one transaction. A second document model would give revenue two sources of
+truth, and the VAT return and the till report could disagree with nobody able to
+say which was right.
+
+What is left is the drawer: the float, takings by tender, refunds and pay-outs,
+the count somebody took, and the variance. Only cash is in the box, and the
+variance posts — a shortage that is recorded but not booked leaves the ledger
+saying the drawer holds what it does not.
 
 ## How modules learn about each other
 

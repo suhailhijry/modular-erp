@@ -94,10 +94,22 @@ where
         if guard.len() >= self.capacity && !guard.contains_key(&key) {
             Self::evict_expired(&mut guard, self.ttl);
             // Still full after dropping expired entries: the working set exceeds
-            // capacity. Skip the insert rather than evict something live —
-            // a cache that thrashes is worse than one that occasionally misses.
+            // capacity, so something live has to go.
+            //
+            // **Evicting the oldest, and not skipping the insert.** Skipping was
+            // the obvious conservative choice and it is the wrong one here: it
+            // keeps whoever arrived first and refuses everyone who arrived
+            // since, so the entries that survive are the ones closest to expiry
+            // and the traffic that misses is the traffic that is actually
+            // arriving. The cache would sit at capacity serving a working set it
+            // had stopped tracking.
+            //
+            // Evicting the oldest is not the thrash that argument feared,
+            // because the TTL is five seconds: the oldest entry is one that was
+            // about to expire anyway, so this is the expiry sweep running a
+            // moment early.
             if guard.len() >= self.capacity {
-                return;
+                Self::evict_oldest(&mut guard, self.capacity / 10 + 1);
             }
         }
         guard.insert(
@@ -128,6 +140,25 @@ where
 
     fn evict_expired(entries: &mut HashMap<K, Entry<V>>, ttl: Duration) {
         entries.retain(|_, entry| entry.stored_at.elapsed() < ttl);
+    }
+
+    /// Drops the `count` entries closest to expiring.
+    ///
+    /// A scan and a partial sort rather than an LRU list, because this runs only
+    /// when the map is full *and* nothing in it has expired — which under a
+    /// five-second TTL means sustained traffic past capacity, not a normal
+    /// request. A batch rather than one entry so the scan is amortised over the
+    /// next `count` inserts instead of running on every one of them.
+    fn evict_oldest(entries: &mut HashMap<K, Entry<V>>, count: usize) {
+        let mut ages: Vec<_> = entries
+            .iter()
+            .map(|(key, entry)| (entry.stored_at, key.clone()))
+            .collect();
+        let count = count.min(ages.len());
+        ages.select_nth_unstable_by_key(count.saturating_sub(1), |(at, _)| *at);
+        for (_, key) in ages.into_iter().take(count) {
+            entries.remove(&key);
+        }
     }
 
     #[cfg(test)]
@@ -187,6 +218,31 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         short.put(3, 3);
         assert!(short.get(&3).is_some(), "expired entries must make room");
+    }
+
+    /// **A full cache keeps what is arriving, not what arrived first.**
+    ///
+    /// The failure this refuses is silent and only shows up at scale: refusing
+    /// the insert leaves the map at capacity holding a working set that has
+    /// moved on, so every request that is actually happening misses while the
+    /// cache reports itself full.
+    #[test]
+    fn a_full_cache_makes_room_for_what_is_arriving() {
+        let cache: TtlCache<u32, u32> = TtlCache::new(Duration::from_mins(1), 10);
+        for key in 0..10 {
+            cache.put(key, key);
+        }
+        assert_eq!(cache.len(), 10);
+
+        // Nothing has expired, so this can only be served by evicting.
+        cache.put(100, 100);
+        assert_eq!(cache.get(&100), Some(100), "the newest arrival was refused");
+        assert!(cache.len() <= 10, "capacity must still bound the map");
+
+        // What went is the oldest, which under a short TTL was next to expire
+        // anyway. What stayed is the recent end.
+        assert_eq!(cache.get(&0), None, "the oldest entry survived");
+        assert_eq!(cache.get(&9), Some(9), "a recent entry was evicted");
     }
 
     #[test]

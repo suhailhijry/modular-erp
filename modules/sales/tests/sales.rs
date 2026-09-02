@@ -1204,8 +1204,9 @@ async fn an_invoice_can_only_be_credited_once() {
     fixture.cleanup().await;
 }
 
-/// An invoice that has been paid cannot simply be cancelled — the money is
-/// somewhere, and this system has no way to model the refund.
+/// An invoice the business is **still holding money against** cannot be
+/// cancelled. Not "has ever been paid": the money has to go back first, and
+/// `refund_invoice` is how — see the test below.
 #[tokio::test]
 async fn an_invoice_with_payments_is_refused_rather_than_left_inconsistent() {
     let fixture = Fixture::new().await;
@@ -2963,6 +2964,375 @@ async fn receivables_merge_by_reference_and_split_by_name() {
             "an unidentified row keys by its name"
         );
     }
+
+    fixture.cleanup().await;
+}
+
+async fn refund(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> Outcome {
+    sales::refund_invoice(
+        &fixture.db,
+        &code(id),
+        &Receipt {
+            reference: reference.to_owned(),
+            amount,
+            received_on: when(),
+            into: code("1010"),
+        },
+        &Metadata::default(),
+    )
+    .await
+}
+
+/// **Money back, then the credit note.** The order is the point: a credit note
+/// may not undo a supply while the business keeps the cash, so the refusal
+/// above stands until the cash has gone.
+#[tokio::test]
+async fn refunding_what_was_paid_makes_an_invoice_creditable_again() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-REF-1",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    pay(&fixture, "INV-REF-1", "wire-1", riyals(115))
+        .await
+        .expect("records");
+
+    // Still holding it, so still refused.
+    let error = credit(&fixture, "INV-REF-1", "CN-REF-1")
+        .await
+        .expect_err("the money is still here");
+    assert!(matches!(
+        rejection(&error),
+        Some(SalesError::HasPayments(_))
+    ));
+
+    refund(&fixture, "INV-REF-1", "refund-1", riyals(115))
+        .await
+        .expect("hands it back");
+
+    fixture.project().await;
+    let invoice = fixture.invoice("INV-REF-1").await.expect("is there");
+    assert_eq!(
+        invoice.summary.paid,
+        riyals(0),
+        "paid is net of refunds — it is what the business is holding"
+    );
+
+    credit(&fixture, "INV-REF-1", "CN-REF-1")
+        .await
+        .expect("nothing is held any more");
+
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("1100").await,
+        money(0),
+        "the receivable is square"
+    );
+    assert_eq!(fixture.balance("4000").await, money(0), "revenue reversed");
+
+    fixture.cleanup().await;
+}
+
+/// Handing back more than was taken is refused, for the reason overpaying is:
+/// a business giving away money it never received has made a decision somebody
+/// needs to see, and a negative balance is how that decision never gets made.
+#[tokio::test]
+async fn refunding_more_than_is_held_is_refused() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-REF-2",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    pay(&fixture, "INV-REF-2", "wire-1", riyals(50))
+        .await
+        .expect("records");
+
+    let error = refund(&fixture, "INV-REF-2", "refund-1", riyals(80))
+        .await
+        .expect_err("more than was taken");
+    assert!(matches!(
+        rejection(&error),
+        Some(SalesError::Overrefund { .. })
+    ));
+
+    // And a retry of a good one is a no-op rather than a second refund.
+    for _ in 0..3 {
+        refund(&fixture, "INV-REF-2", "refund-1", riyals(50))
+            .await
+            .expect("a retry is not an error");
+    }
+
+    fixture.project().await;
+    let invoice = fixture.invoice("INV-REF-2").await.expect("is there");
+    assert_eq!(invoice.summary.paid, riyals(0), "refunded three times");
+    assert_eq!(
+        fixture.balance("1010").await,
+        money(0),
+        "the bank moved once"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The two views must agree, and this is the test that keeps them agreeing.**
+///
+/// `invoice_status` groups and `invoice_row` correlates, because a paged read
+/// through the grouped one aggregates every invoice in the tenant to return
+/// twenty rows. Two shapes of the same numbers is exactly how a rule comes to be
+/// written twice and drift, so it is asserted rather than trusted.
+#[tokio::test]
+async fn the_two_invoice_views_answer_the_same_numbers() {
+    let fixture = Fixture::new().await;
+
+    // One untouched, one part-paid, one paid and refunded, one credited.
+    for (n, lines) in (1..=4).map(|n| {
+        (
+            n,
+            vec![line("Consulting", riyals(100), VatCategory::Standard)],
+        )
+    }) {
+        issue(&fixture, &format!("INV-VIEW-{n}"), lines)
+            .await
+            .expect("issues");
+    }
+    pay(&fixture, "INV-VIEW-2", "wire-1", riyals(40))
+        .await
+        .expect("records");
+    pay(&fixture, "INV-VIEW-3", "wire-1", riyals(115))
+        .await
+        .expect("records");
+    refund(&fixture, "INV-VIEW-3", "refund-1", riyals(115))
+        .await
+        .expect("hands it back");
+    credit(&fixture, "INV-VIEW-4", "CN-VIEW-4")
+        .await
+        .expect("credits");
+
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let disagreements: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM proj_sales.invoice_status a
+           JOIN proj_sales.invoice_row b USING (id)
+          WHERE a.paid        IS DISTINCT FROM b.paid
+             OR a.outstanding IS DISTINCT FROM b.outstanding
+             OR a.payments    IS DISTINCT FROM b.payments",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("reads");
+    assert_eq!(disagreements, 0, "the two views drifted");
+
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM proj_sales.invoice_row
+          WHERE id NOT IN (SELECT id FROM proj_sales.invoice_status)",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("reads");
+    assert_eq!(rows, 0, "the views disagree about which invoices exist");
+
+    drop(conn);
+    fixture.cleanup().await;
+}
+
+/// **The Phase 7a reconciliation, end to end.**
+///
+/// An invoice issued before anybody kept a customer list names a buyer that no
+/// record matches. A foreign key would have refused every one of them; this is
+/// the surface that lets somebody work through the backlog instead.
+#[tokio::test]
+async fn an_unmatched_buyer_can_be_matched_to_a_record_afterwards() {
+    let fixture = Fixture::new().await;
+
+    // Two invoices to the same spelling, and one to somebody else, all issued
+    // with no reference — the state a tenant is in before `crm` exists.
+    for (id, printed, amount) in [
+        ("INV-OLD-1", "نجد للاستشارات", riyals(1_000)),
+        ("INV-OLD-2", "نجد للاستشارات", riyals(500)),
+        ("INV-OLD-3", "شركة أخرى", riyals(200)),
+    ] {
+        issue_invoice(
+            &fixture.db,
+            &code(id),
+            &Draft {
+                customer: Customer::new(printed),
+                issued_on: on("2026-03-01"),
+                due_on: Some(on("2026-03-31")),
+                currency: amount.currency(),
+                lines: vec![line("Consulting", amount, VatCategory::Zero)],
+                discounts: Vec::new(),
+                note: String::new(),
+            },
+            &Metadata::default(),
+        )
+        .await
+        .expect("issues");
+    }
+    fixture.project().await;
+
+    // The worklist: one row per spelling, largest first.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let backlog = sales::unmatched_customers(&mut conn, 50)
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(backlog.len(), 2, "grouped by spelling, not by invoice");
+    assert_eq!(backlog[0].name, "نجد للاستشارات");
+    assert_eq!(backlog[0].invoices, 2, "forty invoices is one decision");
+    assert_eq!(backlog[0].gross, riyals(1_500), "biggest backlog first");
+
+    // Somebody records the customer and matches the two invoices to it.
+    customer_record(&fixture, "CUST-9", "نجد للاستشارات").await;
+    for id in ["INV-OLD-1", "INV-OLD-2"] {
+        sales::attach_customer(
+            &fixture.db,
+            &code(id),
+            &code("CUST-9"),
+            on("2026-04-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("matches");
+    }
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    // **The document still says what it printed.** This is the whole reason
+    // this is a reference and not an edit: restating a filed document is what
+    // the frozen copy exists to prevent.
+    let stored: (String, Option<String>) = sqlx::query_as(
+        "SELECT customer, customer_id FROM proj_sales.invoice WHERE id = 'INV-OLD-1'",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .expect("reads");
+    assert_eq!(stored.0, "نجد للاستشارات", "the printed name moved");
+    assert_eq!(stored.1.as_deref(), Some("CUST-9"), "the reference is set");
+
+    // And the worklist has shrunk to what is genuinely left.
+    let remaining = sales::unmatched_customers(&mut conn, 50)
+        .await
+        .expect("reads");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].name, "شركة أخرى");
+    drop(conn);
+
+    fixture.cleanup().await;
+}
+
+/// Matching the same record twice writes nothing; matching a different one is a
+/// correction and does write, because a match made to the wrong customer has to
+/// be fixable.
+#[tokio::test]
+async fn matching_is_idempotent_and_a_wrong_match_is_correctable() {
+    let fixture = Fixture::new().await;
+    customer_record(&fixture, "CUST-A", "أحمد الأول").await;
+    customer_record(&fixture, "CUST-B", "أحمد الثاني").await;
+    issue(
+        &fixture,
+        "INV-MATCH-1",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+
+    let first = sales::attach_customer(
+        &fixture.db,
+        &code("INV-MATCH-1"),
+        &code("CUST-A"),
+        on("2026-04-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("matches");
+    assert!(first.at.is_some(), "the first match wrote nothing");
+
+    let again = sales::attach_customer(
+        &fixture.db,
+        &code("INV-MATCH-1"),
+        &code("CUST-A"),
+        on("2026-04-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a retry is not an error");
+    assert!(
+        again.at.is_none(),
+        "the same match twice wrote a second time"
+    );
+
+    // The wrong Ahmed. Correcting it is an event, so the log shows both.
+    sales::attach_customer(
+        &fixture.db,
+        &code("INV-MATCH-1"),
+        &code("CUST-B"),
+        on("2026-04-02"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("corrects");
+
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT customer_id FROM proj_sales.invoice WHERE id = 'INV-MATCH-1'")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("reads");
+    assert_eq!(stored.as_deref(), Some("CUST-B"), "the correction was lost");
+    drop(conn);
+
+    fixture.cleanup().await;
+}
+
+/// Matching to a customer nobody recorded is refused — against the **log**, so a
+/// record created a moment ago is not refused for lagging behind its projection.
+#[tokio::test]
+async fn matching_to_a_customer_who_is_not_there_is_refused() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-MATCH-2",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+
+    let error = sales::attach_customer(
+        &fixture.db,
+        &code("INV-MATCH-2"),
+        &code("CUST-NOBODY"),
+        on("2026-04-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("no such customer");
+    assert!(matches!(
+        rejection(&error),
+        Some(SalesError::NoSuchCustomer(_))
+    ));
+
+    // Created now, matched immediately: no projection has run, and it works.
+    customer_record(&fixture, "CUST-NEW", "جديد").await;
+    sales::attach_customer(
+        &fixture.db,
+        &code("INV-MATCH-2"),
+        &code("CUST-NEW"),
+        on("2026-04-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the log knows, even though the projection has not run");
 
     fixture.cleanup().await;
 }

@@ -393,12 +393,13 @@ pub async fn take_back(
                 crate::upcasters(),
                 metadata,
                 |loaded: &Loaded<Shift>| {
-                    if loaded.aggregate.has_pay_out(&returning.reference) {
+                    if loaded.aggregate.has_return(&returning.reference) {
                         return Ok(Decision::nothing());
                     }
                     let total =
                         Money::checked_sum(returning.tenders.iter().map(|t| t.amount), currency)?;
                     Ok(Decision::one(ShiftEvent::Refunded {
+                        reference: returning.reference.clone(),
                         sale: sale.clone(),
                         total,
                         tenders: returning.tenders.clone(),

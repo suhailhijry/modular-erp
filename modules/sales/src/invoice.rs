@@ -271,14 +271,35 @@ pub enum InvoiceEvent {
         /// Which cash or bank account it came out of.
         account: AggregateId,
     },
+    /// **A `crm` record was matched to this invoice after the fact.**
+    ///
+    /// The reconciliation surface Phase 7a asked for. Invoices issued before
+    /// `crm` existed name a buyer that no record matches, and a foreign key
+    /// would have refused every one of them; this attaches the reference
+    /// afterwards, one invoice at a time, as somebody works through the list.
+    ///
+    /// **It does not touch what the document printed.** The frozen `customer`
+    /// on `Issued` is what the law requires the invoice to say and it never
+    /// moves (L5). This is the *reference* — the thing that makes "everything
+    /// for this customer" answerable — and the two were always meant to be
+    /// separate, which is the whole argument in the `crm` chapter.
+    ///
+    /// Re-attaching to a different record is allowed and is itself an event: a
+    /// match made to the wrong Ahmed has to be correctable, and the log keeps
+    /// both so the correction is visible rather than silent.
+    CustomerAttached {
+        customer: AggregateId,
+        at: Timestamp,
+    },
 }
 
 impl InvoiceEvent {
-    pub const NAMES: [&'static str; 4] = [
+    pub const NAMES: [&'static str; 5] = [
         "sales.invoice.issued",
         "sales.invoice.payment_recorded",
         "sales.invoice.cancelled",
         "sales.invoice.refunded",
+        "sales.invoice.customer_attached",
     ];
 }
 
@@ -289,6 +310,7 @@ impl DomainEvent for InvoiceEvent {
             Self::PaymentRecorded { .. } => Self::NAMES[1],
             Self::Cancelled { .. } => Self::NAMES[2],
             Self::Refunded { .. } => Self::NAMES[3],
+            Self::CustomerAttached { .. } => Self::NAMES[4],
         })
     }
 
@@ -324,6 +346,12 @@ pub struct Invoice {
     pub refunded: Option<Money>,
     /// Refund references already recorded, for the reason `payments` is a list.
     pub refunds: Vec<String>,
+    /// The `crm` record this invoice points at, if one has been matched to it.
+    ///
+    /// Set at issue when the caller knew it, or afterwards by
+    /// [`InvoiceEvent::CustomerAttached`]. Never the frozen name — that is on
+    /// the `Issued` event and does not move.
+    pub customer: Option<AggregateId>,
 }
 
 impl Aggregate for Invoice {
@@ -337,12 +365,14 @@ impl Aggregate for Invoice {
         match event {
             InvoiceEvent::Issued {
                 number,
+                customer,
                 currency,
                 totals,
                 ..
             } => {
                 self.issued = true;
                 self.number.clone_from(number);
+                self.customer.clone_from(&customer.id);
                 self.currency = Some(*currency);
                 self.gross = Some(totals.gross);
                 self.paid = Some(Money::zero(*currency));
@@ -362,6 +392,9 @@ impl Aggregate for Invoice {
                     Some(refunded) => refunded.checked_add(*amount).ok(),
                     None => None,
                 };
+            }
+            InvoiceEvent::CustomerAttached { customer, .. } => {
+                self.customer = Some(customer.clone());
             }
             InvoiceEvent::PaymentRecorded {
                 payment, amount, ..
@@ -402,6 +435,15 @@ impl Invoice {
     #[must_use]
     pub fn has_refund(&self, reference: &str) -> bool {
         self.refunds.iter().any(|r| r == reference)
+    }
+
+    /// Whether this invoice already points at this exact record.
+    ///
+    /// The retry check for attaching: the same match twice writes nothing, and
+    /// a *different* one is a correction that does write.
+    #[must_use]
+    pub fn points_at(&self, customer: &AggregateId) -> bool {
+        self.customer.as_ref() == Some(customer)
     }
 
     /// **What the business is still holding of the customer's money.**

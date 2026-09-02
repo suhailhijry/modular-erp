@@ -2187,6 +2187,25 @@
         ],
         "type": "object"
       },
+      "MatchCustomer": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customer": {
+            "description": "The `crm` record this invoice's buyer turned out to be.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "customer"
+        ],
+        "type": "object"
+      },
       "MemberAdded": {
         "properties": {
           "identity": {
@@ -3412,6 +3431,41 @@
         ],
         "type": "object"
       },
+      "NewRefund": {
+        "example": {
+          "account": "1000",
+          "amount": {
+            "currency": "SAR",
+            "minor": 575000
+          },
+          "reference": "BANK-88245",
+          "refunded_on": "2026-08-22T00:00:00Z"
+        },
+        "properties": {
+          "account": {
+            "description": "The cash or bank account it went out of.",
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount"
+          },
+          "reference": {
+            "description": "Your reference for handing the money back. Sending the same one twice\nagainst the same invoice is a no-op.",
+            "type": "string"
+          },
+          "refunded_on": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "amount",
+          "refunded_on",
+          "account"
+        ],
+        "type": "object"
+      },
       "NewReservation": {
         "example": {
           "customer": "CUST-0001",
@@ -3513,6 +3567,36 @@
           "from",
           "until",
           "takes"
+        ],
+        "type": "object"
+      },
+      "NewReturn": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "description": "Your key. Sending it twice is a no-op.",
+            "type": "string"
+          },
+          "tenders": {
+            "description": "What the customer is handed back, and how. Must come to the whole sale:\nthis credits the document, and a partial credit note is not something\n`sales` can write.",
+            "items": {
+              "$ref": "#/components/schemas/NewTender"
+            },
+            "type": "array"
+          },
+          "why": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "tenders"
         ],
         "type": "object"
       },
@@ -6159,6 +6243,47 @@
           "difference",
           "postings",
           "balances"
+        ],
+        "type": "object"
+      },
+      "UnmatchedCustomerView": {
+        "description": "A buyer named on invoices that no record has been matched to yet.",
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "gross": {
+            "description": "What those invoices came to, in minor units. Largest first, so the\nbacklog worth clearing sorts to the top.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "invoices": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_issued": {
+            "description": "The most recent of them, so a name last seen years ago can be left.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "description": "Exactly as the invoices printed it.",
+            "type": "string"
+          },
+          "vat_number": {
+            "description": "Where any of them carried one. The strongest clue for matching.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "invoices",
+          "gross",
+          "currency",
+          "last_issued"
         ],
         "type": "object"
       },
@@ -13120,6 +13245,152 @@
         ]
       }
     },
+    "/v1/pos/shifts/{shift}/sales/{sale}/returns": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The sale is named in the path because the document being credited is the one\nthat was rung, and `reference` is the caller's own key for *this* return —\ntwo different things, which is why they are two fields.",
+        "operationId": "take_back",
+        "parameters": [
+          {
+            "description": "The key it was opened under.",
+            "in": "path",
+            "name": "shift",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The sale being handed back.",
+            "in": "path",
+            "name": "sale",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewReturn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PosAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Nothing handed back, or a value that did not parse"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such shift"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The till is shut, the sale is not one that can be credited, or the ledger refused it"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Hand a sale back: the money, the credit note and the drawer, in one write.",
+        "tags": [
+          "pos"
+        ]
+      }
+    },
     "/v1/pos/shifts/{shift}/takings": {
       "get": {
         "operationId": "shift_takings",
@@ -17408,6 +17679,152 @@
         ]
       }
     },
+    "/v1/sales/invoices/{invoice}/customer": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**This sets the reference and never the printed name.** What the invoice says\nabout its buyer was frozen when it was issued and stays frozen — that is what\nthe law requires the document to say, and a reconciliation does not get to\nrestate a document somebody has already filed a return against.\n\nSending the same record twice is a no-op. Sending a *different* one is a\ncorrection and is recorded as one, because a match made to the wrong customer\nhas to be fixable.",
+        "operationId": "attach_customer",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The invoice being matched.",
+            "in": "path",
+            "name": "invoice",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MatchCustomer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentRecorded"
+                }
+              }
+            },
+            "description": "Matched, or already matched to this record."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unusable id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such invoice, one that was never issued, or no such customer"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Match a customer record to an invoice that was issued without one.",
+        "tags": [
+          "sales"
+        ]
+      }
+    },
     "/v1/sales/invoices/{invoice}/payments": {
       "parameters": [
         {
@@ -17559,6 +17976,162 @@
           }
         },
         "summary": "Record a payment against an invoice.",
+        "tags": [
+          "sales"
+        ]
+      }
+    },
+    "/v1/sales/invoices/{invoice}/refunds": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The mirror of a payment, and what makes a paid invoice creditable: a credit\nnote is refused while the business is still holding the customer's money, so\nthe refund comes first and the credit note after.\n\nRefunding more than is held is refused for the same reason overpaying is —\nhanding back money that was never taken is a decision somebody needs to see,\nand a negative balance is how it never gets made.",
+        "operationId": "refund_payment",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The invoice the money is going back against.",
+            "in": "path",
+            "name": "invoice",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewRefund"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentRecorded"
+                }
+              }
+            },
+            "description": "Refunded, or already refunded under this reference."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A non-positive amount, or an unusable id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "More than is held — read the invoice again and decide"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such invoice, or one that was never issued"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Hand money back against an invoice.",
         "tags": [
           "sales"
         ]
@@ -17882,6 +18455,136 @@
           }
         },
         "summary": "**Who owes what, and for how long.**",
+        "tags": [
+          "sales"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/sales/unmatched-customers": {
+      "get": {
+        "description": "The worklist for reconciling invoices issued before `crm` existed, or before\nthis buyer was recorded. One row per spelling, largest backlog first, because\nthe job is matching people and forty invoices for one name is one decision.",
+        "operationId": "unmatched_customers",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows to return. Clamped, not refused.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UnmatchedCustomerView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "The worklist, biggest first. Empty means everything is matched."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, not yours, or the sales module is not enabled here"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The projection did not reach `consistent_after` in time. Retryable."
+          }
+        },
+        "summary": "Buyer names on invoices that no customer record has been matched to.",
         "tags": [
           "sales"
         ]
