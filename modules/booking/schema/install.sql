@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS resource (
     -- show "3 of 8 left" without reaching into write-side state.
     capacity      INTEGER NOT NULL CHECK (capacity BETWEEN 0 AND 65535),
 
+    -- **Where it is.** Set once at declaration; null in a single-branch
+    -- business and on every resource declared before branches existed. No
+    -- foreign key: `proj_branches` is another projection group, and L3 forbids
+    -- joining to it.
+    branch        TEXT,
+
     -- The timetable, as the rules were written. JSONB because it is read whole
     -- and never queried into: the question "is this resource open then" is
     -- answered from the aggregate inside the booking transaction, not from here.
@@ -43,6 +49,10 @@ CREATE TABLE IF NOT EXISTS resource (
     recorded_at   TIMESTAMPTZ NOT NULL,
     position      BIGINT NOT NULL
 );
+
+-- "Book at Olaya": the calendar's columns for one place.
+CREATE INDEX IF NOT EXISTS resource_by_branch_idx
+    ON resource (branch, kind, name, id) WHERE withdrawn_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS resource_in_service_idx
     ON resource (kind, name) WHERE withdrawn_at IS NULL;

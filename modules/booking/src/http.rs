@@ -105,6 +105,13 @@ struct OpeningHours {
     "capacity": 1
 }))]
 struct NewBookable {
+    /// Which branch it is at. Omit it in a single-branch business.
+    ///
+    /// **Set once**: a chair that physically moves is a new resource, because
+    /// changing this would re-attribute every booking it ever held to a place
+    /// it was not at.
+    #[serde(default)]
+    branch: Option<String>,
     /// Your key for this resource. Declaring the same one twice is a no-op.
     id: String,
     name: String,
@@ -139,6 +146,8 @@ struct WithdrawBookable {
 
 #[derive(Debug, Serialize, ToSchema)]
 struct BookableRecord {
+    /// Which branch it is at. Absent in a single-branch business.
+    branch: Option<String>,
     id: String,
     name: String,
     name_latin: Option<String>,
@@ -384,6 +393,9 @@ struct BookingAccepted {
 /// Paging, plus the one flag the resource list needs.
 #[derive(Debug, Deserialize)]
 struct BookableQuery {
+    /// Only this branch's. Defaults to the `X-Branch` the request carries;
+    /// send it explicitly to look at another.
+    branch: Option<String>,
     #[serde(flatten)]
     page: After,
     /// Include resources that are out of service.
@@ -441,6 +453,11 @@ async fn list_bookables(
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
     let page = crate::resources(
         &mut conn,
+        // **"Book at Olaya."** The caller's branch narrows the list by default
+        // and `?branch=` overrides it, because a manager at one counter looking
+        // at another's rota is a normal thing to want and refusing it would
+        // make the header a wall rather than a default.
+        query.branch.as_deref().or(tenant.branch.as_ref().map(erp_types::AggregateId::as_str)),
         query.withdrawn,
         query.page.limit(50, 200),
         after.as_ref(),
@@ -483,6 +500,14 @@ async fn declare_bookable(
         name_latin: body.name_latin,
         kind: kind(&body.kind, locale)?,
         capacity: body.capacity,
+        // **Where the resource is**, which is not where the request came from —
+        // an owner at head office declares a chair at Olaya. So it is a field on
+        // the body and not `Allowed::branch`, and the two mean different things.
+        branch: body
+            .branch
+            .as_deref()
+            .map(|b| parse_id(b, locale))
+            .transpose()?,
     };
 
     let committed = crate::declare_resource(
@@ -1403,6 +1428,7 @@ fn bookable(r: crate::ResourceSummary) -> BookableRecord {
         name_latin: r.name_latin,
         kind: r.kind,
         capacity: r.capacity,
+        branch: r.branch,
         withdrawn: r.withdrawn,
         withdrawn_why: r.withdrawn_why,
     }

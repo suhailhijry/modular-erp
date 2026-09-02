@@ -82,6 +82,7 @@ fn person(name: &str) -> Details {
         name_latin: None,
         kind: Kind::Person,
         capacity: 1,
+        branch: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn place(name: &str, capacity: u16) -> Details {
         name_latin: None,
         kind: Kind::Place,
         capacity,
+        branch: None,
     }
 }
 

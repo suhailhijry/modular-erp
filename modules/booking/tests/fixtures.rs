@@ -260,7 +260,7 @@ impl Fixture {
 
     async fn rota(&self) -> Vec<booking::ResourceSummary> {
         let mut conn = self.pool.acquire().await.expect("connection");
-        booking::resources(&mut conn, false, 50, None)
+        booking::resources(&mut conn, None, false, 50, None)
             .await
             .expect("reads")
             .items

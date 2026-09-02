@@ -560,7 +560,7 @@ That is the wedge, and everything below is ordered by how directly it serves it.
 | 4 | **14 · `modules/prepaid`** | Deferred revenue, and the five shapes that share it | wellness, gyms, academies |
 | 5 | **15 · `modules/pos`** | A coffee shop cannot open without a till. Unlocks a whole segment that needs no booking at all | cafés, restaurants, retail |
 | 6 | **16 · branches** | Does not exist today. Blocks per-branch reporting and the segments that have more than one | multi-site anything |
-| 7 | **17 · the booking site** | How a customer actually reaches the business | appointments |
+| 7 | **17 · the public booking API** | How a customer reaches the business. The site itself is a separate React project; this is the surface it calls | appointments |
 | 8 | **18 · marketing** | Segments and campaigns over the log | growth |
 | 9 | **19 · `modules/inventory`** | Restaurants and retail count stock | restaurants, retail |
 | | *then* | Phases 10–13 as written: reports, channels, payments, real time | |
@@ -1575,17 +1575,23 @@ this system builds, hashes, chains, signs and reports those today.
 - [x] A sale is a simplified invoice unless the buyer gives a VAT number. Not
       re-decided here: it is `sales`' rule, reached by passing the customer
       through, which is what composing buys
-- [ ] **Returns and refunds — blocked, and the plan did not see why.**
-      `sales::cancel_invoice` refuses an invoice that has payments
-      (`SalesError::HasPayments`), and **every till sale is paid the instant it
-      happens**, so no till sale can be credited through the existing path.
+- [x] **Returns and refunds — the prerequisite was built, then this was.**
+      `sales::cancel_invoice` refused an invoice that had payments, and **every
+      till sale is paid the instant it happens**, so no till sale could be
+      credited through any route.
 
-      The refusal is right as it stands: crediting a paid invoice without paying
-      the money back leaves the business holding cash it now owes. What is
-      missing is a **refund** — money out — which `sales` has no concept of, and
-      which belongs there rather than here because a shop that invoices normally
-      can also refund. `ShiftEvent::Refunded` and the drawer half of it are
-      built and unreachable, waiting on that
+      The refusal was not wrong so much as too blunt. What a credit note may not
+      do is undo a supply while the business keeps the cash — so `sales` gained
+      a **refund** (`Refunded`, `refund_invoice`, `refund_in`,
+      `entry_for_refund`), and the rule became *"nothing is still held"*:
+      `Invoice::held()` is paid less refunded, and a credit note needs it at
+      zero. `pos::take_back` then hands the money back and credits the document
+      in one transaction, which is the only order in which the books are never
+      briefly wrong.
+
+      A refund projects as a **negative** row in `invoice_payment` rather than a
+      table of its own, so `paid` stays one sum and no read has to remember to
+      consult a second place before saying what an invoice is holding
 - [x] **Offline is deliberately out of scope.** Unchanged, and the reason is
       unchanged: a till that queues sales locally is a second write path with
       its own ordering problem, and L1 is not negotiable
@@ -1650,17 +1656,34 @@ differentiator and means the concept has to exist first.
       of them repeating it
 - [ ] **Opening hours: deliberately not built.** Nothing would read them.
       `booking` already keeps availability per *resource*, which is finer than a
-      branch and is what a diary needs; branch hours are for the public booking
-      site, which is Phase 17. A rule nobody applies is wrong by the time
-      somebody applies it
-- [ ] Resources belong to a branch. Not built: `booking` resources are
-      tenant-wide, and scoping them is a `booking` change rather than a
-      `branches` one. The dimension it needs now exists
+      branch and is what a diary needs; branch hours are something the booking
+      site would *display*, and that site is a separate React project reading
+      this API — Phase 17. A rule nobody applies is wrong by the time somebody
+      applies it
+- [x] **Resources belong to a branch**, which is what makes "book at Olaya"
+      work. `ResourceEvent::Declared` carries one — **set once, like `kind`**,
+      because a resource that changed branch would retroactively re-attribute
+      every booking it ever held to a place it was not at. If a chair physically
+      moves, declaring a new one is the honest record.
+
+      Checked at declaration against the `branches` log, and **not** inherited
+      from `post_entry_in` like every other branch reference, because declaring
+      a resource posts nothing and so has no journal entry to carry the check.
+      The rota narrows to the caller's `X-Branch` and `?branch=` overrides it —
+      a default, not a wall, for the reason §9d gives
 - [ ] A person scoped to one. Not built, but **the seam is placed**:
       `Allowed::branch` sits beside the capability check, which is where a
       person's scope would be enforced, and the doc comment says so
 - [ ] ZATCA per-branch EGS units. Not built, and unchanged: `taxpayer_id()` is
       still one stream per tenant
+
+**A footgun found by closing the gap, and removed.** `sales::issue_in` took the
+journal entry's id as an argument, and `cancel_in` reverses that entry by
+*rebuilding the same name*. So a caller that chose a different one — `pos` did,
+reasonably, using its own prefix — issued an invoice that could never be
+credited. The name is now derived inside `sales` by `issue_entry` and
+`money_entry`, and is no longer a parameter anybody can get wrong. It was
+invisible until a second caller existed, which is the argument for having one.
 
 **Two decisions worth keeping.**
 
@@ -1690,25 +1713,56 @@ and that the trial balance still balances.
 
 ---
 
-## Phase 17 — The booking site · 4–5 weeks
+## Phase 17 — The public booking API · 3–4 weeks
 
-**How a customer actually reaches the business.** Rekaz sells a branded booking
-site with a custom domain, and a branded iOS app at SAR 9,200 a year. That price
-is the market telling you what a public presence is worth.
+**The site is a separate project.** React and shadcn, its own repository, its own
+deployment, talking to this backend over HTTP. So this phase builds **no pages**:
+what it owes that project is an unauthenticated API surface, the security around
+it, and a contract it can be built against.
 
-- [ ] A public, unauthenticated booking page per tenant, Arabic and English.
-      The tenant is already a subdomain, so `salon.erp.com` is most of the way
-      there
-- [ ] Custom domains, which means ACME certificate automation and a verification
-      flow. The infrastructure half of this is larger than the product half
-- [ ] An embed snippet and a plain link, because Rekaz is right that the real
-      distribution is an Instagram bio and a WhatsApp profile
+That is a smaller phase than "the booking site" was, and a sharper one. The
+pages, the Arabic and English rendering, the embed snippet and the Instagram-bio
+link all leave this repository. What arrives in their place is the thing a
+same-origin server-rendered site would never have needed.
+
+- [ ] **CORS, which does not exist here at all.** Not a line of it, because until
+      now every caller was same-origin. It cannot be a blanket `*`: this surface
+      reads a tenant's diary and takes deposits. Allowed origins are **per
+      tenant** — a tenant configuration value, and therefore a security boundary
+      that a tenant edits, which is a shape nothing here has yet
+- [ ] **Tenant resolution is the decision to take first.** The tenant *is* the
+      subdomain, read from `Host`, and `extract.rs` carries a careful note about
+      why that header is safe to trust for it. A browser sitting on `salon.com`
+      calling a shared `api.erp.com` breaks that: the `Host` is the API's, and
+      the tenant would have to be named some other way — a new resolution path,
+      and a new way to get tenant isolation wrong.
+
+      **Recommended: the site calls `salon.erp.com`.** The React app's API base
+      URL is per tenant, the subdomain stays the single source of tenant
+      identity, and the existing safety argument stays true. CORS then does the
+      cross-origin work, which is what it is for
+- [ ] **Custom domains mostly leave.** ACME and certificate automation belong to
+      wherever the React site is hosted, which is the larger half and no longer
+      this repository's. What stays is **domain verification** — proving a
+      tenant owns `salon.com` before it goes on their CORS allowlist — because
+      that half was never about certificates
 - [ ] Deposits at booking, which is the honest answer to no-shows and is a
-      `prepaid` liability like everything else
-- [ ] **A public surface changes the threat model.** Signup was the only
-      unauthenticated write path and it took two rounds to make safe; this adds
-      a second one, per tenant, taking money. Rate limiting per caller
-      (Phase 12c) stops being deferrable at this point
+      `prepaid` liability like everything else. Unchanged, and now the only
+      money-taking part of the phase that lives here
+- [ ] **A public surface changes the threat model, and a cross-origin one
+      sharpens it.** Signup was the only unauthenticated write path and it took
+      two rounds to make safe; this adds a second, per tenant, taking money —
+      with **no session to attribute abuse to**. Rate limiting per caller
+      (Phase 12c) stops being deferrable and becomes the only defence, which
+      means it is scoped by something other than an identity: origin, IP, and
+      the tenant being booked
+- [ ] **`docs/openapi.json` stops being documentation and becomes a contract.**
+      It is already generated and already guarded by
+      `the_document_matches_the_router`, which is most of the way there. What it
+      does not have is any statement about **breaking change**: with one
+      repository a renamed field was a compile error, and with two it is a
+      deployment that silently stops working. The versioning discipline the
+      `/v1` prefix implies has to become a rule somebody can check
 
 ---
 
@@ -1723,7 +1777,9 @@ is the market telling you what a public presence is worth.
 - [ ] **Campaigns** — a segment, a template, a channel and a schedule. Every one
       of those exists after Phase 11; a campaign is the thing that composes them
 - [ ] Tracking pixels: Meta, TikTok, Snapchat, Google Ads, GTM, Analytics,
-      Clarity. Client-side and cheap, and the whole list is table stakes here
+      Clarity. **Client-side, and the client is the React project now** — so
+      what this repository owes is the configuration: which ids a tenant has set,
+      readable by the site. The pixels themselves are not built here
 - [ ] Reviews, and the request that asks for one after a visit
 - [ ] Abandoned bookings, which is the retargeting case that actually pays
 

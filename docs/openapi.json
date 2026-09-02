@@ -669,6 +669,13 @@
       },
       "BookableRecord": {
         "properties": {
+          "branch": {
+            "description": "Which branch it is at. Absent in a single-branch business.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "capacity": {
             "format": "int32",
             "minimum": 0,
@@ -2588,6 +2595,13 @@
           "name_latin": "Noura"
         },
         "properties": {
+          "branch": {
+            "description": "Which branch it is at. Omit it in a single-branch business.\n\n**Set once**: a chair that physically moves is a new resource, because\nchanging this would re-attribute every booking it ever held to a place\nit was not at.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "capacity": {
             "description": "How many can be held at once. One stylist, six covers at a table, eight\nrooms of a type, five hundred places in a museum slot.",
             "format": "int32",
@@ -4075,6 +4089,13 @@
           "items": {
             "items": {
               "properties": {
+                "branch": {
+                  "description": "Which branch it is at. Absent in a single-branch business.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "capacity": {
                   "format": "int32",
                   "minimum": 0,

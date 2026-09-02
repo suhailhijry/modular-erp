@@ -203,8 +203,11 @@ impl Projection for ZatcaDocuments {
             }
 
             // A payment changes nothing ZATCA sees. The document was cleared on
-            // what was charged, not on what has been collected.
-            InvoiceEvent::PaymentRecorded { .. } => Ok(()),
+            // what was charged, not on what has been collected — and a refund
+            // is the same fact in the other direction. **What ZATCA sees when a
+            // sale is undone is the credit note**, which arrives as `Cancelled`
+            // above and is a document of its own.
+            InvoiceEvent::PaymentRecorded { .. } | InvoiceEvent::Refunded { .. } => Ok(()),
         }
     }
 }

@@ -101,6 +101,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — A booking needs a name to put in the diary.
 - **ar** — يحتاج الحجز إلى اسم يظهر في المفكرة.
 
+### `booking.no_such_branch`
+
+- **en** — There is no open branch {branch}. A resource can only be placed at a branch that exists and is still trading.
+- **ar** — لا يوجد فرع مفتوح {branch}. المورد لا يُسنَد إلا لفرع قائم وما زال يعمل.
+
 ### `booking.no_such_customer`
 
 - **en** — There is no customer {customer}.
@@ -935,6 +940,11 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — Only {outstanding} is outstanding, and the payment is {offered}.
 - **ar** — المتبقي هو {outstanding} فقط، ومبلغ الدفعة {offered}.
+
+### `sales.overrefund`
+
+- **en** — The business is holding only {held} against this invoice and the refund is {offered}. Handing back more than was taken is a decision somebody has to make, not a negative balance.
+- **ar** — المحتفظ به مقابل هذه الفاتورة {held} والمبلغ المسترد {offered}. إعادة أكثر مما استُلم قرار يتخذه شخص، لا رصيد سالب.
 
 ### `sales.payment_currency`
 

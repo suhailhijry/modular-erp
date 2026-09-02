@@ -72,19 +72,21 @@ impl Projection for Resources {
                 name_latin,
                 kind,
                 capacity,
+                branch,
                 at,
             } => {
                 sqlx::query(
                     "INSERT INTO resource
-                         (id, name, name_latin, kind, capacity,
+                         (id, name, name_latin, kind, capacity, branch,
                           declared_on, recorded_at, position)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 )
                 .bind(id)
                 .bind(&name)
                 .bind(&name_latin)
                 .bind(kind.as_str())
                 .bind(i32::from(capacity))
+                .bind(branch.as_ref().map(erp_types::AggregateId::as_str))
                 .bind(at)
                 .bind(ctx.event_time())
                 .bind(ctx.position().get())
@@ -327,6 +329,8 @@ pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = Booking>>> {
 /// Something bookable, as a list shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceSummary {
+    /// Where it is. `None` in a single-branch business.
+    pub branch: Option<String>,
     pub id: String,
     pub name: String,
     pub name_latin: Option<String>,
@@ -350,6 +354,7 @@ pub struct ResourceDetail {
 /// drawn in — people first, then the places they work in.
 pub async fn resources(
     conn: &mut PgConnection,
+    branch: Option<&str>,
     include_withdrawn: bool,
     limit: i64,
     after: Option<&Cursor>,
@@ -366,9 +371,11 @@ pub async fn resources(
     let rows = sqlx::query!(
         r#"SELECT id as "id!", name as "name!", name_latin, kind as "kind!",
                   capacity as "capacity!",
+                  branch,
                   (withdrawn_at IS NOT NULL) as "withdrawn!", withdrawn_why
              FROM proj_booking.resource
             WHERE ($5 OR withdrawn_at IS NULL)
+              AND ($6::text IS NULL OR branch = $6)
               AND ($2::text IS NULL OR (kind, name, id) > ($2, $3, $4))
             ORDER BY kind, name, id
             LIMIT $1"#,
@@ -377,6 +384,7 @@ pub async fn resources(
         name,
         id,
         include_withdrawn,
+        branch,
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -389,6 +397,7 @@ pub async fn resources(
                 name_latin: r.name_latin,
                 kind: r.kind,
                 capacity: u16::try_from(r.capacity).unwrap_or(u16::MAX),
+                branch: r.branch,
                 withdrawn: r.withdrawn,
                 withdrawn_why: r.withdrawn_why,
             })
@@ -406,6 +415,7 @@ pub async fn resource(
     let Some(row) = sqlx::query!(
         r#"SELECT id as "id!", name as "name!", name_latin, kind as "kind!",
                   capacity as "capacity!", availability as "availability!",
+                  branch,
                   (withdrawn_at IS NOT NULL) as "withdrawn!", withdrawn_why,
                   declared_on as "declared_on!"
              FROM proj_booking.resource WHERE id = $1"#,
@@ -424,6 +434,7 @@ pub async fn resource(
             name_latin: row.name_latin,
             kind: row.kind,
             capacity: u16::try_from(row.capacity).unwrap_or(u16::MAX),
+            branch: row.branch,
             withdrawn: row.withdrawn,
             withdrawn_why: row.withdrawn_why,
         },

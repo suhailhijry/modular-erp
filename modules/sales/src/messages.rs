@@ -9,6 +9,7 @@ pub const PAYMENT_CURRENCY: MessageCode = MessageCode::new("sales.payment_curren
 pub const NOT_A_PAYMENT: MessageCode = MessageCode::new("sales.not_a_payment");
 pub const ALREADY_CANCELLED: MessageCode = MessageCode::new("sales.already_cancelled");
 pub const HAS_PAYMENTS: MessageCode = MessageCode::new("sales.has_payments");
+pub const OVERREFUND: MessageCode = MessageCode::new("sales.overrefund");
 pub const INVALID_REFERENCE: MessageCode = MessageCode::new("sales.invalid_reference");
 pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("sales.mixed_currencies");
 pub const NOT_A_DISCOUNT: MessageCode = MessageCode::new("sales.not_a_discount");
@@ -26,6 +27,7 @@ pub static CODES: &[MessageCode] = &[
     NOT_A_PAYMENT,
     ALREADY_CANCELLED,
     HAS_PAYMENTS,
+    OVERREFUND,
     INVALID_REFERENCE,
     MIXED_CURRENCIES,
     NOT_A_DISCOUNT,
@@ -36,6 +38,20 @@ pub static CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        OVERREFUND,
+        Locale::English,
+        Template::Simple(
+            "The business is holding only {held} against this invoice and the refund is {offered}. Handing back more than was taken is a decision somebody has to make, not a negative balance.",
+        ),
+    ),
+    (
+        OVERREFUND,
+        Locale::Arabic,
+        Template::Simple(
+            "المحتفظ به مقابل هذه الفاتورة {held} والمبلغ المسترد {offered}. إعادة أكثر مما استُلم قرار يتخذه شخص، لا رصيد سالب.",
+        ),
+    ),
     (
         NOTHING_TO_INVOICE,
         Locale::English,

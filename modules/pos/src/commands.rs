@@ -244,7 +244,6 @@ pub async fn sell(
     if basket.tenders.iter().any(|t| !t.amount.is_positive()) {
         return Err(rejected(PosError::NotAnAmount));
     }
-    let entry = derived("psi", &[sale.as_str()]).map_err(rejected)?;
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
@@ -269,7 +268,6 @@ pub async fn sell(
             let issued = sales::issue_in(
                 &mut *conn,
                 sale,
-                &entry,
                 &draft_from(basket),
                 &format!("Till {} · sale {sale}", held.aggregate.till),
                 metadata,
@@ -337,6 +335,131 @@ pub async fn sell(
         }
     }
     contended(shift)
+}
+
+/// A sale handed back.
+#[derive(Debug, Clone)]
+pub struct Return {
+    /// The caller's key. Returning the same one twice is a no-op (L8).
+    pub reference: String,
+    /// What the customer is given back, and how. Must come to the whole sale:
+    /// this credits the document, and a partial credit note is not something
+    /// `sales` can write.
+    pub tenders: Vec<Tender>,
+    pub why: String,
+    pub at: Timestamp,
+}
+
+/// Takes a sale back: the credit note, the money, and the drawer, in one write.
+///
+/// # Why this needed a change to `sales` first
+///
+/// `cancel_invoice` refused any invoice that had ever been paid — and **every
+/// till sale is paid the instant it happens**, so no till sale could be credited
+/// through any route. The rule was not wrong so much as too blunt: what a credit
+/// note may not do is undo a supply while the business keeps the cash. So
+/// `sales` gained a refund, the rule became *"nothing is still held"*, and this
+/// hands the money back and credits the document in the same transaction —
+/// which is also the only order in which the books are never briefly wrong.
+pub async fn take_back(
+    db: &TenantDb,
+    shift: &AggregateId,
+    sale: &AggregateId,
+    returning: &Return,
+    metadata: &Metadata,
+) -> Outcome {
+    // A return that hands nothing back is not a return, and it is also the only
+    // input for which the currency below is unanswerable.
+    if returning.tenders.is_empty() || returning.tenders.iter().any(|t| !t.amount.is_positive()) {
+        return Err(rejected(PosError::NotAnAmount));
+    }
+    let currency = returning.tenders[0].amount.currency();
+    for _ in 1..=MAX_ATTEMPTS {
+        let mut tx = db.begin().await?;
+        let outcome = async {
+            let conn = &mut *tx;
+            let held = erp_eventlog::load::<Shift>(&mut *conn, shift, crate::upcasters())
+                .await
+                .map_err(ExecuteError::Load)?;
+            if !held.aggregate.exists() {
+                return Err(ExecuteError::Rejected(PosError::NoSuchShift(
+                    shift.to_string(),
+                )));
+            }
+
+            let committed = try_execute::<Shift, _, PosError>(
+                &mut *conn,
+                shift,
+                crate::upcasters(),
+                metadata,
+                |loaded: &Loaded<Shift>| {
+                    if loaded.aggregate.has_pay_out(&returning.reference) {
+                        return Ok(Decision::nothing());
+                    }
+                    let total =
+                        Money::checked_sum(returning.tenders.iter().map(|t| t.amount), currency)?;
+                    Ok(Decision::one(ShiftEvent::Refunded {
+                        sale: sale.clone(),
+                        total,
+                        tenders: returning.tenders.clone(),
+                        why: returning.why.clone(),
+                        at: returning.at,
+                    }))
+                },
+            )
+            .await?;
+
+            if committed.at.is_some() {
+                give_the_money_back(&mut *conn, sale, returning, metadata).await?;
+                sales::credit_in(
+                    &mut *conn,
+                    sale,
+                    &returning.reference,
+                    &returning.why,
+                    returning.at,
+                    metadata,
+                )
+                .await
+                .map_err(lift)?;
+            }
+            Ok(committed)
+        }
+        .await;
+
+        if let Some(done) = settle(tx, outcome).await? {
+            return Ok(done);
+        }
+    }
+    contended(shift)
+}
+
+/// One `sales` refund per tender, out of the account its method settles in.
+async fn give_the_money_back(
+    conn: &mut sqlx::PgConnection,
+    sale: &AggregateId,
+    returning: &Return,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<PosError>> {
+    let accounts = accounts(&mut *conn).await?;
+    for (n, tender) in returning.tenders.iter().enumerate() {
+        let reference = format!("refund-{}-{n}", tender.method);
+        let receipt = sales::Receipt {
+            reference: reference.clone(),
+            amount: tender.amount,
+            received_on: returning.at,
+            into: accounts.for_method(tender.method).clone(),
+        };
+        sales::refund_in(
+            &mut *conn,
+            sale,
+            &receipt,
+            &format!("Refund {reference} · sale {sale}"),
+            metadata,
+        )
+        .await
+        .map_err(lift)?;
+    }
+    Ok(())
 }
 
 /// Cash out of the drawer for something that is not a refund.
@@ -516,11 +639,9 @@ async fn take_the_money(
             received_on: basket.at,
             into: accounts.for_method(tender.method).clone(),
         };
-        let entry = derived("psp", &[sale.as_str(), &reference]).map_err(ExecuteError::Rejected)?;
         sales::pay_in(
             &mut *conn,
             sale,
-            &entry,
             &receipt,
             &format!("Tender {reference} · sale {sale}"),
             metadata,

@@ -47,6 +47,8 @@ pub enum BookingError {
     NoName,
     #[error("a resource needs a name")]
     ResourceHasNoName,
+    #[error("there is no open branch {0}")]
+    NoSuchBranch(String),
     #[error("there is no customer {0} to book this for")]
     NoSuchCustomer(String),
     #[error("there is nothing bookable called {0}")]
@@ -87,6 +89,9 @@ impl erp_i18n::Localize for BookingError {
             Self::NothingToBook => Message::new(messages::NOTHING_TO_BOOK),
             Self::NoName => Message::new(messages::NO_NAME),
             Self::ResourceHasNoName => Message::new(messages::RESOURCE_HAS_NO_NAME),
+            Self::NoSuchBranch(id) => {
+                Message::new(messages::NO_SUCH_BRANCH).with("branch", MessageArg::text(id))
+            }
             Self::NoSuchCustomer(id) => {
                 Message::new(messages::NO_SUCH_CUSTOMER).with("customer", MessageArg::text(id))
             }
@@ -180,6 +185,11 @@ pub struct Details {
     /// How many can be held at once. One stylist, six covers, eight rooms of a
     /// type, five hundred places in a museum slot.
     pub capacity: u16,
+    /// Where it is. **Set once**, for the reason `kind` is — see
+    /// [`crate::ResourceEvent::Declared`] — so [`Amendment`] does not carry one.
+    ///
+    /// `None` is a single-branch business, which is most of them.
+    pub branch: Option<AggregateId>,
 }
 
 /// What can be changed about one afterwards.
@@ -248,6 +258,23 @@ pub async fn declare_resource(
         let mut tx = db.begin().await?;
         let outcome = async {
             let conn = &mut *tx;
+            // **The branch, checked against the log.** Not `proj_branches`: a
+            // branch opened a moment ago must be able to take a chair, which is
+            // the same argument `crm` and `ledger` make one layer along.
+            //
+            // Checked here rather than inherited from `post_entry_in` like
+            // every other branch reference, because declaring a resource posts
+            // nothing — there is no journal entry to carry the check.
+            if let Some(branch) = &details.branch
+                && !branches::accepts_documents(&mut *conn, branch)
+                    .await
+                    .map_err(ExecuteError::Load)?
+            {
+                return Err(ExecuteError::Rejected(BookingError::NoSuchBranch(
+                    branch.to_string(),
+                )));
+            }
+
             // A resource keeps the name the business gave it — you book
             // `CHAIR-1`, not a UUID — so the id stays the caller's. What
             // `try_create` adds is that re-using that name for a *different*
@@ -263,6 +290,7 @@ pub async fn declare_resource(
                         name_latin: details.name_latin.clone(),
                         kind: details.kind,
                         capacity: details.capacity,
+                        branch: details.branch.clone(),
                         at,
                     }))
                 },
@@ -462,6 +490,10 @@ pub async fn fit_out(
             },
             kind: template.kind,
             capacity: template.capacity,
+            // A fixture installs one trade's worth of resources, and a trade is
+            // not a place. A business with branches assigns them afterwards by
+            // declaring its own.
+            branch: None,
         };
 
         let declared = declare_resource(db, &id, &details, at, metadata).await?;

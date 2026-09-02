@@ -136,9 +136,14 @@ CREATE TABLE IF NOT EXISTS invoice_payment (
     id           UUID PRIMARY KEY,
     invoice_id   TEXT NOT NULL REFERENCES invoice (id) ON DELETE CASCADE,
     -- The payer's own reference. Unique per invoice, which is what makes
-    -- recording one twice a no-op.
+    -- recording one twice a no-op — and which means a **refund must not reuse a
+    -- payment's reference on the same invoice**: they are two movements of
+    -- money and cannot be one fact.
     reference    TEXT NOT NULL,
-    amount       BIGINT NOT NULL CHECK (amount > 0),
+    -- **Signed.** Positive is money in, negative is money handed back. One
+    -- table rather than two, so `paid` is a single sum and no read has to
+    -- remember to consult a second place before saying what an invoice holds.
+    amount       BIGINT NOT NULL CHECK (amount <> 0),
     received_on  TIMESTAMPTZ NOT NULL,
     -- The ledger account it landed in.
     account      TEXT NOT NULL,
@@ -228,6 +233,8 @@ SELECT i.id,
        i.cancelled_on,
        i.credit_note,
        i.recorded_at,
+       -- Net of refunds, because `amount` is signed. This is what the business
+       -- is holding, which is the number `outstanding` below is derived from.
        COALESCE(sum(p.amount), 0)::BIGINT            AS paid,
        -- A cancelled invoice owes nothing. Without this it keeps appearing in
        -- a receivables list, and somebody chases a customer for money that was

@@ -27,7 +27,7 @@ use crate::invoice::{
     Customer, Discount as InvoiceDiscount, DraftDiscount, DraftLine, Invoice, InvoiceEvent,
     InvoiceLine,
 };
-use crate::posting::{PostingAccounts, entry_for_issue, entry_for_payment};
+use crate::posting::{PostingAccounts, entry_for_issue, entry_for_payment, entry_for_refund};
 use crate::vat::TaxError;
 
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +38,8 @@ pub enum SalesError {
     NotIssued(String),
     #[error("only {outstanding} is outstanding; the payment is {offered}")]
     Overpayment { outstanding: Money, offered: Money },
+    #[error("the business holds only {held}; the refund is {offered}")]
+    Overrefund { held: Money, offered: Money },
     #[error("the invoice is in {expected} and the payment is in {found}")]
     PaymentCurrency {
         expected: CurrencyCode,
@@ -84,6 +86,9 @@ impl erp_i18n::Localize for SalesError {
                 offered,
             } => Message::new(messages::OVERPAYMENT)
                 .with("outstanding", MessageArg::text(outstanding.to_string()))
+                .with("offered", MessageArg::text(offered.to_string())),
+            Self::Overrefund { held, offered } => Message::new(messages::OVERREFUND)
+                .with("held", MessageArg::text(held.to_string()))
                 .with("offered", MessageArg::text(offered.to_string())),
             Self::PaymentCurrency { expected, found } => Message::new(messages::PAYMENT_CURRENCY)
                 .with("expected", MessageArg::text(expected.to_string()))
@@ -180,12 +185,11 @@ pub async fn issue_invoice(
         return Err(rejected(SalesError::NothingToInvoice));
     }
 
-    let entry_id = derived_id("si", &[id.as_str()])?;
     let memo = format!("Invoice {id} · {}", draft.customer.name);
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
-        match issue_in(&mut tx, id, &entry_id, draft, &memo, metadata).await {
+        match issue_in(&mut tx, id, draft, &memo, metadata).await {
             Ok(numbered) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
                 return Ok(numbered);
@@ -213,11 +217,17 @@ pub async fn issue_invoice(
 pub async fn issue_in(
     conn: &mut sqlx::PgConnection,
     id: &AggregateId,
-    entry_id: &AggregateId,
     draft: &Draft,
     memo: &str,
     metadata: &Metadata,
 ) -> Result<Numbered, ExecuteError<SalesError>> {
+    // **Derived here and not taken as an argument.** It used to be a parameter,
+    // and `cancel_in` reverses it by rebuilding the same name — so a caller that
+    // chose a different one issued an invoice that could never be credited.
+    // `pos` did exactly that, and the test that caught it is
+    // `a_return_hands_the_money_back_and_credits_the_sale`. A name only this
+    // module can get wrong is a name only this module should write.
+    let entry_id = &issue_entry(id)?;
     // **The customer reference, checked in this transaction.**
     //
     // Against the *log* and not `proj_crm.customer`, because `crm` is a
@@ -384,12 +394,11 @@ pub async fn record_payment(
 
     // Scoped by invoice as well as reference: two customers can both call their
     // transfer "march".
-    let entry_id = derived_id("sp", &[invoice.as_str(), &receipt.reference])?;
     let memo = format!("Payment {} · invoice {invoice}", receipt.reference);
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
-        match pay_in(&mut tx, invoice, &entry_id, receipt, &memo, metadata).await {
+        match pay_in(&mut tx, invoice, receipt, &memo, metadata).await {
             Ok(committed) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
                 return Ok(committed);
@@ -407,16 +416,132 @@ pub async fn record_payment(
     Err(contended(invoice))
 }
 
+/// Money handed back to a customer.
+///
+/// **The mirror of a payment, and the thing this module had no concept of.**
+/// `cancel_invoice` refuses an invoice the business is still holding money
+/// against, which meant no *paid* invoice could ever be credited — and every
+/// till sale is paid the instant it happens. A return was therefore unreachable
+/// through any route, which is what this closes.
+///
+/// Refunding more than is held is refused for the reason overpaying is: a
+/// business handing back money it never took has made a decision somebody needs
+/// to see, and a negative balance is how that decision never gets made.
+pub async fn refund_invoice(
+    db: &TenantDb,
+    invoice: &AggregateId,
+    receipt: &Receipt,
+    metadata: &Metadata,
+) -> Outcome {
+    if !receipt.amount.is_positive() {
+        return Err(rejected(SalesError::NotAPayment));
+    }
+    let memo = format!("Refund {} · invoice {invoice}", receipt.reference);
+
+    for _ in 1..=MAX_ATTEMPTS {
+        let mut tx = db.begin().await?;
+        match refund_in(&mut tx, invoice, receipt, &memo, metadata).await {
+            Ok(committed) => {
+                tx.commit().await.map_err(ExecuteError::from)?;
+                return Ok(committed);
+            }
+            Err(e) if e.is_conflict() => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+            }
+            Err(e) => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+                return Err(e.into());
+            }
+        }
+    }
+
+    Err(contended(invoice))
+}
+
+/// One attempt at refunding, in the caller's transaction. Public for the reason
+/// [`issue_in`] is: a till hands the money back in the same write that credits
+/// the sale.
+pub async fn refund_in(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    receipt: &Receipt,
+    memo: &str,
+    metadata: &Metadata,
+) -> Result<Committed<InvoiceEvent>, ExecuteError<SalesError>> {
+    let entry_id = &money_entry("sr", invoice, &receipt.reference)?;
+    let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
+
+    let entry_lines = entry_for_refund(receipt.amount, &receipt.into, &accounts)
+        .map_err(|e| ExecuteError::Rejected(SalesError::Unbalanced(e)))?;
+
+    let committed = try_execute::<Invoice, _, SalesError>(
+        &mut *conn,
+        invoice,
+        crate::upcasters(),
+        &metadata,
+        |loaded| {
+            let state = &loaded.aggregate;
+            if !state.issued {
+                return Err(SalesError::NotIssued(invoice.as_str().to_owned()));
+            }
+            if state.has_refund(&receipt.reference) {
+                return Ok(Decision::nothing());
+            }
+
+            let held = state
+                .held()
+                .ok_or_else(|| SalesError::NotIssued(invoice.as_str().to_owned()))?;
+
+            if held.currency() != receipt.amount.currency() {
+                return Err(SalesError::PaymentCurrency {
+                    expected: held.currency(),
+                    found: receipt.amount.currency(),
+                });
+            }
+            if receipt.amount.minor() > held.minor() {
+                return Err(SalesError::Overrefund {
+                    held,
+                    offered: receipt.amount,
+                });
+            }
+
+            Ok(Decision::one(InvoiceEvent::Refunded {
+                refund: receipt.reference.clone(),
+                amount: receipt.amount,
+                refunded_on: receipt.received_on,
+                account: receipt.into.clone(),
+            }))
+        },
+    )
+    .await?;
+
+    if !committed.events.is_empty() {
+        ledger::post_entry_in(
+            conn,
+            entry_id,
+            receipt.received_on,
+            memo,
+            &entry_lines,
+            &metadata,
+        )
+        .await
+        .map_err(lift)?;
+    }
+
+    Ok(committed)
+}
+
 /// One attempt at recording a payment, in the caller's transaction. Public for
 /// the reason [`issue_in`] is.
 pub async fn pay_in(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,
-    entry_id: &AggregateId,
     receipt: &Receipt,
     memo: &str,
     metadata: &Metadata,
 ) -> Result<Committed<InvoiceEvent>, ExecuteError<SalesError>> {
+    // Derived here, for the reason `issue_in` derives its own.
+    let entry_id = &money_entry("sp", invoice, &receipt.reference)?;
     let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
 
     let entry_lines = entry_for_payment(receipt.amount, &receipt.into, &accounts)
@@ -524,8 +649,11 @@ pub async fn cancel_invoice(
     on: Timestamp,
     metadata: &Metadata,
 ) -> NumberedOutcome {
-    let entry_id = derived_id("si", &[invoice.as_str()])?;
-    let credit_id = derived_id("cn", &[invoice.as_str(), credit_note])?;
+    let unusable = |_| {
+        ExecuteError::Rejected(SalesError::NotIssued(invoice.as_str().to_owned()))
+    };
+    let entry_id = derived_id("si", &[invoice.as_str()]).map_err(unusable)?;
+    let credit_id = derived_id("cn", &[invoice.as_str(), credit_note]).map_err(unusable)?;
     let memo = format!("Credit note {credit_note} · invoice {invoice}");
 
     for _ in 1..=MAX_ATTEMPTS {
@@ -566,6 +694,57 @@ pub async fn cancel_invoice(
     clippy::too_many_arguments,
     reason = "every one is a value computed before the transaction opened"
 )]
+/// The journal entry an invoice's issue posts under.
+///
+/// One function, because `cancel_in` reverses it by name and the two must agree.
+fn issue_entry(invoice: &AggregateId) -> Result<AggregateId, ExecuteError<SalesError>> {
+    derived_id("si", &[invoice.as_str()])
+        .map_err(|_| ExecuteError::Rejected(SalesError::NotIssued(invoice.as_str().to_owned())))
+}
+
+/// The journal entry a payment or a refund posts under. Scoped by invoice as
+/// well as reference: two customers can both call their transfer "march".
+fn money_entry(
+    prefix: &str,
+    invoice: &AggregateId,
+    reference: &str,
+) -> Result<AggregateId, ExecuteError<SalesError>> {
+    derived_id(prefix, &[invoice.as_str(), reference])
+        .map_err(|_| ExecuteError::Rejected(SalesError::NotIssued(invoice.as_str().to_owned())))
+}
+
+/// Credits an invoice inside the caller's transaction.
+///
+/// Public for the reason [`issue_in`] and [`refund_in`] are — a till credits the
+/// sale in the same write that hands the money back. It derives both journal
+/// entry ids itself, because they belong to **this** module's scheme: the one
+/// being reversed is the entry `issue_in` posted, and a caller cannot be
+/// expected to know how that was named.
+pub async fn credit_in(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    credit_note: &str,
+    reason: &str,
+    on: Timestamp,
+    metadata: &Metadata,
+) -> Result<Numbered, ExecuteError<SalesError>> {
+    let entry_id = issue_entry(invoice)?;
+    let credit_id = money_entry("cn", invoice, credit_note)?;
+    let memo = format!("Credit note {credit_note} · invoice {invoice}");
+    cancel_in(
+        conn,
+        invoice,
+        &entry_id,
+        &credit_id,
+        credit_note,
+        reason,
+        on,
+        &memo,
+        metadata,
+    )
+    .await
+}
+
 async fn cancel_in(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,
@@ -610,7 +789,16 @@ async fn cancel_in(
                     by: by.clone(),
                 });
             }
-            if state.payments.is_empty() {
+            // **What matters is the money, not whether a payment exists.**
+            // This used to refuse any invoice that had ever been paid, which
+            // made a till sale — paid the instant it happens — impossible to
+            // credit through any route. What a credit note may not do is undo a
+            // supply while the business keeps the cash: refund it first, and
+            // then the sale can be undone.
+            let held = state
+                .held()
+                .ok_or_else(|| SalesError::NotIssued(invoice.as_str().to_owned()))?;
+            if held.is_zero() {
                 Ok(Decision::one(InvoiceEvent::Cancelled {
                     credit_note: credit_note.clone(),
                     reference: Some(reference.clone()),

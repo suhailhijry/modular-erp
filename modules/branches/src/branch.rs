@@ -15,8 +15,9 @@
 //!
 //! **Opening hours.** The plan asks for them and nothing would read them.
 //! `booking` already keeps availability per resource, which is finer than a
-//! branch and is what a diary actually needs; branch hours are for the public
-//! booking site, which is Phase 17. A rule nobody applies is a rule that is
+//! branch and is what a diary actually needs; branch hours are something the
+//! booking site would *display*, and that site is a separate React project
+//! reading this API — Phase 17. A rule nobody applies is a rule that is
 //! wrong by the time somebody does — see the `Address` note below for the shape
 //! of that mistake already made three times.
 

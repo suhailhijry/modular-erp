@@ -16,6 +16,10 @@ workspace = true
 # split is deliberate and load-bearing — see the crate docs.
 erp-occupancy = { workspace = true }
 # `crm` for the customer reference, read from the log and never from `proj_crm`.
+# **`branches`, so a resource can say where it is.** A leaf that depends on
+# nothing, checked against its log at declare time — declaring a resource posts
+# nothing, so there is no journal entry to inherit `post_entry_in`'s check.
+branches = { workspace = true }
 crm = { workspace = true }
 erp-web = { workspace = true }
 tracing = { workspace = true }

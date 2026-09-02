@@ -18,6 +18,7 @@ use erp_testkit::{Schema, TestDb};
 use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 use pos::{
     Basket, Method, Opening, PayOut, PosError, Tender, close_shift, open_shift, pay_out, sell,
+    take_back,
 };
 
 static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
@@ -681,4 +682,105 @@ async fn a_rebuild_reproduces_the_till() {
 #[test]
 fn the_catalog_is_complete() {
     erp_i18n::testing::assert_complete(&pos::CATALOG);
+}
+
+/// **A return: the money back, the sale credited, and the drawer down.**
+///
+/// The gap Phase 15 could not close. `cancel_invoice` refused any invoice that
+/// had ever been paid, and every till sale is paid the instant it happens — so
+/// no till sale could be credited through any route. `sales` gained a refund,
+/// its rule became *"nothing is still held"*, and this is the whole thing in one
+/// transaction.
+#[tokio::test]
+async fn a_return_hands_the_money_back_and_credits_the_sale() {
+    let fixture = Fixture::new().await;
+    opened(&fixture, "SHIFT-1", 0).await;
+    sell(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-1"),
+        &coffee(vec![Tender::new(Method::Cash, gross())]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the sale rings");
+
+    take_back(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-1"),
+        &pos::Return {
+            reference: "RET-1".to_owned(),
+            tenders: vec![Tender::new(Method::Cash, gross())],
+            why: "أعاد المنتج".to_owned(),
+            at: on("2026-04-01"),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("the return is taken");
+
+    fixture.project().await;
+
+    // The drawer is back where it started, and so are the books.
+    let shift = fixture.shift("SHIFT-1").await.expect("there");
+    assert_eq!(shift.expected, money(0), "the cash did not leave the drawer");
+    assert_eq!(fixture.balance("1000").await, money(0), "cash on hand");
+    assert_eq!(fixture.balance("4000").await, money(0), "revenue reversed");
+    assert_eq!(fixture.balance("2100").await, money(0), "VAT reversed");
+    assert_eq!(
+        fixture.balance("1100").await,
+        money(0),
+        "the receivable is square"
+    );
+
+    // The takings still say what happened: a sale was made and given back.
+    let takings = fixture.takings("SHIFT-1").await;
+    let cash = takings
+        .iter()
+        .find(|t| t.method == "cash")
+        .expect("cash was taken");
+    assert_eq!(cash.taken, gross());
+    assert_eq!(cash.refunded, gross());
+
+    fixture.cleanup().await;
+}
+
+/// A retried return hands the money back once.
+#[tokio::test]
+async fn a_retried_return_is_harmless() {
+    let fixture = Fixture::new().await;
+    opened(&fixture, "SHIFT-1", 0).await;
+    sell(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-1"),
+        &coffee(vec![Tender::new(Method::Cash, gross())]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("rings");
+
+    for _ in 0..3 {
+        take_back(
+            &fixture.db,
+            &code("SHIFT-1"),
+            &code("SALE-1"),
+            &pos::Return {
+                reference: "RET-1".to_owned(),
+                tenders: vec![Tender::new(Method::Cash, gross())],
+                why: "أعاد".to_owned(),
+                at: on("2026-04-01"),
+            },
+            &Metadata::default(),
+        )
+        .await
+        .expect("a retry is not an error");
+    }
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1000").await, money(0), "refunded twice");
+    assert_eq!(fixture.balance("4000").await, money(0));
+
+    fixture.cleanup().await;
 }

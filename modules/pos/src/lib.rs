@@ -51,7 +51,8 @@ mod projections;
 mod shift;
 
 pub use commands::{
-    Basket, Opening, PayOut, PosError, Rung, close_shift, open_shift, pay_out, sell,
+    Basket, Opening, PayOut, PosError, Return, Rung, close_shift, open_shift, pay_out, sell,
+    take_back,
 };
 pub use posting::PostingAccounts;
 pub use projections::{Pos, ShiftSummary, Shifts, TakingRow, projections, shift, shifts, takings};

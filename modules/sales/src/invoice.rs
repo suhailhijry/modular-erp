@@ -256,13 +256,29 @@ pub enum InvoiceEvent {
         /// business with two banks needs to say which one.
         account: AggregateId,
     },
+    /// **Money handed back.** The mirror of a payment, and the thing this module
+    /// had no concept of until a till needed to take a return.
+    ///
+    /// Separate from `Cancelled`, because they are separate facts: a credit note
+    /// says the supply is undone, and this says the cash left. A shop can do the
+    /// first without the second — crediting an unpaid invoice — and must do both
+    /// for a paid one, or it is holding money it no longer has a sale for.
+    Refunded {
+        /// The caller's own reference. Refunding it twice is a no-op.
+        refund: String,
+        amount: Money,
+        refunded_on: Timestamp,
+        /// Which cash or bank account it came out of.
+        account: AggregateId,
+    },
 }
 
 impl InvoiceEvent {
-    pub const NAMES: [&'static str; 3] = [
+    pub const NAMES: [&'static str; 4] = [
         "sales.invoice.issued",
         "sales.invoice.payment_recorded",
         "sales.invoice.cancelled",
+        "sales.invoice.refunded",
     ];
 }
 
@@ -272,6 +288,7 @@ impl DomainEvent for InvoiceEvent {
             Self::Issued { .. } => Self::NAMES[0],
             Self::PaymentRecorded { .. } => Self::NAMES[1],
             Self::Cancelled { .. } => Self::NAMES[2],
+            Self::Refunded { .. } => Self::NAMES[3],
         })
     }
 
@@ -303,6 +320,10 @@ pub struct Invoice {
     /// handful of instalments at most — and the only way to make recording a
     /// payment idempotent without a separate table.
     pub payments: Vec<String>,
+    /// Total handed back. `None` until the invoice is issued.
+    pub refunded: Option<Money>,
+    /// Refund references already recorded, for the reason `payments` is a list.
+    pub refunds: Vec<String>,
 }
 
 impl Aggregate for Invoice {
@@ -325,6 +346,7 @@ impl Aggregate for Invoice {
                 self.currency = Some(*currency);
                 self.gross = Some(totals.gross);
                 self.paid = Some(Money::zero(*currency));
+                self.refunded = Some(Money::zero(*currency));
             }
             InvoiceEvent::Cancelled {
                 credit_note,
@@ -333,6 +355,13 @@ impl Aggregate for Invoice {
             } => {
                 self.cancelled_by = Some(reference.clone().unwrap_or_else(|| credit_note.clone()));
                 self.credit_note = Some(credit_note.clone());
+            }
+            InvoiceEvent::Refunded { refund, amount, .. } => {
+                self.refunds.push(refund.clone());
+                self.refunded = match self.refunded {
+                    Some(refunded) => refunded.checked_add(*amount).ok(),
+                    None => None,
+                };
             }
             InvoiceEvent::PaymentRecorded {
                 payment, amount, ..
@@ -368,6 +397,21 @@ impl Invoice {
     #[must_use]
     pub fn has_payment(&self, reference: &str) -> bool {
         self.payments.iter().any(|p| p == reference)
+    }
+
+    #[must_use]
+    pub fn has_refund(&self, reference: &str) -> bool {
+        self.refunds.iter().any(|r| r == reference)
+    }
+
+    /// **What the business is still holding of the customer's money.**
+    ///
+    /// Paid less refunded. This is what decides whether an invoice may be
+    /// credited: a credit note says the supply is undone, and undoing a supply
+    /// while keeping the cash is not a credit note, it is a debt.
+    #[must_use]
+    pub fn held(&self) -> Option<Money> {
+        self.paid?.checked_sub(self.refunded?).ok()
     }
 }
 

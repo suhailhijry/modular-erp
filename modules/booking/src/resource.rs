@@ -14,7 +14,7 @@
 //! gapless number: the log is the record, the table is the working state.
 
 use erp_eventlog::{Aggregate, DomainEvent};
-use erp_types::{DomainName, EventName, SchemaVersion, Timestamp};
+use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::availability::Availability;
@@ -78,6 +78,17 @@ pub enum ResourceEvent {
         name_latin: Option<String>,
         kind: Kind,
         capacity: u16,
+        /// **Where it is. Set once, like `kind`.**
+        ///
+        /// A chair does not move between branches — and if the physical one
+        /// does, declaring a new resource is the honest record, because moving
+        /// this field would retroactively re-attribute every booking the
+        /// resource ever held to a place it was not at.
+        ///
+        /// Optional, and `None` on every resource declared before branches
+        /// existed. That is a single-branch business, which is most of them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<AggregateId>,
         at: Timestamp,
     },
     Amended {
@@ -143,6 +154,9 @@ pub struct Resource {
     pub name: String,
     pub name_latin: Option<String>,
     pub kind: Option<Kind>,
+    /// Where it is. `None` on a resource declared before branches existed, or
+    /// by a business that has one.
+    pub branch: Option<AggregateId>,
     /// What it is set to when it is in service. **Not** what the engine holds
     /// while it is withdrawn, which is zero — see [`Self::effective_capacity`].
     pub capacity: u16,
@@ -164,6 +178,7 @@ impl Aggregate for Resource {
                 name_latin,
                 kind,
                 capacity,
+                branch,
                 ..
             } => {
                 self.declared = true;
@@ -171,6 +186,7 @@ impl Aggregate for Resource {
                 self.name_latin.clone_from(name_latin);
                 self.kind = Some(*kind);
                 self.capacity = *capacity;
+                self.branch.clone_from(branch);
             }
             ResourceEvent::Amended {
                 name,

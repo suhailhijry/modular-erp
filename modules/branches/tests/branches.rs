@@ -67,6 +67,10 @@ async fn install_modules(db: &TenantDb) {
     ensure_group_schema::<branches::Branches>(&mut conn)
         .await
         .expect("branches checkpoint");
+    booking::install(&mut conn).await.expect("booking installs");
+    ensure_group_schema::<booking::Booking>(&mut conn)
+        .await
+        .expect("booking checkpoint");
     sales::install(&mut conn).await.expect("sales installs");
     ensure_group_schema::<sales::Sales>(&mut conn)
         .await
@@ -180,6 +184,8 @@ impl Fixture {
             .await
             .expect("branches projects");
 
+        self.project_booking().await;
+
         let owned = pos::projections();
         let refs: Vec<&dyn Projection<Group = pos::Pos>> =
             owned.iter().map(AsRef::as_ref).collect();
@@ -211,6 +217,15 @@ impl Fixture {
             .iter()
             .find(|b| b.code == code)
             .map_or_else(|| money(0), |b| b.balance)
+    }
+
+    async fn project_booking(&self) {
+        let owned = booking::projections();
+        let refs: Vec<&dyn Projection<Group = booking::Booking>> =
+            owned.iter().map(AsRef::as_ref).collect();
+        run_to_head::<booking::Booking>(&self.pool, &refs, booking::upcasters(), 200)
+            .await
+            .expect("booking projects");
     }
 
     /// What one branch did, per account.
@@ -626,4 +641,103 @@ async fn a_rebuild_reproduces_the_branches() {
 #[test]
 fn the_catalog_is_complete() {
     erp_i18n::testing::assert_complete(&branches::CATALOG);
+}
+
+/// **"Book at Olaya."**
+///
+/// A resource says where it is, the list narrows to a branch, and a resource
+/// placed at a branch that is not open is refused — checked at declaration
+/// rather than inherited from `post_entry_in`, because declaring a chair posts
+/// nothing and so has no journal entry to carry the check.
+#[tokio::test]
+async fn a_resource_belongs_to_a_branch_and_the_rota_narrows_to_it() {
+    let fixture = Fixture::new().await;
+    for (id, name) in [("OLAYA", "فرع العليا"), ("MALAZ", "فرع الملز")] {
+        open_branch(
+            &fixture.db,
+            &code(id),
+            &details(name),
+            on("2026-04-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("the branch opens");
+    }
+
+    let chair = |branch: &str| booking::Details {
+        name: "كرسي".to_owned(),
+        name_latin: None,
+        kind: booking::Kind::Place,
+        capacity: 1,
+        branch: Some(code(branch)),
+    };
+
+    for (id, branch) in [("CHAIR-O", "OLAYA"), ("CHAIR-M", "MALAZ")] {
+        booking::declare_resource(
+            &fixture.db,
+            &code(id),
+            &chair(branch),
+            on("2026-04-02"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("the chair is declared");
+    }
+
+    // A chair at a branch that is not there.
+    let refused = booking::declare_resource(
+        &fixture.db,
+        &code("CHAIR-X"),
+        &chair("NOWHERE"),
+        on("2026-04-02"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("there is no such branch");
+    assert!(format!("{refused}").contains("NOWHERE"));
+
+    // And one at a branch that has closed.
+    close_branch(
+        &fixture.db,
+        &code("MALAZ"),
+        "انتقل",
+        on("2026-04-03"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("closes");
+    let refused = booking::declare_resource(
+        &fixture.db,
+        &code("CHAIR-M2"),
+        &chair("MALAZ"),
+        on("2026-04-04"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("the branch is closed");
+    assert!(format!("{refused}").contains("MALAZ"));
+
+    fixture.project_booking().await;
+    let mut conn = fixture.pool.acquire().await.expect("connection");
+
+    // The rota for one place.
+    let olaya = booking::resources(&mut conn, Some("OLAYA"), false, 50, None)
+        .await
+        .expect("reads");
+    assert_eq!(olaya.items.len(), 1, "Olaya's rota carried another branch");
+    assert_eq!(olaya.items[0].id, "CHAIR-O");
+    assert_eq!(olaya.items[0].branch.as_deref(), Some("OLAYA"));
+
+    // And the whole business, which is what no branch header means.
+    let everywhere = booking::resources(&mut conn, None, false, 50, None)
+        .await
+        .expect("reads");
+    assert_eq!(
+        everywhere.items.len(),
+        2,
+        "the unfiltered rota is not every branch's"
+    );
+
+    drop(conn);
+    fixture.cleanup().await;
 }

@@ -122,6 +122,31 @@ impl Projection for Invoices {
                 .execute(&mut *conn)
                 .await?;
             }
+            InvoiceEvent::Refunded {
+                refund,
+                amount,
+                refunded_on,
+                account,
+            } => {
+                // **The same table, with the sign flipped.** A refund is money
+                // moving the other way against the same invoice, and a separate
+                // table would mean every read that wants "what is this invoice
+                // holding" has to remember to consult two.
+                sqlx::query(
+                    "INSERT INTO invoice_payment
+                         (id, invoice_id, reference, amount, received_on, account, recorded_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(ctx.derive_id(&format!("refund-{refund}")))
+                .bind(id)
+                .bind(&refund)
+                .bind(-amount.minor())
+                .bind(refunded_on)
+                .bind(account.as_str())
+                .bind(ctx.event_time())
+                .execute(&mut *conn)
+                .await?;
+            }
         }
         Ok(())
     }

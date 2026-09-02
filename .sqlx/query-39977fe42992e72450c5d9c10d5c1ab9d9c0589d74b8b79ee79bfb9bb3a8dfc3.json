@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, kind as \"kind!\",\n                  capacity as \"capacity!\", availability as \"availability!\",\n                  (withdrawn_at IS NOT NULL) as \"withdrawn!\", withdrawn_why,\n                  declared_on as \"declared_on!\"\n             FROM proj_booking.resource WHERE id = $1",
+  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, kind as \"kind!\",\n                  capacity as \"capacity!\", availability as \"availability!\",\n                  branch,\n                  (withdrawn_at IS NOT NULL) as \"withdrawn!\", withdrawn_why,\n                  declared_on as \"declared_on!\"\n             FROM proj_booking.resource WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -71,12 +71,23 @@
       },
       {
         "ordinal": 6,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
         "name": "withdrawn!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "withdrawn_why",
         "type_info": "Text",
         "origin": {
@@ -87,7 +98,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "declared_on!",
         "type_info": "Timestamptz",
         "origin": {
@@ -110,10 +121,11 @@
       false,
       false,
       false,
+      true,
       null,
       true,
       false
     ]
   },
-  "hash": "d03b5483a389144e16c55b6f91bed11c7827692099e02308484c191e309f5ef2"
+  "hash": "39977fe42992e72450c5d9c10d5c1ab9d9c0589d74b8b79ee79bfb9bb3a8dfc3"
 }

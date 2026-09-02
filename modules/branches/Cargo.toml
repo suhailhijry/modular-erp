@@ -40,6 +40,7 @@ thiserror = { workspace = true }
 # **The exit criterion is what a branch is for**, so the test that carries this
 # module drives real documents through `pos` and `sales` and reads the ledger
 # per branch. Dev-only: nothing here depends on them, which is the point.
+booking = { workspace = true }
 pos = { workspace = true }
 sales = { workspace = true }
 ledger = { workspace = true }

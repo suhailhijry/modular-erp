@@ -250,6 +250,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "branches",
  "chrono",
  "crm",
  "erp-control",
@@ -278,6 +279,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "booking",
  "chrono",
  "crm",
  "erp-control",

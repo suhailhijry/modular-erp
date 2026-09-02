@@ -2,6 +2,7 @@
 
 use erp_i18n::{Locale, MessageCode, Template};
 
+pub const NO_SUCH_BRANCH: MessageCode = MessageCode::new("booking.no_such_branch");
 pub const NOTHING_TO_BOOK: MessageCode = MessageCode::new("booking.nothing_to_book");
 pub const NO_NAME: MessageCode = MessageCode::new("booking.no_name");
 pub const RESOURCE_HAS_NO_NAME: MessageCode = MessageCode::new("booking.resource_has_no_name");
@@ -33,6 +34,7 @@ pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("booking.mixed_curren
 pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("booking.amount_out_of_range");
 
 pub static CODES: &[MessageCode] = &[
+    NO_SUCH_BRANCH,
     NOTHING_TO_BOOK,
     NO_NAME,
     RESOURCE_HAS_NO_NAME,
@@ -65,6 +67,20 @@ pub static CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NO_SUCH_BRANCH,
+        Locale::English,
+        Template::Simple(
+            "There is no open branch {branch}. A resource can only be placed at a branch that exists and is still trading.",
+        ),
+    ),
+    (
+        NO_SUCH_BRANCH,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يوجد فرع مفتوح {branch}. المورد لا يُسنَد إلا لفرع قائم وما زال يعمل.",
+        ),
+    ),
     (
         NOTHING_TO_BOOK,
         Locale::English,
