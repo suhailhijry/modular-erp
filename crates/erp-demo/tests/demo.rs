@@ -449,6 +449,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
         replay!(pool, prepaid, prepaid::Prepaid, "entitlement"),
         replay!(pool, pos, pos::Pos, "shift"),
         replay!(pool, branches, branches::Branches, "branch"),
+        replay!(pool, hr, hr::Hr, "employee"),
         replay!(pool, ledger, ledger::Ledger, "account"),
         replay!(pool, sales, sales::Sales, "invoice"),
         replay!(pool, purchases, purchases::Purchases, "bill"),

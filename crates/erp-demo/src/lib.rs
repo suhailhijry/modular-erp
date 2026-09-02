@@ -88,6 +88,9 @@ pub struct Seeded {
     pub till_sales: usize,
     /// Places the business trades from.
     pub branches: usize,
+    /// People on the books, arranged as an org chart with claims travelling up
+    /// it.
+    pub employees: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -212,6 +215,10 @@ pub async fn seed(
     // that does not exist yet is refused by `ledger::post_entry_in`.
     let branches = seed_branches(&app, slug, &token).await?;
 
+    // The people. **After the branches**, because somebody works somewhere and
+    // hiring into a branch that does not exist yet is refused.
+    let employees = seed_org(&app, slug, &token).await?;
+
     // The counter. After the customers for the same reason the diary is, and
     // before the last projection run.
     let till_sales = seed_till(&app, slug, &token).await?;
@@ -267,6 +274,7 @@ pub async fn seed(
         prepaid,
         till_sales,
         branches,
+        employees,
     })
 }
 
@@ -276,6 +284,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     advance::<booking::Booking>(&db, &booking::projections(), booking::upcasters()).await?;
     advance::<prepaid::Prepaid>(&db, &prepaid::projections(), prepaid::upcasters()).await?;
     advance::<branches::Branches>(&db, &branches::projections(), branches::upcasters()).await?;
+    advance::<hr::Hr>(&db, &hr::projections(), hr::upcasters()).await?;
     advance::<pos::Pos>(&db, &pos::projections(), pos::upcasters()).await?;
     advance::<crm::Crm>(&db, &crm::projections(), crm::upcasters()).await?;
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
@@ -1387,6 +1396,105 @@ async fn seed_branches(app: &axum::Router, slug: &str, token: &str) -> Result<us
         .await?;
     }
     Ok(places.len())
+}
+
+/// The people, and the permission that shows what the org chart is for.
+///
+/// # Why the demo hires four and not one
+///
+/// Because one employee demonstrates a staff list and four demonstrate an
+/// **authorization structure**. The clerk at Olaya is granted a discount
+/// approval, and the branch manager and the owner hold it without anybody
+/// having granted it to them — which is §9b's whole claim and the thing a
+/// one-person demo cannot make.
+///
+/// The regional manager is over both branches, so their claims arrive carrying
+/// a branch each, and the branch manager below them does not gain the other
+/// branch — which is a list somebody can read and check.
+async fn seed_org(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
+    let people = [
+        ("EMP-OWNER", "منيرة العتيبي", "Munira Alotaibi", None, None),
+        (
+            "EMP-REGION",
+            "خالد الشمري",
+            "Khalid Alshamri",
+            Some("EMP-OWNER"),
+            None,
+        ),
+        (
+            "EMP-OLAYA",
+            "سارة الأحمد",
+            "Sara Alahmad",
+            Some("EMP-REGION"),
+            Some("BRANCH-OLAYA"),
+        ),
+        (
+            "EMP-CLERK",
+            "نورة القحطاني",
+            "Noura Alqahtani",
+            Some("EMP-OLAYA"),
+            Some("BRANCH-OLAYA"),
+        ),
+    ];
+
+    for (id, name, latin, reports_to, branch) in &people {
+        let mut body = serde_json::json!({
+            "name": name,
+            "name_latin": latin,
+            "phone": "+966500000000",
+            "at": "2026-01-01T00:00:00Z"
+        });
+        // **`demo_id`, not the literal.** A create takes its identity from the
+        // `Idempotency-Key`, so the id this employee ends up under is the UUID
+        // that key derives — and naming the manager by the readable string
+        // would point at somebody who does not exist. The first run of this
+        // seed made exactly that mistake and the API said so.
+        if let Some(manager) = reports_to {
+            body["reports_to"] = serde_json::json!(demo_id(manager));
+        }
+        // Same argument as the manager above: a branch is addressed by the id
+        // its own create was stored under.
+        if let Some(at) = branch {
+            body["branch"] = serde_json::json!(demo_id(at));
+        }
+        create(
+            app,
+            slug,
+            "/v1/hr/employees",
+            token,
+            id,
+            &body,
+            StatusCode::CREATED,
+        )
+        .await?;
+    }
+
+    // **The grant that makes the point.** Given to the clerk, held by three.
+    post(
+        app,
+        slug,
+        &format!("/v1/hr/employees/{}/claims", demo_id("EMP-CLERK")),
+        Some(token),
+        &serde_json::json!({
+            "claim": "sales.apply_discount",
+            "branch": demo_id("BRANCH-OLAYA")
+        }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    // And one that must not travel, so the demo shows both halves of the rule.
+    post(
+        app,
+        slug,
+        &format!("/v1/hr/employees/{}/claims", demo_id("EMP-OLAYA")),
+        Some(token),
+        &serde_json::json!({ "claim": "purchases.approve_payment" }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    Ok(people.len())
 }
 
 /// A day at the counter: a shift opened, sales rung, and the drawer counted.

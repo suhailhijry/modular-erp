@@ -43,6 +43,7 @@
 - [erp-testkit](./api/erp-testkit.md)
 - [branches](./api/branches.md)
 - [crm](./api/crm.md)
+- [hr](./api/hr.md)
 - [ledger](./api/ledger.md)
 - [sales](./api/sales.md)
 - [purchases](./api/purchases.md)

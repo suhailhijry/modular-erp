@@ -309,6 +309,102 @@ exactly as it was.
 Passing `?archived=true` to the list includes them, which is what a search box
 wants and a working list does not.
 
+## The org chart, and what people may decide
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/hr/employees` | Alphabetically. Scoped to your branch by default | Read |
+| `POST /v1/hr/employees` | Put somebody on the books | ManageTenant |
+| `GET /v1/hr/employees/{employee}` | One of them | Read |
+| `PUT /v1/hr/employees/{employee}` | Change their details. **Never their manager** | ManageTenant |
+| `PUT /v1/hr/employees/{employee}/manager` | Move them in the chart | ManageTenant |
+| `PUT /v1/hr/employees/{employee}/branch` | Move them to another branch | ManageTenant |
+| `POST /v1/hr/employees/{employee}/leaving` | They left. The record stays | ManageTenant |
+| `GET /v1/hr/employees/{employee}/claims` | What they hold, and where each came from | Read |
+| `POST /v1/hr/employees/{employee}/claims` | Grant one | ManageTenant |
+| `DELETE /v1/hr/employees/{employee}/claims/{claim}` | Take it back | ManageTenant |
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  http://localhost:8080/v1/hr/employees -d '{
+    "name":       "نورة القحطاني",
+    "name_latin": "Noura Alqahtani",
+    "phone":      "+966500000000",
+    "reports_to": "EMP-0002",
+    "branch":     "BR-OLAYA"
+  }'
+```
+
+`branch` is **where this person works** — not the `X-Branch` on the request,
+which says where the request happened. The two differ legitimately and often, and
+a report that read one where it meant the other would be wrong in a way nobody
+notices for a quarter.
+
+### The list is scoped, and says so
+
+```bash
+curl -s "${AUTH[@]}" 'http://localhost:8080/v1/hr/employees?scope=all'
+```
+
+It narrows to your `X-Branch` by default, `?branch=` looks at another, and
+`?scope=all` looks at the company. **A filter, not a wall**: payroll and an org
+chart are company-wide by nature, and a boundary that refused them would make the
+module unusable in its first month.
+
+### Claims travel up the reporting line
+
+**A manager automatically holds everything their reports hold.** So granting is
+not a local act, and the response says so:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/hr/employees/EMP-CLERK/claims \
+  -d '{"claim":"sales.apply_discount","branch":"BR-OLAYA"}'
+# {"holders":["EMP-CLERK","EMP-MANAGER","EMP-OWNER"],"propagates":true}
+```
+
+`holders` is **everyone who now has it**, not an acknowledgement. Show it.
+
+Some claims must not travel. Segregation of duties says the person who raises an
+invoice is not the person who approves its payment, and under this union their
+shared manager would hold both:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/hr/employees/EMP-CLERK/claims \
+  -d '{"claim":"purchases.approve_payment"}'
+# {"holders":["EMP-CLERK"],"propagates":false}
+```
+
+`propagates` came back `false` **whatever was sent**: the segregated list is not
+configuration, because what an auditor requires is not a preference a business
+expresses.
+
+Reading somebody's claims says where each came from:
+
+```bash
+curl -s "${AUTH[@]}" http://localhost:8080/v1/hr/employees/EMP-MANAGER/claims
+# [{"claim":"sales.apply_discount","branch":"BR-OLAYA","source":"EMP-CLERK"}]
+```
+
+`source` is the first question anybody asks of an inherited permission.
+
+A claim with no `branch` is **company-wide** and answers for any branch — payroll
+could not be expressed otherwise. One scoped to Olaya does not answer for Malaz,
+which is what stops a branch manager gaining authority in a branch they have
+never seen.
+
+### What these claims are not
+
+They are **not** the platform's capabilities. `Read`, `PostEntries`,
+`ManageAccounts` and `ManageTenant` answer *"may you reach this endpoint at
+all"*, come from your membership, and are unchanged by anything here. An `hr`
+claim answers *"may you approve this particular thing"* and is checked inside the
+command that decides.
+
+Promoting somebody therefore takes effect immediately and touches no session.
+
 ## Branches
 
 | | | Capability |

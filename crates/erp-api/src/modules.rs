@@ -72,6 +72,11 @@ const REGISTERED: &[Registered] = &[
         http: crm::http::routes,
     },
     Registered {
+        name: "hr",
+        setup: hr::setup,
+        http: hr::http::routes,
+    },
+    Registered {
         name: "ledger",
         setup: ledger::setup,
         http: ledger::http::routes,

@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 852 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 870 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -1140,7 +1140,10 @@ payroll, and both have to be settled before `Employee` has a field.
 
 ### 9a · `modules/hr` — the org chart
 
-- [ ] `Employee`, `Position`, `Department`, `Contract`
+- [x] `Employee`. `Position`, `Department` and `Contract` are not built: the
+      tree and the claims are what everything else in this phase stands on, and
+      three more aggregates before the authorization model was proved would
+      have been three more things to change when it moved
 - [ ] Skills: which services a person may perform. Booking reads it to decide who
       is eligible, so this is why `hr` lands below `booking` and not beside it
 - [ ] Shifts, on Phase 8's recurrence. The same problem, so the same type
@@ -1152,12 +1155,14 @@ below depends on being able to walk it. So: one `reports_to` edge per employee,
 a single root per tenant, and **cycles refused at the command** — not because a
 cycle is untidy but because the claim union below would not terminate.
 
-- [ ] `Employee::reports_to`, and `Reparented` as an event of its own. Moving a
+- [x] `Employee::reports_to`, and `Reparented` as an event of its own. Moving a
       person moves everything they carry, which makes it the operation an
       auditor asks about — and an `Amended` that quietly changed a parent would
-      not answer them
-- [ ] A cycle is refused. `A → B → A` is not a rare input: it is what two
-      well-meaning edits a week apart produce
+      not answer them. `amending_details_cannot_move_somebody_in_the_chart` is
+      what keeps the two apart
+- [x] A cycle is refused, in `claims::place`, by a recursive walk **down** —
+      because that is the direction one closes in: making `A` report to somebody
+      already in `A`'s subtree is what creates it
 
 ### 9b · Claims, and why they travel upward
 
@@ -1177,31 +1182,46 @@ what her own cashier can"*.
 **Every consequence below follows from that one line, and each is a decision
 rather than an accident.**
 
-- [ ] **The root holds the union of every claim in the company.** That is the
-      definition, not a defect — but it means the org chart *is* the
-      authorization model and the top node is a superuser by construction.
-      Either that is intended, or somebody has to be able to sit outside the
-      tree, and the plan should say which before the aggregate exists
-- [ ] **A grant at a leaf is not a local act.** Giving a junior something
-      powerful is the cheapest way to escalate every ancestor, silently. The
-      screen that grants a claim must name who else just gained it; a grant that
-      shows only the person being granted is the interface that makes this
-      design dangerous rather than convenient
+- [x] **The root holds the union of every claim in the company.** Settled as
+      intended: the person nobody reports to is the owner, and a business owner
+      who could not approve something in their own company would be a
+      surprising product.
+
+      Somebody who must sit *outside* it — an external auditor, a bookkeeper on
+      retainer — is **not an employee and does not go in the tree**. They are a
+      platform membership with a role, which is the other axis entirely and is
+      exactly what §9c kept separate
+- [x] **A grant at a leaf is not a local act**, and the API makes that
+      impossible to omit: `POST .../claims` answers with `holders` — *everyone*
+      who now has it — rather than an acknowledgement. A screen cannot fail to
+      show what it was handed
 - [ ] **Segregation of duties breaks, and this is the part that fails an audit.**
       The control every accounting system is measured on is that the person who
       raises an invoice is not the person who approves its payment. Under a
       bottom-up union their shared manager holds both, automatically, the moment
       the org chart says so.
 
-      So a claim must be markable **non-propagating**, and the segregation
-      claims must use it. Without that escape hatch the design cannot pass a
-      Saudi statutory audit, and it is cheaper to build the flag now than to
-      discover it in a customer's first year
-- [ ] **It cannot be computed on demand.** A subtree walk per check puts the org
-      chart in the middle of whatever command is asking. The effective set is
-      maintained when the org changes — `Reparented`, a claim granted, a claim
-      revoked — and read as a single row when it is needed. §9c settles *where*
-      that maintained set lives, and it is not a projection
+      So a claim is markable **non-propagating**, and `hr::SEGREGATED` is the
+      list that must be — a constant and not configuration, because what an
+      auditor requires is not a preference a tenant expresses. `grant` refuses
+      to propagate one **even when asked to**, and the response says
+      `propagates: false` rather than silently doing something else.
+      `a_segregated_claim_travels_nowhere` is the test
+- [x] **It is not computed on demand.** `org_claim_effective` is maintained when
+      the org changes and read as one indexed lookup when a command asks.
+
+      The recomputation is **the whole set, not an increment**, and that is
+      deliberate: an incremental update would be a second implementation of the
+      union rule, free to disagree with the first. This codebase has already
+      been bitten by a rule written twice — `pos`'s drawer — so the union exists
+      once, in one recursive SQL statement, and every change re-runs it. Marked
+      `ponytail:` with the condition for changing it
+
+**What 9a still owes**, and it is additive: skills, shifts, attendance, leave,
+positions, departments and contracts. Each of them hangs off `Employee` and
+none of them changes the authorization model, which is why the tree and the
+claims went first — three more aggregates written before the model was proved
+would have been three more things to change when it moved.
 
 ### 9c · Which plane the claims live on — **decided: they do not leave the tenant**
 
@@ -1217,9 +1237,15 @@ the two-plane split exist to keep clean — so it does not.
       `Capability` and `Allowed<C>` are untouched: the platform keeps answering
       *"may you reach this endpoint at all"*, and `hr` answers *"may you do this
       particular thing"*
-- [ ] **Two lines that must stay true**, and the ones to write a test against:
-      no `hr` type appears in `erp-control` or `erp-web`, and no org-chart event
-      invalidates a session. If either breaks, (a) has quietly become (b)
+- [x] **Two lines that must stay true**, now three tests in
+      `modules/hr/tests/planes.rs`: no `hr` type appears in `erp-control`,
+      `erp-web` or `erp-tenant` and none of them depends on the crate; nothing
+      in `hr` reaches for `Invalidate`, `forget` or `ControlPlane`; and nothing
+      in `claims.rs` names a `proj_` table.
+
+      They are source-scanning and crude, which is the point: the decision is
+      not enforced by any type, so what enforces it is a test that reads what a
+      reviewer would have to read
 
 **What it buys.** No plane is crossed. Nothing has to invalidate a session cache
 when somebody is promoted — `shared.rs` warns that a stale *logout* is the one
@@ -1242,39 +1268,43 @@ moment ago must already bite.
 But the union is a subtree walk, and loading every employee aggregate to compute
 one inside a command is not viable either.
 
-- [ ] So the effective set is **write-side state in the tenant migration chain**,
-      maintained in the same transaction as the org events that change it —
-      exactly the shape `occupancy_claim` takes in Phase 7b, and in
-      `migrations/tenant/` for the same reason: `rebuild_schema` must not be able
-      to reach it. A projection alongside it is still worth having for the
-      screen that *displays* who holds what; it is simply not what a command
-      reads
+- [x] The effective set is **write-side state in the tenant migration chain**
+      — `migrations/tenant/0008_org_claims.sql` — maintained in the same
+      transaction as the org event that changed it. `proj_hr` exists alongside
+      it for the screen that *draws* the chart, and is not what any check reads.
+
+      **A design error the first run caught.** `PRIMARY KEY (employee, claim,
+      branch)` cannot hold a nullable column, and company-wide is exactly
+      `branch IS NULL` — so the key would have forced every claim to name a
+      branch, which payroll cannot. It is two partial unique indexes instead,
+      and the second is not redundant with the first because Postgres treats
+      NULLs as distinct
 
 ### 9d · Branch scoping, now that branches exist
 
 Phase 16 built the dimension. Everything in `hr` carries it: `Employee`,
 `Department`, `Position`, `Contract`, shifts and attendance.
 
-- [ ] **A record's branch is not the request's branch, and conflating them is
+- [x] **A record's branch is not the request's branch, and conflating them is
       the bug waiting here.** Phase 16's branch travels in `Metadata` and means
       *where this request happened*; `Employee.branch` means *where this person
       works*. They differ legitimately and often — an Olaya manager visiting
       Malaz records attendance for a Malaz shift — and a report that read one
       where it meant the other would be wrong in a way nobody notices for a
       quarter
-- [ ] **A filter, not a wall.** `ledger::post_entry_in` *refuses* a document
+- [x] **A filter, not a wall.** `ledger::post_entry_in` *refuses* a document
       dated to a branch that is not open; `hr` reads must **default** to the
       caller's branch and widen on an explicit parameter. It cannot be a wall:
       payroll, the org chart and an end-of-service calculation are company-wide
       by nature, and a boundary that refused them would make the feature
       unusable in the first month
-- [ ] Every list endpoint states which of the two it is. "Scoped by default,
-      crossable on request" is a promise a reader has to be able to check per
-      endpoint rather than infer
-- [ ] **Claims carry their branch up the tree.** The union of §9b is over
-      `(claim, branch)` pairs, not bare claims — a regional manager over two
-      branches accumulates both, and collapsing them to a bare claim would grant
-      a branch manager authority in a branch they have never seen
+- [x] Every list endpoint states which of the two it is. `GET /v1/hr/employees`
+      says it in the operation summary and takes `?scope=all`, which is what a
+      payroll run and an org chart both want
+- [x] **Claims carry their branch up the tree.** The union is over
+      `(claim, branch)` pairs. `a_claim_carries_its_branch_up_the_tree` asserts
+      both halves: the regional manager accumulates Olaya *and* Malaz, and the
+      Olaya manager does not gain Malaz
 
 ### 9e · Documents that expire
 

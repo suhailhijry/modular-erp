@@ -1,0 +1,124 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, email, phone,\n                  reports_to, branch, hired_on as \"hired_on!\", left_at\n             FROM proj_hr.employee WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name_latin",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "name_latin"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "email",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "email"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "phone",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "phone"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "reports_to",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "reports_to"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "hired_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "hired_on"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "left_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "left_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "afdde0414efb933df811437339806e629c19a7a74f71f1a0a2f24e4395ba7900"
+}

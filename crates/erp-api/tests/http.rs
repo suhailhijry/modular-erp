@@ -1792,6 +1792,19 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("issue_invoice", &["owner", "accountant", "clerk"]),
     ("refund_payment", &["owner", "accountant", "clerk"]),
     ("unmatched_customers", ALL_ROLES),
+    // The org chart. Reading it is ordinary — a staff list is on the wall in
+    // most businesses. Changing it is changing the authorization structure, and
+    // granting a claim escalates every ancestor, so it is the owner's.
+    ("list_employees", ALL_ROLES),
+    ("get_employee", ALL_ROLES),
+    ("list_claims", ALL_ROLES),
+    ("hire_employee", OWNER),
+    ("amend_employee", OWNER),
+    ("reparent_employee", OWNER),
+    ("transfer_employee", OWNER),
+    ("record_leaving", OWNER),
+    ("grant_claim", OWNER),
+    ("revoke_claim", OWNER),
     // Which websites may call this tenant's public API. Reading the list is
     // ordinary; changing it is changing who may reach a business's diary from a
     // browser, which is the owner's decision and nobody else's.
@@ -1960,8 +1973,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        118,
-        "expected a hundred and eighteen role-scoped operations"
+        128,
+        "expected a hundred and twenty-eight role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

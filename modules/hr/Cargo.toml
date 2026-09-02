@@ -1,0 +1,39 @@
+[package]
+name = "hr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The org chart, and the claims that travel up it."
+
+[lints]
+workspace = true
+
+[dependencies]
+erp-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+# The branch a person works at is checked against the log that owns it, the
+# same way `sales` checks a customer. Nothing here reads `proj_branches`.
+branches = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+erp-i18n = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

@@ -64,14 +64,15 @@ chapter uses a type you have not already met.
 | 12 | [`erp-testkit`](./erp-testkit.md) | Template databases, fault injection, the differ |
 | 13 | [`branches`](./branches.md) | Places to trade from; the dimension on every document |
 | 14 | [`crm`](./crm.md) | Customers as records |
-| 15 | [`ledger`](./ledger.md) | Accounts, journal entries, periods, VAT, charts |
-| 16 | [`sales`](./sales.md) | Invoices, credit notes, payments in, refunds, receivables |
-| 17 | [`purchases`](./purchases.md) | Bills, payments out, input tax |
-| 18 | [`tax_sa`](./tax_sa.md) | The Saudi rate, the VAT return, ZATCA |
-| 19 | [`booking`](./booking.md) | Reservations, rotas, availability, pricing |
-| 20 | [`prepaid`](./prepaid.md) | Packages, deposits, subscriptions, loyalty, deferred revenue |
-| 21 | [`pos`](./pos.md) | Shifts, till sales, the drawer and its variance |
-| | [The HTTP API](./http.md) | All 132 operations, with curl for each |
+| 15 | [`hr`](./hr.md) | The org chart, and the claims that travel up it |
+| 16 | [`ledger`](./ledger.md) | Accounts, journal entries, periods, VAT, charts |
+| 17 | [`sales`](./sales.md) | Invoices, credit notes, payments in, refunds, receivables |
+| 18 | [`purchases`](./purchases.md) | Bills, payments out, input tax |
+| 19 | [`tax_sa`](./tax_sa.md) | The Saudi rate, the VAT return, ZATCA |
+| 20 | [`booking`](./booking.md) | Reservations, rotas, availability, pricing |
+| 21 | [`prepaid`](./prepaid.md) | Packages, deposits, subscriptions, loyalty, deferred revenue |
+| 22 | [`pos`](./pos.md) | Shifts, till sales, the drawer and its variance |
+| | [The HTTP API](./http.md) | All 142 operations, with curl for each |
 
 `erp-occupancy` sits at 4 rather than beside `booking` because that is where its
 dependencies put it: it knows about `erp-types` and nothing else, and `booking`

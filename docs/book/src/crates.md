@@ -20,6 +20,7 @@ erp-testkit     template databases, fault injection, the differ
 
 modules/branches    places to trade from; the dimension on every document
 modules/crm         customers as records
+modules/hr          the org chart, and the claims that travel up it
 modules/ledger      accounts, journal entries, periods, VAT, charts
 modules/sales       invoices, credit notes, payments, refunds, receivables
 modules/purchases   bills, payments out, input tax

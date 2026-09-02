@@ -27,6 +27,20 @@ frozen copy, both — never either.
 Archiving is not deletion. The customer is on documents that have been issued,
 filed against and cleared with ZATCA.
 
+## hr
+
+The org chart, and the claims that travel up it.
+
+**A manager automatically holds everything their reports hold**, so nobody has to
+remember that a new permission for a junior also needs giving to whoever covers
+for them. That one rule makes the org chart the authorization model — which is
+why granting reports back *everyone* who gained it, and why a claim can be marked
+non-propagating so segregation of duties survives.
+
+These claims never leave the tenant. The platform still answers "may you reach
+this endpoint"; `hr` answers "may you approve this particular thing", checked
+inside the command that decides.
+
 ## ledger
 
 Double-entry accounting: accounts, journal entries, fiscal periods and VAT rates.
