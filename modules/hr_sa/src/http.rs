@@ -34,6 +34,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(gosi_schedule, set_gosi_schedule))
         .routes(routes!(gosi_for))
         .routes(routes!(end_of_service_for))
+        .routes(routes!(leave_entitlement))
 }
 
 static CATALOG: erp_i18n::Composite =
@@ -137,6 +138,26 @@ struct GosiQuery {
     currency: String,
     /// `saudi` or `non_saudi`.
     footing: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct EntitlementView {
+    /// Days of paid annual leave this year. **21, or 30 after five years'
+    /// service** — and the step can land mid-year, in which case this is the
+    /// two rates over the days each applied to.
+    annual_days: i64,
+    /// How long they had served when the window opened, in days. Returned so
+    /// the figure above can be checked.
+    served_days: i64,
+    /// Days of the window they were employed for. Fewer than 365 for a joiner
+    /// or a leaver, and the entitlement is pro-rated by it.
+    days_in_window: i64,
+    /// Annual days already taken in the window, from `hr`.
+    annual_taken: i64,
+    /// What is left. **May be negative**, which is a real state — somebody who
+    /// took three weeks in January and left in March has overdrawn, and a
+    /// clamp to zero would hide the money the business is owed back.
+    annual_left: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,6 +431,87 @@ async fn end_of_service_for(
 // ---------------------------------------------------------------------------
 // Translation
 // ---------------------------------------------------------------------------
+
+/// What somebody is entitled to be away for, and what is left of it.
+///
+/// **`hr` records what was taken; this says what was owed.** The two halves are
+/// deliberately in different modules — what was taken is the same in every
+/// country, and 21 days rising to 30 is Article 109.
+#[utoipa::path(
+    get,
+    path = "/v1/hr_sa/employees/{employee}/leave-entitlement",
+    tag = "hr_sa",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+        ("from" = String, Query, description = "First day of the leave year, inclusive."),
+        ("until" = String, Query, description = "Last day, inclusive."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for `hr`'s read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, description = "`annual_left` may be negative — somebody can overdraw.", body = EntitlementView),
+        (status = BAD_REQUEST, description = "A date that did not parse", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such employee", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn leave_entitlement(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Path(id): Path<String>,
+    Query(window): Query<LeaveWindow>,
+) -> Result<Json<EntitlementView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, hr::GROUP_NAME, locale)
+        .await?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let person = hr::employee(&mut conn, &id)
+        .await
+        .map_err(|e| database(&e, locale))?
+        .ok_or_else(|| not_found(&id, locale))?;
+    let taken = hr::leave_taken(&mut conn, &id, window.from, window.until)
+        .await
+        .map_err(|e| database(&e, locale))?;
+    drop(conn);
+
+    let hired = person.hired_on.date_naive();
+    // Employed for the part of the window that is after they joined and before
+    // they left — a joiner is owed the part of the year they were here for.
+    let opens = window.from.max(hired);
+    let closes = person
+        .left_at
+        .map_or(window.until, |at| window.until.min(at.date_naive()));
+    let days_in_window = (closes - opens).num_days() + 1;
+    let served_days = (opens - hired).num_days();
+
+    let annual_days = crate::annual_entitlement(served_days, days_in_window.max(0));
+    let annual_taken = taken
+        .iter()
+        .find(|(kind, _)| kind == "annual")
+        .map_or(0, |(_, days)| *days);
+
+    Ok(Json(EntitlementView {
+        annual_days,
+        served_days: served_days.max(0),
+        days_in_window: days_in_window.max(0),
+        annual_taken,
+        // **Not clamped.** Somebody who took three weeks in January and left in
+        // March has overdrawn, and hiding it would hide money the business is
+        // owed back.
+        annual_left: annual_days - annual_taken,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaveWindow {
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
+}
 
 fn cash(amount: Money) -> SaCash {
     SaCash {

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT employee as \"employee!\", name as \"name!\", basic as \"basic!\",\n                  gross as \"gross!\", deductions as \"deductions!\", net as \"net!\",\n                  currency as \"currency!\"\n             FROM proj_payroll.payslip WHERE run = $1 ORDER BY name, employee",
+  "query": "SELECT employee as \"employee!\", name as \"name!\", basic as \"basic!\",\n                  commission as \"commission!\", performed as \"performed!\",\n                  gross as \"gross!\", deductions as \"deductions!\", net as \"net!\",\n                  currency as \"currency!\"\n             FROM proj_payroll.payslip WHERE run = $1 ORDER BY name, employee",
   "describe": {
     "columns": [
       {
@@ -38,6 +38,28 @@
       },
       {
         "ordinal": 3,
+        "name": "commission!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.payslip",
+            "name": "commission"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "performed!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payroll.payslip",
+            "name": "performed"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "gross!",
         "type_info": "Int8",
         "origin": {
@@ -48,7 +70,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 6,
         "name": "deductions!",
         "type_info": "Int8",
         "origin": {
@@ -59,7 +81,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 7,
         "name": "net!",
         "type_info": "Int8",
         "origin": {
@@ -70,7 +92,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 8,
         "name": "currency!",
         "type_info": "Text",
         "origin": {
@@ -93,8 +115,10 @@
       false,
       false,
       false,
+      false,
+      false,
       false
     ]
   },
-  "hash": "8ac94880a70986f1af9d28425973b62f6dd9ba012ec9c7fc62af72d325040ac1"
+  "hash": "ab53043865d9bdcd55f4bba214e9a20267f101a09662d2332c78dd3856068a25"
 }

@@ -15,6 +15,7 @@ workspace = true
 # crate answers "what is being booked, by whom, and is it offered then". The
 # split is deliberate and load-bearing — see the crate docs.
 erp-occupancy = { workspace = true }
+erp-recurrence = { workspace = true }
 # `crm` for the customer reference, read from the log and never from `proj_crm`.
 # **`branches`, so a resource can say where it is.** A leaf that depends on
 # nothing, checked against its log at declare time — declaring a resource posts

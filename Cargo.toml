@@ -17,6 +17,7 @@ publish = false
 erp-i18n = { path = "crates/erp-i18n" }
 erp-eventlog = { path = "crates/erp-eventlog" }
 erp-occupancy = { path = "crates/erp-occupancy" }
+erp-recurrence = { path = "crates/erp-recurrence" }
 erp-projection = { path = "crates/erp-projection" }
 erp-types = { path = "crates/erp-types" }
 erp-testkit = { path = "crates/erp-testkit" }

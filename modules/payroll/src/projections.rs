@@ -124,14 +124,16 @@ async fn write_payslip(
 ) -> Result<(), ProjectionError> {
     sqlx::query(
         "INSERT INTO payslip
-             (run, employee, name, basic, gross, deductions, net, currency,
-              recorded_at, position)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+             (run, employee, name, basic, commission, performed, gross,
+              deductions, net, currency, recorded_at, position)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
     )
     .bind(run)
     .bind(slip.employee.as_str())
     .bind(&slip.name)
     .bind(slip.basic.minor())
+    .bind(slip.commission.minor())
+    .bind(slip.performed.minor())
     .bind(slip.gross.minor())
     .bind(slip.deductions.minor())
     .bind(slip.net.minor())
@@ -175,6 +177,11 @@ pub struct PayslipRow {
     /// As it was when the run was made.
     pub name: String,
     pub basic: Money,
+    /// Earned on work performed, at the rate on their salary. **Part of
+    /// `gross`.**
+    pub commission: Money,
+    /// What that was earned on, so the figure can be checked.
+    pub performed: Money,
     pub gross: Money,
     pub deductions: Money,
     pub net: Money,
@@ -262,6 +269,7 @@ pub async fn run(conn: &mut PgConnection, id: &str) -> Result<Option<RunSummary>
 pub async fn payslips(conn: &mut PgConnection, run: &str) -> Result<Vec<PayslipRow>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"SELECT employee as "employee!", name as "name!", basic as "basic!",
+                  commission as "commission!", performed as "performed!",
                   gross as "gross!", deductions as "deductions!", net as "net!",
                   currency as "currency!"
              FROM proj_payroll.payslip WHERE run = $1 ORDER BY name, employee"#,
@@ -277,6 +285,8 @@ pub async fn payslips(conn: &mut PgConnection, run: &str) -> Result<Vec<PayslipR
             employee: r.employee,
             name: r.name,
             basic: Money::from_minor(r.basic, currency),
+            commission: Money::from_minor(r.commission, currency),
+            performed: Money::from_minor(r.performed, currency),
             gross: Money::from_minor(r.gross, currency),
             deductions: Money::from_minor(r.deductions, currency),
             net: Money::from_minor(r.net, currency),

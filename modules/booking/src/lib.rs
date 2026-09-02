@@ -45,8 +45,6 @@
 //! configuration rather than a branch. If one of them needs a code change, this
 //! module is not finished.
 
-pub mod availability;
-pub mod calendar;
 pub mod http;
 pub mod messages;
 
@@ -57,20 +55,23 @@ mod reservation;
 mod resource;
 pub mod trades;
 
-pub use availability::{Availability, BadRule, any_covers};
-pub use calendar::{Calendar, NotAnOffset};
+// **Re-exported, not owned.** The repeating calendar moved to
+// `erp-recurrence` when `hr` needed the same shape for a shift and could not
+// reach it here — `booking` already depends on `hr`, so the other direction
+// would close a cycle. These stay so nothing that names them had to change.
 pub use commands::{
     Amendment, Booking as Draft, BookingError, CUSTOMER_PREFIX, Details, amend_resource, assign,
     customer_resource, declare_resource, fit_out, move_to, reschedule, reserve, restore_resource,
     schedule_resource, withdraw_resource,
 };
+pub use erp_recurrence::{Availability, BadRule, Calendar, NotAnOffset, any_covers};
 pub use pricing::{
     Allowance, Applied, Band, Charge, Charged, PriceError, PublicBooking, Tariff, price,
 };
 pub use projections::{
-    Booking, ReservationDetail, ReservationLine, ReservationSummary, Reservations, ResourceDetail,
-    ResourceSummary, Resources, projections, reservation, reservations, resource, resources,
-    stages,
+    Booking, Performed, ReservationDetail, ReservationLine, ReservationSummary, Reservations,
+    ResourceDetail, ResourceSummary, Resources, performed, projections, reservation, reservations,
+    resource, resources, stages,
 };
 pub use reservation::{
     Customer, DraftLine, Held, Line, Reservation, ReservationEvent, Stage, UnknownStage,

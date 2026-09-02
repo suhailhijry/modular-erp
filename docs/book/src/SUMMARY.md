@@ -33,6 +33,7 @@
 - [erp-i18n](./api/erp-i18n.md)
 - [erp-eventlog](./api/erp-eventlog.md)
 - [erp-occupancy](./api/erp-occupancy.md)
+- [erp-recurrence](./api/erp-recurrence.md)
 - [erp-projection](./api/erp-projection.md)
 - [erp-tenant](./api/erp-tenant.md)
 - [erp-control](./api/erp-control.md)

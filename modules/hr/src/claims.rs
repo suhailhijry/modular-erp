@@ -60,6 +60,14 @@ use sqlx::PgConnection;
 
 /// Claims that must never travel up the tree.
 ///
+/// # Why a claim is `module:verb` and not `module.verb`
+///
+/// Because `module.verb` is what an *error code* looks like in this API, and a
+/// document naming `hr.approve_leave` as an example claim was read by the
+/// openapi guard as a code that did not exist. That is a real ambiguity and not
+/// a false alarm: two namespaces sharing a shape is two things somebody will
+/// eventually confuse. A colon separates them at a glance.
+///
 /// **This is the segregation-of-duties list**, and it is a constant rather than
 /// configuration because what an auditor requires is not a preference a tenant
 /// expresses. A business that could switch it off would have a design that
@@ -71,10 +79,10 @@ pub const SEGREGATED: &[&str] = &[
     // The classic pair. Raising a document and approving the money for it must
     // not land in one pair of hands, and under this union they otherwise would
     // the moment the two people share any manager.
-    "purchases.approve_payment",
-    "sales.approve_credit_note",
+    "purchases:approve_payment",
+    "sales:approve_credit_note",
     // Approving your own timesheet is the same shape one module over.
-    "hr.approve_timesheet",
+    "hr:approve_timesheet",
 ];
 
 /// Whether a claim is one the union must not carry.
@@ -83,12 +91,15 @@ pub fn is_segregated(claim: &str) -> bool {
     SEGREGATED
         .iter()
         .any(|listed| claim == *listed || claim.starts_with(&format!("{listed}.")))
+    // The `.` suffix is deliberate and not a leftover: a family is
+    // `purchases:approve_payment.over_limit`, so the *namespace* separator is
+    // the colon and the *hierarchy* separator inside it stays a dot.
 }
 
 /// One claim, somewhere.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Claim {
-    /// The granting module's own vocabulary — `hr.approve_leave`. Never parsed.
+    /// The granting module's own vocabulary — `hr:approve_leave`. Never parsed.
     pub name: String,
     /// Where it applies. `None` is company-wide.
     ///
@@ -398,12 +409,12 @@ mod tests {
     /// letters.
     #[test]
     fn segregation_matches_a_family_and_not_a_lookalike() {
-        assert!(is_segregated("purchases.approve_payment"));
-        assert!(is_segregated("purchases.approve_payment.over_limit"));
+        assert!(is_segregated("purchases:approve_payment"));
+        assert!(is_segregated("purchases:approve_payment.over_limit"));
         assert!(
-            !is_segregated("purchases.approve_payments"),
+            !is_segregated("purchases:approve_payments"),
             "a different claim was segregated because it shared a prefix"
         );
-        assert!(!is_segregated("purchases.record_bill"));
+        assert!(!is_segregated("purchases:record_bill"));
     }
 }

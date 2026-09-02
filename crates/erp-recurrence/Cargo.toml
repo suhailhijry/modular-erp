@@ -1,0 +1,22 @@
+[package]
+name = "erp-recurrence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "When something repeats: which days, and between which two times on those days."
+
+[lints]
+workspace = true
+
+[dependencies]
+# `Span` is what a rule is asked about, and it is the one thing this needs from
+# the capacity engine. Nothing here claims anything.
+erp-occupancy = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }

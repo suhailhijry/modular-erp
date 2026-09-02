@@ -21,7 +21,7 @@ use erp_eventlog::{
     Committed, Decision, ExecuteError, Loaded, MAX_ATTEMPTS, Metadata, load, try_execute,
 };
 use erp_tenant::{CommandError, TenantDb};
-use erp_types::{AggregateId, CurrencyCode, Timestamp};
+use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 
 use crate::posting::{PostingAccounts, entry_for_run};
 use crate::run::{NotAPeriod, Payslip, Period, Run, RunEvent, total};
@@ -87,6 +87,7 @@ pub async fn draft_run(
     id: &AggregateId,
     period: Period,
     employees: &[AggregateId],
+    performed: &[(AggregateId, Money)],
     at: Timestamp,
     metadata: &Metadata,
 ) -> Outcome {
@@ -98,7 +99,7 @@ pub async fn draft_run(
         let mut tx = db.begin().await?;
         let outcome = async {
             let conn = &mut *tx;
-            let payslips = compute(&mut *conn, employees, period).await?;
+            let payslips = compute(&mut *conn, employees, performed, period).await?;
             let currency = payslips
                 .first()
                 .map(|p| p.gross.currency())
@@ -266,6 +267,7 @@ async fn post(
 async fn compute(
     conn: &mut sqlx::PgConnection,
     employees: &[AggregateId],
+    performed: &[(AggregateId, Money)],
     period: Period,
 ) -> Result<Vec<Payslip>, ExecuteError<PayrollError>> {
     let (from, until) = period.starts_on().zip(period.ends_on()).ok_or_else(|| {
@@ -286,18 +288,51 @@ async fn compute(
             .map_err(ExecuteError::Load)?
             .aggregate;
 
-        let gross = salary
+        let salaried = salary
             .gross()
             .map_err(|e| ExecuteError::Rejected(PayrollError::Money(e)))?;
-        let net = salary
-            .net()
+
+        // **The caller sends what was performed; the rate is the employee's.**
+        //
+        // That split is the point. Who is in the run and what they did are
+        // facts a person assembles — from `booking::performed`, which says who
+        // completed which priced lines — and a caller could get either wrong.
+        // What fraction of it they earn is a term of their employment, read
+        // from their own record, so a caller cannot invent the *amount*.
+        let earned_on = performed
+            .iter()
+            .find(|(who, _)| who == employee)
+            .map_or_else(|| Money::zero(salaried.currency()), |(_, net)| *net);
+        let commission = if salary.commission_bp == 0 || !earned_on.is_positive() {
+            Money::zero(salaried.currency())
+        } else {
+            earned_on
+                .apportioned(i64::from(salary.commission_bp), 10_000)
+                .map_err(|e| ExecuteError::Rejected(PayrollError::Money(e)))?
+        };
+
+        // **Commission is part of gross**, because statutory contributions and
+        // end-of-service are computed from what somebody earned rather than
+        // from the predictable part of it.
+        let gross = salaried
+            .checked_add(commission)
             .map_err(|e| ExecuteError::Rejected(PayrollError::Money(e)))?;
-        let deductions = gross
-            .checked_sub(net)
+        let taken_off = salaried
+            .checked_sub(
+                salary
+                    .net()
+                    .map_err(|e| ExecuteError::Rejected(PayrollError::Money(e)))?,
+            )
             .map_err(|e| ExecuteError::Rejected(PayrollError::Money(e)))?;
+        let net = gross
+            .checked_sub(taken_off)
+            .map_err(|e| ExecuteError::Rejected(PayrollError::Money(e)))?;
+        let deductions = taken_off;
 
         payslips.push(Payslip {
             employee: employee.clone(),
+            commission,
+            performed: earned_on,
             // **Frozen.** A payslip says who it was for, and somebody who
             // marries next month does not get a new copy of last month's.
             name: held.name,

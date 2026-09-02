@@ -1,0 +1,67 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.employee as \"employee!\", l.unit as \"resource!\",\n                  count(*) as \"jobs!\", sum(l.net)::BIGINT as \"net!\",\n                  l.currency as \"currency!\"\n             FROM proj_booking.reservation_line l\n             JOIN proj_booking.reservation v ON v.id = l.reservation_id\n             JOIN proj_booking.resource r ON r.id = l.unit\n            WHERE l.unit IS NOT NULL\n              AND r.employee IS NOT NULL\n              AND l.net IS NOT NULL\n              AND v.stage = 'completed'\n              AND l.starts_at < $2 AND l.ends_at > $1\n            GROUP BY r.employee, l.unit, l.currency\n            ORDER BY r.employee, l.unit",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "employee!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "employee"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "resource!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation_line",
+            "name": "unit"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "jobs!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation_line",
+            "name": "currency"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      null,
+      null,
+      true
+    ]
+  },
+  "hash": "2b982e6eb4e45864fa76b21f67bf2bee557d313b4a4cd68d61abea28e47160de"
+}

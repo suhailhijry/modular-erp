@@ -9,13 +9,13 @@
 
 use erp_eventlog::Envelope;
 use erp_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
-use erp_types::{Cursor, Page, Timestamp};
+use erp_types::{CurrencyCode, Cursor, Money, Page, Timestamp};
 use sqlx::PgConnection;
 
-use crate::availability::Availability;
 use crate::pricing::Charged;
 use crate::reservation::{Held, Line, ReservationEvent, Stage};
 use crate::resource::ResourceEvent;
+use erp_recurrence::Availability;
 
 /// Two tables and their lines, all fed by one module's events.
 ///
@@ -485,6 +485,75 @@ pub struct ReservationLine {
 pub struct ReservationDetail {
     pub summary: ReservationSummary,
     pub lines: Vec<ReservationLine>,
+}
+
+/// What one person performed, and what it came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Performed {
+    /// The `hr` employee the resource named. Opaque here.
+    pub employee: String,
+    /// The bookable resource they were assigned as.
+    pub resource: String,
+    pub jobs: i64,
+    /// What those lines came to, net.
+    pub net: Money,
+}
+
+/// Who performed what over a window, for a commission report.
+///
+/// # Only completed work, and only what was priced
+///
+/// **Completed**, because a booking that was cancelled or never turned up is
+/// not work somebody did — and a commission paid on a no-show is money the
+/// business gives away twice.
+///
+/// **Priced**, because a line with no charge is a business that bills elsewhere
+/// rather than one that charged zero, and summing it as nothing would quietly
+/// under-pay whoever performed it. Those lines are excluded and the count says
+/// so.
+///
+/// # Why this lives here and the rate does not
+///
+/// `booking` knows who did the work and what it was worth. What fraction of it
+/// somebody earns is a term of their employment, so it is on their salary in
+/// `hr` — and neither module has to learn the other's business.
+pub async fn performed(
+    conn: &mut PgConnection,
+    from: Timestamp,
+    until: Timestamp,
+) -> Result<Vec<Performed>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT r.employee as "employee!", l.unit as "resource!",
+                  count(*) as "jobs!", sum(l.net)::BIGINT as "net!",
+                  l.currency as "currency!"
+             FROM proj_booking.reservation_line l
+             JOIN proj_booking.reservation v ON v.id = l.reservation_id
+             JOIN proj_booking.resource r ON r.id = l.unit
+            WHERE l.unit IS NOT NULL
+              AND r.employee IS NOT NULL
+              AND l.net IS NOT NULL
+              AND v.stage = 'completed'
+              AND l.starts_at < $2 AND l.ends_at > $1
+            GROUP BY r.employee, l.unit, l.currency
+            ORDER BY r.employee, l.unit"#,
+        from,
+        until,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let currency =
+            CurrencyCode::new(&r.currency).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        out.push(Performed {
+            employee: r.employee,
+            resource: r.resource,
+            jobs: r.jobs,
+            net: Money::from_minor(r.net, currency),
+        });
+    }
+    Ok(out)
 }
 
 /// The diary: bookings that overlap a window, earliest first.

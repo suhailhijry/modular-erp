@@ -145,6 +145,7 @@ impl Fixture {
                     amount: Money::from_minor(basic.minor() / 4, sar()),
                 }],
                 deductions: Vec::new(),
+                commission_bp: 0,
             },
             on(hired),
             &Metadata::default(),
@@ -272,6 +273,78 @@ async fn a_stored_schedule_replaces_the_shipped_one() {
     let c = hr_sa::contribution(riyals(10_000), Footing::Saudi, stored).expect("computes");
     assert_eq!(c.employee, riyals(1_100));
     drop(conn);
+
+    fixture.cleanup().await;
+}
+
+/// **The two halves meet: `hr` says what was taken, this says what was owed.**
+///
+/// A joiner is owed the part of the year they were here for, and somebody can
+/// overdraw — which is a real state and not one to clamp away.
+#[tokio::test]
+async fn the_entitlement_and_what_was_taken_come_from_different_modules() {
+    let fixture = Fixture::new().await;
+    // Joined at the start of 2026, so a full first year at 21 days.
+    fixture
+        .employ("EMP-1", riyals(8_000), "2026-01-01", None)
+        .await;
+
+    hr::record_leave(
+        &fixture.db,
+        &code("EMP-1"),
+        hr::Leave::Annual,
+        "2026-06-03".parse().expect("a date"),
+        "2026-06-07".parse().expect("a date"),
+        "إجازة",
+        on("2026-05-20"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+    fixture.project().await;
+
+    let year = (
+        "2026-01-01".parse::<chrono::NaiveDate>().expect("a date"),
+        "2026-12-31".parse::<chrono::NaiveDate>().expect("a date"),
+    );
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let taken = hr::leave_taken(&mut conn, "EMP-1", year.0, year.1)
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(
+        taken,
+        vec![("annual".to_owned(), 5)],
+        "the 3rd to the 7th is five days"
+    );
+
+    // A full first year: 21 days, and 16 left.
+    let owed = hr_sa::annual_entitlement(0, 365);
+    assert_eq!(owed, 21);
+    assert_eq!(owed - 5, 16);
+
+    fixture.cleanup().await;
+}
+
+/// **Somebody can overdraw**, and the figure has to say so rather than clamp.
+///
+/// Three weeks in January and a March leaving date is money the business is
+/// owed back, and a zero would hide it.
+#[tokio::test]
+async fn a_leaver_who_took_the_whole_year_up_front_is_shown_as_overdrawn() {
+    let fixture = Fixture::new().await;
+    // Two months of the year, so two months' worth of entitlement.
+    let owed = hr_sa::annual_entitlement(0, 59);
+    assert_eq!(
+        owed, 4,
+        "sixty days of a first year is about four days' leave"
+    );
+    assert!(
+        owed - 21 < 0,
+        "somebody who took the whole year's leave and left in March was shown as square"
+    );
 
     fixture.cleanup().await;
 }

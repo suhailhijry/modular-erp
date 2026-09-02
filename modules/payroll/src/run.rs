@@ -37,6 +37,21 @@ pub struct Payslip {
     /// Basic plus allowances, which is what statutory contributions are
     /// computed from.
     pub gross: Money,
+    /// What they earned on the work they performed, at the rate on their
+    /// salary. Zero for everybody a business pays no commission to, which is
+    /// most people.
+    ///
+    /// **Included in `gross`**, because it is pay: statutory contributions and
+    /// end-of-service are computed from what somebody earned, not from the part
+    /// of it that was predictable.
+    ///
+    /// Always present, even at zero. `Money` has no `Default` — a zero needs a
+    /// currency — so there is no `#[serde(default)]` to fall back on, and a
+    /// payslip that omitted the field would be one a reader had to guess at.
+    pub commission: Money,
+    /// What it was earned on. Recorded so the payslip can justify the number —
+    /// "five per cent of 24,000" is a figure somebody will query.
+    pub performed: Money,
     /// What is taken off. **Not tax and not GOSI**: those are the country
     /// module's, and `hr` refuses to let a business type them in.
     pub deductions: Money,

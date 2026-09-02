@@ -1,0 +1,78 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT kind as \"kind!\", from_date as \"from!\", until_date as \"until!\",\n                  days as \"days!\", why as \"why!\"\n             FROM proj_hr.employee_leave\n            WHERE employee = $1 AND from_date <= $3 AND until_date >= $2\n            ORDER BY from_date, kind",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_leave",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "from!",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_leave",
+            "name": "from_date"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "until!",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_leave",
+            "name": "until_date"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "days!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_leave",
+            "name": "days"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "why!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_leave",
+            "name": "why"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a1471ffb5a679308e434e9138853c5544ae14eca3f45fe605daf717f0e245afa"
+}

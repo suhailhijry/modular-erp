@@ -1810,6 +1810,14 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("list_skills", ALL_ROLES),
     ("record_skills", OWNER),
     ("record_salary", OWNER),
+    ("list_rota", ALL_ROLES),
+    ("record_shifts", OWNER),
+    ("timesheet", ALL_ROLES),
+    ("list_leave", ALL_ROLES),
+    // A supervisor approving a timesheet is recording work, not restructuring
+    // the business — so this sits with the clerk's other daily recording.
+    ("record_day", &["owner", "accountant", "clerk"]),
+    ("record_leave", &["owner", "accountant", "clerk"]),
     // Payroll. Drafting posts nothing and approving posts, so both sit with
     // the other recording work — an accountant runs payroll.
     ("list_runs", ALL_ROLES),
@@ -1825,6 +1833,7 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("gosi_schedule", ALL_ROLES),
     ("gosi_for", ALL_ROLES),
     ("end_of_service_for", ALL_ROLES),
+    ("leave_entitlement", ALL_ROLES),
     ("set_gosi_schedule", &["owner", "accountant"]),
     // Which websites may call this tenant's public API. Reading the list is
     // ordinary; changing it is changing who may reach a business's diary from a
@@ -1994,8 +2003,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        144,
-        "expected a hundred and forty-four role-scoped operations"
+        151,
+        "expected a hundred and fifty-one role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

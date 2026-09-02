@@ -27,6 +27,10 @@ pub static CATALOG: Composite = Composite::new(&[
     // stylist is already holding one of one" is the most common thing this API
     // says no to — so its codes have to render from here like any other.
     &erp_occupancy::CATALOG,
+    // Nor is this. A repeating calendar is one idea two modules need — the
+    // diary's opening hours and the rota's shifts — so it sits below both and
+    // its refusals render from here for the same reason occupancy's do.
+    &erp_recurrence::CATALOG,
     &booking::CATALOG,
     &crm::CATALOG,
     &ledger::CATALOG,
@@ -34,6 +38,9 @@ pub static CATALOG: Composite = Composite::new(&[
     &branches::CATALOG,
     &prepaid::CATALOG,
     &pos::CATALOG,
+    &hr::CATALOG,
+    &payroll::CATALOG,
+    &hr_sa::CATALOG,
     &purchases::CATALOG,
     &tax_sa::CATALOG,
 ]);

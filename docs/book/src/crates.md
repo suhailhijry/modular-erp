@@ -9,6 +9,7 @@ erp-types       newtypes, Money, NonEmpty. No I/O, so a frontend could share it
 erp-i18n        message codes, locales, the Localize trait
 erp-eventlog    the tenant log: append, load, upcasters, numbering, outbox
 erp-occupancy   capacity over time: does one more fit
+erp-recurrence  when something repeats: which days, between which two times
 erp-projection  groups, ProjectionCtx, the runner, shadow replay and the differ
 erp-tenant      TenantDb, the Budget trait, roles, EnabledModules, ModuleSetup
 erp-control     identities, tenants, entitlements, clusters, placement, the fleet

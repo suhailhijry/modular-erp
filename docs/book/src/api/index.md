@@ -54,27 +54,28 @@ chapter uses a type you have not already met.
 | 2 | [`erp-i18n`](./erp-i18n.md) | Message codes, locales, the `Localize` trait |
 | 3 | [`erp-eventlog`](./erp-eventlog.md) | The tenant log: append, load, upcast, number, enqueue |
 | 4 | [`erp-occupancy`](./erp-occupancy.md) | Capacity over time: does one more fit |
-| 5 | [`erp-projection`](./erp-projection.md) | Groups, the runner, shadow replay |
-| 6 | [`erp-tenant`](./erp-tenant.md) | `TenantDb`, the connection budget, roles, module setup |
-| 7 | [`erp-control`](./erp-control.md) | Identities, tenants, entitlements, clusters, the fleet |
-| 8 | [`erp-web`](./erp-web.md) | Extractors, problem+json, paging, consistency |
-| 9 | [`erp-worker`](./erp-worker.md) | The `Job` trait, the visit loop, the three binaries |
-| 10 | [`erp-api`](./erp-api.md) | The core's routes, the module list, the composition root |
-| 11 | [`erp-demo`](./erp-demo.md) | The seeded tenant |
-| 12 | [`erp-testkit`](./erp-testkit.md) | Template databases, fault injection, the differ |
-| 13 | [`branches`](./branches.md) | Places to trade from; the dimension on every document |
-| 14 | [`crm`](./crm.md) | Customers as records |
-| 15 | [`hr`](./hr.md) | The org chart, and the claims that travel up it |
-| 16 | [`ledger`](./ledger.md) | Accounts, journal entries, periods, VAT, charts |
-| 17 | [`sales`](./sales.md) | Invoices, credit notes, payments in, refunds, receivables |
-| 18 | [`purchases`](./purchases.md) | Bills, payments out, input tax |
-| 19 | [`tax_sa`](./tax_sa.md) | The Saudi rate, the VAT return, ZATCA |
-| 20 | [`booking`](./booking.md) | Reservations, rotas, availability, pricing |
-| 21 | [`prepaid`](./prepaid.md) | Packages, deposits, subscriptions, loyalty, deferred revenue |
-| 22 | [`pos`](./pos.md) | Shifts, till sales, the drawer and its variance |
-| 23 | [`payroll`](./payroll.md) | What a business pays its people, and the entry it makes |
-| 24 | [`hr_sa`](./hr_sa.md) | GOSI, and end of service |
-| | [The HTTP API](./http.md) | All 158 operations, with curl for each |
+| 5 | [`erp-recurrence`](./erp-recurrence.md) | When something repeats: which days, between which times |
+| 6 | [`erp-projection`](./erp-projection.md) | Groups, the runner, shadow replay |
+| 7 | [`erp-tenant`](./erp-tenant.md) | `TenantDb`, the connection budget, roles, module setup |
+| 8 | [`erp-control`](./erp-control.md) | Identities, tenants, entitlements, clusters, the fleet |
+| 9 | [`erp-web`](./erp-web.md) | Extractors, problem+json, paging, consistency |
+| 10 | [`erp-worker`](./erp-worker.md) | The `Job` trait, the visit loop, the three binaries |
+| 11 | [`erp-api`](./erp-api.md) | The core's routes, the module list, the composition root |
+| 12 | [`erp-demo`](./erp-demo.md) | The seeded tenant |
+| 13 | [`erp-testkit`](./erp-testkit.md) | Template databases, fault injection, the differ |
+| 14 | [`branches`](./branches.md) | Places to trade from; the dimension on every document |
+| 15 | [`crm`](./crm.md) | Customers as records |
+| 16 | [`hr`](./hr.md) | The org chart, and the claims that travel up it |
+| 17 | [`ledger`](./ledger.md) | Accounts, journal entries, periods, VAT, charts |
+| 18 | [`sales`](./sales.md) | Invoices, credit notes, payments in, refunds, receivables |
+| 19 | [`purchases`](./purchases.md) | Bills, payments out, input tax |
+| 20 | [`tax_sa`](./tax_sa.md) | The Saudi rate, the VAT return, ZATCA |
+| 21 | [`booking`](./booking.md) | Reservations, rotas, availability, pricing |
+| 22 | [`prepaid`](./prepaid.md) | Packages, deposits, subscriptions, loyalty, deferred revenue |
+| 23 | [`pos`](./pos.md) | Shifts, till sales, the drawer and its variance |
+| 24 | [`payroll`](./payroll.md) | What a business pays its people, and the entry it makes |
+| 25 | [`hr_sa`](./hr_sa.md) | GOSI, and end of service |
+| | [The HTTP API](./http.md) | All 165 operations, with curl for each |
 
 `erp-occupancy` sits at 4 rather than beside `booking` because that is where its
 dependencies put it: it knows about `erp-types` and nothing else, and `booking`

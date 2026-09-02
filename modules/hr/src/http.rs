@@ -23,7 +23,7 @@ use utoipa_axum::routes;
 
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, Read};
+use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Read};
 use erp_web::{Consistency, nudge};
 use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
 
@@ -43,10 +43,19 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(expiring_documents))
         .routes(routes!(list_skills, record_skills))
         .routes(routes!(record_salary))
+        .routes(routes!(list_rota, record_shifts))
+        .routes(routes!(timesheet, record_day))
+        .routes(routes!(list_leave, record_leave))
 }
 
-static CATALOG: erp_i18n::Composite =
-    erp_i18n::Composite::new(&[&crate::CATALOG, &branches::CATALOG, &erp_web::CATALOG]);
+static CATALOG: erp_i18n::Composite = erp_i18n::Composite::new(&[
+    &crate::CATALOG,
+    // A shift that would not parse says why in the caller's language, and the
+    // rule's refusals live with the type in `erp-recurrence`.
+    &erp_recurrence::CATALOG,
+    &branches::CATALOG,
+    &erp_web::CATALOG,
+]);
 
 // ---------------------------------------------------------------------------
 // Wire shapes
@@ -133,9 +142,9 @@ struct Leaving {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[schema(example = json!({"claim": "hr.approve_leave", "branch": "BR-OLAYA"}))]
+#[schema(example = json!({"claim": "hr:approve_leave", "branch": "BR-OLAYA"}))]
 struct NewClaim {
-    /// The granting module's own vocabulary — `hr.approve_leave`.
+    /// The granting module's own vocabulary — `hr:approve_leave`.
     claim: String,
     /// Where it applies. Absent is company-wide, which is not the same as some
     /// particular branch.
@@ -282,9 +291,137 @@ struct NewSalary {
     /// would be able to get them wrong.
     #[serde(default)]
     deductions: Vec<NewComponent>,
+    /// What fraction of the work they perform they earn, in basis points.
+    /// `500` is five per cent. Absent or zero is a business that pays none.
+    ///
+    /// **A rate and not an amount**, unlike the allowances above: a commission
+    /// is a share of a number that changes every month, and storing the amount
+    /// would mean restating it each period.
+    #[serde(default)]
+    commission_bp: u32,
     #[serde(default)]
     #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
     at: Option<Timestamp>,
+}
+
+/// One window in a repeating rota.
+///
+/// **The same shape a bookable resource's opening hours take**, because it is
+/// the same problem: which days, and between which two times on those days. The
+/// type is `erp-recurrence`, below both modules.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+struct ShiftWindow {
+    /// 1 is January. Empty means every month.
+    #[serde(default)]
+    months: Vec<u8>,
+    /// 1 is Monday, 7 is Sunday. Empty means every day of the week.
+    #[serde(default)]
+    weekdays: Vec<u8>,
+    /// 1 to 31. Empty means every day of the month.
+    #[serde(default)]
+    days: Vec<u8>,
+    /// Minutes past local midnight. `540` is 09:00.
+    opens_at: u16,
+    /// Minutes past local midnight, exclusive. `1020` is 17:00.
+    closes_at: u16,
+    /// The first day this applies. Absent means it always has.
+    #[schema(value_type = Option<String>, format = Date)]
+    from: Option<chrono::NaiveDate>,
+    /// The last day, **inclusive**. Absent means it always will.
+    #[schema(value_type = Option<String>, format = Date)]
+    until: Option<chrono::NaiveDate>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "shifts": [{ "weekdays": [1, 2, 3, 4, 5], "opens_at": 540, "closes_at": 1020 }]
+}))]
+struct NewShifts {
+    /// **The whole pattern**, replacing what was there.
+    ///
+    /// One at a time is not offered, for the reason skills are not: an empty
+    /// list means *no pattern recorded*, so adding one window would restrict
+    /// somebody a caller was only trying to note a Saturday for.
+    shifts: Vec<ShiftWindow>,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    at: Option<Timestamp>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct Rota {
+    items: Vec<ShiftWindow>,
+    /// Whether a pattern has been recorded. **An empty list means "no pattern",
+    /// not "never works"** — and this is the field that stops it being read the
+    /// wrong way round.
+    rostered: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({"minutes": 480, "note": "غطّت وردية المساء"}))]
+struct NewDay {
+    /// Minutes worked. **Zero is an absence somebody recorded deliberately**,
+    /// which is a different fact from a day with no record at all.
+    minutes: u16,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    at: Option<Timestamp>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct WorkedDayRecord {
+    #[schema(value_type = String, format = Date)]
+    on: chrono::NaiveDate,
+    minutes: i32,
+    note: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "kind": "annual", "from": "2026-06-03", "until": "2026-06-05"
+}))]
+struct NewLeave {
+    /// `annual`, `sick`, `unpaid` or `statutory`.
+    kind: String,
+    #[schema(value_type = String, format = Date)]
+    from: chrono::NaiveDate,
+    /// **Inclusive**: the 3rd to the 5th is three days.
+    #[schema(value_type = String, format = Date)]
+    until: chrono::NaiveDate,
+    #[serde(default)]
+    why: String,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    at: Option<Timestamp>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct LeaveRecord {
+    kind: String,
+    #[schema(value_type = String, format = Date)]
+    from: chrono::NaiveDate,
+    #[schema(value_type = String, format = Date)]
+    until: chrono::NaiveDate,
+    days: i32,
+    why: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct LeaveSummary {
+    items: Vec<LeaveRecord>,
+    /// Days taken per kind over the window. **What a balance is drawn down
+    /// by** — how much somebody is *entitled* to is statute, and belongs to the
+    /// country module.
+    taken: std::collections::BTreeMap<String, i64>,
+}
+
+/// A window of dates. Both ends inclusive, like every date range here.
+#[derive(Debug, Deserialize)]
+struct DateWindow {
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1076,6 +1213,7 @@ async fn record_salary(
         basic: body.basic.parse(locale)?,
         allowances: components(&body.allowances, locale)?,
         deductions: components(&body.deductions, locale)?,
+        commission_bp: body.commission_bp,
     };
 
     let committed = crate::record_salary(
@@ -1106,6 +1244,365 @@ fn components(sent: &[NewComponent], locale: Locale) -> Result<Vec<crate::Compon
         .collect()
 }
 
+/// When somebody works.
+#[utoipa::path(
+    get,
+    path = "/v1/hr/employees/{employee}/shifts",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, description = "`rostered: false` means no pattern is recorded, not that they never work.", body = Rota),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn list_rota(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Path(id): Path<String>,
+) -> Result<Json<Rota>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let rules = crate::shifts(&mut conn, &id)
+        .await
+        .map_err(|e| database(&e, locale))?;
+    drop(conn);
+
+    let items: Vec<ShiftWindow> = rules.iter().map(window).collect();
+    Ok(Json(Rota {
+        rostered: !items.is_empty(),
+        items,
+    }))
+}
+
+/// Record when somebody works.
+///
+/// **The whole pattern at once.** A rota is read as "when is Sara in", never as
+/// a sequence of amendments.
+///
+/// **This restricts nothing.** A shift is what somebody is scheduled for, and
+/// people cover, swap and stay late — a system telling a manager she cannot ask
+/// somebody to stay is not a rule it gets to make. What refuses is a lapsed work
+/// document, where the law does.
+#[utoipa::path(
+    put,
+    path = "/v1/hr/employees/{employee}/shifts",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+    ),
+    request_body = NewShifts,
+    responses(
+        (status = OK, body = HrAccepted),
+        (status = BAD_REQUEST, description = "A window that closes before it opens, runs past midnight, or names a day that is not one", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such employee", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn record_shifts(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(id): Path<String>,
+    Json(body): Json<NewShifts>,
+) -> Result<Json<HrAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let employee = parse_id(&id, locale)?;
+
+    let shifts: Vec<erp_recurrence::Availability> = body
+        .shifts
+        .iter()
+        .map(|w| {
+            erp_recurrence::Availability::from_parts(
+                &w.months,
+                &w.weekdays,
+                &w.days,
+                w.opens_at,
+                w.closes_at,
+                w.from,
+                w.until,
+            )
+        })
+        .collect::<Result<_, _>>()
+        .map_err(|e| {
+            Problem::new(
+                StatusCode::BAD_REQUEST,
+                &erp_i18n::Localize::message(&e),
+                locale,
+                &CATALOG,
+            )
+        })?;
+
+    let committed = crate::record_shifts(
+        &tenant.db,
+        &employee,
+        &shifts,
+        body.at.unwrap_or_else(chrono::Utc::now),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(HrAccepted {
+        id,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+fn window(rule: &erp_recurrence::Availability) -> ShiftWindow {
+    ShiftWindow {
+        months: rule.months(),
+        weekdays: rule.weekdays(),
+        days: rule.days(),
+        opens_at: rule.opens_at(),
+        closes_at: rule.closes_at(),
+        from: rule.starting(),
+        until: rule.ending(),
+    }
+}
+
+/// One person's timesheet over a window.
+#[utoipa::path(
+    get,
+    path = "/v1/hr/employees/{employee}/days",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+        ("from" = String, Query, description = "First day, inclusive."),
+        ("until" = String, Query, description = "Last day, inclusive."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = Vec<WorkedDayRecord>),
+        (status = BAD_REQUEST, description = "A date that did not parse", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn timesheet(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Path(id): Path<String>,
+    Query(window): Query<DateWindow>,
+) -> Result<Json<Vec<WorkedDayRecord>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let days = crate::worked(&mut conn, &id, window.from, window.until)
+        .await
+        .map_err(|e| database(&e, locale))?;
+
+    Ok(Json(
+        days.into_iter()
+            .map(|d| WorkedDayRecord {
+                on: d.on,
+                minutes: d.minutes,
+                note: d.note,
+            })
+            .collect(),
+    ))
+}
+
+/// Record a day somebody worked.
+///
+/// **The whole day at once**, not a clock-in and a clock-out. A half-recorded
+/// day is a state every attendance system has and none handles well: it is
+/// somebody who forgot, somebody who left early, or a device that lost power,
+/// and nothing can tell which.
+///
+/// The same day with the same minutes writes nothing. The same day with
+/// different minutes is a **correction**, and the timesheet takes the latest.
+#[utoipa::path(
+    put,
+    path = "/v1/hr/employees/{employee}/days/{day}",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+        ("day" = String, Path, description = "The day, `YYYY-MM-DD`. A shift running to 02:00 belongs to the day it started."),
+    ),
+    request_body = NewDay,
+    responses(
+        (status = OK, body = HrAccepted),
+        (status = BAD_REQUEST, description = "Not a date, or more minutes than a day has", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such employee", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn record_day(
+    // **`PostEntries`, not `ManageTenant`.** A supervisor approving a timesheet
+    // is recording what happened, not restructuring the business — the same
+    // judgement that puts taking a booking and ringing a sale with the clerk.
+    tenant: Allowed<PostEntries>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path((id, day)): Path<(String, String)>,
+    Json(body): Json<NewDay>,
+) -> Result<Json<HrAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let employee = parse_id(&id, locale)?;
+    let on: chrono::NaiveDate = day
+        .parse()
+        .map_err(|_| bad_request(erp_web::messages::INVALID_ID, "day", &day, locale))?;
+
+    let committed = crate::record_day(
+        &tenant.db,
+        &employee,
+        on,
+        body.minutes,
+        &body.note,
+        body.at.unwrap_or_else(chrono::Utc::now),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(HrAccepted {
+        id,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+/// Leave touching a window, and how many days of each kind it comes to.
+///
+/// **Touching, not starting in.** A fortnight beginning in March is leave in
+/// April too, and a rota that only found the ones starting inside the window
+/// would show somebody who is on a beach.
+#[utoipa::path(
+    get,
+    path = "/v1/hr/employees/{employee}/leave",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+        ("from" = String, Query, description = "First day of the window, inclusive."),
+        ("until" = String, Query, description = "Last day, inclusive."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, description = "`taken` is days per kind — what a balance is drawn down by.", body = LeaveSummary),
+        (status = BAD_REQUEST, description = "A date that did not parse", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn list_leave(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Path(id): Path<String>,
+    Query(window): Query<DateWindow>,
+) -> Result<Json<LeaveSummary>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let items = crate::leave(&mut conn, &id, window.from, window.until)
+        .await
+        .map_err(|e| database(&e, locale))?;
+    let taken = crate::leave_taken(&mut conn, &id, window.from, window.until)
+        .await
+        .map_err(|e| database(&e, locale))?;
+    drop(conn);
+
+    Ok(Json(LeaveSummary {
+        items: items
+            .into_iter()
+            .map(|l| LeaveRecord {
+                kind: l.kind,
+                from: l.from,
+                until: l.until,
+                days: l.days,
+                why: l.why,
+            })
+            .collect(),
+        taken: taken.into_iter().collect(),
+    }))
+}
+
+/// Record leave taken, or booked.
+#[utoipa::path(
+    post,
+    path = "/v1/hr/employees/{employee}/leave",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+    ),
+    request_body = NewLeave,
+    responses(
+        (status = OK, body = HrAccepted),
+        (status = BAD_REQUEST, description = "Not a kind of leave, or an end before the start", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such employee", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn record_leave(
+    // Recording that somebody was away is the same kind of act as recording
+    // that they worked. See `record_day`.
+    tenant: Allowed<PostEntries>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(id): Path<String>,
+    Json(body): Json<NewLeave>,
+) -> Result<Json<HrAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let employee = parse_id(&id, locale)?;
+    let kind: crate::Leave = body.kind.parse().map_err(|e: crate::UnknownLeave| {
+        bad_request(crate::messages::UNKNOWN_LEAVE, "kind", &e.0, locale)
+    })?;
+
+    let committed = crate::record_leave(
+        &tenant.db,
+        &employee,
+        kind,
+        body.from,
+        body.until,
+        &body.why,
+        body.at.unwrap_or_else(chrono::Utc::now),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(HrAccepted {
+        id,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 struct BranchScope {
     branch: Option<String>,
@@ -1132,7 +1629,7 @@ fn record(e: crate::EmployeeSummary) -> EmployeeRecord {
 /// A claim name is checked for shape and never for meaning.
 ///
 /// The vocabulary belongs to whichever module grants it — `hr` does not know
-/// what `sales.approve_credit_note` is for, and a list of permitted names here
+/// what `sales:approve_credit_note` is for, and a list of permitted names here
 /// would be a second place every module had to register.
 fn read_claim(name: &str, branch: Option<String>, locale: Locale) -> Result<Claim, Problem> {
     let name = name.trim();

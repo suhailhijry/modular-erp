@@ -326,6 +326,12 @@ wants and a working list does not.
 | `GET /v1/hr/employees/{employee}/skills` | What they may perform | Read |
 | `PUT /v1/hr/employees/{employee}/skills` | Record the whole set | ManageTenant |
 | `PUT /v1/hr/employees/{employee}/salary` | What they are paid | ManageTenant |
+| `GET /v1/hr/employees/{employee}/shifts` | When they work | Read |
+| `PUT /v1/hr/employees/{employee}/shifts` | Record the whole pattern | ManageTenant |
+| `GET /v1/hr/employees/{employee}/days` | Their timesheet over a window | Read |
+| `PUT /v1/hr/employees/{employee}/days/{day}` | Record a day worked | PostEntries |
+| `GET /v1/hr/employees/{employee}/leave` | Leave, and days taken per kind | Read |
+| `POST /v1/hr/employees/{employee}/leave` | Record leave | PostEntries |
 | `PUT /v1/hr/employees/{employee}/documents/{kind}` | Record a document, or renew it | ManageTenant |
 | `GET /v1/hr/documents/expiring` | What has lapsed, and what is about to | Read |
 
@@ -365,7 +371,7 @@ not a local act, and the response says so:
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/hr/employees/EMP-CLERK/claims \
-  -d '{"claim":"sales.apply_discount","branch":"BR-OLAYA"}'
+  -d '{"claim":"sales:apply_discount","branch":"BR-OLAYA"}'
 # {"holders":["EMP-CLERK","EMP-MANAGER","EMP-OWNER"],"propagates":true}
 ```
 
@@ -378,7 +384,7 @@ shared manager would hold both:
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/hr/employees/EMP-CLERK/claims \
-  -d '{"claim":"purchases.approve_payment"}'
+  -d '{"claim":"purchases:approve_payment"}'
 # {"holders":["EMP-CLERK"],"propagates":false}
 ```
 
@@ -390,7 +396,7 @@ Reading somebody's claims says where each came from:
 
 ```bash
 curl -s "${AUTH[@]}" http://localhost:8080/v1/hr/employees/EMP-MANAGER/claims
-# [{"claim":"sales.apply_discount","branch":"BR-OLAYA","source":"EMP-CLERK"}]
+# [{"claim":"sales:apply_discount","branch":"BR-OLAYA","source":"EMP-CLERK"}]
 ```
 
 `source` is the first question anybody asks of an inherited permission.
@@ -427,6 +433,70 @@ curl -s "${AUTH[@]}" http://localhost:8080/v1/hr/employees/EMP-0001/skills
 Assigning somebody to a line they are not qualified for is refused with the same
 code as a lapsed document — at the point of use both mean "not somebody who can
 do this job".
+
+### Attendance and leave
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/hr/employees/EMP-0001/days/2026-05-04 \
+  -d '{"minutes": 480, "note": "غطّت وردية المساء"}'
+```
+
+**The whole day at once**, not a clock-in and a clock-out: a half-recorded day
+is somebody who forgot, somebody who left early, or a device that lost power,
+and nothing can tell which.
+
+`minutes: 0` is **an absence somebody recorded**, which is a different fact from
+a day with no record. More than 1,440 is refused.
+
+Sending the same day with different minutes is a **correction** — the timesheet
+takes the latest.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/hr/employees/EMP-0001/leave \
+  -d '{"kind":"annual","from":"2026-06-03","until":"2026-06-05"}'
+
+curl -s "${AUTH[@]}" \
+  'http://localhost:8080/v1/hr/employees/EMP-0001/leave?from=2026-01-01&until=2026-12-31'
+# {"items":[…],"taken":{"annual":3}}
+```
+
+`kind` is `annual`, `sick`, `unpaid` or `statutory`. **Both dates are
+inclusive**: the 3rd to the 5th is three days.
+
+The list finds leave that **touches** the window, not leave that starts in it —
+a fortnight beginning in March is leave in April too.
+
+`taken` is days per kind, which is what a balance is drawn down by. **How much
+somebody is entitled to is statute** and belongs to the country module; what has
+gone is the same everywhere and is here. Half-days are not modelled.
+
+### When somebody works
+
+```bash
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/hr/employees/EMP-0001/shifts -d '{
+    "shifts": [{"weekdays":[1,2,3,4,5],"opens_at":540,"closes_at":1020}]
+  }'
+```
+
+The **same shape** a bookable resource's opening hours take, because it is the
+same problem. `opens_at` and `closes_at` are minutes past local midnight, and
+local is the tenant's clock — `540` is 09:00. Weekday 1 is Monday. An empty
+`weekdays`, `months` or `days` means *every* one.
+
+**A shift restricts nothing.** It says when somebody is scheduled, and people
+cover, swap and stay late. What refuses a rostering is a lapsed work document,
+where the law says so.
+
+```bash
+curl -s "${AUTH[@]}" http://localhost:8080/v1/hr/employees/EMP-0001/shifts
+# {"items":[{"weekdays":[1,2,3,4,5],"opens_at":540,"closes_at":1020,…}],"rostered":true}
+```
+
+`rostered: false` means **no pattern recorded**, not that they never work — a
+business that has not written anybody's shifts down has everybody available.
 
 ### What somebody is paid
 
@@ -1477,6 +1547,21 @@ means reading a read model, and a payroll run is money leaving the business — 
 must not be computed from a table that may be a second behind. List staff from
 `GET /v1/hr/employees` and send the ones to pay.
 
+**Commission works the same way, one step further.** Send `performed` — what each
+person completed in the period, net — and the *rate* comes from their salary
+record. So a caller can be wrong about the basis and never about the amount:
+
+```json
+{ "period": "2026-05",
+  "employees": ["EMP-0001"],
+  "performed": [{"employee":"EMP-0001","net":2400000,"currency":"SAR"}] }
+```
+
+Somebody with no `commission_bp` on their salary earns nothing, however large the
+basis. The payslip carries `performed` beside `commission`, because "five per
+cent of 24,000" is a figure somebody will query — and the commission is part of
+`gross`, since statutory contributions are computed from what somebody earned.
+
 Somebody employed for only part of the period, or with no salary recorded,
 **refuses the whole run** with `payroll.not_payable`. A run that quietly left
 somebody out is one somebody notices on payday; one that silently paid a full
@@ -1528,6 +1613,7 @@ everybody.
 | `PUT /v1/hr_sa/gosi/schedule` | Set them | ManageAccounts |
 | `GET /v1/hr_sa/gosi/contribution` | What contributions come to on a base | Read |
 | `GET /v1/hr_sa/employees/{employee}/end-of-service` | What somebody is owed | Read |
+| `GET /v1/hr_sa/employees/{employee}/leave-entitlement` | Days owed, taken and left | Read |
 
 **Both calculations answer and record nothing.** Asking what an end-of-service
 comes to is a question, and the answer changes as a salary and service do;
@@ -1591,6 +1677,24 @@ her" a business asks before making an offer.
 
 The wage is basic plus allowances, which is what the Labour Law says; basic
 alone is the common shortcut and it underpays.
+
+### Leave entitlement
+
+```bash
+curl -s "${AUTH[@]}" \
+  'http://localhost:8080/v1/hr_sa/employees/EMP-0001/leave-entitlement?from=2026-01-01&until=2026-12-31'
+# {"annual_days":21,"served_days":0,"days_in_window":365,
+#  "annual_taken":5,"annual_left":16}
+```
+
+**`hr` records what was taken; this says what was owed.** Twenty-one days a
+year, rising to thirty after five years' service, pro-rated for a part year —
+and the step can land mid-year, in which case the answer is the two rates over
+the days each applied to.
+
+`annual_left` **may be negative**. Somebody who took three weeks in January and
+left in March has overdrawn, and a zero would hide money the business is owed
+back.
 
 **The WPS file is not here.** The monthly file the Ministry mandates has a
 specification this build cannot verify, and a file that is almost right is one

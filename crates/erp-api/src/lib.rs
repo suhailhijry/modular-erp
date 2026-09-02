@@ -50,4 +50,5 @@ pub use catalog::CATALOG;
 /// Re-exported so a caller wiring up a server needs one crate, not two.
 pub use erp_web::{AppState, Problem};
 pub use modules::available as modules;
+pub use modules::catalogues as module_catalogues;
 pub use routes::{openapi, router};

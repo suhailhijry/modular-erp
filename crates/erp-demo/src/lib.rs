@@ -91,7 +91,9 @@ pub struct Seeded {
     /// People on the books, arranged as an org chart with claims travelling up
     /// it.
     pub employees: usize,
-    /// People in the payroll run that was approved and posted.
+    /// People in the payroll run that was approved and posted. One of them
+    /// earns commission, because a rate nobody exercises is a rate nobody
+    /// checks.
     pub paid: usize,
 }
 
@@ -1486,7 +1488,7 @@ async fn seed_org(app: &axum::Router, slug: &str, token: &str) -> Result<usize, 
         &format!("/v1/hr/employees/{}/claims", demo_id("EMP-CLERK")),
         Some(token),
         &serde_json::json!({
-            "claim": "sales.apply_discount",
+            "claim": "sales:apply_discount",
             "branch": demo_id("BRANCH-OLAYA")
         }),
         StatusCode::OK,
@@ -1499,7 +1501,7 @@ async fn seed_org(app: &axum::Router, slug: &str, token: &str) -> Result<usize, 
         slug,
         &format!("/v1/hr/employees/{}/claims", demo_id("EMP-OLAYA")),
         Some(token),
-        &serde_json::json!({ "claim": "purchases.approve_payment" }),
+        &serde_json::json!({ "claim": "purchases:approve_payment" }),
         StatusCode::OK,
     )
     .await?;
@@ -1522,6 +1524,9 @@ async fn seed_salaries(app: &axum::Router, slug: &str, token: &str) -> Result<()
         ("EMP-OLAYA", 1_200_000, 0),
         ("EMP-CLERK", 600_000, 50_000),
     ];
+    // **The stylist earns on what she does.** A rate nobody exercises is a rate
+    // nobody checks, and the demo's whole job is to be exercised.
+    let commission = |id: &str| if id == "EMP-CLERK" { 500 } else { 0 };
     for (id, basic, deduction) in &pay {
         let mut body = serde_json::json!({
             "basic": { "minor": basic, "currency": "SAR" },
@@ -1534,6 +1539,9 @@ async fn seed_salaries(app: &axum::Router, slug: &str, token: &str) -> Result<()
             body["deductions"] = serde_json::json!([
                 { "what": "سلفة", "amount": { "minor": deduction, "currency": "SAR" } }
             ]);
+        }
+        if commission(id) > 0 {
+            body["commission_bp"] = serde_json::json!(commission(id));
         }
         put(
             app,
@@ -1569,7 +1577,18 @@ async fn seed_payroll(app: &axum::Router, slug: &str, token: &str) -> Result<usi
         slug,
         "/v1/payroll/runs/PAY-2026-05",
         token,
-        &serde_json::json!({ "period": "2026-05", "employees": people }),
+        &serde_json::json!({
+            "period": "2026-05",
+            "employees": people,
+            // What the clerk performed. In a running business this comes from
+            // `booking::performed`; the demo states it, because the diary it
+            // seeds is not a month of completed work.
+            "performed": [{
+                "employee": demo_id("EMP-CLERK"),
+                "net": 2_400_000,
+                "currency": "SAR"
+            }]
+        }),
         StatusCode::OK,
     )
     .await?;

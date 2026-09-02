@@ -128,3 +128,35 @@ fn every_code_reaches_the_reference() {
     // Not vacuous: something that is not a code must not be found either.
     assert!(!generated.contains("request.not_a_real_code"));
 }
+
+/// **Every module's catalogue is composed into the complete one.**
+///
+/// The test above can only check codes it has already been given, so a module
+/// whose catalogue was never added to `erp_api::CATALOG` is invisible to it —
+/// and three arrived that way before this existed: `hr`, `payroll` and `hr_sa`
+/// were mounted, routed and tested, with every refusal they can make absent
+/// from `docs/ERRORS.md`.
+///
+/// Nothing broke at runtime, because a module renders through its own smaller
+/// composite. What was missing was the documentation — the reference a client
+/// reads to find out what this API can say to them.
+#[test]
+fn every_module_reaches_the_reference() {
+    let generated = reference();
+    let mut missing = Vec::new();
+
+    for (name, catalog) in erp_api::module_catalogues() {
+        for code in catalog.codes() {
+            if !generated.contains(code.as_str()) {
+                missing.push(format!("{name}: {}", code.as_str()));
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "a module's failures are not in the reference, which means its catalogue \
+         never reached `erp_api::CATALOG`:\n  {}",
+        missing.join("\n  ")
+    );
+}

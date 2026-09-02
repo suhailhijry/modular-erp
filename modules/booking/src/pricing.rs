@@ -36,9 +36,9 @@
 use erp_types::{CurrencyCode, Money, MoneyError};
 use serde::{Deserialize, Serialize};
 
-use crate::availability::Availability;
-use crate::calendar::Calendar;
 use erp_occupancy::Span;
+use erp_recurrence::Availability;
+use erp_recurrence::Calendar;
 
 /// Something taken off a line, and why.
 ///

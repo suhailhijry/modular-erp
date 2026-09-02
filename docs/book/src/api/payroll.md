@@ -120,6 +120,37 @@ notices on payday.
 owed for the days they worked; refusing to pay them would turn a compliance
 problem into wage theft.
 
+## Commission
+
+Where the three modules meet.
+
+**`booking::performed`** says who completed which priced lines and what they
+came to. Only `completed` bookings — a commission paid on a no-show is money the
+business gives away twice — and only priced ones, because a line with no charge
+is a business that bills elsewhere rather than one that charged zero, and summing
+it as nothing would quietly under-pay whoever did the work.
+
+**`Salary::commission_bp`** is the rate, on the employee. A *rate* and not an
+*amount*, which is the opposite of every allowance beside it: an allowance is a
+sum somebody agreed, and a commission is a share of a number that changes every
+month. Storing the amount would mean restating it each period, which is the
+mistake that leaves last month's payslip agreeing with this month's work.
+
+### The split is the design
+
+The caller sends the **basis** — what each person performed — because who is in
+the run and what they did are facts a person assembles, and the same argument
+that has the caller name the employees applies.
+
+`payroll` applies the **rate from the employee's own record**. So a caller can be
+wrong about what somebody performed, and never about what they earned. A basis
+sent for somebody with no rate earns nothing, however large it is.
+
+Commission is part of **gross**, because statutory contributions and
+end-of-service are computed from what somebody earned rather than from the
+predictable part of it. The payslip carries `performed` alongside it, because
+"five per cent of 24,000" is a figure somebody will query.
+
 ## What is deliberately not here
 
 **GOSI, and the WPS file.** Both are Saudi statute and belong in `hr_sa`, for the

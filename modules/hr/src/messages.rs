@@ -15,6 +15,9 @@ pub const NO_DOCUMENT_NUMBER: MessageCode = MessageCode::new("hr.no_document_num
 pub const UNKNOWN_DOCUMENT: MessageCode = MessageCode::new("hr.unknown_document");
 pub const NOT_A_SALARY: MessageCode = MessageCode::new("hr.not_a_salary");
 pub const DEDUCTIONS_EXCEED_PAY: MessageCode = MessageCode::new("hr.deductions_exceed_pay");
+pub const NOT_A_DAY_OF_WORK: MessageCode = MessageCode::new("hr.not_a_day_of_work");
+pub const BACKWARDS_LEAVE: MessageCode = MessageCode::new("hr.backwards_leave");
+pub const UNKNOWN_LEAVE: MessageCode = MessageCode::new("hr.unknown_leave");
 
 pub const CODES: &[MessageCode] = &[
     NO_NAME,
@@ -30,6 +33,9 @@ pub const CODES: &[MessageCode] = &[
     UNKNOWN_DOCUMENT,
     NOT_A_SALARY,
     DEDUCTIONS_EXCEED_PAY,
+    NOT_A_DAY_OF_WORK,
+    BACKWARDS_LEAVE,
+    UNKNOWN_LEAVE,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -142,6 +148,36 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         DEDUCTIONS_EXCEED_PAY,
         Locale::Arabic,
         Template::Simple("مجموع الاستقطاعات يتجاوز المستحق."),
+    ),
+    (
+        NOT_A_DAY_OF_WORK,
+        Locale::English,
+        Template::Simple("A day has 1440 minutes in it."),
+    ),
+    (
+        NOT_A_DAY_OF_WORK,
+        Locale::Arabic,
+        Template::Simple("اليوم ١٤٤٠ دقيقة."),
+    ),
+    (
+        BACKWARDS_LEAVE,
+        Locale::English,
+        Template::Simple("Leave cannot end before it starts."),
+    ),
+    (
+        BACKWARDS_LEAVE,
+        Locale::Arabic,
+        Template::Simple("لا يمكن أن تنتهي الإجازة قبل أن تبدأ."),
+    ),
+    (
+        UNKNOWN_LEAVE,
+        Locale::English,
+        Template::Simple("{kind} is not a kind of leave. Use annual, sick, unpaid or statutory."),
+    ),
+    (
+        UNKNOWN_LEAVE,
+        Locale::Arabic,
+        Template::Simple("{kind} ليس نوع إجازة. استخدم annual أو sick أو unpaid أو statutory."),
     ),
     (
         UNKNOWN_DOCUMENT,

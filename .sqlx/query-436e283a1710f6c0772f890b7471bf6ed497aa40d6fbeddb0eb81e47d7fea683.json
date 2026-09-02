@@ -1,0 +1,37 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT kind as \"kind!\", sum(days)::BIGINT as \"days!\"\n             FROM proj_hr.employee_leave\n            WHERE employee = $1 AND from_date <= $3 AND until_date >= $2\n            GROUP BY kind ORDER BY kind",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_leave",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "days!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "436e283a1710f6c0772f890b7471bf6ed497aa40d6fbeddb0eb81e47d7fea683"
+}

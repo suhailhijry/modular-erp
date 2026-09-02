@@ -68,6 +68,10 @@ pub fn routes() -> OpenApiRouter<AppState> {
 /// to reach a person in their own language with the numbers intact.
 static CATALOG: erp_i18n::Composite = erp_i18n::Composite::new(&[
     &crate::CATALOG,
+    // The repeating calendar's refusals live with the type now, in
+    // `erp-recurrence`, so they have to be composed in here — a rule that would
+    // not parse must still say why in the caller's language.
+    &erp_recurrence::CATALOG,
     &erp_occupancy::CATALOG,
     &crm::CATALOG,
     &erp_web::CATALOG,

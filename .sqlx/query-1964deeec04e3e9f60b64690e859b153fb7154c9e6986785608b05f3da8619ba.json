@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT shifts as \"shifts!\" FROM proj_hr.employee_shift WHERE employee = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "shifts!",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee_shift",
+            "name": "shifts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1964deeec04e3e9f60b64690e859b153fb7154c9e6986785608b05f3da8619ba"
+}

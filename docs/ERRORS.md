@@ -76,11 +76,6 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — That amount is too large to record.
 - **ar** — هذا المبلغ أكبر من أن يُسجَّل.
 
-### `booking.backwards_dates`
-
-- **en** — The last day these hours apply is before the first.
-- **ar** — آخر يوم تسري فيه هذه الساعات يسبق أولها.
-
 ### `booking.cannot_move`
 
 - **en** — A booking cannot go from {from} to {to}.
@@ -141,45 +136,15 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — There is no ready-made rota called {trade}.
 - **ar** — لا توجد قائمة موارد جاهزة باسم {trade}.
 
-### `booking.not_a_day_of_the_month`
-
-- **en** — {value} is not a day of any month.
-- **ar** — {value} ليس يومًا في أي شهر.
-
-### `booking.not_a_month`
-
-- **en** — {value} is not a month.
-- **ar** — {value} ليس شهرًا.
-
 ### `booking.not_a_rate`
 
 - **en** — A price cannot be negative.
 - **ar** — لا يمكن أن يكون السعر بالسالب.
 
-### `booking.not_a_time_of_day`
-
-- **en** — A time of day is minutes past midnight, from 0 to {most}.
-- **ar** — وقت اليوم هو عدد الدقائق بعد منتصف الليل، من 0 إلى {most}.
-
-### `booking.not_a_weekday`
-
-- **en** — {value} is not a weekday. Monday is 1 and Sunday is 7.
-- **ar** — {value} ليس يومًا من أيام الأسبوع. الاثنين هو 1 والأحد هو 7.
-
-### `booking.not_a_window`
-
-- **en** — Opening hours must close after they open. A window that runs past midnight is two windows.
-- **ar** — يجب أن تنتهي ساعات العمل بعد بدايتها. النافذة التي تتجاوز منتصف الليل هي نافذتان.
-
 ### `booking.not_an_allowance`
 
 - **en** — A discount is the amount taken off, so it is a positive number.
 - **ar** — الخصم هو المبلغ المحسوم، لذا يجب أن يكون رقمًا موجبًا.
-
-### `booking.not_an_offset`
-
-- **en** — A timezone offset is minutes from UTC, between -{limit} and {limit}.
-- **ar** — فرق التوقيت هو عدد الدقائق عن التوقيت العالمي، بين -{limit} و {limit}.
 
 ### `booking.not_offered`
 
@@ -314,6 +279,127 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — Something went wrong on our side. The problem has been recorded.
 - **ar** — حدث خطأ لدينا. تم تسجيل المشكلة.
+
+
+## `hr`
+
+### `hr.backwards_leave`
+
+- **en** — Leave cannot end before it starts.
+- **ar** — لا يمكن أن تنتهي الإجازة قبل أن تبدأ.
+
+### `hr.cycle`
+
+- **en** — {id} cannot report to somebody in their own team.
+- **ar** — {id} لا يمكن أن يكون تابعًا لأحد أفراد فريقه.
+
+### `hr.database`
+
+- **en** — The org chart could not be read. Try again.
+- **ar** — تعذّرت قراءة الهيكل التنظيمي. أعد المحاولة.
+
+### `hr.deductions_exceed_pay`
+
+- **en** — What is taken off comes to more than what is paid.
+- **ar** — مجموع الاستقطاعات يتجاوز المستحق.
+
+### `hr.left`
+
+- **en** — Employee {id} has left.
+- **ar** — الموظف {id} لم يعد على رأس العمل.
+
+### `hr.no_contact`
+
+- **en** — An employee needs a phone number or an email address.
+- **ar** — الموظف يحتاج إلى رقم هاتف أو بريد إلكتروني.
+
+### `hr.no_document_number`
+
+- **en** — A document needs its number.
+- **ar** — الوثيقة تحتاج إلى رقمها.
+
+### `hr.no_name`
+
+- **en** — An employee needs a name.
+- **ar** — الموظف يحتاج إلى اسم.
+
+### `hr.no_such_branch`
+
+- **en** — There is no open branch {branch}.
+- **ar** — لا يوجد فرع مفتوح {branch}.
+
+### `hr.no_such_employee`
+
+- **en** — There is no employee {id}.
+- **ar** — لا يوجد موظف {id}.
+
+### `hr.no_such_manager`
+
+- **en** — There is no employee {id} to report to.
+- **ar** — لا يوجد موظف {id} ليكون مسؤولًا.
+
+### `hr.not_a_claim`
+
+- **en** — {claim} is not usable as a permission name.
+- **ar** — {claim} غير صالح كاسم صلاحية.
+
+### `hr.not_a_day_of_work`
+
+- **en** — A day has 1440 minutes in it.
+- **ar** — اليوم ١٤٤٠ دقيقة.
+
+### `hr.not_a_salary`
+
+- **en** — A salary needs positive basic pay, and every part in one currency.
+- **ar** — الراتب يحتاج إلى أساسي موجب، وكل بند بعملة واحدة.
+
+### `hr.unknown_document`
+
+- **en** — {kind} is not a kind of document this system tracks.
+- **ar** — {kind} ليس نوع وثيقة يتتبعه هذا النظام.
+
+### `hr.unknown_leave`
+
+- **en** — {kind} is not a kind of leave. Use annual, sick, unpaid or statutory.
+- **ar** — {kind} ليس نوع إجازة. استخدم annual أو sick أو unpaid أو statutory.
+
+
+## `hr_sa`
+
+### `hr_sa.amount_out_of_range`
+
+- **en** — That amount is outside the range this system can hold.
+- **ar** — المبلغ خارج النطاق الذي يستطيع النظام تمثيله.
+
+### `hr_sa.database`
+
+- **en** — That could not be read. Try again.
+- **ar** — تعذّرت القراءة. أعد المحاولة.
+
+### `hr_sa.no_salary`
+
+- **en** — No salary is recorded for {id}.
+- **ar** — لا يوجد راتب مسجَّل لـ {id}.
+
+### `hr_sa.no_such_employee`
+
+- **en** — There is no employee {id}.
+- **ar** — لا يوجد موظف {id}.
+
+### `hr_sa.not_left`
+
+- **en** — {id} is still employed, so there is no end of service to compute.
+- **ar** — {id} ما زال على رأس العمل، فلا توجد نهاية خدمة لاحتسابها.
+
+### `hr_sa.unknown_footing`
+
+- **en** — {footing} is not a GOSI footing. Use saudi or non_saudi.
+- **ar** — {footing} ليس تصنيفًا في التأمينات. استخدم saudi أو non_saudi.
+
+### `hr_sa.unknown_leaving`
+
+- **en** — {reason} is not a reason for leaving. Use dismissed, resigned, in_full or for_cause.
+- **ar** — {reason} ليس سببًا لانتهاء الخدمة. استخدم dismissed أو resigned أو in_full أو for_cause.
 
 
 ## `invitations`
@@ -492,6 +578,44 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — {n} clusters are at their limit.
 - **ar** — {n} مجموعة بلغت حدّها الأقصى.
+
+
+## `payroll`
+
+### `payroll.amount_out_of_range`
+
+- **en** — That amount is outside the range this system can hold.
+- **ar** — المبلغ خارج النطاق الذي يستطيع النظام تمثيله.
+
+### `payroll.approved`
+
+- **en** — Payroll run {id} has been approved and cannot be changed.
+- **ar** — تم اعتماد مسيرة الرواتب {id} ولا يمكن تعديلها.
+
+### `payroll.database`
+
+- **en** — Payroll could not be read. Try again.
+- **ar** — تعذّرت قراءة الرواتب. أعد المحاولة.
+
+### `payroll.no_such_run`
+
+- **en** — There is no payroll run {id}.
+- **ar** — لا توجد مسيرة رواتب {id}.
+
+### `payroll.nobody_to_pay`
+
+- **en** — A payroll run needs somebody to pay.
+- **ar** — مسيرة الرواتب تحتاج إلى من تُصرف له.
+
+### `payroll.not_a_period`
+
+- **en** — {period} is not a month. Use YYYY-MM.
+- **ar** — {period} ليس شهرًا. استخدم صيغة YYYY-MM.
+
+### `payroll.not_payable`
+
+- **en** — {id} is not on the books, or has no salary recorded.
+- **ar** — {id} ليس على رأس العمل، أو لا يوجد راتب مسجَّل له.
 
 
 ## `pos`
@@ -704,6 +828,44 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — A {category} line carries no VAT, and this one is charged {tax}. Check the supplier's invoice.
 - **ar** — لا تحمل السطور من نوع {category} ضريبة، وهذا السطر عليه {tax}. راجع فاتورة المورّد.
+
+
+## `recurrence`
+
+### `recurrence.backwards_dates`
+
+- **en** — The last day these hours apply is before the first.
+- **ar** — آخر يوم تسري فيه هذه الساعات يسبق أولها.
+
+### `recurrence.not_a_day_of_the_month`
+
+- **en** — {value} is not a day of any month.
+- **ar** — {value} ليس يومًا في أي شهر.
+
+### `recurrence.not_a_month`
+
+- **en** — {value} is not a month.
+- **ar** — {value} ليس شهرًا.
+
+### `recurrence.not_a_time_of_day`
+
+- **en** — A time of day is minutes past midnight, from 0 to {most}.
+- **ar** — وقت اليوم هو عدد الدقائق بعد منتصف الليل، من 0 إلى {most}.
+
+### `recurrence.not_a_weekday`
+
+- **en** — {value} is not a weekday. Monday is 1 and Sunday is 7.
+- **ar** — {value} ليس يومًا من أيام الأسبوع. الاثنين هو 1 والأحد هو 7.
+
+### `recurrence.not_a_window`
+
+- **en** — Opening hours must close after they open. A window that runs past midnight is two windows.
+- **ar** — يجب أن تنتهي ساعات العمل بعد بدايتها. النافذة التي تتجاوز منتصف الليل هي نافذتان.
+
+### `recurrence.not_an_offset`
+
+- **en** — A timezone offset is minutes from UTC, between -{limit} and {limit}.
+- **ar** — فرق التوقيت هو عدد الدقائق عن التوقيت العالمي، بين -{limit} و {limit}.
 
 
 ## `request`

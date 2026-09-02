@@ -22,9 +22,14 @@
 //!
 //! # What is here, and what is not
 //!
-//! **GOSI** and **end of service** are here: both are arithmetic over figures a
-//! caller supplies, both are testable to the halala, and both are what a
-//! business gets asked about.
+//! **GOSI**, **end of service** and **leave entitlement** are here: each is
+//! arithmetic over figures a caller supplies, each is testable to the halala or
+//! the day, and each is what a business gets asked about.
+//!
+//! Leave is the half `hr` deliberately does not have. `hr` records what was
+//! taken, which is the same in every country; how much somebody is *owed* is
+//! Article 109 and Article 117, and putting that in `hr` would make it learn one
+//! country's statute.
 //!
 //! **WPS is not.** The monthly salary file the Ministry mandates has a
 //! specification — field order, encoding, the bank's own variations — that this
@@ -43,10 +48,12 @@
 pub mod gosi;
 pub mod gratuity;
 pub mod http;
+pub mod leave;
 pub mod messages;
 
 pub use gosi::{Contribution, Footing, Schedule, contribution};
 pub use gratuity::{Award, Leaving, end_of_service};
+pub use leave::{SickPay, annual_entitlement, sick_days};
 
 use erp_i18n::StaticCatalog;
 

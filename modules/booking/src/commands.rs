@@ -26,12 +26,12 @@ use erp_occupancy::{BadSpan, Claim, OccupancyError, Span};
 use erp_tenant::{CommandError, TenantDb};
 use erp_types::{AggregateId, DomainName, StreamId, Timestamp};
 
-use crate::availability::{Availability, BadRule, any_covers};
-use crate::calendar::Calendar;
 use crate::pricing::{PriceError, Tariff, price};
 use crate::reservation::{Customer, DraftLine, Line, Reservation, ReservationEvent, Stage};
 use crate::resource::{Kind, Resource, ResourceEvent};
 use crate::trades::{FittedOut, Trade};
+use erp_recurrence::Calendar;
+use erp_recurrence::{Availability, BadRule, any_covers};
 
 /// The prefix under which a customer is held as a resource.
 ///

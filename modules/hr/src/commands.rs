@@ -42,6 +42,10 @@ pub enum HrError {
     NoDocumentNumber,
     #[error("a salary needs positive basic pay, and every part in one currency")]
     NotASalary,
+    #[error("a day has 1440 minutes in it")]
+    NotADayOfWork,
+    #[error("leave cannot end before it starts")]
+    BackwardsLeave,
     #[error("what is taken off comes to more than what is paid")]
     DeductionsExceedPay,
     #[error(transparent)]
@@ -67,6 +71,8 @@ impl erp_i18n::Localize for HrError {
             Self::Left(id) => Message::new(messages::LEFT).with("id", MessageArg::text(id)),
             Self::NoDocumentNumber => Message::new(messages::NO_DOCUMENT_NUMBER),
             Self::NotASalary => Message::new(messages::NOT_A_SALARY),
+            Self::NotADayOfWork => Message::new(messages::NOT_A_DAY_OF_WORK),
+            Self::BackwardsLeave => Message::new(messages::BACKWARDS_LEAVE),
             Self::DeductionsExceedPay => Message::new(messages::DEDUCTIONS_EXCEED_PAY),
             Self::Details(BadEmployee::NoName) => Message::new(messages::NO_NAME),
             Self::Details(BadEmployee::NoContact) => Message::new(messages::NO_CONTACT),
@@ -546,6 +552,144 @@ pub async fn exists(
         .await?
         .aggregate
         .exists())
+}
+
+/// Records when somebody works.
+///
+/// **The whole pattern at once**, for the reason skills are: a rota is read as
+/// "when is Sara in", never as a sequence of amendments, and an add-one API
+/// would let somebody restrict a person they were only trying to note a
+/// Saturday for.
+pub async fn record_shifts(
+    db: &TenantDb,
+    id: &AggregateId,
+    shifts: &[erp_recurrence::Availability],
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    let shifts = shifts.to_vec();
+    db.execute::<Employee, _, HrError>(id, crate::upcasters(), metadata, move |loaded| {
+        let held = &loaded.aggregate;
+        if !held.exists() {
+            return Err(HrError::NoSuchEmployee(id.to_string()));
+        }
+        if held.shifts == shifts {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(EmployeeEvent::Rostered {
+            shifts: shifts.clone(),
+            at,
+        }))
+    })
+    .await
+}
+
+/// Records a day somebody worked.
+///
+/// **The whole day at once**, not a clock-in and a clock-out. A half-recorded
+/// day is a state every attendance system has and none handles well: it is
+/// either somebody who forgot, somebody who left early, or a device that lost
+/// power, and nothing can tell which. So the day is recorded when it is known,
+/// which is what approving a timesheet actually is.
+///
+/// The same day and the same minutes again writes nothing. The same day with
+/// *different* minutes writes a correction, and the projection takes the latest
+/// word — see `Employee::recent_days` for the window that decides which.
+pub async fn record_day(
+    db: &TenantDb,
+    id: &AggregateId,
+    on: chrono::NaiveDate,
+    minutes: u16,
+    note: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    // A day is 1,440 minutes and this refuses more. Not tidiness: a timesheet
+    // that says somebody worked twenty-six hours is a typo, and one that says
+    // they worked six hundred is a broken import — both are better refused than
+    // paid.
+    if minutes > 24 * 60 {
+        return Err(rejected(HrError::NotADayOfWork));
+    }
+    let note = note.trim().to_owned();
+
+    db.execute::<Employee, _, HrError>(id, crate::upcasters(), metadata, move |loaded| {
+        let held = &loaded.aggregate;
+        if !held.exists() {
+            return Err(HrError::NoSuchEmployee(id.to_string()));
+        }
+        if held.recorded_on(on) == Some(minutes) {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(EmployeeEvent::Attended {
+            on,
+            minutes,
+            note: note.clone(),
+            at,
+        }))
+    })
+    .await
+}
+
+/// Records leave taken, or booked.
+///
+/// **Whole days, inclusive at both ends**: a person writing "the 3rd to the 5th"
+/// means three days.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every one is a value the caller already has; a struct would be one type per command"
+)]
+pub async fn record_leave(
+    db: &TenantDb,
+    id: &AggregateId,
+    kind: crate::Leave,
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
+    why: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    if until < from {
+        return Err(rejected(HrError::BackwardsLeave));
+    }
+    let why = why.trim().to_owned();
+
+    db.execute::<Employee, _, HrError>(id, crate::upcasters(), metadata, move |loaded| {
+        if !loaded.aggregate.exists() {
+            return Err(HrError::NoSuchEmployee(id.to_string()));
+        }
+        Ok(Decision::one(EmployeeEvent::Absent {
+            kind,
+            from,
+            until,
+            why: why.clone(),
+            at,
+        }))
+    })
+    .await
+}
+
+/// **Whether this person is scheduled to be working then.**
+///
+/// Answers; **refuses nothing**. A shift is what somebody is scheduled for, and
+/// people cover, swap and stay late — a module telling a manager she cannot ask
+/// somebody to stay is not a rule a system gets to make. A lapsed iqama is,
+/// because the law says so, and that is [`may_work_on`].
+pub async fn is_working_at(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    span: erp_occupancy::Span,
+) -> Result<bool, erp_eventlog::LoadError> {
+    // The tenant's own clock, which both the diary and the rota read — see
+    // `erp_recurrence::Calendar`, whose key is `tenant.calendar` and not any
+    // one module's.
+    let calendar = erp_recurrence::Calendar::resolve(&mut *conn)
+        .await
+        .unwrap_or_default();
+    Ok(load::<Employee>(conn, id, crate::upcasters())
+        .await?
+        .aggregate
+        .is_working_at(span, calendar))
 }
 
 /// **Whether this person may be rostered on this day.**

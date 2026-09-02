@@ -60,7 +60,11 @@ impl From<Calendar> for i32 {
 
 impl Calendar {
     /// Where a tenant's choice is stored.
-    pub const KEY: &'static str = "booking.calendar";
+    ///
+    /// **`tenant.calendar`, not `booking.calendar`.** A business has one clock,
+    /// and both the diary and the rota read it — a key naming one module would
+    /// be the wrong shape the moment a second module asked.
+    pub const KEY: &'static str = "tenant.calendar";
 
     /// `+03:00`. Saudi Arabia, and every market next to it.
     pub const RIYADH: Self = Self { minutes: 3 * 60 };

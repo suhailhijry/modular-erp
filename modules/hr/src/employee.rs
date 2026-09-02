@@ -102,6 +102,26 @@ pub struct Salary {
     /// be able to get them wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deductions: Vec<Component>,
+    /// What fraction of the work they perform they earn, in basis points.
+    ///
+    /// **A rate and not an amount**, which is the opposite of the allowances
+    /// above and for a reason: an allowance is a fixed sum somebody agreed, and
+    /// a commission is a share of a number that changes every month. Storing
+    /// the *amount* would mean restating it each period, which is the mistake
+    /// that leaves last month's payslip agreeing with this month's work.
+    ///
+    /// Zero, and absent on every salary recorded before commission existed —
+    /// which is a business that pays none, and needs no upcaster to say so.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub commission_bp: u32,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if takes a reference"
+)]
+const fn is_zero(rate: &u32) -> bool {
+    *rate == 0
 }
 
 impl Salary {
@@ -122,6 +142,80 @@ impl Salary {
             .try_fold(self.gross()?, |total, part| total.checked_sub(part.amount))
     }
 }
+
+/// Why somebody is away.
+///
+/// # Why these four and not a free-text reason
+///
+/// Because the *balance* differs by kind, and a balance that reads a string is
+/// one that silently accrues nothing when somebody types `Annual` instead of
+/// `annual`. A fifth is a compile error at every match, which is where a new
+/// rule should surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Leave {
+    /// Paid annual leave. **The one with a balance** — Saudi statute is 21 days
+    /// a year, rising to 30 after five years' service, and that arithmetic is
+    /// `hr_sa`'s rather than this module's.
+    Annual,
+    /// Sick leave. Saudi statute pays it on a sliding scale over 120 days,
+    /// which is again the country module's business.
+    Sick,
+    /// Unpaid. Recorded because a business needs to know somebody was away, and
+    /// because it does not accrue.
+    Unpaid,
+    /// Hajj, marriage, bereavement, paternity — the statutory named leaves. One
+    /// variant rather than four, because what this module does with them is
+    /// identical and what distinguishes them is a country's rules.
+    Statutory,
+}
+
+impl Leave {
+    /// Whether taking this draws down an annual balance.
+    #[must_use]
+    pub const fn draws_annual(self) -> bool {
+        matches!(self, Self::Annual)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Annual => "annual",
+            Self::Sick => "sick",
+            Self::Unpaid => "unpaid",
+            Self::Statutory => "statutory",
+        }
+    }
+
+    pub const ALL: [Self; 4] = [Self::Annual, Self::Sick, Self::Unpaid, Self::Statutory];
+}
+
+impl std::fmt::Display for Leave {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0} is not a kind of leave this system records")]
+pub struct UnknownLeave(pub String);
+
+impl std::str::FromStr for Leave {
+    type Err = UnknownLeave;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == s)
+            .ok_or_else(|| UnknownLeave(s.to_owned()))
+    }
+}
+
+/// How many recorded days an employee remembers.
+///
+/// A quarter of working days. A duplicate submit arrives within seconds;
+/// anything arriving sixty-four days later is a correction and not a retry.
+const DAY_WINDOW: usize = 64;
 
 /// A document a person must hold to be allowed to work.
 ///
@@ -292,6 +386,20 @@ pub enum EmployeeEvent {
         salary: crate::employee::Salary,
         at: Timestamp,
     },
+    /// **When this person works.**
+    ///
+    /// The whole pattern, replacing — the same shape and the same reason as
+    /// [`Self::Skilled`]. A rota is read as "when is Sara in", never as a
+    /// sequence of amendments.
+    ///
+    /// The rules are `erp_recurrence::Availability`, which is what `booking`
+    /// uses for a chair's opening hours: **which days, and between which two
+    /// times on those days**. It is one problem, so it is one type — and it
+    /// lives below both modules because `booking` already depends on this one.
+    Rostered {
+        shifts: Vec<erp_recurrence::Availability>,
+        at: Timestamp,
+    },
     /// What this person is qualified to do.
     ///
     /// **The whole set, replacing.** A skill list is read as "what can this
@@ -303,6 +411,45 @@ pub enum EmployeeEvent {
         /// meaning owns the id, the same way `occupancy` does not know what a
         /// chair is.
         skills: Vec<AggregateId>,
+        at: Timestamp,
+    },
+    /// Somebody clocked in and out.
+    ///
+    /// **One event for the whole day**, not one for in and one for out. A
+    /// half-recorded day — clocked in, never out — is a state every attendance
+    /// system has and none of them handles well: it is either somebody who
+    /// forgot, somebody who left early, or a device that lost power, and the
+    /// system cannot tell. So the day is recorded when it is known, which is
+    /// what a supervisor approving a timesheet actually does.
+    Attended {
+        /// The day, in the tenant's local calendar. **A date, not an instant**:
+        /// a shift that runs to 02:00 belongs to the day it started, and that
+        /// is a decision a person makes rather than arithmetic.
+        #[serde(with = "date")]
+        on: chrono::NaiveDate,
+        /// Minutes worked. Zero is an absence somebody recorded deliberately,
+        /// which is different from a day with no record at all.
+        minutes: u16,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        note: String,
+        at: Timestamp,
+    },
+    /// Leave taken, or booked.
+    ///
+    /// **Whole days.** Half-days are a real thing and this does not model them,
+    /// because the balance arithmetic that follows from them — and the rounding
+    /// argument every business has about it — is a decision nobody has asked
+    /// for yet.
+    Absent {
+        kind: crate::employee::Leave,
+        /// Inclusive at both ends: a person writing "the 3rd to the 5th" means
+        /// three days.
+        #[serde(with = "date")]
+        from: chrono::NaiveDate,
+        #[serde(with = "date")]
+        until: chrono::NaiveDate,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        why: String,
         at: Timestamp,
     },
     /// A document was recorded, or renewed.
@@ -358,6 +505,9 @@ impl DomainEvent for EmployeeEvent {
             Self::DocumentRecorded { .. } => Self::NAMES[6],
             Self::Skilled { .. } => Self::NAMES[7],
             Self::Contracted { .. } => Self::NAMES[8],
+            Self::Rostered { .. } => Self::NAMES[9],
+            Self::Attended { .. } => Self::NAMES[10],
+            Self::Absent { .. } => Self::NAMES[11],
         })
     }
 
@@ -367,7 +517,7 @@ impl DomainEvent for EmployeeEvent {
 }
 
 impl EmployeeEvent {
-    pub const NAMES: [&'static str; 9] = [
+    pub const NAMES: [&'static str; 12] = [
         "hr.employee.hired",
         "hr.employee.amended",
         "hr.employee.reparented",
@@ -377,6 +527,9 @@ impl EmployeeEvent {
         "hr.employee.document_recorded",
         "hr.employee.skilled",
         "hr.employee.contracted",
+        "hr.employee.rostered",
+        "hr.employee.attended",
+        "hr.employee.absent",
     ];
 }
 
@@ -403,6 +556,19 @@ pub struct Employee {
     /// What they are paid. `None` until a salary is recorded — a business can
     /// keep an org chart without keeping salaries, and most start that way.
     pub salary: Option<Salary>,
+    /// When they work. **Empty means no pattern recorded**, not "never" — see
+    /// [`Self::is_working_at`].
+    pub shifts: Vec<erp_recurrence::Availability>,
+    /// Days recently recorded, oldest first. Bounded; see [`DAY_WINDOW`].
+    ///
+    /// **Not every day they ever worked.** Somebody attends for years, so a
+    /// full history here would grow without bound — the same problem
+    /// `prepaid::Loyalty` has with movements and the same answer. What this is
+    /// for is telling a *retry* from a *correction*: a form submitted twice
+    /// within the window writes nothing, and re-recording a day from last year
+    /// writes a second event, which is what a correction is and is what the
+    /// projection takes as the latest word.
+    pub recent_days: std::collections::VecDeque<(chrono::NaiveDate, u16)>,
     /// What they are qualified to do, named by bookable resource.
     ///
     /// **Empty means no restriction**, not "nothing" — see [`Self::can_perform`].
@@ -460,6 +626,21 @@ impl Aggregate for Employee {
             EmployeeEvent::Rehired { .. } => self.left_at = None,
             EmployeeEvent::Skilled { skills, .. } => self.skills.clone_from(skills),
             EmployeeEvent::Contracted { salary, .. } => self.salary = Some(salary.clone()),
+            EmployeeEvent::Rostered { shifts, .. } => self.shifts.clone_from(shifts),
+            EmployeeEvent::Attended { on, minutes, .. } => {
+                self.recent_days.retain(|(day, _)| day != on);
+                self.recent_days.push_back((*on, *minutes));
+                while self.recent_days.len() > DAY_WINDOW {
+                    self.recent_days.pop_front();
+                }
+            }
+            // **Leave keeps no window**, deliberately. A day recorded twice is
+            // a duplicate; a leave request recorded twice is two requests, and
+            // the ranges may overlap in ways only a person can judge. The
+            // projection keys by `(employee, from, kind)` so a re-submitted
+            // form is one row, and the log keeps both because the second one
+            // may have been a correction to the end date.
+            EmployeeEvent::Absent { .. } => {}
             EmployeeEvent::DocumentRecorded {
                 kind,
                 number,
@@ -520,6 +701,46 @@ impl Employee {
             return false;
         }
         self.left_at.is_none_or(|left| left.date_naive() >= until)
+    }
+
+    /// What was recorded for this day, if it is still in the window.
+    ///
+    /// `None` means either "nothing recorded" or "recorded long enough ago to
+    /// have fallen out", and the caller cannot tell them apart — which is why
+    /// this only decides retry-versus-correction and never what a timesheet
+    /// says. That is the projection's job.
+    #[must_use]
+    pub fn recorded_on(&self, day: chrono::NaiveDate) -> Option<u16> {
+        self.recent_days
+            .iter()
+            .find(|(recorded, _)| *recorded == day)
+            .map(|(_, minutes)| *minutes)
+    }
+
+    /// **Whether this person is scheduled to be working then.**
+    ///
+    /// # Empty means no pattern, not "never"
+    ///
+    /// The same sharp edge as skills, and the same resolution: a business that
+    /// has not written anybody's shifts down has everybody available, because
+    /// the alternative would empty every rota the day the module is switched on.
+    ///
+    /// # This does not refuse anything
+    ///
+    /// A shift is what somebody is *scheduled* for, and people cover, swap and
+    /// stay late. Refusing to roster somebody outside their shift would be a
+    /// module telling a manager they cannot ask — which is not a rule a system
+    /// gets to make, unlike a lapsed iqama, where the law does.
+    ///
+    /// So this answers, and `booking` shows it. What refuses is
+    /// [`Self::may_work_on`].
+    #[must_use]
+    pub fn is_working_at(
+        &self,
+        span: erp_occupancy::Span,
+        calendar: erp_recurrence::Calendar,
+    ) -> bool {
+        self.shifts.is_empty() || erp_recurrence::any_covers(&self.shifts, span, calendar.offset())
     }
 
     /// **Whether this person may be rostered on this day.**

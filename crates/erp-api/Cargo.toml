@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 erp-web = { workspace = true }
+erp-recurrence = { workspace = true }
 erp-control = { workspace = true }
 erp-eventlog = { workspace = true }
 booking = { workspace = true }

@@ -17,7 +17,7 @@ use erp_eventlog::{Aggregate, DomainEvent};
 use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::availability::Availability;
+use erp_recurrence::Availability;
 
 /// A person, a place or a thing.
 ///

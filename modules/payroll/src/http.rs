@@ -61,9 +61,28 @@ struct NewDraft {
     /// business — it must not be computed from a table that may be a second
     /// behind. List staff from `GET /v1/hr/employees` and send the ones to pay.
     employees: Vec<String>,
+    /// What each of them performed in the period, net.
+    ///
+    /// From `GET /v1/booking/reservations` — or, once it exists as a route,
+    /// whatever reports completed priced work per person. Omit it for a
+    /// business that pays no commission, which is most of them.
+    ///
+    /// **The amount is not yours to send.** What fraction of this somebody
+    /// earns is the rate on their salary, read from their own record, so a
+    /// caller can be wrong about the *basis* and never about the *commission*.
+    #[serde(default)]
+    performed: Vec<PerformedBy>,
     #[serde(default)]
     #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
     at: Option<Timestamp>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+struct PerformedBy {
+    employee: String,
+    /// Net of what they completed, in minor units.
+    net: i64,
+    currency: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -96,6 +115,12 @@ struct PayslipRecord {
     /// somebody who marries next month does not get a new copy of last month's.
     name: String,
     basic: PayrollCash,
+    /// Earned on work performed, at the rate on their salary. **Part of
+    /// `gross`**, because statutory contributions are computed from what
+    /// somebody earned rather than from the predictable part of it.
+    commission: PayrollCash,
+    /// What the commission was earned on, so the number can be checked.
+    performed: PayrollCash,
     gross: PayrollCash,
     deductions: PayrollCash,
     net: PayrollCash,
@@ -239,11 +264,31 @@ async fn draft_run(
         .map(|e| parse_id(e, locale))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let performed = body
+        .performed
+        .iter()
+        .map(|p| {
+            let currency = erp_types::CurrencyCode::new(&p.currency).map_err(|_| {
+                bad_request(
+                    erp_web::messages::UNKNOWN_CURRENCY,
+                    "currency",
+                    &p.currency,
+                    locale,
+                )
+            })?;
+            Ok((
+                parse_id(&p.employee, locale)?,
+                erp_types::Money::from_minor(p.net, currency),
+            ))
+        })
+        .collect::<Result<Vec<_>, Problem>>()?;
+
     let committed = crate::draft_run(
         &tenant.db,
         &run,
         period,
         &employees,
+        &performed,
         body.at.unwrap_or_else(chrono::Utc::now),
         &metadata(&tenant),
     )
@@ -298,6 +343,8 @@ async fn run_payslips(
                 employee: s.employee,
                 name: s.name,
                 basic: money(s.basic),
+                commission: money(s.commission),
+                performed: money(s.performed),
                 gross: money(s.gross),
                 deductions: money(s.deductions),
                 net: money(s.net),

@@ -21,6 +21,8 @@ erp-eventlog = { workspace = true }
 erp-i18n = { workspace = true }
 erp-projection = { workspace = true }
 erp-types = { workspace = true, features = ["sqlx"] }
+erp-occupancy = { workspace = true }
+erp-recurrence = { workspace = true }
 # The branch a person works at is checked against the log that owns it, the
 # same way `sales` checks a customer. Nothing here reads `proj_branches`.
 branches = { workspace = true }
@@ -32,6 +34,8 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+erp-occupancy = { workspace = true }
+erp-recurrence = { workspace = true }
 erp-control = { workspace = true }
 erp-testkit = { workspace = true }
 erp-i18n = { workspace = true }

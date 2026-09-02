@@ -115,6 +115,58 @@ or three of childbirth in full; Article 80 dismissals for cause pay nothing.
 Both are facts about *why*, which this module is not told and must not guess —
 so they are `Leaving::InFull` and `Leaving::ForCause`, stated by the caller.
 
+## Leave entitlement
+
+The half `hr` deliberately does not have. **`hr` records what was taken**, which
+is the same in every country; **this says what was owed**, which is Article 109
+and Article 117.
+
+### Annual leave
+
+Twenty-one days a year, rising to **thirty after five years' service** with the
+same employer, pro-rated for a part year — somebody who joined in July is owed
+half a year's worth because the law says so, not because a business is generous.
+
+**The step can land mid-year**, so the entitlement is the two rates over the days
+each applied to:
+
+```text
+(days below five years × 21  +  days above × 30)
+────────────────────────────────────────────────  , rounded up
+                     365
+```
+
+An implementation that picked one rate by comparison would be wrong by up to
+nine days in exactly the year somebody notices. Rounding goes **up**, for the
+reason the gratuity's does: rounding a statutory entitlement down is the version
+that ends up in front of a labour office.
+
+`GET .../leave-entitlement` combines both halves and answers `annual_left`,
+which **may be negative**. Somebody who took three weeks in January and left in
+March has overdrawn, and clamping it to zero would hide money the business is
+owed back.
+
+### Sick leave
+
+Article 117 is a **pay scale, not a day count**: the first thirty days at full
+pay, the next sixty at three quarters, the thirty after that unpaid — one
+hundred and twenty in a year, after which there is no further entitlement.
+
+```rust
+pub fn sick_days(already_taken: i64, days: i64) -> SickPay
+```
+
+`already_taken` is what makes the bands land right: **a second illness in the
+same year does not start again at full pay**. Twenty-five days used and ten more
+is five at full and five at three quarters, not ten at full.
+
+`SickPay::value` prices it, with three quarters as `apportioned(3, 4)` — the one
+rounding policy this codebase uses, which here rounds toward the employee.
+
+Running past the entitlement is reported by `exhausts_entitlement` and **not
+refused**: being ill longer than the law provides for is a real thing, and what
+follows is a conversation rather than an error.
+
 ## No aggregate, no projection, no schema
 
 This module holds **no state**. Every function is arithmetic over what it is

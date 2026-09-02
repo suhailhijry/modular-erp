@@ -46,6 +46,18 @@ struct Registered {
     /// The module's own router. A function pointer rather than a value because
     /// [`REGISTERED`] is a `const` and building a router allocates.
     http: fn() -> OpenApiRouter<AppState>,
+    /// **What its failures say, in every language.**
+    ///
+    /// Here for the same reason `http` is: a module that reached the platform
+    /// without its catalogue would render bare codes at a user, and
+    /// `docs/ERRORS.md` would not know its refusals existed. Three modules
+    /// arrived that way before this field did — `hr`, `payroll` and `hr_sa` —
+    /// and nothing failed, because the completeness audit could only check
+    /// codes it had already been given.
+    ///
+    /// Now there is nowhere to add a module that does not also say what it can
+    /// say.
+    catalog: &'static dyn erp_i18n::Catalog,
 }
 
 /// **The list.** Every module this build offers, in the order they are mounted.
@@ -59,62 +71,74 @@ const REGISTERED: &[Registered] = &[
         name: "booking",
         setup: booking::setup,
         http: booking::http::routes,
+        catalog: &booking::CATALOG,
     },
     // First, because everything else may name one and it names nothing.
     Registered {
         name: "branches",
         setup: branches::setup,
         http: branches::http::routes,
+        catalog: &branches::CATALOG,
     },
     Registered {
         name: "crm",
         setup: crm::setup,
         http: crm::http::routes,
+        catalog: &crm::CATALOG,
     },
     Registered {
         name: "hr",
         setup: hr::setup,
         http: hr::http::routes,
+        catalog: &hr::CATALOG,
     },
     Registered {
         name: "payroll",
         setup: payroll::setup,
         http: payroll::http::routes,
+        catalog: &payroll::CATALOG,
     },
     Registered {
         name: "hr_sa",
         setup: hr_sa::setup,
         http: hr_sa::http::routes,
+        catalog: &hr_sa::CATALOG,
     },
     Registered {
         name: "ledger",
         setup: ledger::setup,
         http: ledger::http::routes,
+        catalog: &ledger::CATALOG,
     },
     Registered {
         name: "sales",
         setup: sales::setup,
         http: sales::http::routes,
+        catalog: &sales::CATALOG,
     },
     Registered {
         name: "prepaid",
         setup: prepaid::setup,
         http: prepaid::http::routes,
+        catalog: &prepaid::CATALOG,
     },
     Registered {
         name: "pos",
         setup: pos::setup,
         http: pos::http::routes,
+        catalog: &pos::CATALOG,
     },
     Registered {
         name: "purchases",
         setup: purchases::setup,
         http: purchases::http::routes,
+        catalog: &purchases::CATALOG,
     },
     Registered {
         name: "tax_sa",
         setup: tax_sa::setup,
         http: tax_sa::http::routes,
+        catalog: &tax_sa::CATALOG,
     },
 ];
 
@@ -127,6 +151,20 @@ pub fn available() -> Vec<(&'static str, ModuleSetup)> {
     REGISTERED
         .iter()
         .map(|module| (module.name, (module.setup)()))
+        .collect()
+}
+
+/// Every module's catalogue, for the completeness audit.
+///
+/// Exists so `every_module_reaches_the_reference` can ask the registry rather
+/// than a list somebody maintains beside it — which is what let `hr`, `payroll`
+/// and `hr_sa` reach the platform with their refusals absent from
+/// `docs/ERRORS.md`.
+#[must_use]
+pub fn catalogues() -> Vec<(&'static str, &'static dyn erp_i18n::Catalog)> {
+    REGISTERED
+        .iter()
+        .map(|module| (module.name, module.catalog))
         .collect()
 }
 

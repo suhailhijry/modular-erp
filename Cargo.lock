@@ -258,6 +258,7 @@ dependencies = [
  "erp-i18n",
  "erp-occupancy",
  "erp-projection",
+ "erp-recurrence",
  "erp-tenant",
  "erp-testkit",
  "erp-types",
@@ -592,6 +593,7 @@ dependencies = [
  "erp-i18n",
  "erp-occupancy",
  "erp-projection",
+ "erp-recurrence",
  "erp-testkit",
  "erp-types",
  "erp-web",
@@ -738,6 +740,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "erp-recurrence"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-occupancy",
+ "serde",
+ "sqlx",
+ "thiserror",
 ]
 
 [[package]]
@@ -1116,7 +1131,9 @@ dependencies = [
  "erp-control",
  "erp-eventlog",
  "erp-i18n",
+ "erp-occupancy",
  "erp-projection",
+ "erp-recurrence",
  "erp-tenant",
  "erp-testkit",
  "erp-types",

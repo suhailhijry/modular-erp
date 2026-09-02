@@ -32,8 +32,8 @@
 
 use erp_i18n::Locale;
 
-use crate::availability::Availability;
 use crate::resource::Kind;
+use erp_recurrence::Availability;
 
 /// One thing a trade declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

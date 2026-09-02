@@ -178,6 +178,7 @@ impl Fixture {
                         }]
                     })
                     .unwrap_or_default(),
+                commission_bp: 0,
             },
             on("2026-01-01"),
             &Metadata::default(),
@@ -248,6 +249,7 @@ async fn a_payroll_run_posts_and_the_books_balance() {
         &code("PAY-2026-05"),
         Period::parse("2026-05").expect("a month"),
         &[code("EMP-1"), code("EMP-2")],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
@@ -325,6 +327,7 @@ async fn the_entry_lands_in_the_month_the_run_is_for() {
         Period::parse("2026-02").expect("a month"),
         &[code("EMP-1")],
         // Drafted in March, for February.
+        &[],
         on("2026-03-03"),
         &Metadata::default(),
     )
@@ -369,6 +372,7 @@ async fn redrafting_replaces_the_previous_draft() {
         &code("PAY-1"),
         period,
         &[code("EMP-1"), code("EMP-2")],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
@@ -382,6 +386,7 @@ async fn redrafting_replaces_the_previous_draft() {
         &code("PAY-1"),
         period,
         &[code("EMP-1"), code("EMP-2")],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
@@ -395,6 +400,7 @@ async fn redrafting_replaces_the_previous_draft() {
         &code("PAY-1"),
         period,
         &[code("EMP-1")],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
@@ -433,6 +439,7 @@ async fn an_approved_run_cannot_be_changed() {
         &code("PAY-1"),
         period,
         &[code("EMP-1")],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
@@ -447,6 +454,7 @@ async fn an_approved_run_cannot_be_changed() {
         &code("PAY-1"),
         period,
         &[],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
@@ -460,6 +468,7 @@ async fn an_approved_run_cannot_be_changed() {
         &code("PAY-1"),
         period,
         &[code("EMP-1"), code("EMP-2")],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
@@ -482,6 +491,7 @@ async fn a_retried_approval_posts_once() {
         &code("PAY-1"),
         Period::parse("2026-05").expect("a month"),
         &[code("EMP-1")],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
@@ -537,6 +547,7 @@ async fn a_run_refuses_rather_than_quietly_leaving_somebody_out() {
         &code("PAY-1"),
         Period::parse("2026-05").expect("a month"),
         &[code("EMP-1"), code("EMP-2")],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
@@ -568,12 +579,140 @@ async fn somebody_who_has_left_is_not_in_the_run() {
         &code("PAY-1"),
         Period::parse("2026-05").expect("a month"),
         &[code("EMP-1")],
+        &[],
         on("2026-05-28"),
         &Metadata::default(),
     )
     .await
     .expect_err("somebody who left was paid");
     assert!(format!("{error:?}").contains("NotPayable"), "{error:?}");
+
+    fixture.cleanup().await;
+}
+
+/// **The caller sends what was performed; the rate is the employee's.**
+///
+/// That split is the whole design: who is in the run and what they did are
+/// facts a person assembles, and a caller could get either wrong. What fraction
+/// of it they earn is a term of their employment, read from their own record —
+/// so a caller can be wrong about the *basis* and never about the *commission*.
+#[tokio::test]
+async fn commission_is_computed_from_the_rate_on_the_record() {
+    let fixture = Fixture::new().await;
+
+    // 8,000 basic plus 2,000 housing, and five per cent of what she performs.
+    hr::hire(
+        &fixture.db,
+        &code("EMP-1"),
+        &hr::Hire {
+            details: hr::Details {
+                name: "سارة".to_owned(),
+                name_latin: None,
+                national_id: None,
+                email: None,
+                phone: Some("+966500000000".to_owned()),
+            },
+            reports_to: None,
+            branch: None,
+            at: on("2026-01-01"),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("hired");
+    hr::record_salary(
+        &fixture.db,
+        &code("EMP-1"),
+        &hr::Salary {
+            basic: riyals(8_000),
+            allowances: vec![hr::Component {
+                what: "بدل سكن".to_owned(),
+                amount: riyals(2_000),
+            }],
+            deductions: Vec::new(),
+            commission_bp: 500,
+        },
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("has a salary");
+
+    // She performed 24,000 of work. Five per cent is 1,200.
+    draft_run(
+        &fixture.db,
+        &code("PAY-1"),
+        Period::parse("2026-05").expect("a month"),
+        &[code("EMP-1")],
+        &[(code("EMP-1"), riyals(24_000))],
+        on("2026-05-28"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("drafts");
+    approve_run(&fixture.db, &code("PAY-1"), &Metadata::default())
+        .await
+        .expect("approves");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let slips = payroll::payslips(&mut conn, "PAY-1").await.expect("reads");
+    drop(conn);
+
+    let slip = &slips[0];
+    assert_eq!(slip.commission, riyals(1_200), "five per cent of 24,000");
+    assert_eq!(
+        slip.performed,
+        riyals(24_000),
+        "the payslip cannot justify the number it paid"
+    );
+
+    // **Commission is part of gross**, because statutory contributions and
+    // end-of-service are computed from what somebody earned rather than from
+    // the predictable part of it.
+    assert_eq!(slip.gross, riyals(11_200));
+    assert_eq!(slip.net, riyals(11_200));
+
+    assert_eq!(
+        fixture.balance("5000").await,
+        riyals(11_200),
+        "the wage cost left the commission out"
+    );
+    assert!(fixture.imbalances().await.is_empty());
+
+    fixture.cleanup().await;
+}
+
+/// Somebody on no commission rate earns none, however much they performed — the
+/// rate is the record's and a basis cannot create one.
+#[tokio::test]
+async fn a_basis_without_a_rate_earns_nothing() {
+    let fixture = Fixture::new().await;
+    fixture.employ("EMP-1", "سارة", riyals(8_000), None).await;
+
+    draft_run(
+        &fixture.db,
+        &code("PAY-1"),
+        Period::parse("2026-05").expect("a month"),
+        &[code("EMP-1")],
+        &[(code("EMP-1"), riyals(99_000))],
+        on("2026-05-28"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("drafts");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let slips = payroll::payslips(&mut conn, "PAY-1").await.expect("reads");
+    drop(conn);
+
+    assert_eq!(
+        slips[0].commission,
+        riyals(0),
+        "a caller's basis created a commission nobody agreed to"
+    );
+    assert_eq!(slips[0].gross, riyals(10_000));
 
     fixture.cleanup().await;
 }

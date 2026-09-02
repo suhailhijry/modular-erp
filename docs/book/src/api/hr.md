@@ -67,9 +67,9 @@ be:
 
 ```rust
 pub const SEGREGATED: &[&str] = &[
-    "purchases.approve_payment",
-    "sales.approve_credit_note",
-    "hr.approve_timesheet",
+    "purchases:approve_payment",
+    "sales:approve_credit_note",
+    "hr:approve_timesheet",
 ];
 ```
 
@@ -81,7 +81,7 @@ design that passes an audit only when nobody has touched the settings.
 `propagates: false` rather than quietly doing something other than what was
 sent. Matching is by prefix, so a module can segregate a whole family, and
 `segregation_matches_a_family_and_not_a_lookalike` is what stops
-`purchases.approve_payments` being caught by `purchases.approve_payment`.
+`purchases:approve_payments` being caught by `purchases:approve_payment`.
 
 ## These claims never leave the tenant
 
@@ -274,6 +274,111 @@ implementation of the rule.
 `payroll` reads it from the **aggregate** inside the transaction that posts:
 money leaving the business on the strength of a table that may be a second
 behind is the one kind of lag nobody accepts.
+
+## Shifts
+
+When somebody works, in the **same type** a bookable resource's opening hours
+use — `erp_recurrence::Availability`, which is which days and between which two
+times on those days. It is one problem, so it is one type, and it sits below both
+modules because `booking` already depends on `hr`.
+
+```rust
+pub fn is_working_at(&self, span: Span, calendar: Calendar) -> bool {
+    self.shifts.is_empty() || any_covers(&self.shifts, span, calendar.offset())
+}
+```
+
+**Empty means no pattern recorded, not "never works"** — the same sharp edge as
+skills and the same resolution: a business that has not written anybody's shifts
+down has everybody available, because the alternative empties every rota the day
+the module is switched on. `GET .../shifts` answers `rostered` so `[]` cannot be
+read the wrong way round.
+
+### It refuses nothing, and that is the point
+
+A shift is what somebody is *scheduled* for. People cover, swap and stay late —
+a system telling a manager she cannot ask somebody to stay is not a rule it gets
+to make.
+
+A lapsed iqama is, because the law says so, and that is `may_work_on`. The two
+questions are deliberately different functions: one informs a rota, the other
+refuses one.
+
+### One clock
+
+`Calendar` moved to `erp-recurrence` with the rule, and its key is
+**`tenant.calendar`** rather than `booking.calendar`: a business has one
+timezone, and both the diary and the rota read it. A key naming one module would
+have been the wrong shape the moment a second asked.
+
+## Attendance, and leave
+
+### A day is recorded whole
+
+```rust
+Attended { on: NaiveDate, minutes: u16, note: String, at: Timestamp }
+```
+
+**One event for the day, not one for clocking in and one for clocking out.** A
+half-recorded day is a state every attendance system has and none handles well:
+it is somebody who forgot, somebody who left early, or a device that lost power,
+and nothing can tell which. So the day is recorded when it is *known*, which is
+what approving a timesheet actually is.
+
+`on` is a **date and not an instant**: a shift running to 02:00 belongs to the
+day it started, and that is a decision a person makes rather than arithmetic.
+
+**Zero minutes is a fact.** A business that marked somebody absent has said
+something; a day nobody touched has not. They are different rows.
+
+More than 1,440 minutes is refused — a timesheet saying twenty-six hours is a
+typo and one saying six hundred is a broken import, and both are better refused
+than paid.
+
+Recording the same day again with different minutes is a **correction**: the log
+keeps both and the timesheet takes the latest.
+
+### The aggregate does not hold a career
+
+```rust
+pub recent_days: VecDeque<(NaiveDate, u16)>,   // bounded
+```
+
+Somebody attends for years, so a full history on the aggregate would grow
+without bound — the same problem `prepaid::Loyalty` has with movements and the
+same answer. The window exists only to tell a *retry* from a *correction*: a
+form submitted twice writes nothing, and re-recording a day from last year
+writes a second event, which is what a correction is.
+
+What a timesheet *says* is the projection's job, and it is unbounded there
+because a table can be.
+
+### Leave
+
+```rust
+pub enum Leave { Annual, Sick, Unpaid, Statutory }
+```
+
+Four variants and not a free-text reason, because the *balance* differs by kind
+and one that reads a string accrues nothing when somebody types `Annual`.
+
+**Whole days, inclusive at both ends**: the 3rd to the 5th is three days. The
+count is **stored** rather than recomputed, because an inclusive range is
+exactly the arithmetic somebody gets wrong by one — and a report deriving it
+would be a second implementation of the rule.
+
+Reads find leave that **touches** a window, not leave that starts in it. A
+fortnight beginning in March is leave in April too, and a rota that only found
+the ones starting inside the window would show somebody who is on a beach.
+
+`leave_taken` is days per kind — **what a balance is drawn down by**. How much
+somebody is *entitled* to is statute (21 days rising to 30 after five years, and
+the sick-leave sliding scale) and belongs to `hr_sa`; what has gone is the same
+everywhere and is here.
+
+**Half-days are not modelled.** They are a real thing, and the balance
+arithmetic that follows from them — with the rounding argument every business
+has about it — is a decision nobody has asked for.
 
 ## Documents that expire
 

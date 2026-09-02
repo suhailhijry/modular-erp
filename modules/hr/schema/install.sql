@@ -82,6 +82,23 @@ CREATE TABLE IF NOT EXISTS employee_document (
 CREATE INDEX IF NOT EXISTS employee_document_by_expiry_idx
     ON employee_document (expires_on, employee);
 
+-- When somebody works.
+--
+-- The rules are JSON, for the reason a resource's opening hours are: nothing
+-- queries inside them — a rota screen draws them and a rule is evaluated by the
+-- write side, which reads the aggregate.
+--
+-- **Empty means no pattern recorded**, not "never". A business that has not
+-- written anybody's shifts down has everybody available, because the
+-- alternative would empty every rota the day the module is switched on.
+CREATE TABLE IF NOT EXISTS employee_shift (
+    employee      TEXT PRIMARY KEY REFERENCES employee (id) ON DELETE CASCADE,
+    shifts        JSONB NOT NULL DEFAULT '[]'::jsonb,
+
+    recorded_at   TIMESTAMPTZ NOT NULL,
+    position      BIGINT NOT NULL
+);
+
 -- What somebody is qualified to do, named by the bookable resource each service
 -- is.
 --
@@ -136,3 +153,62 @@ CREATE TABLE IF NOT EXISTS employee_salary (
     recorded_at   TIMESTAMPTZ NOT NULL,
     position      BIGINT NOT NULL
 );
+
+-- What somebody worked, one row per day.
+--
+-- **A date and not an instant**: a shift running to 02:00 belongs to the day it
+-- started, and that is a decision a person makes rather than arithmetic.
+--
+-- Upserted, so re-recording a day is a correction and not a second row — the
+-- log keeps both, and this holds the latest word.
+CREATE TABLE IF NOT EXISTS employee_day (
+    employee      TEXT NOT NULL REFERENCES employee (id) ON DELETE CASCADE,
+    on_date       DATE NOT NULL,
+
+    -- Zero is an absence somebody recorded deliberately, which is a different
+    -- fact from a day with no row at all.
+    minutes       INTEGER NOT NULL CHECK (minutes >= 0),
+    note          TEXT NOT NULL DEFAULT '',
+
+    recorded_at   TIMESTAMPTZ NOT NULL,
+    position      BIGINT NOT NULL,
+
+    PRIMARY KEY (employee, on_date)
+);
+
+-- "What did the branch work last month", which is the timesheet screen and the
+-- input to any hours-based pay.
+CREATE INDEX IF NOT EXISTS employee_day_by_date_idx ON employee_day (on_date, employee);
+
+-- Leave taken or booked.
+--
+-- Keyed by `(employee, from, kind)` so a re-submitted form is one row while two
+-- genuinely different requests starting on the same day for different reasons
+-- are two — a person can be on unpaid leave for a week and have a statutory day
+-- inside it, and a business records both.
+CREATE TABLE IF NOT EXISTS employee_leave (
+    employee      TEXT NOT NULL REFERENCES employee (id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL
+                  CHECK (kind IN ('annual', 'sick', 'unpaid', 'statutory')),
+
+    -- Inclusive at both ends: a person writing "the 3rd to the 5th" means three
+    -- days, and an exclusive end here would be the one place in this codebase
+    -- where a date meant the day before.
+    from_date     DATE NOT NULL,
+    until_date    DATE NOT NULL CHECK (until_date >= from_date),
+    -- Stored rather than derived, because it is what a balance is drawn down by
+    -- and a report recomputing it from two dates would be a second
+    -- implementation of an inclusive range.
+    days          INTEGER NOT NULL CHECK (days > 0),
+
+    why           TEXT NOT NULL DEFAULT '',
+
+    recorded_at   TIMESTAMPTZ NOT NULL,
+    position      BIGINT NOT NULL,
+
+    PRIMARY KEY (employee, from_date, kind)
+);
+
+-- "Who is off this week", which is the question a rota asks every morning.
+CREATE INDEX IF NOT EXISTS employee_leave_by_dates_idx
+    ON employee_leave (from_date, until_date);

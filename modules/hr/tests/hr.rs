@@ -198,6 +198,13 @@ impl Fixture {
             .expect("asks")
     }
 
+    async fn working(&self, employee: &str, span: erp_occupancy::Span) -> bool {
+        let mut conn = self.db.acquire().await.expect("connection");
+        hr::is_working_at(&mut conn, &code(employee), span)
+            .await
+            .expect("asks")
+    }
+
     async fn project(&self) {
         let owned = hr::projections();
         let refs: Vec<&dyn erp_projection::Projection<Group = hr::Hr>> =
@@ -245,7 +252,7 @@ async fn a_claim_travels_up_the_reporting_line() {
     let gained = hr::grant_claim(
         &fixture.db,
         &code("EMP-CLERK"),
-        &claim("sales.apply_discount"),
+        &claim("sales:apply_discount"),
         true,
     )
     .await
@@ -265,7 +272,7 @@ async fn a_claim_travels_up_the_reporting_line() {
 
     for who in ["EMP-CLERK", "EMP-MANAGER", "EMP-OWNER"] {
         assert!(
-            fixture.holds(who, "sales.apply_discount", None).await,
+            fixture.holds(who, "sales:apply_discount", None).await,
             "{who} did not inherit what their team holds"
         );
     }
@@ -275,14 +282,14 @@ async fn a_claim_travels_up_the_reporting_line() {
     hr::grant_claim(
         &fixture.db,
         &code("EMP-OWNER"),
-        &claim("hr.approve_leave"),
+        &claim("hr:approve_leave"),
         true,
     )
     .await
     .expect("granted");
-    assert!(fixture.holds("EMP-OWNER", "hr.approve_leave", None).await);
+    assert!(fixture.holds("EMP-OWNER", "hr:approve_leave", None).await);
     assert!(
-        !fixture.holds("EMP-CLERK", "hr.approve_leave", None).await,
+        !fixture.holds("EMP-CLERK", "hr:approve_leave", None).await,
         "a claim travelled downward, which would make every grant a company-wide one"
     );
 
@@ -304,7 +311,7 @@ async fn a_segregated_claim_travels_nowhere() {
     let gained = hr::grant_claim(
         &fixture.db,
         &code("EMP-CLERK"),
-        &claim("purchases.approve_payment"),
+        &claim("purchases:approve_payment"),
         true,
     )
     .await
@@ -317,18 +324,18 @@ async fn a_segregated_claim_travels_nowhere() {
     );
     assert!(
         fixture
-            .holds("EMP-CLERK", "purchases.approve_payment", None)
+            .holds("EMP-CLERK", "purchases:approve_payment", None)
             .await
     );
     assert!(
         !fixture
-            .holds("EMP-MANAGER", "purchases.approve_payment", None)
+            .holds("EMP-MANAGER", "purchases:approve_payment", None)
             .await,
         "the shared manager now holds both halves of a segregated pair"
     );
     assert!(
         !fixture
-            .holds("EMP-OWNER", "purchases.approve_payment", None)
+            .holds("EMP-OWNER", "purchases:approve_payment", None)
             .await
     );
 
@@ -369,7 +376,7 @@ async fn a_claim_carries_its_branch_up_the_tree() {
     hr::grant_claim(
         &fixture.db,
         &code("EMP-OLAYA"),
-        &at("hr.approve_leave", "BR-OLAYA"),
+        &at("hr:approve_leave", "BR-OLAYA"),
         true,
     )
     .await
@@ -377,7 +384,7 @@ async fn a_claim_carries_its_branch_up_the_tree() {
     hr::grant_claim(
         &fixture.db,
         &code("EMP-MALAZ"),
-        &at("hr.approve_leave", "BR-MALAZ"),
+        &at("hr:approve_leave", "BR-MALAZ"),
         true,
     )
     .await
@@ -386,12 +393,12 @@ async fn a_claim_carries_its_branch_up_the_tree() {
     // The regional manager accumulates both.
     assert!(
         fixture
-            .holds("EMP-REGION", "hr.approve_leave", Some("BR-OLAYA"))
+            .holds("EMP-REGION", "hr:approve_leave", Some("BR-OLAYA"))
             .await
     );
     assert!(
         fixture
-            .holds("EMP-REGION", "hr.approve_leave", Some("BR-MALAZ"))
+            .holds("EMP-REGION", "hr:approve_leave", Some("BR-MALAZ"))
             .await
     );
 
@@ -399,12 +406,12 @@ async fn a_claim_carries_its_branch_up_the_tree() {
     // fails if the union ever collapses the branch away.
     assert!(
         fixture
-            .holds("EMP-OLAYA", "hr.approve_leave", Some("BR-OLAYA"))
+            .holds("EMP-OLAYA", "hr:approve_leave", Some("BR-OLAYA"))
             .await
     );
     assert!(
         !fixture
-            .holds("EMP-OLAYA", "hr.approve_leave", Some("BR-MALAZ"))
+            .holds("EMP-OLAYA", "hr:approve_leave", Some("BR-MALAZ"))
             .await,
         "a branch manager gained authority in a branch they have never seen"
     );
@@ -423,16 +430,16 @@ async fn a_company_wide_claim_answers_everywhere() {
     hr::grant_claim(
         &fixture.db,
         &code("EMP-PAYROLL"),
-        &claim("hr.run_payroll"),
+        &claim("hr:run_payroll"),
         true,
     )
     .await
     .expect("granted");
 
-    assert!(fixture.holds("EMP-PAYROLL", "hr.run_payroll", None).await);
+    assert!(fixture.holds("EMP-PAYROLL", "hr:run_payroll", None).await);
     assert!(
         fixture
-            .holds("EMP-PAYROLL", "hr.run_payroll", Some("BR-OLAYA"))
+            .holds("EMP-PAYROLL", "hr:run_payroll", Some("BR-OLAYA"))
             .await,
         "payroll is company-wide by nature and was refused at a branch"
     );
@@ -497,17 +504,17 @@ async fn moving_somebody_moves_what_their_team_holds() {
     hr::grant_claim(
         &fixture.db,
         &code("EMP-CLERK"),
-        &claim("sales.apply_discount"),
+        &claim("sales:apply_discount"),
         true,
     )
     .await
     .expect("granted");
     assert!(
         fixture
-            .holds("EMP-SALES", "sales.apply_discount", None)
+            .holds("EMP-SALES", "sales:apply_discount", None)
             .await
     );
-    assert!(!fixture.holds("EMP-OPS", "sales.apply_discount", None).await);
+    assert!(!fixture.holds("EMP-OPS", "sales:apply_discount", None).await);
 
     hr::reparent(
         &fixture.db,
@@ -521,19 +528,19 @@ async fn moving_somebody_moves_what_their_team_holds() {
     .expect("moved");
 
     assert!(
-        fixture.holds("EMP-OPS", "sales.apply_discount", None).await,
+        fixture.holds("EMP-OPS", "sales:apply_discount", None).await,
         "the new manager did not gain what their new report holds"
     );
     assert!(
         !fixture
-            .holds("EMP-SALES", "sales.apply_discount", None)
+            .holds("EMP-SALES", "sales:apply_discount", None)
             .await,
         "the old manager kept authority over somebody who left their team"
     );
     // The owner is above both, so nothing changes for them.
     assert!(
         fixture
-            .holds("EMP-OWNER", "sales.apply_discount", None)
+            .holds("EMP-OWNER", "sales:apply_discount", None)
             .await
     );
 
@@ -548,14 +555,14 @@ async fn a_leaver_keeps_their_record_and_loses_their_claims() {
     hr::grant_claim(
         &fixture.db,
         &code("EMP-CLERK"),
-        &claim("sales.apply_discount"),
+        &claim("sales:apply_discount"),
         true,
     )
     .await
     .expect("granted");
     assert!(
         fixture
-            .holds("EMP-OWNER", "sales.apply_discount", None)
+            .holds("EMP-OWNER", "sales:apply_discount", None)
             .await
     );
 
@@ -571,13 +578,13 @@ async fn a_leaver_keeps_their_record_and_loses_their_claims() {
 
     assert!(
         !fixture
-            .holds("EMP-CLERK", "sales.apply_discount", None)
+            .holds("EMP-CLERK", "sales:apply_discount", None)
             .await,
         "somebody who left kept their authority"
     );
     assert!(
         !fixture
-            .holds("EMP-OWNER", "sales.apply_discount", None)
+            .holds("EMP-OWNER", "sales:apply_discount", None)
             .await,
         "a manager kept authority inherited from somebody who has gone"
     );
@@ -604,7 +611,7 @@ async fn an_inherited_claim_says_who_it_came_from() {
     hr::grant_claim(
         &fixture.db,
         &code("EMP-CLERK"),
-        &claim("sales.apply_discount"),
+        &claim("sales:apply_discount"),
         true,
     )
     .await
@@ -612,7 +619,7 @@ async fn an_inherited_claim_says_who_it_came_from() {
     hr::grant_claim(
         &fixture.db,
         &code("EMP-MANAGER"),
-        &claim("hr.approve_leave"),
+        &claim("hr:approve_leave"),
         true,
     )
     .await
@@ -621,7 +628,7 @@ async fn an_inherited_claim_says_who_it_came_from() {
     let held = fixture.effective("EMP-MANAGER").await;
     let discount = held
         .iter()
-        .find(|h| h.claim.name == "sales.apply_discount")
+        .find(|h| h.claim.name == "sales:apply_discount")
         .expect("inherited the discount");
     assert_eq!(
         discount.source, "EMP-CLERK",
@@ -630,7 +637,7 @@ async fn an_inherited_claim_says_who_it_came_from() {
 
     let own = held
         .iter()
-        .find(|h| h.claim.name == "hr.approve_leave")
+        .find(|h| h.claim.name == "hr:approve_leave")
         .expect("holds their own");
     assert_eq!(
         own.source, "EMP-MANAGER",
@@ -649,7 +656,7 @@ async fn revoking_a_claim_bites_immediately_and_says_who_lost_it() {
     hr::grant_claim(
         &fixture.db,
         &code("EMP-CLERK"),
-        &claim("sales.apply_discount"),
+        &claim("sales:apply_discount"),
         true,
     )
     .await
@@ -658,7 +665,7 @@ async fn revoking_a_claim_bites_immediately_and_says_who_lost_it() {
     let lost = hr::revoke_claim(
         &fixture.db,
         &code("EMP-CLERK"),
-        &claim("sales.apply_discount"),
+        &claim("sales:apply_discount"),
     )
     .await
     .expect("revoked");
@@ -673,7 +680,7 @@ async fn revoking_a_claim_bites_immediately_and_says_who_lost_it() {
     );
     for who in ["EMP-CLERK", "EMP-MANAGER", "EMP-OWNER"] {
         assert!(
-            !fixture.holds(who, "sales.apply_discount", None).await,
+            !fixture.holds(who, "sales:apply_discount", None).await,
             "{who} kept a revoked claim"
         );
     }
@@ -1004,6 +1011,411 @@ async fn the_who_can_do_this_list_matches_what_assign_would_allow() {
             "{id} was offered by the screen and would be refused by the rota"
         );
     }
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// 9a — shifts
+// ---------------------------------------------------------------------------
+
+fn weekdays(days: &[u8], opens: u16, closes: u16) -> erp_recurrence::Availability {
+    erp_recurrence::Availability::from_parts(&[], days, &[], opens, closes, None, None)
+        .expect("a valid rule")
+}
+
+fn span(from: &str, until: &str) -> erp_occupancy::Span {
+    erp_occupancy::Span::new(
+        format!("{from}:00Z").parse().expect("an instant"),
+        format!("{until}:00Z").parse().expect("an instant"),
+    )
+    .expect("a valid span")
+}
+
+/// **A shift says when somebody is scheduled, and refuses nothing.**
+///
+/// People cover, swap and stay late. A system telling a manager she cannot ask
+/// somebody to stay is not a rule it gets to make — unlike a lapsed iqama,
+/// where the law does.
+#[tokio::test]
+async fn a_shift_says_when_somebody_is_in_and_stops_nothing() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+
+    // Nothing recorded: available whenever asked, because a business that has
+    // not written anybody's shifts down must not find its rota empty.
+    assert!(
+        fixture
+            .working("EMP-1", span("2026-05-04T06:00", "2026-05-04T07:00"))
+            .await,
+        "somebody with no pattern recorded was reported as not working"
+    );
+
+    // Monday to Friday, 09:00 to 17:00 local — and local is Riyadh, +03:00, so
+    // 09:00 there is 06:00 UTC. The offset is the tenant's clock and it is why
+    // these two numbers differ.
+    hr::record_shifts(
+        &fixture.db,
+        &code("EMP-1"),
+        &[weekdays(&[1, 2, 3, 4, 5], 9 * 60, 17 * 60)],
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    // 2026-05-04 is a Monday.
+    assert!(
+        fixture
+            .working("EMP-1", span("2026-05-04T06:00", "2026-05-04T07:00"))
+            .await,
+        "a Monday morning was not inside a Monday-to-Friday shift"
+    );
+    assert!(
+        !fixture
+            .working("EMP-1", span("2026-05-04T20:00", "2026-05-04T21:00"))
+            .await,
+        "eleven at night was inside a nine-to-five"
+    );
+    // 2026-05-09 is a Saturday.
+    assert!(
+        !fixture
+            .working("EMP-1", span("2026-05-09T06:00", "2026-05-09T07:00"))
+            .await,
+        "a Saturday was inside a Monday-to-Friday shift"
+    );
+
+    // **And none of that stops them being rostered.** `may_work_on` is what
+    // refuses, and it does not consult the pattern.
+    let today = chrono::Utc::now().date_naive();
+    assert!(
+        fixture.may_work("EMP-1", &today.to_string()).await,
+        "a shift pattern was allowed to refuse somebody"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// The same pattern again writes nothing, and the read says whether one is
+/// recorded at all — which is what stops `[]` being read as "never works".
+#[tokio::test]
+async fn a_rota_says_whether_a_pattern_was_recorded() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let none = hr::shifts(&mut conn, "EMP-1").await.expect("reads");
+    drop(conn);
+    assert!(none.is_empty(), "a pattern appeared from nowhere");
+
+    let pattern = [weekdays(&[6, 7], 10 * 60, 14 * 60)];
+    hr::record_shifts(
+        &fixture.db,
+        &code("EMP-1"),
+        &pattern,
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    let again = hr::record_shifts(
+        &fixture.db,
+        &code("EMP-1"),
+        &pattern,
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a retry is not an error");
+    assert!(again.at.is_none(), "the same pattern wrote a second event");
+
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let stored = hr::shifts(&mut conn, "EMP-1").await.expect("reads");
+    drop(conn);
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].weekdays(),
+        vec![6, 7],
+        "the rule came back saying something else"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The rota and the diary read one clock.** `Calendar` moved to
+/// `erp-recurrence` with the rule, and its key is `tenant.calendar` rather than
+/// any one module's — a business has one timezone.
+#[tokio::test]
+async fn the_rota_reads_the_tenant_clock_and_not_a_module_s() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+    hr::record_shifts(
+        &fixture.db,
+        &code("EMP-1"),
+        &[weekdays(&[1, 2, 3, 4, 5], 9 * 60, 17 * 60)],
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    // Riyadh by default: 09:00 local is 06:00 UTC.
+    assert!(
+        fixture
+            .working("EMP-1", span("2026-05-04T06:00", "2026-05-04T07:00"))
+            .await
+    );
+
+    // Move the business to UTC and the same instant is 06:00 local, before the
+    // shift opens.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    erp_eventlog::configuration::set(
+        &mut conn,
+        erp_recurrence::Calendar::KEY,
+        &erp_recurrence::Calendar::try_from(0).expect("UTC is an offset"),
+        None,
+    )
+    .await
+    .expect("stores");
+    drop(conn);
+
+    assert!(
+        !fixture
+            .working("EMP-1", span("2026-05-04T06:00", "2026-05-04T07:00"))
+            .await,
+        "the rota did not read the tenant's clock"
+    );
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// 9a — attendance and leave
+// ---------------------------------------------------------------------------
+
+fn date(s: &str) -> chrono::NaiveDate {
+    s.parse().expect("a valid date")
+}
+
+/// **A day is recorded whole, and recording it again corrects it.**
+///
+/// Not a clock-in and a clock-out: a half-recorded day is somebody who forgot,
+/// somebody who left early, or a device that lost power, and nothing can tell
+/// which.
+#[tokio::test]
+async fn a_day_is_recorded_whole_and_corrected_in_place() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+
+    hr::record_day(
+        &fixture.db,
+        &code("EMP-1"),
+        date("2026-05-04"),
+        8 * 60,
+        "",
+        on("2026-05-04"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    // The same day, the same minutes: nothing happens.
+    let again = hr::record_day(
+        &fixture.db,
+        &code("EMP-1"),
+        date("2026-05-04"),
+        8 * 60,
+        "",
+        on("2026-05-04"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a retry is not an error");
+    assert!(again.at.is_none(), "the same day wrote a second event");
+
+    // The same day, different minutes: a correction, and the timesheet takes
+    // the latest word rather than showing two rows.
+    hr::record_day(
+        &fixture.db,
+        &code("EMP-1"),
+        date("2026-05-04"),
+        9 * 60,
+        "بقيت ساعة إضافية",
+        on("2026-05-05"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("corrected");
+
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let sheet = hr::worked(&mut conn, "EMP-1", date("2026-05-01"), date("2026-05-31"))
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(sheet.len(), 1, "a correction left the old day behind");
+    assert_eq!(sheet[0].minutes, 9 * 60);
+    assert_eq!(sheet[0].note, "بقيت ساعة إضافية");
+
+    fixture.cleanup().await;
+}
+
+/// **Zero minutes is a fact, and no record at all is a different one.**
+///
+/// A business that marks somebody absent has said something; a day nobody
+/// touched has not.
+#[tokio::test]
+async fn a_recorded_absence_is_not_the_same_as_no_record() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+
+    hr::record_day(
+        &fixture.db,
+        &code("EMP-1"),
+        date("2026-05-04"),
+        0,
+        "لم تحضر",
+        on("2026-05-04"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let sheet = hr::worked(&mut conn, "EMP-1", date("2026-05-01"), date("2026-05-31"))
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(
+        sheet.len(),
+        1,
+        "a deliberate absence was indistinguishable from silence"
+    );
+    assert_eq!(sheet[0].minutes, 0);
+
+    fixture.cleanup().await;
+}
+
+/// A timesheet that says twenty-six hours is a typo, and one that says six
+/// hundred is a broken import. Both are better refused than paid.
+#[tokio::test]
+async fn a_day_longer_than_a_day_is_refused() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+
+    let error = hr::record_day(
+        &fixture.db,
+        &code("EMP-1"),
+        date("2026-05-04"),
+        26 * 60,
+        "",
+        on("2026-05-04"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("twenty-six hours was accepted");
+    assert!(format!("{error:?}").contains("NotADayOfWork"), "{error:?}");
+
+    fixture.cleanup().await;
+}
+
+/// **Leave is inclusive at both ends**, so the 3rd to the 5th is three days —
+/// and the count is stored rather than recomputed, because an inclusive range
+/// is exactly the arithmetic somebody gets wrong by one.
+#[tokio::test]
+async fn leave_counts_both_ends_and_is_found_by_any_day_it_covers() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+
+    hr::record_leave(
+        &fixture.db,
+        &code("EMP-1"),
+        hr::Leave::Annual,
+        date("2026-06-03"),
+        date("2026-06-05"),
+        "إجازة",
+        on("2026-05-20"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    // A fortnight that starts in March and runs into April.
+    hr::record_leave(
+        &fixture.db,
+        &code("EMP-1"),
+        hr::Leave::Unpaid,
+        date("2026-03-25"),
+        date("2026-04-07"),
+        "بدون راتب",
+        on("2026-03-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("recorded");
+
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    let june = hr::leave(&mut conn, "EMP-1", date("2026-06-01"), date("2026-06-30"))
+        .await
+        .expect("reads");
+    assert_eq!(june.len(), 1);
+    assert_eq!(june[0].days, 3, "the 3rd to the 5th is three days");
+
+    // **Touching, not starting in.** April has no leave beginning in it, and
+    // somebody is still away for the first week.
+    let april = hr::leave(&mut conn, "EMP-1", date("2026-04-01"), date("2026-04-30"))
+        .await
+        .expect("reads");
+    assert_eq!(
+        april.len(),
+        1,
+        "a rota for April showed somebody who is on a beach"
+    );
+    assert_eq!(april[0].kind, "unpaid");
+    assert_eq!(april[0].days, 14);
+
+    // And the balance half: what has gone, per kind.
+    let taken = hr::leave_taken(&mut conn, "EMP-1", date("2026-01-01"), date("2026-12-31"))
+        .await
+        .expect("reads");
+    drop(conn);
+    assert_eq!(
+        taken,
+        vec![("annual".to_owned(), 3), ("unpaid".to_owned(), 14)],
+        "the days taken per kind are what a balance is drawn down by"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Leave that ends before it starts is refused rather than stored as a
+/// negative count.
+#[tokio::test]
+async fn backwards_leave_is_refused() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+
+    let error = hr::record_leave(
+        &fixture.db,
+        &code("EMP-1"),
+        hr::Leave::Annual,
+        date("2026-06-05"),
+        date("2026-06-03"),
+        "",
+        on("2026-05-20"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("backwards leave was accepted");
+    assert!(format!("{error:?}").contains("BackwardsLeave"), "{error:?}");
 
     fixture.cleanup().await;
 }

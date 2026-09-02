@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS payslip (
     name          TEXT NOT NULL,
 
     basic         BIGINT NOT NULL,
+    -- What they earned on work they performed, at the rate on their salary.
+    -- **Included in `gross`**: statutory contributions and end-of-service are
+    -- computed from what somebody earned, not from the predictable part of it.
+    commission    BIGINT NOT NULL DEFAULT 0,
+    -- What the commission was earned on, so the payslip can justify it. "Five
+    -- per cent of 24,000" is a figure somebody will query.
+    performed     BIGINT NOT NULL DEFAULT 0,
     gross         BIGINT NOT NULL,
     deductions    BIGINT NOT NULL,
     net           BIGINT NOT NULL,

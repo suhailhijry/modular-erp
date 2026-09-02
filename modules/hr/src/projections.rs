@@ -107,23 +107,24 @@ impl Projection for EmployeeList {
             EmployeeEvent::Transferred { branch, .. } => {
                 transferred(ctx, conn, id, branch.as_ref()).await?;
             }
-            EmployeeEvent::Left { why, at } => {
-                sqlx::query(
-                    "UPDATE employee SET left_at = $2, left_why = $3,
-                            recorded_at = $4, position = $5
-                      WHERE id = $1",
-                )
-                .bind(id)
-                .bind(at)
-                .bind(&why)
-                .bind(ctx.event_time())
-                .bind(ctx.position().get())
-                .execute(&mut *conn)
-                .await?;
-            }
+            EmployeeEvent::Left { why, at } => left(ctx, conn, id, &why, at).await?,
+            EmployeeEvent::Rehired { .. } => rehired(ctx, conn, id).await?,
             EmployeeEvent::Contracted { salary, .. } => {
                 contracted(ctx, conn, id, &salary).await?;
             }
+            EmployeeEvent::Rostered { shifts, .. } => {
+                rostered(ctx, conn, id, &shifts).await?;
+            }
+            EmployeeEvent::Attended {
+                on, minutes, note, ..
+            } => attended(ctx, conn, id, on, minutes, &note).await?,
+            EmployeeEvent::Absent {
+                kind,
+                from,
+                until,
+                why,
+                ..
+            } => absent(ctx, conn, id, kind, (from, until), &why).await?,
             EmployeeEvent::Skilled { skills, .. } => {
                 skilled(ctx, conn, id, &skills).await?;
             }
@@ -134,18 +135,6 @@ impl Projection for EmployeeList {
                 ..
             } => {
                 recorded(ctx, conn, id, kind, &number, expires_on).await?;
-            }
-            EmployeeEvent::Rehired { .. } => {
-                sqlx::query(
-                    "UPDATE employee SET left_at = NULL, left_why = NULL,
-                            recorded_at = $2, position = $3
-                      WHERE id = $1",
-                )
-                .bind(id)
-                .bind(ctx.event_time())
-                .bind(ctx.position().get())
-                .execute(&mut *conn)
-                .await?;
             }
         }
         Ok(())
@@ -237,6 +226,140 @@ async fn contracted(
     .bind(salary.basic.currency().to_string())
     .bind(serde_json::to_value(&salary.allowances).unwrap_or_default())
     .bind(serde_json::to_value(&salary.deductions).unwrap_or_default())
+    .bind(ctx.event_time())
+    .bind(ctx.position().get())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// When somebody works.
+///
+/// The rules go in as JSON for the reason a resource's opening hours do:
+/// nothing queries inside them. A rota screen draws them, and the rule that
+/// *decides* is evaluated on the write side from the aggregate.
+async fn rostered(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    shifts: &[erp_recurrence::Availability],
+) -> Result<(), ProjectionError> {
+    sqlx::query(
+        "INSERT INTO employee_shift (employee, shifts, recorded_at, position)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (employee) DO UPDATE
+             SET shifts = EXCLUDED.shifts,
+                 recorded_at = EXCLUDED.recorded_at,
+                 position = EXCLUDED.position",
+    )
+    .bind(id)
+    .bind(serde_json::to_value(shifts).unwrap_or_default())
+    .bind(ctx.event_time())
+    .bind(ctx.position().get())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Somebody left. **The record stays** — they are on last year's payroll and
+/// whatever they approved.
+async fn left(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    why: &str,
+    at: Timestamp,
+) -> Result<(), ProjectionError> {
+    sqlx::query(
+        "UPDATE employee SET left_at = $2, left_why = $3, recorded_at = $4, position = $5
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(at)
+    .bind(why)
+    .bind(ctx.event_time())
+    .bind(ctx.position().get())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// They came back.
+async fn rehired(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+) -> Result<(), ProjectionError> {
+    sqlx::query(
+        "UPDATE employee SET left_at = NULL, left_why = NULL, recorded_at = $2, position = $3
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(ctx.event_time())
+    .bind(ctx.position().get())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// A day somebody worked.
+async fn attended(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    on: chrono::NaiveDate,
+    minutes: u16,
+    note: &str,
+) -> Result<(), ProjectionError> {
+    sqlx::query(
+        "INSERT INTO employee_day (employee, on_date, minutes, note, recorded_at, position)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (employee, on_date) DO UPDATE
+             SET minutes = EXCLUDED.minutes, note = EXCLUDED.note,
+                 recorded_at = EXCLUDED.recorded_at, position = EXCLUDED.position",
+    )
+    .bind(id)
+    .bind(on)
+    .bind(i32::from(minutes))
+    .bind(note)
+    .bind(ctx.event_time())
+    .bind(ctx.position().get())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Leave taken, or booked.
+///
+/// `days` is stored because it is what a balance is drawn down by, and a report
+/// recomputing it from two dates would be a second implementation of an
+/// inclusive range — which is exactly the arithmetic somebody gets wrong by one.
+async fn absent(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    kind: crate::Leave,
+    dates: (chrono::NaiveDate, chrono::NaiveDate),
+    why: &str,
+) -> Result<(), ProjectionError> {
+    let (from, until) = dates;
+    let days = (until - from).num_days() + 1;
+
+    sqlx::query(
+        "INSERT INTO employee_leave
+             (employee, kind, from_date, until_date, days, why, recorded_at, position)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (employee, from_date, kind) DO UPDATE
+             SET until_date = EXCLUDED.until_date, days = EXCLUDED.days,
+                 why = EXCLUDED.why, recorded_at = EXCLUDED.recorded_at,
+                 position = EXCLUDED.position",
+    )
+    .bind(id)
+    .bind(kind.as_str())
+    .bind(from)
+    .bind(until)
+    .bind(i32::try_from(days).unwrap_or(i32::MAX))
+    .bind(why)
     .bind(ctx.event_time())
     .bind(ctx.position().get())
     .execute(&mut *conn)
@@ -622,6 +745,142 @@ pub async fn who_can_perform(
     .await?;
 
     Ok(rows.into_iter().map(|r| summarise!(r)).collect())
+}
+
+/// When somebody works, for a rota screen.
+///
+/// **Empty means no pattern recorded**, not "never" — the same rule the write
+/// side applies in `Employee::is_working_at`, and the reason the HTTP shape
+/// answers `rostered` alongside the list.
+pub async fn shifts(
+    conn: &mut PgConnection,
+    employee: &str,
+) -> Result<Vec<erp_recurrence::Availability>, sqlx::Error> {
+    let row: Option<serde_json::Value> = sqlx::query_scalar!(
+        r#"SELECT shifts as "shifts!" FROM proj_hr.employee_shift WHERE employee = $1"#,
+        employee,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    // A rule that will not decode is a rule this build cannot read. Empty
+    // rather than a failure, and the same call `booking` makes about a
+    // resource's timetable — except that here empty means *no restriction*, so
+    // the failure mode is a rota that shows everybody rather than nobody.
+    Ok(row
+        .map(|v| serde_json::from_value(v).unwrap_or_default())
+        .unwrap_or_default())
+}
+
+/// A day somebody worked, as a timesheet shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkedDay {
+    pub on: chrono::NaiveDate,
+    pub minutes: i32,
+    pub note: String,
+}
+
+/// Leave taken or booked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaveTaken {
+    /// `annual`, `sick`, `unpaid` or `statutory`.
+    pub kind: String,
+    pub from: chrono::NaiveDate,
+    /// **Inclusive**, so the 3rd to the 5th is three days.
+    pub until: chrono::NaiveDate,
+    pub days: i32,
+    pub why: String,
+}
+
+/// One person's timesheet over a window, oldest first.
+pub async fn worked(
+    conn: &mut PgConnection,
+    employee: &str,
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
+) -> Result<Vec<WorkedDay>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT on_date as "on!", minutes as "minutes!", note as "note!"
+             FROM proj_hr.employee_day
+            WHERE employee = $1 AND on_date BETWEEN $2 AND $3
+            ORDER BY on_date"#,
+        employee,
+        from,
+        until,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| WorkedDay {
+            on: r.on,
+            minutes: r.minutes,
+            note: r.note,
+        })
+        .collect())
+}
+
+/// One person's leave that touches a window.
+///
+/// **Touches, not starts in.** A fortnight beginning in March is leave in April
+/// too, and a report that only found the ones starting inside the window would
+/// show a rota with somebody in it who is on a beach.
+pub async fn leave(
+    conn: &mut PgConnection,
+    employee: &str,
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
+) -> Result<Vec<LeaveTaken>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT kind as "kind!", from_date as "from!", until_date as "until!",
+                  days as "days!", why as "why!"
+             FROM proj_hr.employee_leave
+            WHERE employee = $1 AND from_date <= $3 AND until_date >= $2
+            ORDER BY from_date, kind"#,
+        employee,
+        from,
+        until,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| LeaveTaken {
+            kind: r.kind,
+            from: r.from,
+            until: r.until,
+            days: r.days,
+            why: r.why,
+        })
+        .collect())
+}
+
+/// How many days of each kind somebody has taken in a window.
+///
+/// **What a balance is drawn down by.** How much they are *entitled* to is
+/// statute and belongs to the country module — this says what has gone, which
+/// is the half that is the same everywhere.
+pub async fn leave_taken(
+    conn: &mut PgConnection,
+    employee: &str,
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
+) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT kind as "kind!", sum(days)::BIGINT as "days!"
+             FROM proj_hr.employee_leave
+            WHERE employee = $1 AND from_date <= $3 AND until_date >= $2
+            GROUP BY kind ORDER BY kind"#,
+        employee,
+        from,
+        until,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows.into_iter().map(|r| (r.kind, r.days)).collect())
 }
 
 /// A cursor over `(name, id)`, ascending — a staff list reads alphabetically,
