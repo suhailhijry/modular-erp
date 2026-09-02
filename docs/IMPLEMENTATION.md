@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 994 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,007 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -34,8 +34,9 @@ to the log rather than reading four groups, and reconciles to the books; and
 Phase 11a/b/c/e — short links; `modules/messaging`, with templates that fetch
 their own data, audiences resolved rather than frozen and SMS billed by the
 segment; `modules/files`, where a document's record is a key and a checksum rather
-than a URL; and 11d — every list is a spreadsheet on `Accept: text/csv`, and an
-import takes the good rows and reports the bad ones.
+than a URL; 11d — every list is a spreadsheet on `Accept: text/csv`, and an
+import takes the good rows and reports the bad ones; and Phase 12c/12d — API
+keys in pairs, and a version a client can be refused on by name.
 
 **Phase 9 is complete except two items, and both are blocked on something
 outside the repository**: the WPS file needs a specification this build cannot
@@ -79,10 +80,11 @@ a refusal with a `sales.already_matched` code.
 re-pointing a document at a different customer changes what a report says about
 that customer. If a clerk should be doing the backlog, it wants `PostEntries`.
 
-### 3 · Two flaky tests I could not reproduce
+### 3 · Four flaky tests I could not reproduce
 
-Both in `erp-control`/`erp-eventlog`, both around leases and killed backends,
-both passing in isolation and failing once each under a full-workspace run:
+All four pass in isolation and each failed once under a full-workspace run. The
+first two are around leases and killed backends; the second two arrived later
+and look like load rather than a shared cause:
 
 - `erp-eventlog::crash a_crash_during_a_claim_leaves_the_effect_owed` — failed
   once, then passed 5/5 in isolation, 3/3 under `-j 16`, and in several later
@@ -92,9 +94,18 @@ both passing in isolation and failing once each under a full-workspace run:
   under a full run and passed immediately in isolation. Same family: a lease
   whose timing assumption is tighter than a loaded machine honours.
 
-Left as-is rather than papered over with a retry. If either recurs, the suspect
-in both is a wait that assumes the database has finished something it was only
-told to start.
+- `erp-worker::modules an_invitation_is_promised_by_the_control_plane_and_delivered_by_the_worker`
+  — failed once on the run that added API keys, passed immediately in isolation
+  and on the next full run.
+- `erp-demo::demo every_module_is_enabled_and_answering` — the same, on the same
+  run. The demo now builds sixteen modules' worth of data in one test, which is
+  the slowest thing in the suite.
+
+Left as-is rather than papered over with a retry. If any recurs, the suspect in
+the first two is a wait that assumes the database has finished something it was
+only told to start; in the second two it is more likely that a loaded machine
+took longer than a timeout allows, and the honest fix is a longer timeout with
+the reason written down rather than a retry that hides it.
 
 ### 4 · Phase 9 decisions I took without you
 
@@ -395,6 +406,40 @@ obvious one — it is a job that composes three things that already work.
 **The synchronous half is done and is the useful half today**: `Accept:
 text/csv` on any list, as one layer, so a list added tomorrow is exportable
 without anybody remembering to make it so.
+
+### 21 · An API key's secret is digested, not Argon2
+
+The plan says "the same posture as a password". A key is shown once and stored
+hashed, which is the posture; what it is **not** is Argon2, and the difference is
+deliberate.
+
+A password is short and chosen by a person, so the slow hash is what stands
+between a stolen dump and a dictionary. A key is 256 bits from the OS: there is
+no dictionary, and Argon2 would put roughly 50ms on **every request** an
+integration makes — which for the thing most likely to be called in a loop is
+the wrong end of the trade.
+
+This is the argument `0004_authentication.sql` already makes for session tokens,
+in the same schema: *"a token is 256 bits of entropy, so unlike a password there
+is nothing to brute-force and no need for a slow hash; the point is only that a
+leaked database dump cannot be replayed."*
+
+The comparison is constant-time regardless.
+
+### 22 · A key acts as a machine identity, not as the person who made it
+
+Issuing a key creates an identity with no password and joins it to the tenant.
+The alternative — the key carries its creator's identity — has two failures a
+business meets: the key dies when they leave, and everything it did reads in the
+audit trail as theirs.
+
+`created_by` records who asked, which is a different and equally necessary fact.
+
+The pleasant consequence is that a key needs no new code downstream. Membership,
+roles, `enter`, the audit trail and every module's `metadata(&tenant)` work
+unchanged — and a key for one tenant is nothing on another's subdomain because
+its identity is a member of exactly one, which is a check nobody had to remember
+to write.
 
 ---
 
@@ -2080,16 +2125,20 @@ being verified is somebody else's command executed under your authority.
 
 ### 12c · API keys, in pairs
 
-- [ ] A **public key** identifies and is safe in a mobile app or a browser. A
+- [x] A **public key** identifies and is safe in a mobile app or a browser. A
       **private key** authenticates, is shown once, and is stored hashed — the
-      same posture as a password
-- [ ] Scopes per key, so an integration that reads bookings cannot post journal
-      entries
-- [ ] Rotation with an overlap window, because a key that cannot be rotated
-      without downtime is a key nobody rotates
-- [ ] Rate limits per key, and this is the primitive
+      same posture as a password. **Digested rather than Argon2**, for the
+      reason `session` already gives about its own tokens; see review §21
+- [x] Scopes per key, so an integration that reads bookings cannot post journal
+      entries — and they **narrow only**, so a key given the owner's role by
+      mistake still cannot
+- [x] Rotation with an overlap window, because a key that cannot be rotated
+      without downtime is a key nobody rotates — seven days by default, and zero
+      is legitimate for a key that is known to have leaked
+- [x] Rate limits per key, and this is the primitive
       [item 5](#5-signup-is-public-unlimited-and-creates-a-database) has been
-      waiting for
+      waiting for — the same `erp_web::rate::Limiter` the public surface uses,
+      keyed by the public key
 
 ### 12d · API version compatibility
 
@@ -2097,13 +2146,19 @@ Not app version gating. A client — mobile, web, or somebody else's system — 
 **compiled against a stated API version**, and the server decides whether it can
 still be served.
 
-- [ ] A request declares the version it was built against. The server publishes
+- [x] A request declares the version it was built against. The server publishes
       the range it supports and refuses outside it, naming the version to build
       against — the same shape as `MIGRATION_FLOOR` refusing an old tenant, and
-      the same reasoning as D17's two majors
-- [ ] The refusal is a typed error a client can act on, not a 500
-- [ ] A version inside the range but behind is served, and says so in a header.
-      Deprecation that arrives as a surprise is an outage
+      the same reasoning as D17's two majors. `x-api-version` in,
+      `x-api-current` and `x-api-minimum` out, on **every** response including
+      refusals
+- [x] The refusal is a typed error a client can act on, not a 500 —
+      `request.api_version_too_old` / `_too_new`, with the numbers in `args`
+- [x] A version inside the range but behind is served, and says so in a header.
+      Deprecation that arrives as a surprise is an outage. **There has only ever
+      been one contract**, so the mechanism is unit-tested at versions this build
+      does not have rather than only at `1..=1` — a range nobody has exercised
+      is a range that does not work
 
 ### 12e · Signing in without a password
 

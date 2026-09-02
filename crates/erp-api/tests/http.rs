@@ -1840,6 +1840,12 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Importing a spreadsheet of customers creates records in bulk under ids
     // the file chose. Structural, so the owner's.
     ("import_customers", &["owner"]),
+    // API keys are a way into the tenant. Issuing, rotating and revoking one is
+    // changing who has access, which is the same act as adding a member.
+    ("list_keys", &["owner"]),
+    ("issue_key", &["owner"]),
+    ("rotate_key", &["owner"]),
+    ("revoke_key", &["owner"]),
     ("upload_file", &["owner", "accountant", "clerk"]),
     ("remove_file", &["owner", "accountant", "clerk"]),
     // The org chart. Reading it is ordinary — a staff list is on the wall in
@@ -2053,8 +2059,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        174,
-        "expected a hundred and seventy-four role-scoped operations"
+        178,
+        "expected a hundred and seventy-eight role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -7338,4 +7344,333 @@ async fn an_import_takes_the_good_rows_and_reports_the_bad_ones() {
         .await
         .expect("counts");
     assert_eq!(events, 5, "a re-upload duplicated rows");
+}
+
+/// **A key that reads bookings cannot post journal entries.**
+///
+/// Phase 12c's whole point in one test: the key is issued with a role that
+/// would permit posting and a scope that does not, and the scope wins. Then it
+/// is rotated with an overlap — both halves work — and revoked, and the old one
+/// stops.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one key's whole life — issued, scoped, rotated, revoked — and \
+              splitting it would mean four fixtures for one story"
+)]
+async fn an_api_key_is_narrowed_by_its_scopes_and_survives_a_rotation() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, ledger::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // An owner's role, and a scope that reads customers and nothing else.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/keys")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "Booking widget",
+                        "scopes": ["crm:read"],
+                        "role": "owner"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let key_id = body["id"].as_str().expect("an id").to_owned();
+    let secret = body["secret"].as_str().expect("a secret").to_owned();
+    let public = body["public_key"]
+        .as_str()
+        .expect("a public key")
+        .to_owned();
+
+    assert!(secret.starts_with("sk_"), "{secret}");
+    assert!(public.starts_with("pk_"), "{public}");
+    assert!(
+        secret.contains(public.trim_start_matches("pk_")),
+        "the private key does not name its public half, so it cannot be looked up"
+    );
+
+    // **The scope it has.**
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/crm/customers")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // **The scope it does not**, despite the owner's role.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/ledger/accounts")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "keys.out_of_scope");
+
+    // A route outside any module needs a wildcard, and this key has none.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/members")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // **Rotation, with an overlap.** Both keys work.
+    let (status, body, _) = fixture
+        .send(
+            Request::post(format!("/v1/keys/{key_id}/rotation"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({}).to_string()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let replacement = body["secret"].as_str().expect("a secret").to_owned();
+    assert_eq!(body["rotated_from"], key_id);
+    assert_eq!(
+        body["scopes"],
+        serde_json::json!(["crm:read"]),
+        "a rotation must not change what a key may do"
+    );
+
+    for (which, key) in [("the old one", &secret), ("the new one", &replacement)] {
+        let (status, body, _) = fixture
+            .send(
+                Request::get("/v1/crm/customers")
+                    .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{which} stopped working: {body}");
+    }
+
+    // And the old one carries an expiry now, which is the overlap.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/keys")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let old = body
+        .as_array()
+        .and_then(|keys| keys.iter().find(|k| k["id"] == key_id.as_str()))
+        .expect("the old key is still listed");
+    assert!(old["expires_at"].is_string(), "{old}");
+    assert!(old["last_used_at"].is_string(), "it was used: {old}");
+
+    // **Revoked, and it stops.**
+    let (status, body, _) = fixture
+        .send(
+            Request::delete(format!("/v1/keys/{key_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "why": "rotated" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/crm/customers")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    // The replacement is untouched.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/crm/customers")
+                .header(header::AUTHORIZATION, format!("Bearer {replacement}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Revoking again is `204`: the caller wanted it off and it is off.
+    let (status, _, _) = fixture
+        .send(
+            Request::delete(format!("/v1/keys/{key_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "why": "again" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+/// **A key for one tenant is nothing on another's subdomain.**
+///
+/// The check is membership, not a comparison anybody had to remember to write:
+/// the key's machine identity is a member of exactly one tenant, so `enter`
+/// refuses everywhere else.
+#[tokio::test]
+async fn a_key_does_not_work_on_another_tenants_subdomain() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let acme = fixture.provision("acme").await;
+    let other = fixture.provision("other").await;
+    fixture.join(user, acme).await;
+    fixture.join(user, other).await;
+    fixture.enable_module(acme, crm::setup()).await;
+    fixture.enable_module(other, crm::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/keys")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "Acme's", "scopes": ["*:read"], "role": "viewer"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let secret = body["secret"].as_str().expect("a secret").to_owned();
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/crm/customers")
+                .header(header::HOST, "acme.localhost")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/crm/customers")
+                .header(header::HOST, "other.localhost")
+                .header(header::AUTHORIZATION, format!("Bearer {secret}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+/// **A client is told what to build against, in a typed error and not a 500.**
+///
+/// And a client that says nothing is served, because `curl` and a browser say
+/// nothing and an API that cannot be tried without reading the documentation
+/// first is an API nobody tries.
+#[tokio::test]
+async fn a_client_outside_the_version_range_is_refused_and_told_what_to_build_against() {
+    let fixture = Fixture::new().await;
+
+    // Says nothing: served, and told what is current.
+    let response = fixture
+        .raw(Request::get("/v1/health").body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-api-current")
+            .and_then(|v| v.to_str().ok()),
+        Some(erp_web::version::CURRENT.to_string().as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-api-minimum")
+            .and_then(|v| v.to_str().ok()),
+        Some(erp_web::version::FLOOR.to_string().as_str())
+    );
+    assert!(
+        response.headers().get("x-api-deprecated").is_none(),
+        "current is not deprecated"
+    );
+
+    // Declares the current one: the same.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/health")
+                .header("x-api-version", erp_web::version::CURRENT.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Declares one this build has never had.
+    let response = fixture
+        .raw(
+            Request::get("/v1/health")
+                .header("x-api-version", (erp_web::version::CURRENT + 1).to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // **On the refusal too.** A client that has just been told its version is
+    // wrong is exactly the one that needs to know which is right.
+    assert_eq!(
+        response
+            .headers()
+            .get("x-api-current")
+            .and_then(|v| v.to_str().ok()),
+        Some(erp_web::version::CURRENT.to_string().as_str())
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("body reads");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("problem+json");
+    assert_eq!(body["code"], "request.api_version_too_new");
+    assert_eq!(
+        body["args"]["current"]["value"],
+        i64::from(erp_web::version::CURRENT),
+        "the refusal has to name what to build against: {body}"
+    );
+
+    // Something that is not a version at all.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/health")
+                .header("x-api-version", "v2.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.api_version_too_new");
 }

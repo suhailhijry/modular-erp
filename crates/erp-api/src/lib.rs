@@ -39,6 +39,7 @@
 
 mod catalog;
 mod invitations;
+mod keys;
 mod links;
 mod members;
 mod modules;

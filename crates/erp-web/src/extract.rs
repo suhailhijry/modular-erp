@@ -125,8 +125,20 @@ impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
 /// seconds is survivable, a stale *logout* is not.
 #[derive(Debug, Clone)]
 pub struct Authenticated {
+    /// Who this is.
+    ///
+    /// **For an API key this is derived and was never issued**: no row in
+    /// `session`, no token that could be replayed. It carries the key's machine
+    /// identity so everything downstream — membership, roles, the audit trail —
+    /// works without learning a second shape.
     pub session: Session,
     pub token: String,
+    /// Set when the caller presented an API key rather than a session.
+    ///
+    /// Carried through to [`Allowed`], which is where the scopes narrow what the
+    /// role already allows. A handler never reads it: a key is not a different
+    /// kind of caller to a handler, it is a caller with fewer permissions.
+    pub key: Option<erp_control::KeyContext>,
 }
 
 impl FromRequestParts<AppState> for Authenticated {
@@ -141,13 +153,52 @@ impl FromRequestParts<AppState> for Authenticated {
             ApiError::Auth(erp_control::AuthError::NoSession).into_problem(locale, &crate::CATALOG)
         })?;
 
+        // **The prefix decides, and it is the key's own.** A session token is
+        // hex and an API key says `sk_`, so there is no value that could be
+        // tried as both — which is what stops a leaked key being replayed as a
+        // session or the reverse.
+        if token.starts_with(API_KEY_PREFIX) {
+            let key = state
+                .control
+                .key(&token)
+                .await
+                .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
+
+            // **Bounded here, where a key is a name to attribute abuse to.**
+            // The interactive surface has a session and a person behind it; an
+            // integration has neither and is the thing most likely to loop.
+            // This is the primitive Phase 3's signup note was waiting for.
+            if let Err(seconds) = state
+                .limiter
+                .check(&key.tenant.to_string(), &key.public_key)
+            {
+                return Err(too_many_requests(seconds, locale));
+            }
+
+            return Ok(Self {
+                session: Session {
+                    identity: key.identity,
+                    // Not a session and never stored — see the field's docs.
+                    // The instant is the request's, so nothing downstream can
+                    // mistake this for something with a life of its own.
+                    expires_at: chrono::Utc::now(),
+                },
+                token,
+                key: Some(key),
+            });
+        }
+
         let session = state
             .control
             .session(&token)
             .await
             .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
 
-        Ok(Self { session, token })
+        Ok(Self {
+            session,
+            token,
+            key: None,
+        })
     }
 }
 
@@ -161,6 +212,8 @@ impl FromRequestParts<AppState> for Authenticated {
 pub struct Tenant {
     pub db: TenantDb,
     pub session: Session,
+    /// Set when an API key got in. See [`Authenticated::key`].
+    pub key: Option<erp_control::KeyContext>,
     /// The subdomain this request arrived on, which is the tenant's name.
     ///
     /// Carried because a handler that has to build a link back into this tenant
@@ -204,6 +257,7 @@ impl FromRequestParts<AppState> for Tenant {
         Ok(Self {
             db,
             session: auth.session,
+            key: auth.key,
             slug: tenant.slug,
         })
     }
@@ -283,18 +337,7 @@ impl FromRequestParts<AppState> for Public {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("anonymous");
         if let Err(seconds) = state.limiter.check(tenant.slug.as_str(), caller) {
-            // The wait is in the message's `args`, not a `Retry-After` header —
-            // which is what signup's 429 already does, and one shape for one
-            // answer beats a second mechanism for the same fact.
-            return Err(Problem::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                &erp_i18n::Message::new(crate::messages::TOO_MANY_REQUESTS).with(
-                    "seconds",
-                    erp_i18n::MessageArg::Count(i64::try_from(seconds).unwrap_or(i64::MAX)),
-                ),
-                locale,
-                &crate::CATALOG,
-            ));
+            return Err(too_many_requests(seconds, locale));
         }
 
         let db = state
@@ -367,6 +410,30 @@ fn not_found(locale: Locale) -> Problem {
 }
 
 /// The bearer token, if the header is well formed.
+/// What an API key's private half starts with.
+///
+/// The one place this crate knows the shape, and it is a prefix rather than a
+/// length or a charset: it has to be something a secret scanner can grep for in
+/// a repository, which is the whole reason keys have prefixes at all.
+const API_KEY_PREFIX: &str = "sk_";
+
+/// The 429, in one place.
+///
+/// The wait is in the message's `args`, not a `Retry-After` header — which is
+/// what signup's 429 already does, and one shape for one answer beats a second
+/// mechanism for the same fact.
+fn too_many_requests(seconds: u64, locale: Locale) -> Problem {
+    Problem::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        &erp_i18n::Message::new(crate::messages::TOO_MANY_REQUESTS).with(
+            "seconds",
+            erp_i18n::MessageArg::Count(i64::try_from(seconds).unwrap_or(i64::MAX)),
+        ),
+        locale,
+        &crate::CATALOG,
+    )
+}
+
 fn bearer(parts: &Parts) -> Option<String> {
     let value = parts.headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let (scheme, token) = value.split_once(' ')?;
@@ -510,6 +577,31 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
             .unwrap_or(Language(Locale::DEFAULT));
         let tenant = Tenant::from_request_parts(parts, state).await?;
         let module = module_of(parts.uri.path(), tenant.db.modules());
+
+        // **Scopes narrow, they never widen.** The role check below still has
+        // to pass; this is a second gate in front of it, so an integration
+        // scoped to `booking:read` cannot post journal entries even if somebody
+        // gives its identity the owner's role by mistake.
+        if let Some(key) = &tenant.key
+            && !key.permits(
+                C::CAPABILITY,
+                module.as_ref().map(erp_types::ModuleId::as_str),
+            )
+        {
+            return Err(Problem::new(
+                StatusCode::FORBIDDEN,
+                &erp_i18n::Message::new(erp_control::messages::OUT_OF_SCOPE).with(
+                    "scope",
+                    erp_i18n::MessageArg::text(format!(
+                        "{}:{}",
+                        module.as_ref().map_or("*", erp_types::ModuleId::as_str),
+                        C::CAPABILITY.as_str()
+                    )),
+                ),
+                locale,
+                &crate::CATALOG,
+            ));
+        }
 
         if !tenant.db.allows_in(C::CAPABILITY, module.as_ref()) {
             // 403, not 404. The caller has already proved they are a member, so

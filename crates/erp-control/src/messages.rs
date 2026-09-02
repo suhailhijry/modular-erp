@@ -58,6 +58,14 @@ pub const SIGNUP_SUBJECT: MessageCode = MessageCode::new("mail.signup_subject");
 /// The body of a signup confirmation.
 pub const SIGNUP_BODY: MessageCode = MessageCode::new("mail.signup_body");
 pub const LAST_OWNER: MessageCode = MessageCode::new("members.last_owner");
+/// A scope that is not one. `module:capability`, or `*:capability`.
+pub const NOT_A_SCOPE: MessageCode = MessageCode::new("keys.not_a_scope");
+/// The key is real and does not carry the scope this route needs. A 403, and it
+/// names the scope — "ask for a key that can do this" is only actionable when
+/// you know which scope to ask for.
+pub const OUT_OF_SCOPE: MessageCode = MessageCode::new("keys.out_of_scope");
+/// No key by that id in this tenant.
+pub const NO_SUCH_KEY: MessageCode = MessageCode::new("keys.no_such_key");
 
 /// Every code this crate can produce. The completeness test walks this list.
 /// The subject line of an invitation email. Not an error — the first message
@@ -89,6 +97,9 @@ pub static CODES: &[MessageCode] = &[
     SIGNUP_TOO_SOON,
     SIGNUP_SUBJECT,
     SIGNUP_BODY,
+    NOT_A_SCOPE,
+    OUT_OF_SCOPE,
+    NO_SUCH_KEY,
 ];
 
 // ---------------------------------------------------------------------------
@@ -96,6 +107,39 @@ pub static CODES: &[MessageCode] = &[
 // ---------------------------------------------------------------------------
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    // -- api keys ----------------------------------------------------------
+    (
+        NOT_A_SCOPE,
+        Locale::English,
+        Template::Simple(
+            "{scope} is not a scope. Write it as `booking:read`, or `*:read` for every module.",
+        ),
+    ),
+    (
+        NOT_A_SCOPE,
+        Locale::Arabic,
+        Template::Simple("{scope} ليس نطاقًا. اكتبه هكذا: booking:read، أو ‎*:read لكل الوحدات."),
+    ),
+    (
+        OUT_OF_SCOPE,
+        Locale::English,
+        Template::Simple("This key does not carry {scope}."),
+    ),
+    (
+        OUT_OF_SCOPE,
+        Locale::Arabic,
+        Template::Simple("هذا المفتاح لا يحمل {scope}."),
+    ),
+    (
+        NO_SUCH_KEY,
+        Locale::English,
+        Template::Simple("There is no key {id} here."),
+    ),
+    (
+        NO_SUCH_KEY,
+        Locale::Arabic,
+        Template::Simple("لا يوجد مفتاح {id} هنا."),
+    ),
     // -- identity ----------------------------------------------------------
     (
         NO_SUCH_IDENTITY,

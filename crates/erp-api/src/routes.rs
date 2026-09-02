@@ -188,14 +188,6 @@ fn problem_response(description: &str) -> utoipa::openapi::RefOr<utoipa::openapi
     )
 }
 
-fn takes_a_query(operation: &utoipa::openapi::path::Operation) -> bool {
-    operation.parameters.as_ref().is_some_and(|params| {
-        params
-            .iter()
-            .any(|p| p.parameter_in == utoipa::openapi::path::ParameterIn::Query)
-    })
-}
-
 impl Modify for Conventions {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         openapi
@@ -261,12 +253,16 @@ impl Modify for Conventions {
                         "500",
                         "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer.",
                     ),
+                    // **Every route, because the check is a layer.** A client
+                    // declaring a version this build does not serve is refused
+                    // before the handler is reached, so a 400 is reachable on a
+                    // route that takes nothing at all.
+                    (
+                        "400",
+                        "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`.",
+                    ),
                 ];
                 if operation.request_body.is_some() {
-                    also.push((
-                        "400",
-                        "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found.",
-                    ));
                     also.push((
                         "413",
                         "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest.",
@@ -280,12 +276,7 @@ impl Modify for Conventions {
                         "The body is JSON and not the shape this route takes. `args.reason` names the field.",
                     ));
                 }
-                if takes_a_query(operation) {
-                    also.push((
-                        "400",
-                        "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`.",
-                    ));
-                }
+
                 for (status, description) in also {
                     operation
                         .responses
@@ -320,6 +311,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(crate::modules::routes())
         .merge(crate::origins::routes())
         .merge(crate::links::routes())
+        .merge(crate::keys::routes())
         // Every module's own routes, from the one list that also says what to
         // install. See `crate::modules::REGISTERED`.
         .merge(crate::modules::mounted())
@@ -349,6 +341,10 @@ pub fn router(state: AppState) -> Router {
         // is the same query with a different encoder, so it is a layer rather
         // than something each handler has to remember — see `erp_web::csv`.
         .layer(axum::middleware::from_fn(erp_web::csv::layer))
+        // **Outermost of the three**, so a client outside the range is refused
+        // before anything reads its body — and so every response, refusals
+        // included, carries what this build serves.
+        .layer(axum::middleware::from_fn(erp_web::version::layer))
         // **Outermost, so a preflight never reaches a handler and a refusal
         // never reaches one either.** Per tenant and asynchronous, which is why
         // it is written here rather than configured from `tower-http` — see

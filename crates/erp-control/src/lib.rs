@@ -26,6 +26,7 @@ mod auth;
 mod cache;
 mod fleet;
 mod invitations;
+mod keys;
 mod leases;
 pub mod mail;
 mod members;
@@ -53,6 +54,7 @@ pub use fleet::{EventVersions, FleetPlan, MIGRATION_FLOOR, TenantSchema, UPGRADE
 pub use invitations::{
     Accepted, INVITATION_LIFETIME, Invitation, InvitationError, PendingInvitation,
 };
+pub use keys::{ApiKey, BadScope, KeyContext, KeyScope, ROTATION_OVERLAP, Secret};
 pub use leases::{Claimed, WorkSchedule};
 pub use members::{Member, MemberError};
 pub use model::{

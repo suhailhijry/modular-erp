@@ -39,6 +39,7 @@ pub mod messages;
 mod problem;
 pub mod rate;
 mod state;
+pub mod version;
 mod wire;
 
 use erp_i18n::{Composite, StaticCatalog};

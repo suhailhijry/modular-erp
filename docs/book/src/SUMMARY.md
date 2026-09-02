@@ -59,6 +59,8 @@
 - [reports](./api/reports.md)
 - [messaging](./api/messaging.md)
 - [files](./api/files.md)
+- [API keys](./api/keys.md)
+- [API versioning](./api/versioning.md)
 - [Spreadsheets, both directions](./api/exports.md)
 - [The HTTP API](./api/http.md)
 

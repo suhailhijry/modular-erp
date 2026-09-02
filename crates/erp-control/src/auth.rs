@@ -153,6 +153,14 @@ pub(crate) fn verification_token() -> Result<String, AuthError> {
     Ok(format!("erp-verify-{}", hex(&random_bytes()?)))
 }
 
+/// 32 bytes as hex, for an API key's two halves.
+///
+/// Minted here for the same reason every other credential in this file is: a
+/// caller cannot supply a predictable one.
+pub(crate) fn key_token() -> Result<String, AuthError> {
+    Ok(hex(&random_bytes()?))
+}
+
 fn random_bytes() -> Result<[u8; 32], AuthError> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| AuthError::Hash(e.to_string()))?;

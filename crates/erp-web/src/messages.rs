@@ -8,6 +8,13 @@ use erp_i18n::{Locale, MessageCode, Template};
 pub const UNKNOWN_CURRENCY: MessageCode = MessageCode::new("request.unknown_currency");
 pub const UNKNOWN_ACCOUNT_KIND: MessageCode = MessageCode::new("request.unknown_account_kind");
 pub const INVALID_ID: MessageCode = MessageCode::new("request.invalid_id");
+/// The client declared an API version older than this build serves. **Names
+/// what to build against**, because "unsupported" with no number is a support
+/// ticket.
+pub const API_VERSION_TOO_OLD: MessageCode = MessageCode::new("request.api_version_too_old");
+/// …or newer, which is a client talking to a server that has not been deployed
+/// yet. The same message shape, and the same actionable number.
+pub const API_VERSION_TOO_NEW: MessageCode = MessageCode::new("request.api_version_too_new");
 pub const PASSWORD_TOO_SHORT: MessageCode = MessageCode::new("request.password_too_short");
 pub const UNKNOWN_MODULE: MessageCode = MessageCode::new("request.unknown_module");
 pub const UNKNOWN_CHART: MessageCode = MessageCode::new("request.unknown_chart");
@@ -64,6 +71,8 @@ pub const MISSING_IDEMPOTENCY_KEY: MessageCode =
     MessageCode::new("request.missing_idempotency_key");
 
 pub static CODES: &[MessageCode] = &[
+    API_VERSION_TOO_OLD,
+    API_VERSION_TOO_NEW,
     UNKNOWN_CURRENCY,
     UNKNOWN_ACCOUNT_KIND,
     INVALID_ID,
@@ -103,6 +112,33 @@ pub static CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        API_VERSION_TOO_OLD,
+        Locale::English,
+        Template::Simple(
+            "This API no longer serves version {declared}. Build against version {current}; \
+             the oldest still served is {minimum}.",
+        ),
+    ),
+    (
+        API_VERSION_TOO_OLD,
+        Locale::Arabic,
+        Template::Simple(
+            "لم تعد هذه الواجهة تخدم الإصدار {declared}. ابنِ على الإصدار {current}؛ وأقدم إصدار مدعوم هو {minimum}.",
+        ),
+    ),
+    (
+        API_VERSION_TOO_NEW,
+        Locale::English,
+        Template::Simple(
+            "This API does not know version {declared}. The current version is {current}.",
+        ),
+    ),
+    (
+        API_VERSION_TOO_NEW,
+        Locale::Arabic,
+        Template::Simple("لا تعرف هذه الواجهة الإصدار {declared}. الإصدار الحالي هو {current}."),
+    ),
     // `reason` is the parser's own account of what it found, in English. It is
     // for whoever is writing the client, and it is the one thing that turns
     // "400" into a fixable message.

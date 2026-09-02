@@ -2584,6 +2584,99 @@
         ],
         "type": "object"
       },
+      "KeyIssued": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/KeyRecord"
+          },
+          {
+            "properties": {
+              "secret": {
+                "description": "**Shown once.** There is no way to read it again, by design.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "secret"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "KeyRecord": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expires_at": {
+            "description": "Set by a rotation on the key being replaced. This is the overlap window.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "description": "Best effort, so it can be a little behind. Enough to answer \"is anything\nstill using this\" before somebody revokes it.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "public_key": {
+            "description": "**Safe anywhere.** It identifies an integration and proves nothing.",
+            "type": "string"
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revoked_why": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "description": "One of `owner`, `accountant`, `clerk`, `viewer`.",
+            "type": "string"
+          },
+          "rotated_from": {
+            "description": "The key this one replaced, when it came from a rotation.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scopes": {
+            "description": "`module:capability`, or `*:capability`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "public_key",
+          "name",
+          "scopes",
+          "role",
+          "created_at"
+        ],
+        "type": "object"
+      },
       "LeaveRecord": {
         "properties": {
           "days": {
@@ -4070,6 +4163,39 @@
           "description",
           "net",
           "vat"
+        ],
+        "type": "object"
+      },
+      "NewKey": {
+        "example": {
+          "name": "Booking widget",
+          "role": "viewer",
+          "scopes": [
+            "booking:read",
+            "crm:read"
+          ]
+        },
+        "properties": {
+          "name": {
+            "description": "What a person calls it, so revoking the right one does not need a guess.",
+            "type": "string"
+          },
+          "role": {
+            "description": "The role its machine identity holds — `owner`, `accountant`, `clerk` or\n`viewer`.\n\n**The scopes can only narrow this.** A key given a viewer's role and a\nscope that permits posting still cannot post, because the role is\nchecked as well.\n\nOne of `owner`, `accountant`, `clerk`, `viewer`.",
+            "type": "string"
+          },
+          "scopes": {
+            "description": "What it may do. `booking:read`, `*:read`, `ledger:post_entries`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "scopes",
+          "role"
         ],
         "type": "object"
       },
@@ -7176,6 +7302,18 @@
         ],
         "type": "object"
       },
+      "Revocation": {
+        "properties": {
+          "why": {
+            "description": "Why. Kept on the record, because \"which of these did we revoke after the\nincident, and why\" is the question afterwards.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "why"
+        ],
+        "type": "object"
+      },
       "RoleChange": {
         "example": {
           "role": "accountant"
@@ -7208,6 +7346,20 @@
           "items",
           "rostered"
         ],
+        "type": "object"
+      },
+      "Rotation": {
+        "properties": {
+          "overlap_seconds": {
+            "description": "How long the old key keeps working. Omitted is seven days.\n\n**Zero is legitimate** and means \"stop now\" — for a key that is known to\nhave leaked, where the overlap is the thing you do not want.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "RunAccepted": {
@@ -8625,6 +8777,16 @@
           "302": {
             "description": "Where it points, in `Location`. The only 2xx-adjacent answer this route has — a redirect *is* the success."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "404": {
             "content": {
               "application/json": {
@@ -9530,6 +9692,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -9815,7 +9987,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -10338,6 +10510,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -10710,6 +10892,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -10822,7 +11014,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -10924,6 +11116,16 @@
               }
             },
             "description": "An empty list means every hour is the same price."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -11106,6 +11308,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "500": {
             "content": {
@@ -11437,6 +11649,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -11663,6 +11885,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -11775,7 +12007,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -11881,6 +12113,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "500": {
             "content": {
@@ -12378,6 +12620,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -12604,6 +12856,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -12716,7 +12978,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -12984,6 +13246,16 @@
           "204": {
             "description": "Proved. Already-proved is the same answer."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -13214,7 +13486,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -13353,7 +13625,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -13456,6 +13728,16 @@
               "application/octet-stream": {}
             },
             "description": "The file, always as an attachment and never inline."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -13739,6 +14021,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -13828,7 +14120,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -14246,7 +14538,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -14524,7 +14816,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -14650,6 +14942,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -14771,7 +15073,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -14920,7 +15222,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -15819,7 +16121,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -15975,7 +16277,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -16272,7 +16574,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -16537,7 +16839,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -17200,6 +17502,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -17305,7 +17617,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -17421,6 +17733,16 @@
               }
             },
             "description": "Pending invitations. The tokens are not here — they were shown once."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -17739,6 +18061,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "404": {
             "content": {
               "application/json": {
@@ -17903,6 +18235,550 @@
         ]
       }
     },
+    "/v1/keys": {
+      "get": {
+        "description": "Revoked ones included: \"what did we revoke and when\" is the question after an\nincident, and a list that hides them cannot answer it.",
+        "operationId": "list_keys",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/KeyRecord"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Every key this tenant has, newest first.",
+        "tags": [
+          "keys"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "issue_key",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewKey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyIssued"
+                }
+              }
+            },
+            "description": "The key, with its secret. Store it now; it cannot be read again."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a scope, not a role, or no scopes at all"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Issue one. **The secret is in this response and nowhere else.**",
+        "tags": [
+          "keys"
+        ]
+      }
+    },
+    "/v1/keys/{key}": {
+      "delete": {
+        "operationId": "revoke_key",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The key's id — not its public key.",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Revocation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Revoked, or was already."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No key by that id here"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Stop one working, now.",
+        "tags": [
+          "keys"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/keys/{key}/rotation": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**The overlap is the point.** The old key keeps working while the\nintegration holding it is redeployed on its own schedule — because a key\nthat cannot be rotated without downtime is a key nobody rotates.\n\nThe replacement carries the same scopes and role. Changing what a key may do\nis a different act; folding it into a rotation is how an integration comes\nback with permissions nobody chose.",
+        "operationId": "rotate_key",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The key being replaced.",
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Rotation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyIssued"
+                }
+              }
+            },
+            "description": "The replacement, with its secret. The old key stops at `expires_at`."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No key by that id here, or it is revoked"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Replace one, with an overlap.",
+        "tags": [
+          "keys"
+        ]
+      }
+    },
     "/v1/ledger/accounts": {
       "get": {
         "description": "Balances are summed from the postings rather than maintained, so there is no\nsecond number that can be wrong.",
@@ -17950,7 +18826,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -18181,6 +19057,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -18277,7 +19163,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -18520,6 +19406,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "500": {
             "content": {
@@ -18923,7 +19819,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -19020,6 +19916,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -19224,6 +20130,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -19445,6 +20361,16 @@
         "responses": {
           "204": {
             "description": "Removed."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -19906,6 +20832,16 @@
               }
             },
             "description": "`configured` says whether anybody chose these"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -20424,6 +21360,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -20764,6 +21710,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -20863,6 +21819,16 @@
           "204": {
             "description": "Gone, or was never there."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -20951,6 +21917,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -21185,6 +22161,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -21283,6 +22269,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -21569,6 +22565,16 @@
             },
             "description": "This document, as OpenAPI 3.1"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -21625,6 +22631,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -21828,6 +22844,16 @@
           "204": {
             "description": "Gone. One that was never there is the same answer."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -21913,6 +22939,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -22295,7 +23331,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -22557,6 +23593,16 @@
             },
             "description": "Posted. Already-approved is the same answer."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -22679,7 +23725,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -23059,6 +24105,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -23187,7 +24243,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -23333,7 +24389,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -23749,6 +24805,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -23833,6 +24899,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -24295,6 +25371,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -24424,7 +25510,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -24571,7 +25657,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -24717,7 +25803,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -25113,6 +26199,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -25241,7 +26337,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -25387,7 +26483,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -25533,7 +26629,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -25635,6 +26731,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -25814,6 +26920,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -25898,6 +27014,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -26369,6 +27495,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -26498,7 +27634,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -26611,6 +27747,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -26734,7 +27880,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -26881,7 +28027,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -27159,7 +28305,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -27425,7 +28571,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -27844,7 +28990,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -28373,7 +29519,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -28639,7 +29785,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -29392,6 +30538,16 @@
             },
             "description": "Done."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -29770,7 +30926,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -29889,7 +31045,7 @@
                 }
               }
             },
-            "description": "The body is not JSON. `code` is `request.malformed_body`, and `args.reason` says what the parser found."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -29955,6 +31111,16 @@
         "responses": {
           "204": {
             "description": "Ended. The token no longer works."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -30164,6 +31330,16 @@
             },
             "description": "Created."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
           "404": {
             "content": {
               "application/json": {
@@ -30245,7 +31421,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -30495,7 +31671,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -30906,7 +32082,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -31022,7 +32198,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -31147,7 +32323,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -31264,7 +32440,7 @@
                 }
               }
             },
-            "description": "The query string is missing something or carries something unreadable. `code` is `request.invalid_query`."
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {
@@ -31797,6 +32973,16 @@
               }
             },
             "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
           "401": {
             "content": {

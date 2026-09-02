@@ -458,6 +458,24 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **ar** — لم تعد هذه الدعوة صالحة. اطلب رابطًا جديدًا ممن دعاك.
 
 
+## `keys`
+
+### `keys.no_such_key`
+
+- **en** — There is no key {id} here.
+- **ar** — لا يوجد مفتاح {id} هنا.
+
+### `keys.not_a_scope`
+
+- **en** — {scope} is not a scope. Write it as `booking:read`, or `*:read` for every module.
+- **ar** — {scope} ليس نطاقًا. اكتبه هكذا: booking:read، أو ‎*:read لكل الوحدات.
+
+### `keys.out_of_scope`
+
+- **en** — This key does not carry {scope}.
+- **ar** — هذا المفتاح لا يحمل {scope}.
+
+
 ## `ledger`
 
 ### `ledger.account_closed`
@@ -1061,6 +1079,16 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 
 ## `request`
+
+### `request.api_version_too_new`
+
+- **en** — This API does not know version {declared}. The current version is {current}.
+- **ar** — لا تعرف هذه الواجهة الإصدار {declared}. الإصدار الحالي هو {current}.
+
+### `request.api_version_too_old`
+
+- **en** — This API no longer serves version {declared}. Build against version {current}; the oldest still served is {minimum}.
+- **ar** — لم تعد هذه الواجهة تخدم الإصدار {declared}. ابنِ على الإصدار {current}؛ وأقدم إصدار مدعوم هو {minimum}.
 
 ### `request.certificate_key_mismatch`
 

@@ -20,3 +20,11 @@ control/0002_clusters.sql  add-constraint  Ran before this system had a tenant, 
     could violate it. The rule is about a constraint added to a *live* table: the
     draining build keeps writing rows that satisfied the previous rules, and a new
     constraint starts rejecting them mid-deploy.
+
+control/0012_api_keys.sql  add-constraint  The constraint is **widened**, not
+    added: `kind IN ('password')` becomes `kind IN ('password', 'api_key')`. Every
+    row a draining pod can write is a password authenticator, which satisfied the
+    old rule and satisfies the new one — so there is no row, present or future,
+    that this refuses and the previous constraint allowed. The check the rule
+    exists for is the other direction, and the scan cannot tell one from the other
+    from the SQL alone.
