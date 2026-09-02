@@ -61,6 +61,7 @@
 - [files](./api/files.md)
 - [API keys](./api/keys.md)
 - [API versioning](./api/versioning.md)
+- [Inbound webhooks](./api/webhooks.md)
 - [Spreadsheets, both directions](./api/exports.md)
 - [The HTTP API](./api/http.md)
 

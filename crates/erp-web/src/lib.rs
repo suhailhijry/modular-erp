@@ -40,6 +40,7 @@ mod problem;
 pub mod rate;
 mod state;
 pub mod version;
+pub mod webhook;
 mod wire;
 
 use erp_i18n::{Composite, StaticCatalog};

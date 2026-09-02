@@ -1842,6 +1842,10 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("import_customers", &["owner"]),
     // API keys are a way into the tenant. Issuing, rotating and revoking one is
     // changing who has access, which is the same act as adding a member.
+    // Inbound callbacks. Reading what arrived is ordinary; the shared secret a
+    // provider signs with is a credential, so setting it is the owner's.
+    ("list_webhook_events", ALL_ROLES),
+    ("set_webhook_secret", &["owner"]),
     ("list_keys", &["owner"]),
     ("issue_key", &["owner"]),
     ("rotate_key", &["owner"]),
@@ -2059,8 +2063,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        178,
-        "expected a hundred and seventy-eight role-scoped operations"
+        180,
+        "expected a hundred and eighty role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -7673,4 +7677,142 @@ async fn a_client_outside_the_version_range_is_refused_and_told_what_to_build_ag
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "request.api_version_too_new");
+}
+
+/// **A callback is verified before its body means anything, and arriving twice
+/// does nothing twice.**
+///
+/// Phase 12b in one test. The unsigned, wrongly-signed and replayed forms are
+/// all refused with one answer, and the same event delivered three times is one
+/// effect.
+#[tokio::test]
+async fn a_webhook_is_verified_once_and_deduplicated_however_often_it_arrives() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::put("/v1/hooks/gateway/secret")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "secret": "whsec_abc123" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let payload = serde_json::json!({ "id": "evt_1", "type": "payment.succeeded" }).to_string();
+    let now = chrono::Utc::now().timestamp().to_string();
+    let sign = |timestamp: &str, body: &str| {
+        erp_web::webhook::sign(b"whsec_abc123", format!("{timestamp}.{body}").as_bytes())
+    };
+
+    // **Unsigned.**
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/hooks/gateway")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "webhooks.not_verified");
+
+    // **Signed with the wrong secret** — the same answer, deliberately.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/hooks/gateway")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-webhook-timestamp", now.clone())
+                .header(
+                    "x-webhook-signature",
+                    erp_web::webhook::sign(b"wrong", format!("{now}.{payload}").as_bytes()),
+                )
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["code"], "webhooks.not_verified");
+
+    // **A copy somebody kept**, re-sent with its original timestamp an hour on.
+    let stale = (chrono::Utc::now().timestamp() - 3_600).to_string();
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/hooks/gateway")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-webhook-timestamp", stale.clone())
+                .header("x-webhook-signature", sign(&stale, &payload))
+                .body(Body::from(payload.clone()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    // **The real thing.**
+    let good = |n: &str, p: &str| {
+        Request::post("/v1/hooks/gateway")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-webhook-timestamp", n.to_owned())
+            .header("x-webhook-signature", sign(n, p))
+            .body(Body::from(p.to_owned()))
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture.send(good(&now, &payload)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["event_id"], "evt_1");
+    assert_eq!(body["duplicate"], false);
+
+    // **Twice more**, the way a provider retries. Still `202`: they did nothing
+    // wrong, and an error would make them retry something already done.
+    for _ in 0..2 {
+        let (status, body, _) = fixture.send(good(&now, &payload)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(body["duplicate"], true, "{body}");
+    }
+
+    // Recorded once, with the deliveries counted.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/hooks/gateway/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body[0]["event_id"], "evt_1");
+    assert_eq!(body[0]["kind"], "payment.succeeded");
+    assert_eq!(body[0]["deliveries"], 3, "{body}");
+
+    // And one effect, not three.
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let mut conn = db.acquire().await.expect("connection");
+    let promised: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM outbox WHERE kind = 'webhook.gateway'")
+            .fetch_one(&mut *conn)
+            .await
+            .expect("counts");
+    assert_eq!(
+        promised, 1,
+        "three deliveries promised more than one effect"
+    );
+
+    // A different event under the same secret is its own.
+    let second = serde_json::json!({ "id": "evt_2", "type": "payment.refunded" }).to_string();
+    let (status, body, _) = fixture.send(good(&now, &second)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["duplicate"], false);
 }

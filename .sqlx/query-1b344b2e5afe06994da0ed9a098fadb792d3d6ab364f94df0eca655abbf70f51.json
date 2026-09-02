@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT provider as \"provider!\", event_id as \"event_id!\", kind,\n                  received_at as \"received_at!\", deliveries as \"deliveries!\"\n             FROM webhook_event\n            WHERE provider = $1\n            ORDER BY received_at DESC\n            LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "provider!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_event",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "event_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_event",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "webhook_event",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "received_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "webhook_event",
+            "name": "received_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "deliveries!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "webhook_event",
+            "name": "deliveries"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "1b344b2e5afe06994da0ed9a098fadb792d3d6ab364f94df0eca655abbf70f51"
+}

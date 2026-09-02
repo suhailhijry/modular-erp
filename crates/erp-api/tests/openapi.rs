@@ -239,6 +239,14 @@ fn only_the_deliberately_public_routes_are_public() {
         // enters the tenant through `erp_web::Public` like the three above, and
         // an unguessable token is the whole of the authorization.
         ("get", "/l/{token}"),
+        // **An inbound callback, and the signature is the credential.**
+        //
+        // A provider has no account here and never will. What makes this safe
+        // is not that it is open but that it is *verified*: the body is not
+        // treated as meaning anything until an HMAC over `<timestamp>.<body>`
+        // matches a secret the tenant configured, and the timestamp is inside
+        // the signature so a copy somebody kept cannot be re-sent.
+        ("post", "/v1/hooks/{provider}"),
     ];
 
     for (path, method, operation) in operations(&document()) {

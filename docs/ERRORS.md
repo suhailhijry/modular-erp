@@ -1440,3 +1440,16 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **en** — This business has no ZATCA registration yet, so no invoice can be cleared or reported. Register one first.
 - **ar** — لا يوجد تسجيل لدى هيئة الزكاة والضريبة والجمارك لهذه المنشأة بعد، فلا يمكن اعتماد أي فاتورة أو الإبلاغ عنها. سجِّل البيانات أولًا.
 
+
+## `webhooks`
+
+### `webhooks.no_secret`
+
+- **en** — No secret is configured for {provider}, so nothing could be verified.
+- **ar** — لا يوجد سر مُهيّأ لـ {provider}، فتعذّر التحقق.
+
+### `webhooks.not_verified`
+
+- **en** — That callback did not verify.
+- **ar** — لم يُتحقَّق من صحة هذا الاستدعاء.
+

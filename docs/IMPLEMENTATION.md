@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,007 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,016 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -35,8 +35,8 @@ Phase 11a/b/c/e — short links; `modules/messaging`, with templates that fetch
 their own data, audiences resolved rather than frozen and SMS billed by the
 segment; `modules/files`, where a document's record is a key and a checksum rather
 than a URL; 11d — every list is a spreadsheet on `Accept: text/csv`, and an
-import takes the good rows and reports the bad ones; and Phase 12c/12d — API
-keys in pairs, and a version a client can be refused on by name.
+import takes the good rows and reports the bad ones; and Phase 12b/12c/12d — verified inbound
+callbacks, API keys in pairs, and a version a client can be refused on by name.
 
 **Phase 9 is complete except two items, and both are blocked on something
 outside the repository**: the WPS file needs a specification this build cannot
@@ -440,6 +440,32 @@ roles, `enter`, the audit trail and every module's `metadata(&tenant)` work
 unchanged — and a key for one tenant is nothing on another's subdomain because
 its identity is a member of exactly one, which is a check nobody had to remember
 to write.
+
+### 23 · Webhooks are received and nothing handles them yet
+
+The inbound half is built and verified: a signature checked before the body is
+read, a replay window that a kept copy cannot get around, and the provider's own
+id as the idempotency key so three deliveries are one effect.
+
+What is not built is a **handler**. `webhook.<provider>` is promised to the
+outbox, and nothing registers for it — payments are 12a and a delivery receipt is
+`messaging`'s to claim. Until one does, a verified callback is recorded and its
+effect waits, which is the dispatcher's documented behaviour for a kind nobody
+handles, and `GET /v1/hooks/{provider}/events` is what makes it visible.
+
+The polling reconciliation in the same section needs a provider to poll, which is
+the same decision. **Both unblock together**, and the decision is §15's: which
+gateway, and whether an SDK may be added.
+
+### 24 · HMAC is fifteen lines here rather than a dependency
+
+It is a 1997 specification, it is verified against RFC 4231's published vectors —
+including case 6, a key longer than the block size, which is the line every
+hand-written HMAC gets wrong — and the alternative is a crate whose correctness
+is checked exactly as much.
+
+Say the word and it becomes `hmac`; the tests do not change either way, which is
+the point.
 
 ---
 
@@ -2112,16 +2138,21 @@ being verified is somebody else's command executed under your authority.
 
 ### 12b · Inbound webhooks
 
-- [ ] Signature verified before the body is read. An unverified callback is not
-      a slow path, it is a refused one
-- [ ] Delivered more than once, out of order, and replayed by an attacker who
+- [x] Signature verified before the body is read. An unverified callback is not
+      a slow path, it is a refused one — HMAC-SHA256 over `<timestamp>.<body>`,
+      written here and checked against RFC 4231's published vectors including
+      the key-longer-than-a-block case
+- [x] Delivered more than once, out of order, and replayed by an attacker who
       kept a copy — so a webhook is a **command with the provider's id as its
-      idempotency key**, and arriving twice does nothing twice
-- [ ] Accepted fast, processed as an effect. A provider that times out retries,
-      and a retry storm is self-inflicted
+      idempotency key**, and arriving twice does nothing twice. The timestamp is
+      *inside* the signature, so a kept copy cannot be re-sent with a fresh one
+- [x] Accepted fast, processed as an effect. A provider that times out retries,
+      and a retry storm is self-inflicted — `202` after the row and the promise
+      commit together
 - [ ] Providers that go quiet: reconcile by polling what the provider says it
       sent. A payment confirmed by a webhook nobody received is money the tenant
-      cannot see
+      cannot see — **needs a provider to poll**, which is 12a's decision. See
+      review §23
 
 ### 12c · API keys, in pairs
 

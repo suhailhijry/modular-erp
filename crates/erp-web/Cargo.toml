@@ -17,6 +17,7 @@ erp-projection = { workspace = true }
 erp-i18n = { workspace = true }
 erp-storage = { workspace = true }
 csv = { workspace = true }
+sha2 = { workspace = true }
 erp-types = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }

@@ -38,6 +38,7 @@
 //! `ETag`/`If-Match`. It needs a conflict real enough to shape it.
 
 mod catalog;
+mod hooks;
 mod invitations;
 mod keys;
 mod links;

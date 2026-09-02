@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO webhook_event (provider, event_id, kind, payload)\n         VALUES ($1, $2, $3, $4)\n         ON CONFLICT (provider, event_id) DO UPDATE\n             SET deliveries = webhook_event.deliveries + 1\n         RETURNING (xmax = 0) as \"fresh!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fresh!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "33b2de32011d597a173722685a20995e1868354585ad44863b660c1d39dca355"
+}

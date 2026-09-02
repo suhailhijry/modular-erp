@@ -8,6 +8,14 @@ use erp_i18n::{Locale, MessageCode, Template};
 pub const UNKNOWN_CURRENCY: MessageCode = MessageCode::new("request.unknown_currency");
 pub const UNKNOWN_ACCOUNT_KIND: MessageCode = MessageCode::new("request.unknown_account_kind");
 pub const INVALID_ID: MessageCode = MessageCode::new("request.invalid_id");
+/// A callback that did not verify. **One code for four failures** — unsigned,
+/// wrong signature, unreadable timestamp and expired — because they are the same
+/// answer to somebody who should not be here, and distinguishing them is an
+/// oracle for guessing the rest.
+pub const WEBHOOK_NOT_VERIFIED: MessageCode = MessageCode::new("webhooks.not_verified");
+/// No secret is configured for that provider, so nothing could be verified.
+/// **Ours, not theirs**, which is why it is a separate code and a 503.
+pub const WEBHOOK_NO_SECRET: MessageCode = MessageCode::new("webhooks.no_secret");
 /// The client declared an API version older than this build serves. **Names
 /// what to build against**, because "unsupported" with no number is a support
 /// ticket.
@@ -71,6 +79,8 @@ pub const MISSING_IDEMPOTENCY_KEY: MessageCode =
     MessageCode::new("request.missing_idempotency_key");
 
 pub static CODES: &[MessageCode] = &[
+    WEBHOOK_NOT_VERIFIED,
+    WEBHOOK_NO_SECRET,
     API_VERSION_TOO_OLD,
     API_VERSION_TOO_NEW,
     UNKNOWN_CURRENCY,
@@ -112,6 +122,26 @@ pub static CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        WEBHOOK_NOT_VERIFIED,
+        Locale::English,
+        Template::Simple("That callback did not verify."),
+    ),
+    (
+        WEBHOOK_NOT_VERIFIED,
+        Locale::Arabic,
+        Template::Simple("لم يُتحقَّق من صحة هذا الاستدعاء."),
+    ),
+    (
+        WEBHOOK_NO_SECRET,
+        Locale::English,
+        Template::Simple("No secret is configured for {provider}, so nothing could be verified."),
+    ),
+    (
+        WEBHOOK_NO_SECRET,
+        Locale::Arabic,
+        Template::Simple("لا يوجد سر مُهيّأ لـ {provider}، فتعذّر التحقق."),
+    ),
     (
         API_VERSION_TOO_OLD,
         Locale::English,
