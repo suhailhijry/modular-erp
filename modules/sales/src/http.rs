@@ -406,7 +406,7 @@ async fn issue_invoice(
     key: IdempotencyKey,
     Json(body): Json<NewInvoice>,
 ) -> Result<(StatusCode, Json<Issued>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let id = key.id().clone();
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
@@ -531,7 +531,7 @@ async fn record_payment(
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewPayment>,
 ) -> Result<Json<PaymentRecorded>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let raw = params.get("invoice").map_or("", String::as_str);
     let invoice = parse_id(raw, locale)?;
@@ -595,7 +595,7 @@ async fn refund_payment(
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewRefund>,
 ) -> Result<Json<PaymentRecorded>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let raw = params.get("invoice").map_or("", String::as_str);
     let invoice = parse_id(raw, locale)?;
@@ -657,7 +657,7 @@ async fn credit_note(
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewCreditNote>,
 ) -> Result<Json<Issued>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let raw = params.get("invoice").map_or("", String::as_str);
     let invoice = parse_id(raw, locale)?;
@@ -707,7 +707,7 @@ async fn list_invoices(
     consistency: Consistency,
     Query(page): Query<After>,
 ) -> Result<Json<Paged<InvoiceView>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -820,7 +820,7 @@ async fn receivables(
     consistency: Consistency,
     Query(query): Query<AgedQuery>,
 ) -> Result<Json<Paged<AgedCustomerView>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -871,7 +871,7 @@ async fn unmatched_customers(
     consistency: Consistency,
     Query(query): Query<After>,
 ) -> Result<Json<Vec<UnmatchedCustomerView>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -937,7 +937,7 @@ async fn attach_customer(
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<MatchCustomer>,
 ) -> Result<Json<PaymentRecorded>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let raw = params.get("invoice").map_or("", String::as_str);
     let invoice = parse_id(raw, locale)?;
@@ -985,7 +985,7 @@ async fn get_invoice(
     consistency: Consistency,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<Json<InvoiceDetailView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -1091,7 +1091,7 @@ async fn posting_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<ConfiguredAccounts>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let mut conn = tenant
         .db
@@ -1152,7 +1152,7 @@ async fn set_posting_accounts(
     Language(locale): Language,
     Json(body): Json<AccountsView>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let accounts = crate::PostingAccounts {
         receivable: parse_id(&body.receivable, locale)?,

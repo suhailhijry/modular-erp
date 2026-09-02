@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tenant_origin (tenant, origin, domain)\n             VALUES ($1, $2, $3)\n             ON CONFLICT (tenant, origin) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "36bd4135d1bffa42118ec7982b67dbc678c07618ad787c0c8b57eb500f0dadc5"
+}

@@ -41,6 +41,7 @@ mod catalog;
 mod invitations;
 mod members;
 mod modules;
+mod origins;
 mod routes;
 mod signup;
 

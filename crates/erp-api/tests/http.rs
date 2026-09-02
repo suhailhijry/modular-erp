@@ -219,6 +219,25 @@ impl Fixture {
         (status, json, content_type)
     }
 
+    /// The whole response, headers included.
+    ///
+    /// [`Self::send`] returns the parsed body, which is what almost every test
+    /// wants. CORS is decided entirely in headers, so those tests need this.
+    async fn raw(&self, request: Request<Body>) -> axum::response::Response {
+        let mut request = request;
+        if !request.headers().contains_key(header::HOST) {
+            request.headers_mut().insert(
+                header::HOST,
+                axum::http::HeaderValue::from_static("acme.localhost"),
+            );
+        }
+        self.app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("the router responds")
+    }
+
     /// Logs in and returns the bearer token.
     async fn token(&self, handle: &str, password: &str) -> String {
         let (status, body, _) = self
@@ -303,6 +322,11 @@ impl Fixture {
 
     async fn project_ledger(&self, tenant: TenantId) {
         self.project(tenant, &ledger::projections(), ledger::upcasters())
+            .await;
+    }
+
+    async fn project_booking(&self, tenant: TenantId) {
+        self.project(tenant, &booking::projections(), booking::upcasters())
             .await;
     }
 
@@ -1768,6 +1792,14 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("issue_invoice", &["owner", "accountant", "clerk"]),
     ("refund_payment", &["owner", "accountant", "clerk"]),
     ("unmatched_customers", ALL_ROLES),
+    // Which websites may call this tenant's public API. Reading the list is
+    // ordinary; changing it is changing who may reach a business's diary from a
+    // browser, which is the owner's decision and nobody else's.
+    ("list_origins", ALL_ROLES),
+    ("allow_origin", OWNER),
+    ("revoke_origin", OWNER),
+    ("claim_domain", OWNER),
+    ("verify_domain", OWNER),
     ("attach_customer", OWNER),
     ("record_payment", &["owner", "accountant", "clerk"]),
     ("credit_note", &["owner", "accountant", "clerk"]),
@@ -1928,8 +1960,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        113,
-        "expected a hundred and thirteen role-scoped operations"
+        118,
+        "expected a hundred and eighteen role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -6154,6 +6186,437 @@ async fn a_list_longer_than_one_page_can_be_read_to_the_end() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "request.invalid_cursor");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 17 — the public surface
+// ---------------------------------------------------------------------------
+
+/// **A stranger can see what a business offers, and nothing else.**
+///
+/// The whole safety argument for `erp_web::Public` in one test: the same caller,
+/// on the same host, with no credential, reaches the two public routes and is
+/// refused by every other one. It is refused by *authentication*, not by a
+/// capability — which is the stronger answer, because it means a public route
+/// added tomorrow that forgot to be public still cannot be reached without a
+/// token.
+#[tokio::test]
+async fn a_stranger_sees_what_is_offered_and_can_reach_nothing_else() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // The business records two chairs and takes one out of service.
+    for (id, name) in [("CHAIR-1", "كرسي ١"), ("CHAIR-2", "كرسي ٢")] {
+        let (status, body, _) = fixture
+            .send(
+                Request::post("/v1/booking/resources")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("Idempotency-Key", idem(id))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": id, "name": name, "kind": "person", "capacity": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/booking/resources/CHAIR-2/withdrawal")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "why": "مكسور" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // The public surface takes no `consistent_after`: a customer has no write
+    // position to pass, and a site reading a diary a moment behind is correct.
+    // So the test drives the projection the way the worker would.
+    fixture.project_booking(tenant).await;
+
+    // A stranger. No token, no account, nothing.
+    let (status, body, _) = fixture
+        .send(
+            get("/v1/booking/public/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let offered: Vec<&str> = body["items"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|s| s["id"].as_str())
+        .collect();
+    assert_eq!(
+        offered,
+        vec!["CHAIR-1"],
+        "a broken chair was offered to a customer"
+    );
+
+    // And what a customer is shown is narrower than what a member is shown.
+    let first = &body["items"][0];
+    assert!(
+        first.get("capacity").is_none() && first.get("withdrawn_why").is_none(),
+        "the public shape leaked a member's fields: {first}"
+    );
+
+    // The same stranger, on the same host, against everything else.
+    for path in [
+        "/v1/booking/resources",
+        "/v1/booking/reservations",
+        "/v1/sales/invoices",
+        "/v1/ledger/accounts",
+        "/v1/members",
+    ] {
+        let (status, body, _) = fixture.send(get(path).body(Body::empty()).unwrap()).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{path} answered a stranger: {body}"
+        );
+    }
+
+    fixture.cleanup().await;
+}
+
+/// Availability is a number a form checks, and a service nobody declared is a
+/// 404 rather than a zero — a stale link has to be distinguishable from a full
+/// diary.
+#[tokio::test]
+async fn a_stranger_can_ask_whether_a_slot_is_free() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/booking/resources")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", idem("CHAIR-1"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "CHAIR-1", "name": "كرسي", "kind": "person", "capacity": 2
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let window = "from=2026-05-01T09:00:00Z&until=2026-05-01T10:00:00Z";
+    let (status, body, _) = fixture
+        .send(
+            get(&format!(
+                "/v1/booking/public/availability?resource=CHAIR-1&{window}"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["free"], 2, "an empty diary is entirely free");
+
+    // A link from last year, to a chair that never existed.
+    let (status, body, _) = fixture
+        .send(
+            get(&format!(
+                "/v1/booking/public/availability?resource=CHAIR-NONE&{window}"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a stale link looked like a full diary: {body}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A business that does not take bookings has no public booking page, and says
+/// so with the same 404 as a business that does not exist.
+#[tokio::test]
+async fn a_business_without_the_module_has_no_public_page() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    fixture.enable_ledger(tenant).await;
+
+    for path in [
+        "/v1/booking/public/services",
+        "/v1/booking/public/availability?resource=X&from=2026-05-01T09:00:00Z&until=2026-05-01T10:00:00Z",
+    ] {
+        let (status, body, _) = fixture.send(get(path).body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+        assert_eq!(body["code"], "request.module_not_enabled");
+    }
+
+    // And a business nobody has heard of.
+    let (status, _, _) = fixture
+        .send(
+            get("/v1/booking/public/services")
+                .header(header::HOST, "nobody.localhost")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    fixture.cleanup().await;
+}
+
+/// **A browser at an allowed origin is answered; one at a lookalike is not.**
+///
+/// The lookalike is the point. `https://salon.com.attacker.example` ends with
+/// `salon.com`, so any check written with `ends_with` admits it — and the page
+/// that gets in can read a tenant's diary with a visitor's browser.
+#[tokio::test]
+async fn a_verified_origin_is_answered_and_a_lookalike_is_not() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+
+    fixture
+        .control
+        .claim_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("claims");
+    fixture
+        .control
+        .allow_origin(
+            tenant,
+            "salon.example",
+            "https://salon.example",
+            Actor::system(),
+        )
+        .await
+        .expect("licenses");
+
+    // **Unverified licenses nothing.** The row exists and the origin is still
+    // refused, which is what makes claiming and licensing safe to do in one go.
+    let (_, _, _) = fixture
+        .send(
+            get("/v1/booking/public/services")
+                .header(header::ORIGIN, "https://salon.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let allowed = fixture
+        .control
+        .allows_origin(tenant, "https://salon.example")
+        .await
+        .expect("asks");
+    assert!(!allowed, "an unproved domain licensed an origin");
+
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("verifies");
+
+    // Now the real request carries the header back.
+    let response = fixture
+        .raw(
+            get("/v1/booking/public/services")
+                .header(header::ORIGIN, "https://salon.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("https://salon.example"),
+    );
+    assert_eq!(
+        response.headers().get("vary").and_then(|v| v.to_str().ok()),
+        Some("Origin"),
+        "a shared cache could serve one origin's response to another"
+    );
+    assert!(
+        response
+            .headers()
+            .get("access-control-allow-credentials")
+            .is_none(),
+        "credentials would let a cookie ride along on a public surface"
+    );
+
+    // The lookalike, and a bare different origin.
+    for origin in [
+        "https://salon.example.attacker.test",
+        "https://attacker.test",
+        "http://salon.example",
+    ] {
+        let response = fixture
+            .raw(
+                get("/v1/booking/public/services")
+                    .header(header::ORIGIN, origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "{origin} was let in"
+        );
+    }
+
+    fixture.cleanup().await;
+}
+
+/// A preflight is answered without reaching a handler, and a refused one says
+/// nothing about what the allowlist contains.
+#[tokio::test]
+async fn a_preflight_is_answered_at_the_edge() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    fixture
+        .control
+        .claim_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("claims");
+    fixture
+        .control
+        .allow_origin(
+            tenant,
+            "salon.example",
+            "https://salon.example",
+            Actor::system(),
+        )
+        .await
+        .expect("licenses");
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("verifies");
+
+    let preflight = |origin: &str| {
+        Request::options("/v1/booking/public/services")
+            .header(header::HOST, "acme.localhost")
+            .header(header::ORIGIN, origin)
+            .header("access-control-request-method", "GET")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let response = fixture.raw(preflight("https://salon.example")).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("https://salon.example"),
+    );
+    let allowed_headers = response
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        !allowed_headers.contains("authorization"),
+        "the public surface has no session, and this offered to carry one"
+    );
+
+    // Refused: still a 204, still no explanation.
+    let response = fixture.raw(preflight("https://attacker.test")).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none(),
+        "a page not on the list was told it was"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Revoking an origin takes effect at once on the node that did it, rather than
+/// after the entry cache's TTL — the same promise logging out already makes.
+#[tokio::test]
+async fn revoking_an_origin_takes_effect_at_once() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+
+    fixture
+        .control
+        .claim_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("claims");
+    fixture
+        .control
+        .allow_origin(
+            tenant,
+            "salon.example",
+            "https://salon.example",
+            Actor::system(),
+        )
+        .await
+        .expect("licenses");
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("verifies");
+    assert!(
+        fixture
+            .control
+            .allows_origin(tenant, "https://salon.example")
+            .await
+            .expect("asks"),
+        "a verified origin was refused"
+    );
+
+    fixture
+        .control
+        .revoke_origin(tenant, "https://salon.example", Actor::system())
+        .await
+        .expect("revokes");
+
+    assert!(
+        !fixture
+            .control
+            .allows_origin(tenant, "https://salon.example")
+            .await
+            .expect("asks"),
+        "a revoked origin was still cached"
+    );
 
     fixture.cleanup().await;
 }

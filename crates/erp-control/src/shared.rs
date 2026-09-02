@@ -85,6 +85,10 @@ pub enum Invalidate {
     },
     Platform(IdentityId),
     Entitlements(TenantId),
+    /// Which web origins may call a tenant's public API. On the entry path
+    /// because CORS is decided there, and revoking one has to take effect
+    /// across every node rather than on whichever one the operator hit.
+    Origins(TenantId),
 }
 
 /// A connection to the shared cache, or nothing.

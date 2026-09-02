@@ -68,7 +68,19 @@ waits, so a timing window is plausible.
 Left as-is rather than papered over with a retry. If it recurs, the suspect is
 that `kill_connection` returns before the backend has finished rolling back.
 
-### 4 · The "5,000 tenants" prose was not stale
+### 4 · Two commits are unsigned
+
+`gpg` needs a pinentry TTY for your key's passphrase and I have neither, so the
+gap-closing commits went in with `--no-gpg-sign`. Re-sign them when you are
+back:
+
+```
+git rebase --exec 'git commit --amend --no-edit -S' -i <the commit before them>
+```
+
+Nothing else about them differs.
+
+### 5 · The "5,000 tenants" prose was not stale
 
 I had this on the gap list from an earlier session. It is wrong: `ARCHITECTURE.md`,
 `pools.rs` and `placement.rs` all quote 5,000, and this document's own target is

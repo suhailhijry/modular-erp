@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tenant_origin WHERE tenant = $1 AND origin = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de51d01b351932bc914d719fedf516cc455d1725425110fef3fc512a1ca86e42"
+}

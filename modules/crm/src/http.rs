@@ -186,7 +186,7 @@ async fn list_customers(
     consistency: Consistency,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Paged<CustomerRecord>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -228,7 +228,7 @@ async fn register_customer(
     key: IdempotencyKey,
     Json(body): Json<NewCustomerRecord>,
 ) -> Result<(StatusCode, Json<CustomerRegistered>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = key.id().clone();
     let details = details(
         body.name,
@@ -281,7 +281,7 @@ async fn get_customer(
     consistency: Consistency,
     Path(id): Path<String>,
 ) -> Result<Json<CustomerRecordDetail>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -339,7 +339,7 @@ async fn amend_customer(
     Path(id): Path<String>,
     Json(body): Json<AmendCustomerRecord>,
 ) -> Result<Json<CustomerRegistered>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let key = parse_id(&id, locale)?;
     let details = details(
         body.name,
@@ -385,7 +385,7 @@ async fn archive_customer(
     Path(id): Path<String>,
     Json(body): Json<ArchiveCustomerRecord>,
 ) -> Result<Json<CustomerRegistered>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let key = parse_id(&id, locale)?;
     let committed = crate::archive_customer(&tenant.db, &key, body.reason, &metadata(&tenant))
         .await
@@ -418,7 +418,7 @@ async fn restore_customer(
     Language(locale): Language,
     Path(id): Path<String>,
 ) -> Result<Json<CustomerRegistered>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let key = parse_id(&id, locale)?;
     let committed = crate::restore_customer(&tenant.db, &key, &metadata(&tenant))
         .await

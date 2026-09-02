@@ -192,7 +192,7 @@ async fn vat_return(
     consistency: Consistency,
     Query(period): Query<Period>,
 ) -> Result<Json<ReturnView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let (currency, from, until) = period_of(&period.currency, period.from, period.until, locale)?;
 
     let sides = sides_of(&tenant);
@@ -248,7 +248,7 @@ async fn file_return(
     Language(locale): Language,
     Json(body): Json<NewFiling>,
 ) -> Result<(StatusCode, Json<FiledView>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let (currency, from, until) = period_of(&body.currency, body.from, body.until, locale)?;
 
     let filed = crate::file_return(
@@ -306,7 +306,7 @@ async fn filed_returns(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<Vec<FiledView>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -652,7 +652,7 @@ async fn register(
     Language(locale): Language,
     Json(body): Json<RegistrationBody>,
 ) -> Result<Json<RegistrationBody>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let scheme = body
         .scheme
@@ -726,7 +726,7 @@ async fn registration(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<RegistrationBody>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -794,7 +794,7 @@ async fn zatca_standing(
     consistency: Consistency,
     Query(query): Query<AsOf>,
 ) -> Result<Json<StandingView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -852,7 +852,7 @@ async fn zatca_documents(
     consistency: Consistency,
     Query(page): Query<erp_web::After>,
 ) -> Result<Json<erp_web::Paged<DocumentView>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -896,7 +896,7 @@ async fn zatca_document(
     consistency: Consistency,
     axum::extract::Path(number): axum::extract::Path<String>,
 ) -> Result<Json<FullDocumentView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -1063,7 +1063,7 @@ async fn begin_onboarding(
     Language(locale): Language,
     Json(body): Json<OnboardingRequest>,
 ) -> Result<(StatusCode, Json<CsrView>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let sealing = sealing(&state, locale)?;
     let environment = environment_of(&body.environment, locale)?;
     let unit = unit_for(&tenant, &body, locale).await?;
@@ -1111,7 +1111,7 @@ async fn accept_certificate(
     Language(locale): Language,
     Json(body): Json<CertificateBody>,
 ) -> Result<Json<CertificateView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let sealing = sealing(&state, locale)?;
     let environment = environment_of(&body.environment, locale)?;
 
@@ -1180,7 +1180,7 @@ async fn onboarding_status(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<OnboardingView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let reached = crate::zatca::onboarding::reached(&tenant.db)
         .await
@@ -1431,7 +1431,7 @@ async fn activate(
     Language(locale): Language,
     Json(body): Json<ActivationRequest>,
 ) -> Result<Json<ActivationView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let sealing = sealing(&state, locale)?;
     let environment = environment_of(&body.environment, locale)?;
 

@@ -248,7 +248,7 @@ async fn record_bill(
     key: IdempotencyKey,
     Json(body): Json<NewBill>,
 ) -> Result<(StatusCode, Json<BillPaymentRecorded>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let id = key.id().clone();
     let currency = CurrencyCode::new(&body.currency).map_err(|_| {
@@ -338,7 +338,7 @@ async fn pay_bill(
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<NewBillPayment>,
 ) -> Result<Json<BillPaymentRecorded>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let raw = params.get("bill").map_or("", String::as_str);
     let bill = parse_id(raw, locale)?;
@@ -389,7 +389,7 @@ async fn list_bills(
     consistency: Consistency,
     Query(page): Query<After>,
 ) -> Result<Json<Paged<BillView>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -433,7 +433,7 @@ async fn get_bill(
     consistency: Consistency,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<Json<BillDetailView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;

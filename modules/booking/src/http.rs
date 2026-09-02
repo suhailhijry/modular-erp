@@ -25,7 +25,9 @@ use utoipa_axum::routes;
 
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Read};
+use erp_web::{
+    After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Public, Read,
+};
 use erp_web::{Consistency, nudge};
 use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
 
@@ -42,10 +44,18 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(move_reservation))
         .routes(routes!(reschedule_reservation))
         .routes(routes!(assign_unit))
+        // ------------------------------------------------------------------
+        // The public surface — Phase 17. Mounted under this module's own name
+        // so `module_of` still scopes it and `require_module` still applies: a
+        // tenant with booking switched off has no public booking site.
+        .routes(routes!(public_services))
+        .routes(routes!(public_availability))
+        .routes(routes!(tariff, set_tariff))
         // Unauthenticated on purpose, like `ledger::list_charts`: a signup form
         // needs to show a salon what a salon gets before anybody has an
-        // account. It is product information, not data.
-        .routes(routes!(tariff, set_tariff))
+        // account. It is product information, not data — nothing here reads a
+        // database. (The comment used to sit a line higher, over `tariff`,
+        // which reads a *tenant's* prices and is not public.)
         .routes(routes!(list_trades))
         .routes(routes!(fit_out))
 }
@@ -414,6 +424,172 @@ struct DiaryQuery {
 }
 
 // ---------------------------------------------------------------------------
+// The public surface — Phase 17
+//
+// What a tenant's own customers see, with no account and no session. The site
+// that renders this is a separate React project; what lives here is the API it
+// is built against.
+//
+// **Two rules hold this apart from the routes below.** The caller is
+// `erp_web::Public`, which carries no access at all — every capability check
+// refuses it, so a public handler cannot reach a guarded command by omission.
+// And the shapes are their own: a customer is shown what is bookable and when,
+// never what a member is shown. `BookableRecord` carries a resource's capacity
+// and why it was withdrawn, and neither is a stranger's business.
+// ---------------------------------------------------------------------------
+
+/// What can be booked here, as a customer sees it.
+#[derive(Debug, Serialize, ToSchema)]
+struct ServiceView {
+    id: String,
+    name: String,
+    /// For a site rendering in English. Absent means show `name`.
+    name_latin: Option<String>,
+    /// `person`, `room`, `equipment` — what a site groups by.
+    kind: String,
+    /// Where it is. Absent in a single-branch business.
+    branch: Option<String>,
+}
+
+/// How much of one service is free over a span.
+#[derive(Debug, Serialize, ToSchema)]
+struct FreeView {
+    resource: String,
+    /// How many more bookings fit across the **whole** span.
+    ///
+    /// Zero means full. It is what was free a moment ago, not a reservation —
+    /// the answer that counts is the one taking the booking computes under
+    /// locks, and a form that treats this as a promise will occasionally show a
+    /// slot that has just gone.
+    free: u16,
+}
+
+/// Paging, plus the one branch a customer is choosing between.
+#[derive(Debug, Deserialize)]
+struct PublicServicesQuery {
+    /// One branch's services. Absent means all of them, because a customer
+    /// choosing where to go has to be able to see everywhere.
+    branch: Option<String>,
+    #[serde(flatten)]
+    page: After,
+}
+
+/// One service, over one window.
+#[derive(Debug, Deserialize)]
+struct FreeQuery {
+    resource: String,
+    from: Timestamp,
+    until: Timestamp,
+}
+
+/// What this business offers, for a booking site.
+///
+/// Unauthenticated: it is what a shop puts on its own front page.
+#[utoipa::path(
+    get,
+    path = "/v1/booking/public/services",
+    tag = "booking",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — which is how a public request names the business."),
+        ("branch" = Option<String>, Query, description = "One branch's services. Absent means all of them."),
+        ("after" = Option<String>, Query, description = "From a previous page's `next`."),
+        ("limit" = Option<i64>, Query, description = "Rows per page. Clamped, never refused."),
+    ),
+    security(),
+    responses(
+        (status = OK, description = "One page of what can be booked. `next` is absent when the list ended.", body = Paged<ServiceView>),
+        (status = BAD_REQUEST, description = "An unreadable cursor", body = Problem),
+        (status = NOT_FOUND, description = "No such business, it is not trading, or it does not take bookings", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn public_services(
+    caller: Public,
+    Language(locale): Language,
+    Query(query): Query<PublicServicesQuery>,
+) -> Result<Json<Paged<ServiceView>>, Problem> {
+    require_module(&caller.db, &crate::module_id(), locale)?;
+
+    let after = query.page.cursor(locale)?;
+    let mut conn = caller.db.read().await.map_err(|e| pool(&e, locale))?;
+    let page = crate::resources(
+        &mut conn,
+        query.branch.as_deref(),
+        // **Never the withdrawn ones**, and not a parameter. A member has a
+        // reason to see what is out of service; a customer being offered a
+        // chair that does not exist is the site being wrong.
+        false,
+        query.page.limit(50, 200),
+        after.as_ref(),
+    )
+    .await
+    .map_err(|e| database(&e, locale))?;
+
+    Ok(Json(Paged::of(page, |r: crate::ResourceSummary| {
+        ServiceView {
+            id: r.id,
+            name: r.name,
+            name_latin: r.name_latin,
+            kind: r.kind,
+            branch: r.branch,
+        }
+    })))
+}
+
+/// Whether a service is free over a span.
+///
+/// What a booking form checks before it submits. **It takes no locks**, so it
+/// is what was free a moment ago; taking the booking is what decides.
+#[utoipa::path(
+    get,
+    path = "/v1/booking/public/availability",
+    tag = "booking",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — which is how a public request names the business."),
+        ("resource" = String, Query, description = "The service being asked about."),
+        ("from" = chrono::DateTime<chrono::Utc>, Query, description = "Start of the window."),
+        ("until" = chrono::DateTime<chrono::Utc>, Query, description = "End of it."),
+    ),
+    security(),
+    responses(
+        (status = OK, body = FreeView),
+        (status = BAD_REQUEST, description = "A span that is backwards, empty, or longer than this system will answer for", body = Problem),
+        (status = NOT_FOUND, description = "No such business, no such service, or it does not take bookings", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn public_availability(
+    caller: Public,
+    Language(locale): Language,
+    Query(query): Query<FreeQuery>,
+) -> Result<Json<FreeView>, Problem> {
+    require_module(&caller.db, &crate::module_id(), locale)?;
+
+    let resource = parse_id(&query.resource, locale)?;
+    let span = Span::new(query.from, query.until)
+        .map_err(|e| Problem::new(StatusCode::BAD_REQUEST, &e.message(), locale, &CATALOG))?;
+
+    let mut conn = caller.db.read().await.map_err(|e| pool(&e, locale))?;
+    let free = erp_occupancy::free(&mut conn, &resource, span)
+        .await
+        .map_err(|e| {
+            // A service that is not there is a 404 and not a 422: a customer
+            // following a stale link asked for something that does not exist,
+            // and every other occupancy failure here is the database.
+            let status = match e {
+                erp_occupancy::OccupancyError::NoSuchResource(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            Problem::new(status, &e.message(), locale, &CATALOG)
+        })?;
+
+    Ok(Json(FreeView {
+        resource: query.resource,
+        free,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Routes — what can be booked
 // ---------------------------------------------------------------------------
 
@@ -444,7 +620,7 @@ async fn list_bookables(
     consistency: Consistency,
     Query(query): Query<BookableQuery>,
 ) -> Result<Json<Paged<BookableRecord>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -493,7 +669,7 @@ async fn declare_bookable(
     key: IdempotencyKey,
     Json(body): Json<NewBookable>,
 ) -> Result<(StatusCode, Json<BookingAccepted>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     // **The id stays the caller's here.** A resource is named by the business
     // and booked by that name; the key is only what tells a retry from a
     // different resource claiming a name that is taken.
@@ -553,7 +729,7 @@ async fn get_bookable(
     consistency: Consistency,
     Path(id): Path<String>,
 ) -> Result<Json<BookableDetail>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -594,7 +770,7 @@ async fn amend_bookable(
     Path(id): Path<String>,
     Json(body): Json<AmendBookable>,
 ) -> Result<Json<BookingAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
 
     // No kind: it is set once, at declaration. A chair does not become a
@@ -644,7 +820,7 @@ async fn set_opening_hours(
     Path(id): Path<String>,
     Json(body): Json<Timetable>,
 ) -> Result<Json<BookingAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
 
     let rules: Vec<Availability> = body
@@ -703,7 +879,7 @@ async fn withdraw_bookable(
     Path(id): Path<String>,
     Json(body): Json<WithdrawBookable>,
 ) -> Result<Json<BookingAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::withdraw_resource(
         &tenant.db,
@@ -742,7 +918,7 @@ async fn restore_bookable(
     Language(locale): Language,
     Path(id): Path<String>,
 ) -> Result<Json<BookingAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::restore_resource(
         &tenant.db,
@@ -793,7 +969,7 @@ async fn list_reservations(
     consistency: Consistency,
     Query(query): Query<DiaryQuery>,
 ) -> Result<Json<Paged<ReservationRecord>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -837,7 +1013,7 @@ async fn take_reservation(
     key: IdempotencyKey,
     Json(body): Json<NewReservation>,
 ) -> Result<(StatusCode, Json<BookingAccepted>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = key.id().clone();
     let customer = body
         .customer
@@ -890,7 +1066,7 @@ async fn get_reservation(
     consistency: Consistency,
     Path(id): Path<String>,
 ) -> Result<Json<ReservationRecordDetail>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -952,7 +1128,7 @@ async fn move_reservation(
     Path(id): Path<String>,
     Json(body): Json<MoveReservation>,
 ) -> Result<Json<BookingAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let target: Stage = body.stage.parse().map_err(|e: crate::UnknownStage| {
         Problem::new(
@@ -1006,7 +1182,7 @@ async fn reschedule_reservation(
     Path(id): Path<String>,
     Json(body): Json<RescheduleReservation>,
 ) -> Result<Json<BookingAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let lines = lines(&body.lines, locale)?;
 
@@ -1053,7 +1229,7 @@ async fn assign_unit(
     Path((id, line)): Path<(String, String)>,
     Json(body): Json<AssignUnit>,
 ) -> Result<Json<BookingAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let unit = parse_id(&body.unit, locale)?;
 
@@ -1129,7 +1305,7 @@ async fn tariff(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<TariffView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
     let resolved = crate::Tariff::resolve(&mut conn)
         .await
@@ -1172,7 +1348,7 @@ async fn set_tariff(
     Language(locale): Language,
     Json(body): Json<TariffView>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let bands = body
         .bands
@@ -1287,7 +1463,7 @@ async fn fit_out(
     Language(locale): Language,
     Json(body): Json<FitOut>,
 ) -> Result<Json<FittedOutView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let trade = crate::trade(&body.trade).ok_or_else(|| {
         Problem::new(
             StatusCode::BAD_REQUEST,

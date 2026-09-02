@@ -210,6 +210,19 @@ fn only_the_deliberately_public_routes_are_public() {
         // The token in the path is the credential.
         ("get", "/v1/join/{token}"),
         ("post", "/v1/join/{token}"),
+        // **Phase 17: a tenant's own customers, who have no account here.**
+        //
+        // These do read a tenant's data, which is what makes them different in
+        // kind from everything above — and the reason they are safe is not that
+        // the data is harmless but that `erp_web::Public` carries **no access
+        // at all**: every capability check refuses it, so neither of these can
+        // reach a guarded command by omission.
+        //
+        // They are also deliberately narrower than their authenticated
+        // counterparts. `services` never shows a withdrawn resource and never
+        // its capacity; `availability` answers one number.
+        ("get", "/v1/booking/public/services"),
+        ("get", "/v1/booking/public/availability"),
     ];
 
     for (path, method, operation) in operations(&document()) {

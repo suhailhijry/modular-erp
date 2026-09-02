@@ -283,7 +283,7 @@ async fn list_shifts(
     consistency: Consistency,
     Query(query): Query<ShiftQuery>,
 ) -> Result<Json<Paged<ShiftRecord>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -326,7 +326,7 @@ async fn open_shift(
     key: IdempotencyKey,
     Json(body): Json<NewShift>,
 ) -> Result<(StatusCode, Json<PosAccepted>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = key.id().clone();
 
     let opening = Opening {
@@ -372,7 +372,7 @@ async fn get_shift(
     consistency: Consistency,
     Path(id): Path<String>,
 ) -> Result<Json<ShiftRecord>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -405,7 +405,7 @@ async fn shift_takings(
     consistency: Consistency,
     Path(id): Path<String>,
 ) -> Result<Json<Takings>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -452,7 +452,7 @@ async fn ring_sale(
     key: IdempotencyKey,
     Json(body): Json<NewSale>,
 ) -> Result<(StatusCode, Json<SaleRung>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let shift = parse_id(&shift, locale)?;
     let sale = key.id().clone();
 
@@ -522,7 +522,7 @@ async fn take_back(
     Path((shift, sale)): Path<(String, String)>,
     Json(body): Json<NewReturn>,
 ) -> Result<Json<PosAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = parse_id(&shift, locale)?;
     let sale = parse_id(&sale, locale)?;
 
@@ -567,7 +567,7 @@ async fn pay_out(
     Path(shift): Path<String>,
     Json(body): Json<NewPayOut>,
 ) -> Result<Json<PosAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = parse_id(&shift, locale)?;
 
     let payment = PayOut {
@@ -612,7 +612,7 @@ async fn close_shift(
     Path(shift): Path<String>,
     Json(body): Json<NewCount>,
 ) -> Result<Json<PosAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = parse_id(&shift, locale)?;
     let declared = amount(&body.declared, locale)?;
     let at = body.at.unwrap_or_else(chrono::Utc::now);
@@ -644,7 +644,7 @@ async fn till_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<TillAccounts>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
     let accounts = crate::PostingAccounts::resolve(&mut conn)
         .await
@@ -676,7 +676,7 @@ async fn set_till_accounts(
     Language(locale): Language,
     Json(body): Json<TillAccounts>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let accounts = crate::PostingAccounts {
         cash: parse_id(&body.cash, locale)?,
         bank: parse_id(&body.bank, locale)?,

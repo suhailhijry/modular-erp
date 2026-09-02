@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tenant_domain (tenant, domain, verification_token)\n             VALUES ($1, $2, $3)\n             ON CONFLICT (tenant, domain) DO UPDATE\n                 SET domain = EXCLUDED.domain\n             RETURNING verification_token",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "verification_token",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tenant_domain",
+            "name": "verification_token"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "43be0e477f75d73da58f1dd9bbd98b8a587deda396f22b078c5145d215a82bf7"
+}

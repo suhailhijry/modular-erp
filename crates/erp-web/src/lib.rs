@@ -31,6 +31,7 @@
 //! of all of them, and is what `docs/ERRORS.md` is generated from.
 
 mod consistency;
+pub mod cors;
 mod error;
 mod extract;
 pub mod messages;
@@ -44,7 +45,7 @@ pub use consistency::{Consistency, nudge};
 pub use error::ApiError;
 pub use extract::{
     Allowed, Authenticated, BRANCH_HEADER, Capability, IdempotencyKey, Language, ManageAccounts,
-    ManageTenant, PostEntries, Read, Tenant,
+    ManageTenant, PostEntries, Public, Read, Tenant,
 };
 pub use problem::Problem;
 pub use state::AppState;

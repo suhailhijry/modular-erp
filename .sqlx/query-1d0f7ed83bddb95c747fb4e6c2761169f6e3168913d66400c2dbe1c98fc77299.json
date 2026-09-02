@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT o.origin as \"origin!\"\n                 FROM tenant_origin o\n                 JOIN tenant_domain d\n                   ON d.tenant = o.tenant AND d.domain = o.domain\n                WHERE o.tenant = $1 AND d.verified_at IS NOT NULL\n                ORDER BY o.origin",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "origin!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tenant_origin",
+            "name": "origin"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1d0f7ed83bddb95c747fb4e6c2761169f6e3168913d66400c2dbe1c98fc77299"
+}

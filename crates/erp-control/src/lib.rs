@@ -179,6 +179,13 @@ pub struct ControlPlane {
     /// what someone may do inside a tenant's books.
     platform: TtlCache<IdentityId, bool>,
     entitlements: TtlCache<TenantId, EnabledModules>,
+    /// The origins a tenant's public API answers to, from `tenant_origin`.
+    ///
+    /// Cached on the same terms as everything else on the entry path: a
+    /// cross-origin request asks this once per request, and asking the control
+    /// database every time would put CORS on the hot path of the very surface
+    /// that is expected to be flooded.
+    origins: TtlCache<TenantId, Arc<[String]>>,
     /// The caches every node shares, when this deployment has any.
     ///
     /// `None` is a supported shape and means exactly the behaviour this system
@@ -204,6 +211,7 @@ impl ControlPlane {
             memberships: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             platform: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             entitlements: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            origins: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             shared: None,
             entry_hits: AtomicU64::new(0),
             entry_misses: AtomicU64::new(0),
@@ -234,6 +242,7 @@ impl ControlPlane {
             }
             Invalidate::Platform(id) => self.platform.invalidate(&id),
             Invalidate::Entitlements(id) => self.entitlements.invalidate(&id),
+            Invalidate::Origins(id) => self.origins.invalidate(&id),
         }
         if let Some(shared) = &self.shared {
             shared.publish(&what).await;
@@ -252,6 +261,7 @@ impl ControlPlane {
             }
             Invalidate::Platform(id) => self.platform.invalidate(id),
             Invalidate::Entitlements(id) => self.entitlements.invalidate(id),
+            Invalidate::Origins(id) => self.origins.invalidate(id),
         }
     }
 
@@ -461,6 +471,248 @@ impl ControlPlane {
         }
 
         self.open(&tenant, Lane::Background).await
+    }
+
+    /// Opens a tenant for one of **its customers**, who has no account here.
+    ///
+    /// The booking site, the order form, the thing a shop's own customers touch.
+    ///
+    /// # Why this is not a bypass, and how it differs from maintenance
+    ///
+    /// It takes **no identity**, so nothing it returns can be attributed to a
+    /// person and no capability check can pass: `TenantDb::role()` is `None`,
+    /// and a check against `None` refuses. A public handler therefore cannot
+    /// reach a guarded command even by mistake — it has to call the module
+    /// function directly, which is a visible act rather than an omission.
+    ///
+    /// It differs from [`Self::enter_for_maintenance`] in the two ways that
+    /// matter:
+    ///
+    /// - **`Lane::Client`, not `Lane::Background`.** Somebody is waiting, so it
+    ///   must not yield the way a projection tick does — and it must not draw
+    ///   from the interactive lane either, because a bot hammering a booking
+    ///   form would then starve the counter staff serving people in the shop.
+    ///   That is the whole reason the lane exists, and this is its first caller.
+    /// - **The tenant must be enterable.** Maintenance still drives projections
+    ///   for a suspended tenant, because suspension stops people using the
+    ///   system rather than stopping the system finishing what it accepted. A
+    ///   suspended tenant's public booking page must go dark.
+    pub async fn enter_for_the_public(&self, tenant_id: TenantId) -> Result<TenantDb, AccessError> {
+        let tenant = self
+            .cached_tenant(tenant_id)
+            .await?
+            .ok_or(AccessError::NoSuchTenant)?;
+        if !tenant.is_enterable() {
+            return Err(AccessError::TenantNotActive {
+                status: tenant.status,
+            });
+        }
+
+        self.open(&tenant, Lane::Client).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-origin access to a tenant's public API — Phase 17
+    // -----------------------------------------------------------------------
+
+    /// Whether a browser at this origin may call this tenant's public API.
+    ///
+    /// **Never a wildcard, and never a suffix match.** The stored origin is
+    /// compared whole: `https://salon.com` does not admit
+    /// `https://salon.com.attacker.example`, which is what a naive
+    /// `ends_with` would do and is the single most common way this check is
+    /// written wrong.
+    ///
+    /// A tenant with no origins recorded is a tenant with no public site, and
+    /// answers no cross-origin request at all. That is the safe default and it
+    /// is the one every tenant starts in.
+    pub async fn allows_origin(
+        &self,
+        tenant_id: TenantId,
+        origin: &str,
+    ) -> Result<bool, AccessError> {
+        let origin = origin.trim().to_lowercase();
+        // `contains`, deliberately: it is whole-string equality and cannot be
+        // mistaken for a prefix or suffix test the way a hand-written closure
+        // can. See the module docs on `erp_web::cors`.
+        Ok(self.cached_origins(tenant_id).await?.contains(&origin))
+    }
+
+    /// Every origin this tenant answers, for a settings screen.
+    pub async fn origins(&self, tenant_id: TenantId) -> Result<Vec<String>, AccessError> {
+        Ok(self.cached_origins(tenant_id).await?.to_vec())
+    }
+
+    async fn cached_origins(&self, tenant_id: TenantId) -> Result<Arc<[String]>, AccessError> {
+        if let Some(hit) = self.origins.get(&tenant_id) {
+            self.hit();
+            return Ok(hit);
+        }
+        self.miss();
+
+        // **Only verified domains license an origin.** The join is the check:
+        // an unverified domain has rows here and licenses nothing, so the row
+        // can be written the moment a tenant asks and start working the moment
+        // they prove it, with no second write to forget.
+        let rows: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT o.origin as "origin!"
+                 FROM tenant_origin o
+                 JOIN tenant_domain d
+                   ON d.tenant = o.tenant AND d.domain = o.domain
+                WHERE o.tenant = $1 AND d.verified_at IS NOT NULL
+                ORDER BY o.origin"#,
+            tenant_id.as_uuid(),
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let fresh: Arc<[String]> = rows.into();
+        self.origins.put(tenant_id, Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// Records a domain a tenant says they own, and the token that proves it.
+    ///
+    /// Nothing is licensed by this on its own — see [`Self::verify_domain`].
+    /// Sending the same domain again returns the existing token rather than
+    /// minting a new one, because a tenant who has already published a TXT
+    /// record must not be told to publish a different one.
+    pub async fn claim_domain(
+        &self,
+        tenant_id: TenantId,
+        domain: &str,
+        actor: Actor,
+    ) -> Result<String, AccessError> {
+        let domain = domain.trim().to_lowercase();
+        let token = crate::auth::verification_token().map_err(AccessError::Auth)?;
+        let existing: Option<String> = sqlx::query_scalar!(
+            "INSERT INTO tenant_domain (tenant, domain, verification_token)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (tenant, domain) DO UPDATE
+                 SET domain = EXCLUDED.domain
+             RETURNING verification_token",
+            tenant_id.as_uuid(),
+            domain,
+            token,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let token = existing.unwrap_or(token);
+        self.record(
+            actor,
+            "tenant.domain_claimed",
+            "tenant",
+            &tenant_id.to_string(),
+            serde_json::json!({ "domain": domain }),
+        )
+        .await?;
+        Ok(token)
+    }
+
+    /// Marks a domain proved, which is what makes its origins live.
+    ///
+    /// **This does not do the proving.** Reaching out to DNS or to a well-known
+    /// URL is an effect, and effects are values in the outbox (D9) — so what
+    /// checks the world is a handler, and this is what it writes when the check
+    /// came back yes.
+    pub async fn verify_domain(
+        &self,
+        tenant_id: TenantId,
+        domain: &str,
+        actor: Actor,
+    ) -> Result<bool, AccessError> {
+        let domain = domain.trim().to_lowercase();
+        let updated = sqlx::query!(
+            "UPDATE tenant_domain SET verified_at = now()
+              WHERE tenant = $1 AND domain = $2 AND verified_at IS NULL",
+            tenant_id.as_uuid(),
+            domain,
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        if updated > 0 {
+            self.forget(crate::shared::Invalidate::Origins(tenant_id))
+                .await;
+            self.record(
+                actor,
+                "tenant.domain_verified",
+                "tenant",
+                &tenant_id.to_string(),
+                serde_json::json!({ "domain": domain }),
+            )
+            .await?;
+        }
+        Ok(updated > 0)
+    }
+
+    /// Licenses one origin under a domain this tenant has claimed.
+    ///
+    /// Refused if the domain is not this tenant's: the foreign key says so, and
+    /// the error it raises is the honest one. It is deliberately allowed before
+    /// the domain is verified — the row exists and licenses nothing until the
+    /// proof lands, which is one fewer step to forget.
+    pub async fn allow_origin(
+        &self,
+        tenant_id: TenantId,
+        domain: &str,
+        origin: &str,
+        actor: Actor,
+    ) -> Result<(), AccessError> {
+        let domain = domain.trim().to_lowercase();
+        let origin = origin.trim().to_lowercase();
+        sqlx::query!(
+            "INSERT INTO tenant_origin (tenant, origin, domain)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (tenant, origin) DO NOTHING",
+            tenant_id.as_uuid(),
+            origin,
+            domain,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        self.forget(crate::shared::Invalidate::Origins(tenant_id))
+            .await;
+        self.record(
+            actor,
+            "tenant.origin_allowed",
+            "tenant",
+            &tenant_id.to_string(),
+            serde_json::json!({ "origin": origin, "domain": domain }),
+        )
+        .await
+    }
+
+    /// Withdraws one origin. Takes effect across the fleet within the entry
+    /// cache's TTL, and at once on the node that did it.
+    pub async fn revoke_origin(
+        &self,
+        tenant_id: TenantId,
+        origin: &str,
+        actor: Actor,
+    ) -> Result<(), AccessError> {
+        let origin = origin.trim().to_lowercase();
+        sqlx::query!(
+            "DELETE FROM tenant_origin WHERE tenant = $1 AND origin = $2",
+            tenant_id.as_uuid(),
+            origin,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        self.forget(crate::shared::Invalidate::Origins(tenant_id))
+            .await;
+        self.record(
+            actor,
+            "tenant.origin_revoked",
+            "tenant",
+            &tenant_id.to_string(),
+            serde_json::json!({ "origin": origin }),
+        )
+        .await
     }
 
     /// Claims tenants that are due for a visit, for the length of one visit.

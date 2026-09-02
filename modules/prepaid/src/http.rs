@@ -287,7 +287,7 @@ async fn list_entitlements(
     consistency: Consistency,
     Query(query): Query<HeldQuery>,
 ) -> Result<Json<Paged<EntitlementRecord>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -331,7 +331,7 @@ async fn grant_entitlement(
     key: IdempotencyKey,
     Json(body): Json<NewEntitlement>,
 ) -> Result<(StatusCode, Json<PrepaidAccepted>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = key.id().clone();
     let reason: Reason = body.reason.parse().map_err(|e: crate::UnknownReason| {
         bad_request(crate::messages::UNKNOWN_REASON, "value", &e.0, locale)
@@ -383,7 +383,7 @@ async fn get_entitlement(
     consistency: Consistency,
     Path(id): Path<String>,
 ) -> Result<Json<EntitlementRecord>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -419,7 +419,7 @@ async fn redeem_entitlement(
     Path(id): Path<String>,
     Json(body): Json<NewRedemption>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::redeem(
         &tenant.db,
@@ -461,7 +461,7 @@ async fn expire_entitlement(
     Path(id): Path<String>,
     Json(body): Json<AtAMoment>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::expire(
         &tenant.db,
@@ -499,7 +499,7 @@ async fn revoke_entitlement(
     Path(id): Path<String>,
     Json(body): Json<EndingIt>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::revoke(
         &tenant.db,
@@ -547,7 +547,7 @@ async fn list_subscriptions(
     consistency: Consistency,
     Query(query): Query<HeldQuery>,
 ) -> Result<Json<Paged<SubscriptionRecord>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -591,7 +591,7 @@ async fn start_subscription(
     key: IdempotencyKey,
     Json(body): Json<NewSubscription>,
 ) -> Result<(StatusCode, Json<PrepaidAccepted>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = key.id().clone();
     let term = Term {
         customer: parse_id(&body.customer, locale)?,
@@ -633,7 +633,7 @@ async fn get_subscription(
     consistency: Consistency,
     Path(id): Path<String>,
 ) -> Result<Json<SubscriptionRecord>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -672,7 +672,7 @@ async fn recognise_subscription(
     Path(id): Path<String>,
     Json(body): Json<AtAMoment>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::recognise_through(
         &tenant.db,
@@ -710,7 +710,7 @@ async fn freeze_subscription(
     Path(id): Path<String>,
     Json(body): Json<EndingIt>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::freeze(
         &tenant.db,
@@ -747,7 +747,7 @@ async fn resume_subscription(
     Language(locale): Language,
     Path(id): Path<String>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::resume(
         &tenant.db,
@@ -786,7 +786,7 @@ async fn renew_subscription(
     Path(id): Path<String>,
     Json(body): Json<Renewal>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::renew_subscription(
         &tenant.db,
@@ -829,7 +829,7 @@ async fn cancel_subscription(
     Path(id): Path<String>,
     Json(body): Json<EndingIt>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let committed = crate::cancel_subscription(
         &tenant.db,
@@ -871,7 +871,7 @@ async fn outstanding(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<Owed>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -902,7 +902,7 @@ async fn deferral_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<DeferralAccounts>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
     let accounts = crate::PostingAccounts::resolve(&mut conn)
         .await
@@ -933,7 +933,7 @@ async fn set_deferral_accounts(
     Language(locale): Language,
     Json(body): Json<DeferralAccounts>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let accounts = crate::PostingAccounts {
         deferred: parse_id(&body.deferred, locale)?,
         revenue: parse_id(&body.revenue, locale)?,
@@ -1101,7 +1101,7 @@ async fn list_cards(
     consistency: Consistency,
     Query(query): Query<CardQuery>,
 ) -> Result<Json<Paged<CardRecord>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -1143,7 +1143,7 @@ async fn open_card(
     key: IdempotencyKey,
     Json(body): Json<NewCard>,
 ) -> Result<(StatusCode, Json<PrepaidAccepted>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = key.id().clone();
     let mechanic: Mechanic = body.mechanic.parse().map_err(|e: crate::UnknownMechanic| {
         bad_request(crate::messages::UNKNOWN_MECHANIC, "mechanic", &e.0, locale)
@@ -1186,7 +1186,7 @@ async fn get_card(
     consistency: Consistency,
     Path(id): Path<String>,
 ) -> Result<Json<CardRecord>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -1226,7 +1226,7 @@ async fn earn_on_card(
     Path(id): Path<String>,
     Json(body): Json<NewEarning>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
 
     let earning = Earning {
@@ -1272,7 +1272,7 @@ async fn redeem_card_points(
     Path(id): Path<String>,
     Json(body): Json<NewPointsRedemption>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
 
     let redemption = PointsRedemption {
@@ -1319,7 +1319,7 @@ async fn expire_card_points(
     Path(id): Path<String>,
     Json(body): Json<AtAMoment>,
 ) -> Result<Json<PrepaidAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let aggregate = parse_id(&id, locale)?;
     let at = body.at.unwrap_or_else(chrono::Utc::now);
 
@@ -1347,7 +1347,7 @@ async fn loyalty_scheme(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<LoyaltySchemeRecord>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
     let scheme = crate::Scheme::resolve(&mut conn)
         .await
@@ -1383,7 +1383,7 @@ async fn set_loyalty_scheme(
     Language(locale): Language,
     Json(body): Json<NewLoyaltyScheme>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let scheme = crate::Scheme {
         worth: amount(&body.worth, locale)?,
         rate_bp: body.rate_bp,

@@ -136,7 +136,7 @@ async fn list_branches(
     consistency: Consistency,
     Query(query): Query<BranchQuery>,
 ) -> Result<Json<Paged<BranchRecord>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -178,7 +178,7 @@ async fn open_branch(
     key: IdempotencyKey,
     Json(body): Json<NewBranch>,
 ) -> Result<(StatusCode, Json<BranchAccepted>), Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = key.id().clone();
 
     let committed = crate::open_branch(
@@ -221,7 +221,7 @@ async fn get_branch(
     consistency: Consistency,
     Path(id): Path<String>,
 ) -> Result<Json<BranchRecord>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -257,7 +257,7 @@ async fn amend_branch(
     Path(id): Path<String>,
     Json(body): Json<NewBranch>,
 ) -> Result<Json<BranchAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let branch = parse_id(&id, locale)?;
 
     let committed = crate::amend_branch(
@@ -299,7 +299,7 @@ async fn close_branch(
     Path(id): Path<String>,
     Json(body): Json<ClosingIt>,
 ) -> Result<Json<BranchAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let branch = parse_id(&id, locale)?;
 
     let committed = crate::close_branch(
@@ -340,7 +340,7 @@ async fn reopen_branch(
     Language(locale): Language,
     Path(id): Path<String>,
 ) -> Result<Json<BranchAccepted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let branch = parse_id(&id, locale)?;
 
     let committed =

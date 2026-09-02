@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::ApiError;
-use crate::extract::{Allowed, Capability, Tenant};
+use crate::extract::{Allowed, Capability};
 use crate::problem::Problem;
 
 /// `axum::Json`, refusing in this API's shape.
@@ -179,8 +179,12 @@ pub fn bad_request(code: MessageCode, arg: &str, value: &str, locale: Locale) ->
 /// architecture's `ModuleEnabled<M>` token would make a disabled module's
 /// handler unconstructable instead — worth building when a module has enough
 /// routes that remembering the call becomes the weak link.
-pub fn require_module(tenant: &Tenant, module: &ModuleId, locale: Locale) -> Result<(), Problem> {
-    if tenant.db.has_module(module) {
+pub fn require_module(
+    db: &erp_control::TenantDb,
+    module: &ModuleId,
+    locale: Locale,
+) -> Result<(), Problem> {
+    if db.has_module(module) {
         return Ok(());
     }
     Err(ApiError::NotFound(

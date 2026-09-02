@@ -314,6 +314,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(crate::members::routes())
         .merge(crate::invitations::routes())
         .merge(crate::modules::routes())
+        .merge(crate::origins::routes())
         // Every module's own routes, from the one list that also says what to
         // install. See `crate::modules::REGISTERED`.
         .merge(crate::modules::mounted())
@@ -327,7 +328,17 @@ fn parts() -> (Router<AppState>, utoipa::openapi::OpenApi) {
 }
 
 pub fn router(state: AppState) -> Router {
-    parts().0.with_state(state)
+    parts()
+        .0
+        // **Outermost, so a preflight never reaches a handler and a refusal
+        // never reaches one either.** Per tenant and asynchronous, which is why
+        // it is written here rather than configured from `tower-http` — see
+        // `erp_web::cors`.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            erp_web::cors::layer,
+        ))
+        .with_state(state)
 }
 
 /// The document, for anything that wants it without running a server.

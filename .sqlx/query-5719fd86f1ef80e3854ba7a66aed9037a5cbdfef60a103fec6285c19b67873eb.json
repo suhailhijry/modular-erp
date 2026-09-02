@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tenant_domain SET verified_at = now()\n              WHERE tenant = $1 AND domain = $2 AND verified_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5719fd86f1ef80e3854ba7a66aed9037a5cbdfef60a103fec6285c19b67873eb"
+}

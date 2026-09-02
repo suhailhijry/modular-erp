@@ -1582,6 +1582,22 @@
         ],
         "type": "object"
       },
+      "DomainClaimed": {
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "verification_token": {
+            "description": "Publish this where only the domain's owner could — a `TXT` record on\n`_erp-verification.<domain>`.\n\n**The same token every time you ask.** A tenant who has already published\none must not be told to publish a different one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain",
+          "verification_token"
+        ],
+        "type": "object"
+      },
       "Enable": {
         "example": {
           "module": "sales"
@@ -1794,6 +1810,25 @@
           "declared",
           "skipped",
           "scheduled"
+        ],
+        "type": "object"
+      },
+      "FreeView": {
+        "description": "How much of one service is free over a span.",
+        "properties": {
+          "free": {
+            "description": "How many more bookings fit across the **whole** span.\n\nZero means full. It is what was free a moment ago, not a reservation —\nthe answer that counts is the one taking the booking computes under\nlocks, and a form that treats this as a promise will occasionally show a\nslot that has just gone.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "resource": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource",
+          "free"
         ],
         "type": "object"
       },
@@ -2895,6 +2930,21 @@
         ],
         "type": "object"
       },
+      "NewDomain": {
+        "example": {
+          "domain": "salon.example"
+        },
+        "properties": {
+          "domain": {
+            "description": "The registrable domain, with no scheme and no port.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain"
+        ],
+        "type": "object"
+      },
       "NewEarning": {
         "example": {
           "from": "INV-0001",
@@ -3305,6 +3355,27 @@
           "email",
           "password",
           "role"
+        ],
+        "type": "object"
+      },
+      "NewOrigin": {
+        "example": {
+          "domain": "salon.example",
+          "origin": "https://salon.example"
+        },
+        "properties": {
+          "domain": {
+            "description": "Which claimed domain licenses it.",
+            "type": "string"
+          },
+          "origin": {
+            "description": "Exactly what a browser sends in `Origin`: scheme, host, and a port only\nwhen it is not the scheme's default. It is echoed back verbatim, so a\ntrailing slash or a path makes it a different string and it will not\nmatch.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "domain",
+          "origin"
         ],
         "type": "object"
       },
@@ -3965,6 +4036,21 @@
         "required": [
           "opens_at",
           "closes_at"
+        ],
+        "type": "object"
+      },
+      "Origins": {
+        "properties": {
+          "items": {
+            "description": "Every origin currently answered. An origin under a domain that is\nclaimed but not yet proved is **not** in this list, because it is not\nanswered.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
         ],
         "type": "object"
       },
@@ -4845,6 +4931,60 @@
         ],
         "type": "object"
       },
+      "Paged_ServiceView": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "description": "What can be booked here, as a customer sees it.",
+              "properties": {
+                "branch": {
+                  "description": "Where it is. Absent in a single-branch business.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "description": "`person`, `room`, `equipment` — what a site groups by.",
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "name_latin": {
+                  "description": "For a site rendering in English. Absent means show `name`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "kind"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "Paged_ShiftRecord": {
         "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
         "properties": {
@@ -5599,6 +5739,41 @@
           "name",
           "from",
           "rate_bp"
+        ],
+        "type": "object"
+      },
+      "ServiceView": {
+        "description": "What can be booked here, as a customer sees it.",
+        "properties": {
+          "branch": {
+            "description": "Where it is. Absent in a single-branch business.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "`person`, `room`, `equipment` — what a site groups by.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_latin": {
+            "description": "For a site rendering in English. Absent means show `name`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind"
         ],
         "type": "object"
       },
@@ -6443,6 +6618,239 @@
           "booking"
         ]
       }
+    },
+    "/v1/booking/public/availability": {
+      "get": {
+        "description": "What a booking form checks before it submits. **It takes no locks**, so it\nis what was free a moment ago; taking the booking is what decides.",
+        "operationId": "public_availability",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The service being asked about.",
+            "in": "query",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Start of the window.",
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "End of it.",
+            "in": "query",
+            "name": "until",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FreeView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A span that is backwards, empty, or longer than this system will answer for"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such business, no such service, or it does not take bookings"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "Whether a service is free over a span.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/booking/public/services": {
+      "get": {
+        "description": "Unauthenticated: it is what a shop puts on its own front page.",
+        "operationId": "public_services",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "One branch's services. Absent means all of them.",
+            "in": "query",
+            "name": "branch",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From a previous page's `next`.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Rows per page. Clamped, never refused.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_ServiceView"
+                }
+              }
+            },
+            "description": "One page of what can be booked. `next` is absent when the list ended."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unreadable cursor"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such business, it is not trading, or it does not take bookings"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "What this business offers, for a booking site.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/booking/reservations": {
       "get": {
@@ -9709,6 +10117,222 @@
         ]
       }
     },
+    "/v1/domains": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Claiming licenses nothing on its own. Asking twice returns the same token.",
+        "operationId": "claim_domain",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewDomain"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainClaimed"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a domain, or one another tenant has already claimed"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Claim a domain, and get the token that proves it.",
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/v1/domains/{domain}/verification": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**This does not check anything**, and the doc comment on this module says\nwhy: checking is an outbound call, and an outbound call is an outbox effect\nwith a handler that does not exist yet. Until it does, this is an operator\nsaying the check was made — audited as `tenant.domain_verified`.",
+        "operationId": "verify_domain",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The claimed domain.",
+            "in": "path",
+            "name": "domain",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Proved. Already-proved is the same answer."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This tenant has not claimed that domain"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Record that a domain's ownership has been proved.",
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
     "/v1/health": {
       "get": {
         "description": "Deliberately does not touch the database — a health check that fails when\nthe database is slow takes the fleet out during a slow query.",
@@ -12452,6 +13076,284 @@
         "summary": "This document.",
         "tags": [
           "service"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/origins": {
+      "get": {
+        "operationId": "list_origins",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Origins"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Which websites this business's public API answers.",
+        "tags": [
+          "tenant"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "allow_origin",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewOrigin"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Licensed. It answers once the domain is proved."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not an origin, or a domain this tenant has not claimed"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "License one origin under a domain this tenant has claimed.",
+        "tags": [
+          "tenant"
+        ]
+      }
+    },
+    "/v1/origins/{origin}": {
+      "delete": {
+        "description": "Takes effect at once on this node and within the entry cache's TTL across\nthe fleet — the same bound every other revocation here carries.",
+        "operationId": "revoke_origin",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The origin, URL-encoded.",
+            "in": "path",
+            "name": "origin",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Gone. One that was never there is the same answer."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Stop answering one origin.",
+        "tags": [
+          "tenant"
         ]
       },
       "parameters": [

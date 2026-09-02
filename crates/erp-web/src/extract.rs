@@ -209,6 +209,81 @@ impl FromRequestParts<AppState> for Tenant {
     }
 }
 
+/// A tenant, reached by one of **its customers**, who has no account here.
+///
+/// The booking site, the order form — anything a shop's own customers touch.
+/// Phase 17's foundation, and the first thing in this build to open a tenant
+/// without a person behind it.
+///
+/// # What makes this safe, and why it is a separate type
+///
+/// **There is no access on the handle.** `TenantDb::role()` is `None`, so
+/// `allows()` refuses every capability. A public handler therefore cannot reach
+/// a guarded command by forgetting something: it has to call a module function
+/// directly, which is a visible line of code rather than a missing one.
+///
+/// It is a separate extractor from [`Tenant`] rather than a flag on it, because
+/// the two answer different questions and a boolean would let a handler written
+/// for one silently accept the other. A handler that takes this **is** the
+/// declaration that it is public, and
+/// `only_the_deliberately_public_routes_are_public` is the test that keeps the
+/// list of them honest.
+///
+/// # It still has to be a real tenant, and a live one
+///
+/// The subdomain names it exactly as it does everywhere else — see
+/// [`subdomain`] for why that header is safe to trust with a *name*. A
+/// suspended tenant's public page goes dark, which is the difference between
+/// this and maintenance access: suspension stops people using the system, and
+/// a booking form is people using the system.
+///
+/// # What it does not do yet
+///
+/// **Nothing here rate-limits.** There is no session to attribute abuse to, so
+/// the defence has to be scoped by origin, address and the tenant being
+/// reached — Phase 12c, and Phase 17 is what stops it being deferrable. Until
+/// then the only bound on this surface is the client lane's connection budget,
+/// which stops it taking the system down but does not stop it being abused.
+#[derive(Debug)]
+pub struct Public {
+    pub db: TenantDb,
+    /// The subdomain this arrived on, which is the tenant's name.
+    pub slug: String,
+}
+
+impl FromRequestParts<AppState> for Public {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Problem> {
+        let Language(locale) = Language::from_request_parts(parts, state)
+            .await
+            .unwrap_or(Language(Locale::DEFAULT));
+
+        let slug = subdomain(parts, &state.domain).ok_or_else(|| not_found(locale))?;
+
+        let tenant = state
+            .control
+            .tenant_by_slug(&slug)
+            .await
+            .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?
+            .ok_or_else(|| {
+                ApiError::Access(erp_control::AccessError::NoSuchTenant)
+                    .into_problem(locale, &crate::CATALOG)
+            })?;
+
+        let db = state
+            .control
+            .enter_for_the_public(tenant.id)
+            .await
+            .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
+
+        Ok(Self {
+            db,
+            slug: tenant.slug,
+        })
+    }
+}
+
 /// The tenant's name, from the host a request arrived on.
 ///
 /// # Why the `Host` header is safe to trust with this
@@ -232,14 +307,19 @@ fn subdomain(parts: &Parts, domain: &str) -> Option<String> {
         .map(str::to_owned)
         .or_else(|| parts.uri.host().map(str::to_owned))?;
 
+    tenant_label(&host, domain)
+}
+
+/// The tenant label in a host, or nothing.
+///
+/// Split out from [`subdomain`] so the CORS middleware — which has a `HeaderMap`
+/// and not a `Parts` — asks the same question through the same code. Two
+/// implementations of "which tenant is this host" is how one of them comes to
+/// admit `a.b.acme.erp.com`.
+pub(crate) fn tenant_label(host: &str, domain: &str) -> Option<String> {
     // A port is not part of the name: `acme.localhost:8080` in development is
     // the same tenant as `acme.localhost`. Nor is a trailing dot.
-    let host = host
-        .split(':')
-        .next()
-        .unwrap_or(&host)
-        .trim()
-        .to_lowercase();
+    let host = host.split(':').next().unwrap_or(host).trim().to_lowercase();
     let host = host.strip_suffix('.').unwrap_or(&host);
 
     // The apex is not a tenant. It is where signing up and logging in happen.

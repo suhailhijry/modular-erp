@@ -173,7 +173,7 @@ async fn list_accounts(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<Vec<AccountView>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -227,7 +227,7 @@ async fn open_account(
     Language(locale): Language,
     Json(body): Json<NewAccount>,
 ) -> Result<impl IntoResponse, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let code = parse_id(&body.code, locale)?;
     let kind: AccountKind = body.kind.parse().map_err(|_| {
         bad_request(
@@ -290,7 +290,7 @@ async fn post_entry(
     key: IdempotencyKey,
     Json(body): Json<NewEntry>,
 ) -> Result<Json<EntryPosted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = key.id().clone();
 
     let mut lines = Vec::with_capacity(body.lines.len());
@@ -376,7 +376,7 @@ async fn reverse_entry(
     key: IdempotencyKey,
     Json(body): Json<NewReversal>,
 ) -> Result<Json<EntryPosted>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let original = parse_id(params.get("entry").map_or("", String::as_str), locale)?;
     let reversal = key.id().clone();
@@ -429,7 +429,7 @@ async fn trial_balance(
     Language(locale): Language,
     consistency: Consistency,
 ) -> Result<Json<Vec<TrialBalanceView>>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     consistency
         .wait_for(&tenant.db, crate::GROUP_NAME, locale)
         .await?;
@@ -557,7 +557,7 @@ async fn books(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<BooksView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let mut conn = tenant
         .db
@@ -606,7 +606,7 @@ async fn close_books(
     Language(locale): Language,
     Json(body): Json<BooksView>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let mut conn = tenant
         .db
@@ -670,7 +670,7 @@ async fn vat_rates(
     tenant: Allowed<Read>,
     Language(locale): Language,
 ) -> Result<Json<RatesView>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let mut conn = tenant
         .db
@@ -716,7 +716,7 @@ async fn set_vat_rates(
     Language(locale): Language,
     Json(body): Json<RatesView>,
 ) -> Result<StatusCode, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
 
     // A negative rate would credit VAT payable on every sale; one over 100%
     // would charge more tax than the supply. Neither is a rate anywhere.
@@ -847,7 +847,7 @@ async fn install_chart(
     Language(locale): Language,
     Json(body): Json<InstallChart>,
 ) -> Result<Json<ChartInstalled>, Problem> {
-    require_module(&tenant, &crate::module_id(), locale)?;
+    require_module(&tenant.db, &crate::module_id(), locale)?;
     let chart = crate::chart(&body.template).ok_or_else(|| {
         bad_request(
             erp_web::messages::UNKNOWN_CHART,

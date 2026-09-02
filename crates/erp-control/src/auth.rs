@@ -139,6 +139,20 @@ link_token! {
 }
 
 /// 32 bytes from the OS. The one random source in this file.
+/// A token a tenant publishes to prove they own a domain.
+///
+/// **Not a credential**, which is what makes it different from everything else
+/// this module mints: it goes into a public DNS record, so it is not secret and
+/// is stored in the clear rather than digested. What it has to be is
+/// *unguessable*, so an attacker cannot publish the token a victim will be
+/// issued before the victim asks for it.
+///
+/// Minted here rather than passed in, so no caller can supply a predictable
+/// one — the same reason `sales` stopped taking a journal entry's id.
+pub(crate) fn verification_token() -> Result<String, AuthError> {
+    Ok(format!("erp-verify-{}", hex(&random_bytes()?)))
+}
+
 fn random_bytes() -> Result<[u8; 32], AuthError> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| AuthError::Hash(e.to_string()))?;
