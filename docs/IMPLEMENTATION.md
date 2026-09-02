@@ -1895,13 +1895,24 @@ same-origin server-rendered site would never have needed.
       response says: a site can tell a customer what will be asked for, and
       nothing in this build claims to have collected it. Building it any other
       way would be a booking that reports itself secured and is not.
-- [ ] **`docs/openapi.json` as a contract.** Still the open item. It is
-      generated and guarded by `the_document_matches_the_router`, and it now
-      declares which operations are public and which statuses each answers —
-      including the 429, which the contract check caught the moment the limiter
-      started returning one. What it still has no statement about is **breaking
-      change**: with one repository a renamed field was a compile error, with
-      two it is a deployment that silently stops working.
+- [x] **`docs/openapi.json` as a contract.** `docs/openapi.baseline.json` is what
+      clients may rely on, and `tests/compatibility.rs` fails on a change that
+      would break one: an operation that disappears or is renamed, a required
+      request field that appears, a response field that vanishes, a path that
+      gains a parameter. Accepting a break takes `just baseline`, which is the
+      point — a break somebody typed a command to accept is a break somebody
+      knows about.
+
+      It checks four shapes and **not** type narrowing, enum members or
+      `format`; a full structural diff is a much larger piece of work, and what
+      is here catches the ones a normal refactor causes by accident.
+
+      **The first version of it was useless and the falsification is what said
+      so.** It compared only top-level response properties — and almost every
+      list here answers `Paged<T>`, whose top level is `items` and `next`, so
+      renaming `ServiceView::name` sailed straight through. It walks three
+      levels now, bounded and cycle-guarded, and the same rename is reported as
+      `public_services no longer returns items.name`.
 
 **One decision worth keeping.** Online booking is **off until a business turns
 it on**, and the absence of the setting is a no. The two public *reads* are safe

@@ -1284,6 +1284,101 @@ arithmetic.
 A 409, a 429 and a 503 are worth retrying. A 422 is not: re-asking gets the same
 answer.
 
+## Compatibility
+
+`/v1` is a promise, and `docs/openapi.baseline.json` is what it promises.
+
+Every build compares the generated document against that baseline and fails on a
+change that would break a client written against it: an operation that
+disappears or is renamed, a required request field that appears, a response
+field that vanishes, a path that gains a parameter. Adding an endpoint, an
+optional field or a response status passes untouched.
+
+Accepting a break takes a person typing `just baseline`, which is the point —
+with the site in a separate repository, a renamed field is no longer a compile
+error but a deployment that silently stops working.
+
+It does not check type narrowing, enum members or `format` changes. Those break
+callers too; a full structural diff is a larger piece of work and this says so
+rather than implying coverage it does not have.
+
+## The public surface
+
+Three operations answer with no credential at all, for a tenant's **own
+customers** — the booking site, which is a separate React project reading this
+API.
+
+| | | |
+|---|---|---|
+| `GET /v1/booking/public/services` | What this business offers | |
+| `GET /v1/booking/public/availability` | Whether a slot is free | |
+| `POST /v1/booking/public/reservations` | Ask for it | Off unless the business turned it on |
+
+```bash
+curl -s -H 'Host: acme.localhost' \
+  http://localhost:8080/v1/booking/public/services
+```
+
+The tenant is still the subdomain — a public request names the business the same
+way every other request does.
+
+**These shapes are narrower than their authenticated counterparts, deliberately.**
+`services` never shows a withdrawn resource or its capacity. A public booking
+carries **no price and no customer id**: a stranger sending a rate would be
+choosing their own, and one naming a customer record would be attaching a
+booking to somebody else's file. What it takes is held at `reserved`, and the
+business confirms.
+
+```bash
+curl -sX POST -H 'Host: acme.localhost' -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  http://localhost:8080/v1/booking/public/reservations -d '{
+    "customer_name": "سارة",
+    "customer_phone": "+966500000000",
+    "lines": [{"resource":"CHAIR-1","from":"2026-05-01T09:00:00Z","until":"2026-05-01T10:00:00Z"}]
+  }'
+# 201 {"id":"…","stage":"reserved","deposit_bp":2000}
+```
+
+`deposit_bp` is **what will be asked for, not what was taken.** Card payments
+are a later phase; nothing in this build collects a deposit, and the response
+says so rather than implying the booking is secured.
+
+### From a browser
+
+Cross-origin requests need the origin on the tenant's allowlist, and an origin
+is licensed by a **domain the tenant has proved they own**:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/domains -d '{"domain":"salon.example"}'
+# 201 {"domain":"salon.example","verification_token":"erp-verify-…"}
+
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/origins \
+  -d '{"domain":"salon.example","origin":"https://salon.example"}'
+```
+
+Publish the token where only the domain's owner could, then
+`POST /v1/domains/{domain}/verification`. **Nothing is answered cross-origin for
+an unproved domain**, so claiming and licensing are safe to do in one sitting.
+
+The origin is matched **whole**: `https://salon.example` does not admit
+`https://salon.example.attacker.test`, and `http://` is a different origin from
+`https://`. No wildcard, and no `Access-Control-Allow-Credentials` — the public
+surface has no session, and a browser will not attach cookies to these requests.
+
+### What bounds it
+
+There is no session to attribute abuse to, so the public surface is rate limited
+per `(business, origin)` and per business. Over the limit is **429** with the
+wait in the message's `args`.
+
+**The limit is per API process**, not fleet-wide: a shared counter would put
+Redis on the request path, where failing open is a silent downgrade and failing
+closed makes a cache outage an outage. The sharper bound is an API key, which is
+a later phase.
+
 ## What is not here yet
 
 `ETag`/`If-Match`. It needs a conflict real enough to shape it.

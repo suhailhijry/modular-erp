@@ -127,6 +127,15 @@ errors:
 openapi:
     REGENERATE_DOCS=1 cargo test --quiet -p erp-api --test openapi
 
+# Accept the current API as what clients may rely on.
+#
+# **A deliberate act, and that is the point.** `docs/openapi.baseline.json` is
+# what the compatibility test compares against; running this says the change was
+# intended and, if it breaks callers, that somebody has thought about telling
+# them. See `crates/erp-api/tests/compatibility.rs`.
+baseline:
+    REGENERATE_DOCS=1 cargo test --quiet -p erp-api --test compatibility
+
 # Drop every database this project creates. Does not touch anything else.
 #
 # Includes `erp_tenant_%`: a soak test that fails an assertion panics before its

@@ -319,6 +319,51 @@ reservation carries a price and no journal entry.
 pricing be bands rather than a price list, and what keeps the engine from
 knowing what a service is.
 
+## The public surface
+
+Three routes a tenant's **own customers** reach with no account, for the booking
+site — which is a separate React project reading this API.
+
+`erp_web::Public` is what carries them: a `TenantDb` with **no access at all**,
+so `role()` is `None` and every capability check refuses it. A public handler
+cannot reach a guarded command by forgetting something; it would have to call a
+module function directly, which is a visible line rather than a missing one. It
+is also the first caller of `Lane::Client` — "a tenant's customers, through
+their app or website. The flood" — which is what stops a bot on a booking form
+starving the staff serving people in the shop.
+
+```rust
+async fn public_services(caller: Public, …)      // what is offered
+async fn public_availability(caller: Public, …)  // whether a slot is free
+async fn public_reserve(caller: Public, …)       // ask for it
+```
+
+**The shapes are narrower than the counter's, and that is the design.**
+`ServiceView` has no capacity and no `withdrawn_why`; `PublicLine` has no
+`charge` and no `takes`. A stranger sending a rate would be choosing their own
+price, and one naming a customer record would be attaching a booking to somebody
+else's file — both of which the counter's shapes allow, because a member *is*
+the business.
+
+`public_reserve` is off unless the tenant has turned it on:
+
+```rust
+pub struct PublicBooking {
+    pub open: bool,        // absent means no
+    pub deposit_bp: u32,   // recorded, not charged
+}
+```
+
+The two reads are safe by their nature — a shop's front page is what they are. A
+public **write** claims a real slot in a real diary, and the plan's answer to
+abusing that is a deposit, which needs a payment gateway that does not exist
+yet. So a salon that never asked for online booking cannot find their week full
+of appointments nobody intends to keep, and `deposit_bp` says what *will* be
+asked rather than claiming anything was taken.
+
+Refusing is a **404, not a 403**: "forbidden" would confirm the route works for
+somebody else, which is neither true nor the caller's business.
+
 ## Routes
 
 See [The HTTP API](./http.md#booking).
