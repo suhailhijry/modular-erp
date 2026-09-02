@@ -9,6 +9,8 @@ pub const NO_SUCH_CUSTOMER: MessageCode = MessageCode::new("crm.no_such_customer
 pub const ARCHIVED: MessageCode = MessageCode::new("crm.archived");
 pub const NOT_A_VAT_NUMBER: MessageCode = MessageCode::new("crm.not_a_vat_number");
 pub const PERSON_WITH_VAT_NUMBER: MessageCode = MessageCode::new("crm.person_with_vat_number");
+pub const UNREADABLE_FILE: MessageCode = MessageCode::new("crm.unreadable_file");
+pub const NO_ID_COLUMN: MessageCode = MessageCode::new("crm.no_id_column");
 pub const UNKNOWN_KIND: MessageCode = MessageCode::new("crm.unknown_kind");
 
 pub static CODES: &[MessageCode] = &[
@@ -19,10 +21,32 @@ pub static CODES: &[MessageCode] = &[
     ARCHIVED,
     NOT_A_VAT_NUMBER,
     PERSON_WITH_VAT_NUMBER,
+    UNREADABLE_FILE,
+    NO_ID_COLUMN,
     UNKNOWN_KIND,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        UNREADABLE_FILE,
+        Locale::English,
+        Template::Simple("That is not a spreadsheet this system can read: {reason}"),
+    ),
+    (
+        UNREADABLE_FILE,
+        Locale::Arabic,
+        Template::Simple("هذا ليس جدولًا يستطيع النظام قراءته: {reason}"),
+    ),
+    (
+        NO_ID_COLUMN,
+        Locale::English,
+        Template::Simple("This row has no id, and a customer is imported under one."),
+    ),
+    (
+        NO_ID_COLUMN,
+        Locale::Arabic,
+        Template::Simple("لا يوجد معرّف في هذا الصف، والعميل يُستورد تحت معرّف."),
+    ),
     (
         NO_NAME,
         Locale::English,

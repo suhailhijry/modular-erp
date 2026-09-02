@@ -64,6 +64,10 @@ uuid = { version = "1.24", features = ["serde", "v5", "v7"] }
 sha2 = "0.11"
 base64 = "0.22"
 hex = "0.4"
+# RFC 4180 is not "split on commas": a field can hold a comma, a quote or a
+# newline, and the number of ways to write that parser wrong is why this is a
+# dependency rather than twenty lines. Used for both directions of Phase 11d.
+csv = "1"
 
 # Key generation, the CSR, and sealing secrets at rest. **Already linked**: sqlx
 # builds against it for Postgres TLS, so this is the library the process has

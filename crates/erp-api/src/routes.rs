@@ -345,6 +345,10 @@ pub fn router(state: AppState) -> Router {
     parts()
         .0
         .layer(axum::extract::DefaultBodyLimit::max(MAX_JSON_BODY))
+        // **Every list, including the ones that do not exist yet.** An export
+        // is the same query with a different encoder, so it is a layer rather
+        // than something each handler has to remember — see `erp_web::csv`.
+        .layer(axum::middleware::from_fn(erp_web::csv::layer))
         // **Outermost, so a preflight never reaches a handler and a refusal
         // never reaches one either.** Per tenant and asynchronous, which is why
         // it is written here rather than configured from `tower-http` — see

@@ -1837,6 +1837,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("list_attachments", ALL_ROLES),
     ("get_attachment", ALL_ROLES),
     ("download_file", ALL_ROLES),
+    // Importing a spreadsheet of customers creates records in bulk under ids
+    // the file chose. Structural, so the owner's.
+    ("import_customers", &["owner"]),
     ("upload_file", &["owner", "accountant", "clerk"]),
     ("remove_file", &["owner", "accountant", "clerk"]),
     // The org chart. Reading it is ordinary — a staff list is on the wall in
@@ -2050,8 +2053,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        173,
-        "expected a hundred and seventy-three role-scoped operations"
+        174,
+        "expected a hundred and seventy-four role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -7127,4 +7130,212 @@ async fn the_raised_body_limit_applies_to_uploads_and_nowhere_else() {
         StatusCode::PAYLOAD_TOO_LARGE,
         "the raised limit leaked to a route that is not an upload"
     );
+}
+
+/// **Any list the API can page is a spreadsheet, and nothing had to be written
+/// for it.**
+///
+/// The export is the same query with a different encoder, applied as one layer
+/// — so a list added tomorrow is exportable the day it exists. This asserts it
+/// against two lists in two modules, neither of which knows.
+#[tokio::test]
+async fn any_list_comes_back_as_a_spreadsheet_when_asked_for_one() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    for (id, name) in [("C-1", "نورة"), ("C-2", "Najd, Ltd \"the\" one")] {
+        let (status, body, _) = fixture
+            .send(
+                Request::post("/v1/crm/customers")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("Idempotency-Key", idem(id))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": name, "kind": "person", "phone": "+966500000000"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    fixture
+        .project::<crm::Crm>(tenant, &crm::projections(), crm::upcasters())
+        .await;
+
+    let response = fixture
+        .raw(
+            Request::get("/v1/crm/customers")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::ACCEPT, "text/csv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/csv; charset=utf-8")
+    );
+    let sheet = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body reads")
+            .to_vec(),
+    )
+    .expect("utf-8");
+
+    assert!(sheet.lines().count() >= 3, "a header and two rows: {sheet}");
+    assert!(sheet.contains("name"), "{sheet}");
+    assert!(sheet.contains("نورة"), "{sheet}");
+    // The quoting a naive encoder would get wrong.
+    assert!(
+        sheet.contains(r#""Najd, Ltd ""the"" one""#),
+        "the comma and the quotes were not escaped: {sheet}"
+    );
+
+    // A second list, in the same shape, with nothing written for it.
+    let response = fixture
+        .raw(
+            Request::get("/v1/modules")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::ACCEPT, "text/csv")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/csv; charset=utf-8"),
+        "a list this test did not have to know about"
+    );
+
+    // And JSON is still what a client without the header gets.
+    let (status, body, kind) = fixture
+        .send(
+            Request::get("/v1/crm/customers")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        String::from_utf8_lossy(&kind).starts_with("application/json"),
+        "{}",
+        String::from_utf8_lossy(&kind)
+    );
+}
+
+/// **Partial failure is the outcome, not an exception.**
+///
+/// Five rows, two of them bad: three go in and two come back with their row
+/// number and what was wrong. Then the file is corrected and re-uploaded under
+/// the same key, and the three that already went in are not duplicated.
+#[tokio::test]
+async fn an_import_takes_the_good_rows_and_reports_the_bad_ones() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let file = idem("customers.csv");
+
+    let sheet = "id,name,kind,phone,email\n\
+                 C-1,نورة,person,+966500000001,\n\
+                 C-2,Najd Consulting,company,,hello@najd.example\n\
+                 ,Nobody,person,+966500000003,\n\
+                 C-4,,person,+966500000004,\n\
+                 C-5,Ahmed,person,+966500000005,\n";
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/crm/customers/import")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "text/csv")
+                .header("Idempotency-Key", file.clone())
+                .body(Body::from(sheet))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["imported"], 3, "{body}");
+    assert_eq!(body["rejected"].as_array().map(Vec::len), Some(2), "{body}");
+
+    // **The spreadsheet's own row numbers**, counting the header as row 1.
+    assert_eq!(body["rejected"][0]["row"], 4);
+    assert_eq!(body["rejected"][0]["code"], "crm.no_id_column");
+    assert_eq!(body["rejected"][1]["row"], 5);
+    assert_eq!(body["rejected"][1]["code"], "crm.no_name");
+    assert!(
+        body["rejected"][1]["detail"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()),
+        "a rejection with no sentence in it: {body}"
+    );
+
+    // The corrected file, under the same key.
+    let corrected = "id,name,kind,phone,email\n\
+                     C-1,نورة,person,+966500000001,\n\
+                     C-2,Najd Consulting,company,,hello@najd.example\n\
+                     C-3,Somebody,person,+966500000003,\n\
+                     C-4,Fixed Name,person,+966500000004,\n\
+                     C-5,Ahmed,person,+966500000005,\n";
+
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/crm/customers/import")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "text/csv")
+                .header("Idempotency-Key", file)
+                .body(Body::from(corrected))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["imported"], 5, "{body}");
+    assert!(body["rejected"].as_array().is_some_and(Vec::is_empty));
+
+    // Five customers, not eight: the three that went in the first time were
+    // recognised rather than duplicated.
+    fixture
+        .project::<crm::Crm>(tenant, &crm::projections(), crm::upcasters())
+        .await;
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/crm/customers")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().map(Vec::len), Some(5), "{body}");
+
+    // And the events say so: five registrations and nothing else.
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let mut conn = db.acquire().await.expect("connection");
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM event")
+        .fetch_one(&mut *conn)
+        .await
+        .expect("counts");
+    assert_eq!(events, 5, "a re-upload duplicated rows");
 }

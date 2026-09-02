@@ -237,6 +237,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — A customer needs a phone number or an email address.
 - **ar** — يحتاج العميل إلى رقم جوال أو بريد إلكتروني.
 
+### `crm.no_id_column`
+
+- **en** — This row has no id, and a customer is imported under one.
+- **ar** — لا يوجد معرّف في هذا الصف، والعميل يُستورد تحت معرّف.
+
 ### `crm.no_name`
 
 - **en** — A customer needs a name.
@@ -261,6 +266,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — A customer is a person or a company.
 - **ar** — العميل إما فرد أو منشأة.
+
+### `crm.unreadable_file`
+
+- **en** — That is not a spreadsheet this system can read: {reason}
+- **ar** — هذا ليس جدولًا يستطيع النظام قراءته: {reason}
 
 
 ## `eventlog`

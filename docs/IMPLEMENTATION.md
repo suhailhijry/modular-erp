@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 985 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 994 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -33,8 +33,9 @@ Saudi statutory arithmetic; Phase 10 — `modules/reports`, which subscribes
 to the log rather than reading four groups, and reconciles to the books; and
 Phase 11a/b/c/e — short links; `modules/messaging`, with templates that fetch
 their own data, audiences resolved rather than frozen and SMS billed by the
-segment; and `modules/files`, where a document's record is a key and a checksum
-rather than a URL.
+segment; `modules/files`, where a document's record is a key and a checksum rather
+than a URL; and 11d — every list is a spreadsheet on `Accept: text/csv`, and an
+import takes the good rows and reports the bad ones.
 
 **Phase 9 is complete except two items, and both are blocked on something
 outside the repository**: the WPS file needs a specification this build cannot
@@ -378,6 +379,22 @@ It is `erp_api::routes::MAX_JSON_BODY` now, applied inside `router()`, with
 
 Every route with a body now declares `413`, which the contract check caught
 before I did.
+
+### 20 · The asynchronous export is not built, and the reason is a cap
+
+Every list in this API is capped at a page — 200 rows, 500 in a couple of places
+— so no export takes a minute and none holds a connection long enough to matter.
+Building "generate, store, send a link" now would be building it against a
+problem that does not exist, and the shape would be guessed rather than measured.
+
+What changed is that it is no longer a *design* question. A file is
+`modules/files`, an effect is the outbox, and a link is `erp-links`; all three
+landed this pass. When a list becomes unbounded — an all-invoices export is the
+obvious one — it is a job that composes three things that already work.
+
+**The synchronous half is done and is the useful half today**: `Accept:
+text/csv` on any list, as one layer, so a list added tomorrow is exportable
+without anybody remembering to make it so.
 
 ---
 
@@ -1975,15 +1992,25 @@ a template cannot ask for anything, so somebody must hand it everything.
 
 ### 11d · Spreadsheets, both directions
 
-- [ ] Export any list the API can page. It is the same query, a different
-      encoder, so a new list is exportable the day it exists
+- [x] Export any list the API can page. It is the same query, a different
+      encoder, so a new list is exportable the day it exists — `Accept:
+      text/csv`, as **one layer** in `erp_api::router`, so no handler knows it
+      happened
 - [ ] Large exports are effects, not requests: generate, store (11c), then send a
-      link (11e). A report that takes a minute must not hold a connection
-- [ ] Import with **partial failure as a first-class outcome**. A thousand-row
+      link (11e). A report that takes a minute must not hold a connection —
+      **not built, and deliberately**: every list in this API is capped at a page
+      and none takes a minute. The machinery it would need — a file, an effect
+      and a link — all exists now, so it is a job rather than a design. See
+      review §20
+- [x] Import with **partial failure as a first-class outcome**. A thousand-row
       file with three bad rows imports 997 and returns the three, with the row
-      number and what was wrong
-- [ ] An import is a command per row under one idempotency key, so a re-upload of
-      a corrected file does not duplicate the 997
+      number and what was wrong — the row number counting the header as row 1,
+      which is what the person's editor is showing them
+- [x] An import is a command per row under one idempotency key, so a re-upload of
+      a corrected file does not duplicate the 997 — `erp_web::importing` folds
+      the row's own identity into the file's key, and
+      `an_import_takes_the_good_rows_and_reports_the_bad_ones` re-uploads a
+      corrected file and counts the events
 
 ### 11e · Short links for anything
 
@@ -1998,7 +2025,12 @@ a template cannot ask for anything, so somebody must hand it everything.
       migration chain where a rebuild cannot reach it
 
 **Exit:** a booking reminder reaches a customer in Arabic, on SMS, with a link,
-having asked the read model for everything it says.
+having asked the read model for everything it says. **Met to the last hop**:
+`BookingReminders` in the worker resolves the audience, renders the template,
+shortens the link and promises the effect, and
+`a_reminder_says_what_is_true_now_and_reaches_where_somebody_is_now` asserts all
+of it. What is not verified is the gateway itself, because this build has an
+account with none — see review §15.
 
 ---
 

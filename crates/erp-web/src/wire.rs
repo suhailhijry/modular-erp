@@ -160,6 +160,26 @@ pub fn creating<C: Capability>(tenant: &Allowed<C>, key: &crate::IdempotencyKey)
     metadata(tenant).with_fingerprint(key.fingerprint())
 }
 
+/// The metadata one **row of an import** runs under.
+///
+/// # Why an import needs its own form
+///
+/// An import is a command per row, and the kernel decides "retry or two things
+/// under one name" from the fingerprint. Giving every row the file's key would
+/// make row two look like a retry of row one; giving each row a fresh one would
+/// make a re-upload of a corrected file duplicate the rows that already went in.
+///
+/// So the fingerprint is derived from the caller's key **and** the row's own
+/// identity — stable across uploads of the same file, distinct within one.
+#[must_use]
+pub fn importing<C: Capability>(
+    tenant: &Allowed<C>,
+    key: &crate::IdempotencyKey,
+    row: &str,
+) -> Metadata {
+    metadata(tenant).with_fingerprint(&crate::csv::row_key(key.fingerprint(), row))
+}
+
 /// The metadata a **public** write runs under.
 ///
 /// `actor` is deliberately `None` and not a placeholder string. Nobody is

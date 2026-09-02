@@ -32,6 +32,7 @@
 
 mod consistency;
 pub mod cors;
+pub mod csv;
 mod error;
 mod extract;
 pub mod messages;
@@ -51,8 +52,8 @@ pub use extract::{
 pub use problem::Problem;
 pub use state::AppState;
 pub use wire::{
-    After, Amount, Json, Paged, Query, bad_request, creating, metadata, parse_id, publicly,
-    require_module,
+    After, Amount, Json, Paged, Query, bad_request, creating, importing, metadata, parse_id,
+    publicly, require_module,
 };
 
 /// This crate's own messages — about the request, not the domain.

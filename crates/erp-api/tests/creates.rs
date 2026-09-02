@@ -139,7 +139,18 @@ fn every_handler_that_creates_passes_the_idempotency_key() {
             // retried — a phone that lost signal mid-submit — so it is held to
             // exactly this rule; what it does not carry is an actor, because
             // nobody was behind it.
-            if !body.contains("creating(&tenant") && !body.contains("publicly(&key)") {
+            // `importing(&tenant, &key, row)` is the fourth form. An import is
+            // a command per row, and it folds the row's own identity into the
+            // fingerprint so a re-upload of a corrected file does not duplicate
+            // the rows that already went in — see `erp_web::importing`.
+            if !body.contains("creating(&tenant")
+                && !body.contains("publicly(&key)")
+                // Not `importing(&tenant`: an import's per-row work is a helper
+                // that already holds a `&Allowed<_>`, so the call reads
+                // `importing(tenant, …)`. Comments are stripped before this
+                // runs, so the bare call is signal enough.
+                && !body.contains("importing(")
+            {
                 offenders.push(format!(
                     "{name}::http::{handler} calls {command}, which creates, but passes no \
                      idempotency key — use `creating(&tenant, &key)` rather than \

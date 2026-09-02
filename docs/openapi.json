@@ -2322,6 +2322,28 @@
         ],
         "type": "object"
       },
+      "Imported": {
+        "description": "What an import did.\n\n**Partial failure is the outcome and not an exception.** A thousand-row file\nwith three bad rows imports 997 and returns the three; refusing the file\nmeans a person fixing a spreadsheet by bisection.",
+        "properties": {
+          "imported": {
+            "description": "Rows that went in, including ones that were already there — a re-upload\nof a corrected file is meant to be safe, so a row that was imported last\ntime counts as imported this time.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "rejected": {
+            "description": "Rows that did not, with the row number and the reason.",
+            "items": {
+              "$ref": "#/components/schemas/Rejected"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "imported",
+          "rejected"
+        ],
+        "type": "object"
+      },
       "InstallChart": {
         "example": {
           "currency": "SAR",
@@ -6824,6 +6846,30 @@
           "scheme",
           "identifier",
           "address"
+        ],
+        "type": "object"
+      },
+      "Rejected": {
+        "description": "One row that did not go in.",
+        "properties": {
+          "code": {
+            "description": "The message code, so a client can branch on it.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "What went wrong, in the language the request asked for.",
+            "type": "string"
+          },
+          "row": {
+            "description": "**The spreadsheet's own row number**, counting the header as row 1, so\nit is the number the person's editor is showing them.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "row",
+          "code",
+          "detail"
         ],
         "type": "object"
       },
@@ -12136,6 +12182,172 @@
           }
         },
         "summary": "Record a customer.",
+        "tags": [
+          "crm"
+        ]
+      }
+    },
+    "/v1/crm/customers/import": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "# Partial failure is the outcome, not an exception\n\nA thousand-row file with three bad rows imports 997 and returns the three,\nwith the row number the person's editor is showing them and what was wrong.\nThe alternative — refuse the file — is what every import in this category\ndoes, and it means somebody fixing a spreadsheet by bisection.\n\n# Re-uploading a corrected file is safe\n\nEach row is its own command under a key derived from the file's key **and**\nthe row's id, so the 997 that went in the first time are recognised as\nretries rather than duplicated. See `erp_web::importing`.\n\n# Columns\n\n`id` and `name` are required; `kind` defaults to `person`. The rest —\n`name_latin`, `phone`, `email`, `vat_number`, `vat_scheme`,\n`vat_identifier`, `street`, `building`, `district`, `city`, `postal_code`,\n`country` — are taken when present. A column this does not know is ignored,\nbecause a spreadsheet exported from somewhere else always has three.",
+        "operationId": "import_customers",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The key for this file. Re-uploading a corrected version under the same key does not duplicate the rows that already went in.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`text/csv`.",
+            "in": "header",
+            "name": "Content-Type",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "The spreadsheet. A header row, then one customer per row.",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Imported"
+                }
+              }
+            },
+            "description": "What went in and what did not. **A 200 with rejected rows is the normal outcome**, not an error."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a spreadsheet, no header row, or more rows than one upload takes"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "**Import customers from a spreadsheet.**",
         "tags": [
           "crm"
         ]

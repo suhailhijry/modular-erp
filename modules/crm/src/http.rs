@@ -6,7 +6,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use erp_eventlog::ExecuteError;
-use erp_i18n::{Locale, Localize};
+use erp_i18n::{Catalog as _, Locale, Localize};
 use erp_tenant::CommandError;
 use erp_types::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -16,9 +16,10 @@ use utoipa_axum::routes;
 
 use erp_web::AppState;
 use erp_web::Problem;
+use erp_web::csv::{Imported, Rejected};
 use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, Read};
 use erp_web::{Consistency, nudge};
-use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
+use erp_web::{Json, Query, bad_request, creating, importing, metadata, parse_id, require_module};
 
 use crate::{Address, Contact, CrmError, CustomerKind, Details, TaxRegistration};
 
@@ -27,6 +28,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_customers, register_customer))
         .routes(routes!(get_customer, amend_customer))
         .routes(routes!(archive_customer, restore_customer))
+        .routes(routes!(import_customers))
 }
 
 /// This module's own failures plus everything any route can produce.
@@ -483,6 +485,185 @@ fn details(
             identifier: t.identifier,
         }),
     })
+}
+
+/// **Import customers from a spreadsheet.**
+///
+/// # Partial failure is the outcome, not an exception
+///
+/// A thousand-row file with three bad rows imports 997 and returns the three,
+/// with the row number the person's editor is showing them and what was wrong.
+/// The alternative — refuse the file — is what every import in this category
+/// does, and it means somebody fixing a spreadsheet by bisection.
+///
+/// # Re-uploading a corrected file is safe
+///
+/// Each row is its own command under a key derived from the file's key **and**
+/// the row's id, so the 997 that went in the first time are recognised as
+/// retries rather than duplicated. See `erp_web::importing`.
+///
+/// # Columns
+///
+/// `id` and `name` are required; `kind` defaults to `person`. The rest —
+/// `name_latin`, `phone`, `email`, `vat_number`, `vat_scheme`,
+/// `vat_identifier`, `street`, `building`, `district`, `city`, `postal_code`,
+/// `country` — are taken when present. A column this does not know is ignored,
+/// because a spreadsheet exported from somewhere else always has three.
+#[utoipa::path(
+    post,
+    path = "/v1/crm/customers/import",
+    tag = "crm",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("Idempotency-Key" = String, Header, description = "The key for this file. Re-uploading a corrected version under the same key does not duplicate the rows that already went in."),
+        ("Content-Type" = String, Header, description = "`text/csv`."),
+    ),
+    request_body(content = String, description = "The spreadsheet. A header row, then one customer per row.", content_type = "text/csv"),
+    responses(
+        (status = OK, description = "What went in and what did not. **A 200 with rejected rows is the normal outcome**, not an error.", body = Imported),
+        (status = BAD_REQUEST, description = "Not a spreadsheet, no header row, or more rows than one upload takes", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn import_customers(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    key: IdempotencyKey,
+    body: axum::body::Bytes,
+) -> Result<Json<Imported>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    let rows = erp_web::csv::parse(&body).map_err(|e| {
+        bad_request(
+            crate::messages::UNREADABLE_FILE,
+            "reason",
+            &e.to_string(),
+            locale,
+        )
+    })?;
+
+    let mut imported = 0;
+    let mut rejected = Vec::new();
+
+    for (index, row) in rows.iter().enumerate() {
+        // The header is row 1, so the first customer is row 2 — which is the
+        // number the person's editor is showing them.
+        let number = index + 2;
+        let id = row.get("id").cloned().unwrap_or_default();
+
+        match one(&tenant, &key, row, &id, locale).await {
+            Ok(()) => imported += 1,
+            Err(problem) => rejected.push(Rejected {
+                row: number,
+                code: problem.0,
+                detail: problem.1,
+            }),
+        }
+    }
+
+    // Once, at the end. A nudge per row would ask for a visit a thousand times
+    // for one file.
+    nudge(&state, tenant.db.tenant()).await;
+
+    Ok(Json(Imported { imported, rejected }))
+}
+
+/// One row, as a code and a sentence when it does not go in.
+async fn one(
+    tenant: &Allowed<ManageTenant>,
+    key: &IdempotencyKey,
+    row: &erp_web::csv::Row,
+    id: &str,
+    locale: Locale,
+) -> Result<(), (String, String)> {
+    let say = |message: &erp_i18n::Message| {
+        (
+            message.code.as_str().to_owned(),
+            CATALOG.render_or_code(locale, message),
+        )
+    };
+
+    if id.is_empty() {
+        return Err(say(&erp_i18n::Message::new(crate::messages::NO_ID_COLUMN)));
+    }
+    let id = erp_types::AggregateId::new(id).map_err(|_| {
+        say(&erp_i18n::Message::new(erp_web::messages::INVALID_ID)
+            .with("id", erp_i18n::MessageArg::text(id)))
+    })?;
+
+    let kind: CustomerKind = row
+        .get("kind")
+        .filter(|k| !k.is_empty())
+        .map_or("person", String::as_str)
+        .parse()
+        .map_err(|_| {
+            say(&erp_i18n::Message::new(crate::messages::UNKNOWN_KIND).with(
+                "kind",
+                erp_i18n::MessageArg::text(row.get("kind").map_or("", String::as_str)),
+            ))
+        })?;
+
+    let details = Details {
+        name: row.get("name").cloned().unwrap_or_default(),
+        name_latin: taken(row, "name_latin"),
+        kind,
+        contact: Contact {
+            phone: taken(row, "phone"),
+            email: taken(row, "email"),
+        },
+        address: taken(row, "city").map(|city| Address {
+            street: row.get("street").cloned().unwrap_or_default(),
+            building: taken(row, "building"),
+            district: taken(row, "district"),
+            city,
+            postal_code: taken(row, "postal_code"),
+            country: row
+                .get("country")
+                .filter(|c| !c.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "SA".to_owned()),
+        }),
+        tax: taken(row, "vat_number").map(|vat_number| TaxRegistration {
+            vat_number,
+            scheme: taken(row, "vat_scheme"),
+            identifier: taken(row, "vat_identifier"),
+        }),
+    };
+
+    // Checked here rather than left to the command, so the row's refusal is
+    // this module's own message rather than a wrapped command error.
+    details.check().map_err(|e| say(&e.message()))?;
+
+    match crate::register_customer(
+        &tenant.db,
+        &id,
+        &details,
+        chrono::Utc::now(),
+        &importing(tenant, key, id.as_str()),
+    )
+    .await
+    {
+        // **Already there counts as imported.** A re-upload of a corrected
+        // file is meant to be safe, and a row that went in last time going in
+        // again is the whole point — see `erp_web::importing`.
+        Ok(_) | Err(CommandError::Execute(ExecuteError::AlreadyExists { .. })) => Ok(()),
+        Err(CommandError::Execute(ExecuteError::Rejected(rejection))) => {
+            Err(say(&rejection.message()))
+        }
+        Err(other) => {
+            tracing::warn!(error = %other, row = %id, "a row of an import failed");
+            Err(say(&erp_i18n::Message::new(erp_tenant::messages::INTERNAL)))
+        }
+    }
+}
+
+/// A column's value, when it has one.
+fn taken(row: &erp_web::csv::Row, column: &str) -> Option<String> {
+    row.get(column).filter(|v| !v.is_empty()).cloned()
 }
 
 /// Which failure is which, over HTTP.

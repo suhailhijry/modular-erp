@@ -59,6 +59,7 @@
 - [reports](./api/reports.md)
 - [messaging](./api/messaging.md)
 - [files](./api/files.md)
+- [Spreadsheets, both directions](./api/exports.md)
 - [The HTTP API](./api/http.md)
 
 # Ahead
