@@ -65,11 +65,28 @@ x-app: &app
     # not a value it knows and is refused at start-up — found by running this.
     SMTP_URL: smtp://mailpit:1025
     SMTP_FROM: ERP <noreply@localhost>
+    # **Files go in a bucket here, not on a container's disk.** Two API replicas
+    # with two local roots each hold half a tenant's documents and neither knows
+    # — the failure `erp_storage::local` documents and this stack exists to make
+    # real. `S3_BUCKET` is the switch; without it the API falls back to
+    # `FILE_ROOT` on local disk.
+    S3_BUCKET: documents
+    S3_ENDPOINT: http://minio:9000
+    # MinIO signs whatever it is told; the value only has to match on both ends.
+    S3_REGION: us-east-1
+    S3_ACCESS_KEY_ID: minioadmin
+    S3_SECRET_ACCESS_KEY: minioadmin
+    # **Development only**, and the reason this file is not production: MinIO
+    # here has no certificate, so every object and the signature over it crosses
+    # the network in the clear.
+    S3_ALLOW_HTTP: "true"
   depends_on:
     pg-primary:
       condition: service_healthy
     redis:
       condition: service_healthy
+    createbucket:
+      condition: service_completed_successfully
   restart: unless-stopped
 
 services:
@@ -205,9 +222,44 @@ services:
     ports:
       - "${MAILPIT_UI_PORT:-8025}:8025"
 
+  # An S3-compatible bucket, so the file routes are exercised against a real one
+  # rather than against a directory. Browse it at http://localhost:9001.
+  #
+  # MinIO and not a mock: the whole risk in `erp_storage::s3` is SigV4 and the
+  # wire format, and neither is testable against something that agrees with you.
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+
   # ---------------------------------------------------------------------------
   # One-shots
   # ---------------------------------------------------------------------------
+
+  # The bucket, once. `mb --ignore-existing` so a restart is not a failure.
+  createbucket:
+    image: minio/mc:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -eu
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        mc mb --ignore-existing local/documents
 
   # `CREATE DATABASE erp_control`, and nothing else.
   #

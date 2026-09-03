@@ -100,6 +100,9 @@ PRIMARY_DIRECT_URL     # the route that bypasses a connection pooler — see bel
 REDIS_URL              # the shared session cache and invalidation — see below
 SMTP_URL               # the relay; without it nothing sends mail — see below
 SMTP_FROM              # e.g. "ERP <noreply@erp.com>"; required when SMTP_URL is set
+S3_BUCKET              # where files go; without it, and without FILE_ROOT,
+                       #   the file routes refuse — see below
+FILE_ROOT              # a directory, for a tenant who keeps their own documents
 WORKER_NAME            # for logs; defaults to $HOSTNAME
 RUST_LOG               # e.g. info,erp_worker=debug
 ```
@@ -181,6 +184,45 @@ docker run --rm -p 1025:1025 -p 8025:8025 axllent/mailpit
 then `SMTP_URL="smtp://localhost:1025"` and read the mail at
 `http://localhost:8025`. **No `?tls=` at all** is how lettre spells plain SMTP —
 `tls=none` is not a value it knows and is refused at start-up.
+
+**`S3_BUCKET` is what makes file uploads land anywhere.** Without it, and
+without `FILE_ROOT`, the API refuses every upload (503, `files.no_storage`)
+rather than dropping the bytes. That is deliberate: a customer told their
+contract uploaded when it went nowhere is worse served than one told it did not.
+
+The engine is S3-compatible, not Amazon-only — the endpoint is configuration:
+
+```bash
+S3_BUCKET="documents"
+S3_REGION="fsn1"                                    # Contabo's is `default`
+S3_ENDPOINT="https://fsn1.your-objectstorage.com"   # omit for Amazon itself
+S3_ACCESS_KEY_ID="…"
+S3_SECRET_ACCESS_KEY="…"
+S3_VIRTUAL_HOSTED_STYLE="false"   # `bucket.host`; Contabo cannot, AWS prefers it
+S3_ALLOW_HTTP="false"             # development only, for a local MinIO
+```
+
+Two providers this was written against:
+
+| | `S3_REGION` | `S3_ENDPOINT` | addressing |
+|---|---|---|---|
+| Hetzner | `fsn1`, `nbg1` or `hel1` | `https://<region>.your-objectstorage.com` | either |
+| Contabo | `default` | `https://<region>.contabostorage.com` | path only |
+
+Path-style is the default because it is the one both accept. Set
+`S3_VIRTUAL_HOSTED_STYLE=true` for Amazon.
+
+**`FILE_ROOT` is the other half of D15**: a business that keeps its own records
+on its own hardware sets a directory instead, and no bucket is involved. It is
+read only when `S3_BUCKET` is unset. One caveat that is a deployment fact rather
+than a bug: two API processes with two local roots each hold half a tenant's
+files and neither knows. Use one filesystem, or use a bucket.
+
+There is a real one to develop against:
+
+```bash
+docker compose up -d minio createbucket    # http://localhost:9001
+```
 
 **`SEALING_KEY` is what module secrets are sealed under.** Without it the API
 refuses to store a tenant's ZATCA private key (503, `request.no_sealing_key`)

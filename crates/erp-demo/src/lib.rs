@@ -120,6 +120,11 @@ pub enum DemoError {
     Projection(#[from] erp_projection::RunError),
     #[error(transparent)]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    /// The deployment names a bucket it cannot use. Not a fallback to disk: a
+    /// demo that quietly filed its documents somewhere else than the API beside
+    /// it reads from is a demo that lies.
+    #[error("storage is configured and not usable: {0}")]
+    Storage(String),
 }
 
 /// Prepares a database that has never run anything.
@@ -166,18 +171,26 @@ const DEFAULT_CAPACITY: i32 = 10_000;
 /// test that drops its own database, wrong for anything reachable from outside.
 /// Somewhere for the demo to keep its documents.
 ///
-/// **A real directory**, because the demo fills itself through the public API
-/// and an upload with no storage configured refuses — which is the right
-/// behaviour and would leave the filing cabinet empty. `FILES_ROOT` overrides
-/// it; the default is a directory under the system temp, which is the right
-/// place for a demo that a reaper destroys.
-#[must_use]
-pub fn with_storage(state: AppState) -> AppState {
-    let root = std::env::var("FILES_ROOT").map_or_else(
-        |_| std::env::temp_dir().join("erp-demo-files"),
-        std::path::PathBuf::from,
-    );
-    state.storing_in(std::sync::Arc::new(erp_storage::Local::at(root)))
+/// **Whatever this deployment is configured for, and a real directory if it is
+/// configured for nothing.** The demo fills itself through the public API and
+/// an upload with no storage refuses — which is right, and would leave the
+/// filing cabinet empty.
+///
+/// Asking `erp_storage::from_env` rather than always taking a directory is what
+/// makes the demo agree with the API process beside it: in `compose.yaml` both
+/// see `S3_BUCKET`, so a document the demo uploads is one the API can serve. A
+/// demo that wrote to its own container's disk while the API read a bucket
+/// would fill a filing cabinet nobody can open.
+///
+/// The fallback is under the system temp, which is the right place for a demo
+/// that a reaper destroys. `FILE_ROOT` names it explicitly.
+pub fn with_storage(state: AppState) -> Result<AppState, DemoError> {
+    if let Some(storage) = erp_storage::from_env().map_err(DemoError::Storage)? {
+        return Ok(state.storing_in(storage));
+    }
+    Ok(state.storing_in(std::sync::Arc::new(erp_storage::Local::at(
+        std::env::temp_dir().join("erp-demo-files"),
+    ))))
 }
 
 pub async fn seed(

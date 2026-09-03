@@ -36,9 +36,12 @@
 
 pub mod messages;
 
+mod crypto;
 mod local;
+mod s3;
 
 pub use local::Local;
+pub use s3::{S3, S3Config};
 
 use erp_i18n::{Localize, Message, MessageArg, StaticCatalog};
 use serde::{Deserialize, Serialize};
@@ -127,6 +130,25 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     /// Deleting twice is the same world either way (L8), and a caller cleaning
     /// up after a failed upload should not have to care which half succeeded.
     async fn delete(&self, key: &str) -> Result<(), StorageError>;
+}
+
+/// The engine this deployment is configured for, or `None` for none.
+///
+/// **The order is the decision**: a bucket if one is configured, otherwise a
+/// directory if one is, otherwise nothing — and "nothing" is a real answer that
+/// makes every file route refuse, rather than a default that quietly writes to
+/// a container's filesystem and loses everything the next time it is replaced.
+///
+/// The caller logs which one it got; this crate has no logger and should not
+/// grow one. [`Storage::engine`] is what to log.
+pub fn from_env() -> Result<Option<std::sync::Arc<dyn Storage>>, String> {
+    if let Some(s3) = S3::from_env()? {
+        return Ok(Some(std::sync::Arc::new(s3)));
+    }
+    match std::env::var("FILE_ROOT") {
+        Ok(root) if !root.trim().is_empty() => Ok(Some(std::sync::Arc::new(Local::at(root)))),
+        _ => Ok(None),
+    }
 }
 
 /// SHA-256, hex.

@@ -111,17 +111,26 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # HTTP
 axum = { version = "0.8", features = ["macros"] }
 
-# The client, for the one external service this system talks to: ZATCA.
+# The client: ZATCA, the message relays, and `object_store`'s connector.
 #
-# `default-tls` rather than `rustls-tls` deliberately. sqlx already links
-# native-tls against OpenSSL for Postgres, and every piece of cryptography here
-# — key generation, the CSR, signing, sealing — is OpenSSL too. Choosing rustls
-# would put a second TLS implementation in the same process for no benefit.
+# `native-tls` rather than rustls deliberately. sqlx already links native-tls
+# against OpenSSL for Postgres, and every piece of cryptography here — key
+# generation, the CSR, signing, sealing, and the SigV4 in `erp_storage::crypto`
+# — is OpenSSL too. Choosing rustls would put a second TLS implementation in the
+# same process for no benefit.
 #
-# No cookies, no gzip, no blocking client: six JSON endpoints on one host.
-reqwest = { version = "0.12", default-features = false, features = [
+# **Named, not defaulted.** In 0.12 the feature to ask for was `default-tls` and
+# it meant native-tls; in 0.13 `default-tls` means *rustls*. The same manifest
+# line that was correct before this bump would now quietly pull in the stack
+# this whole comment exists to keep out, so the backend is spelled out.
+#
+# 0.13 rather than 0.12 because `object_store` requires it, and one HTTP client
+# in the build is worth more than the churn of two.
+#
+# No cookies, no gzip, no blocking client.
+reqwest = { version = "0.13", default-features = false, features = [
     "json",
-    "default-tls",
+    "native-tls",
 ] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
@@ -141,6 +150,20 @@ utoipa = { version = "5", features = ["chrono", "uuid"] }
 utoipa-axum = "0.2"
 
 # Storage
+# S3-compatible object storage. `aws-base` and **not** `aws`: the `aws` feature
+# turns on `reqwest/rustls` and `aws-lc-rs`, which would put a second TLS stack
+# and a second cryptography library in a process that already links OpenSSL for
+# Postgres, SMTP, Redis and ZATCA. `aws-base` leaves both out — the price is
+# supplying a `CryptoProvider`, which is SHA-256 and HMAC-SHA256 over the
+# OpenSSL that is already here. See `erp_storage::s3`.
+#
+# Not `aws-sdk-s3`: forty-six crates at minimum, no native-tls option at all,
+# and a default checksum mode (CRC32 + `aws-chunked`, on since 1.69.0) that
+# non-AWS endpoints reject.
+object_store = { version = "0.14", default-features = false, features = [
+    "aws-base",
+    "reqwest",
+] }
 sqlx = { version = "0.9", default-features = false, features = [
     "postgres",
     "runtime-tokio",

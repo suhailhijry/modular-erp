@@ -53,7 +53,7 @@ pub use file::{File, FileEvent, Owner, OwnerKind, UnknownOwner};
 pub use projections::{Attachment, Attachments, Files, attached_to, attachment, projections};
 
 use erp_i18n::StaticCatalog;
-use erp_types::{DomainName, EventName, SchemaVersion};
+use erp_types::{DomainName, EventName, SchemaVersion, TenantId};
 
 /// This module's messages, in every supported language.
 pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messages::CODES);
@@ -142,9 +142,28 @@ pub(crate) fn domain(literal: &'static str) -> DomainName {
 /// and not in the key: a key with a filename in it is a key with a space, a
 /// slash or an Arabic character in it, and three engines with three opinions
 /// about each.
+///
+/// # The tenant is the first segment, and it has to be
+///
+/// One process serves every tenant and holds **one** `Storage`, so one bucket
+/// or one directory holds all of their documents. Invoice numbers, booking
+/// references and employee ids are unique inside a tenant and nowhere else —
+/// two companies both having an `INV-1` is the normal case, not a collision to
+/// design against. Without this segment the second one to upload overwrites the
+/// first, and the first one to read gets the other company's contract.
+///
+/// The tenant's **id** rather than its subdomain: a company that renames itself
+/// has not moved any of its documents, and a key derived from a name would say
+/// otherwise for ever. It is the same argument the crate docs make for storing
+/// a key instead of a URL.
 #[must_use]
-pub fn key_for(owner: &Owner, id: &str) -> String {
-    format!("{}/{}/{}", owner.kind.as_str(), owner.id.as_str(), id)
+pub fn key_for(tenant: TenantId, owner: &Owner, id: &str) -> String {
+    format!(
+        "{tenant}/{}/{}/{}",
+        owner.kind.as_str(),
+        owner.id.as_str(),
+        id
+    )
 }
 
 #[cfg(test)]
@@ -154,13 +173,28 @@ mod tests {
 
     #[test]
     fn a_key_is_generated_from_ids_and_never_from_a_name() {
+        let tenant = TenantId::new();
         let owner = Owner {
             kind: OwnerKind::Invoice,
             id: AggregateId::new("INV-1").expect("valid"),
         };
-        let key = key_for(&owner, "doc-1");
-        assert_eq!(key, "invoice/INV-1/doc-1");
+        let key = key_for(tenant, &owner, "doc-1");
+        assert_eq!(key, format!("{tenant}/invoice/INV-1/doc-1"));
         erp_storage::check_key(&key).expect("a usable key");
+    }
+
+    /// **The collision that one bucket for every tenant would otherwise be.**
+    /// Two companies both having an `INV-1` is the normal case.
+    #[test]
+    fn two_tenants_with_the_same_invoice_number_do_not_share_a_key() {
+        let owner = Owner {
+            kind: OwnerKind::Invoice,
+            id: AggregateId::new("INV-1").expect("valid"),
+        };
+        assert_ne!(
+            key_for(TenantId::new(), &owner, "doc-1"),
+            key_for(TenantId::new(), &owner, "doc-1")
+        );
     }
 
     /// Every owner kind produces a key the storage layer will accept, which is
@@ -172,7 +206,7 @@ mod tests {
                 kind,
                 id: AggregateId::new("ABC-123").expect("valid"),
             };
-            erp_storage::check_key(&key_for(&owner, "doc-1"))
+            erp_storage::check_key(&key_for(TenantId::new(), &owner, "doc-1"))
                 .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
             assert_eq!(kind.as_str().parse(), Ok(kind));
         }

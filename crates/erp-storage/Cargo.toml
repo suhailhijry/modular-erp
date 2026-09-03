@@ -23,5 +23,17 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util"] }
 
+# The S3 engine. See the workspace manifest for why `aws-base` and not `aws`.
+object_store = { workspace = true }
+# SHA-256 and HMAC-SHA256 for SigV4, from the library this build already links.
+openssl = { workspace = true }
+# `object_store`'s default HTTP connector is `reqwest`, and the feature that
+# names it deliberately turns on no TLS of its own. Depending on it *here*, with
+# this workspace's `default-tls`, is what guarantees the OpenSSL stack is
+# present even when this crate is built alone — a `cargo check -p erp-storage`
+# that unified to a TLS-less reqwest would produce an engine that cannot speak
+# `https` and would not say so until a request failed.
+reqwest = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

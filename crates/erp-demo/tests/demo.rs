@@ -71,7 +71,7 @@ impl Demo {
             .await
             .expect("cluster registers");
 
-        let state = erp_demo::with_storage(AppState::new(control));
+        let state = erp_demo::with_storage(AppState::new(control)).expect("storage");
         // No expiry: these tests drop their own databases, and a reaper running
         // in another test must not race them.
         let seeded = erp_demo::seed(&state, slug, PASSWORD, None)
@@ -661,7 +661,7 @@ async fn the_demo_bootstraps_a_database_nobody_prepared() {
         .await
         .expect("bootstrapping is idempotent");
 
-    let state = erp_demo::with_storage(AppState::new(control));
+    let state = erp_demo::with_storage(AppState::new(control)).expect("storage");
     let seeded = erp_demo::seed(&state, "demo-bootstrap", PASSWORD, None)
         .await
         .expect("the demo builds on a database it prepared itself");

@@ -128,7 +128,7 @@ impl Fixture {
 
     /// Stores bytes and records them, in the order a handler does it.
     async fn upload(&self, id: &str, owner: &Owner, name: &str, bytes: &[u8]) {
-        let key = files::key_for(owner, id);
+        let key = files::key_for(self.db.tenant(), owner, id);
         let stored = erp_storage::store(&self.storage, &key, bytes, "application/pdf")
             .await
             .expect("stores");
@@ -179,8 +179,13 @@ async fn a_document_is_attached_and_comes_back_unchanged() {
     assert_eq!(found[0].owner_id, "INV-1");
     assert_eq!(found[0].stored.engine, "local");
     assert_eq!(found[0].stored.media_type, "application/pdf");
-    // **The key, not a URL.** See `files::file`.
-    assert_eq!(found[0].stored.key, "invoice/INV-1/DOC-1");
+    // **The key, not a URL.** See `files::file`. And the tenant is the first
+    // segment, because one bucket holds every tenant's documents and `INV-1` is
+    // unique inside a tenant and nowhere else.
+    assert_eq!(
+        found[0].stored.key,
+        format!("{}/invoice/INV-1/DOC-1", fixture.db.tenant())
+    );
 
     let back = erp_storage::fetch(&fixture.storage, &found[0].stored)
         .await

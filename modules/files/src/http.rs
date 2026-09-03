@@ -255,7 +255,7 @@ async fn upload_file(
     };
     let media_type = declared_type(&headers, locale)?;
 
-    let key = crate::key_for(&owner, file.as_str());
+    let key = crate::key_for(tenant.db.tenant(), &owner, file.as_str());
     let stored = erp_storage::store(storage.as_ref(), &key, &body, &media_type)
         .await
         .map_err(|e| storage_refused(&e, locale))?;

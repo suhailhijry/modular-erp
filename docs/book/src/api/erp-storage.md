@@ -71,12 +71,45 @@ The name a person gave the file is on the record and **not** in the key: a key
 with a filename in it is a key with a space, a slash or an Arabic character in
 it, and three engines with three opinions about each.
 
+**The tenant is the first segment.** `modules/files` builds
+`{tenant}/{kind}/{owner}/{file}`, because one process holds one `Storage` and
+invoice numbers are unique inside a tenant and nowhere else. Two companies both
+having an `INV-1` is the normal case; without that segment the second upload
+overwrites the first. The tenant's *id*, not its subdomain — a company that
+renames itself has not moved any of its documents.
+
+## `S3`, and why `object_store`
+
+Compatible, not Amazon. The endpoint is configuration, so the same engine talks
+to Hetzner, Contabo, MinIO or S3 itself — which matters because a tenant who
+wants their documents in Frankfurt rather than an AWS region is not a special
+case.
+
+`object_store` with `default-features = false, features = ["aws-base"]`, and
+**not** `aws-sdk-s3`. The deciding argument was TLS: this build links one stack,
+OpenSSL, and `aws-sdk-s3` has no native-tls option at all. `object_store`'s own
+`aws` feature would have pulled rustls and `aws-lc-rs` in too; `aws-base` leaves
+both out, at the price of supplying a `CryptoProvider` — which is SHA-256 and
+HMAC-SHA256 over the OpenSSL already here, in `erp_storage::crypto`, checked
+against the RFC 4231 vectors.
+
+Path-style addressing is the default, because it is the one every provider
+accepts; `S3_VIRTUAL_HOSTED_STYLE=true` switches to `bucket.host`, which Amazon
+prefers and Contabo cannot do.
+
+There is no checksum mode to configure. `object_store` sends one when asked and
+not otherwise, so the default that broke `aws-sdk-s3` against every non-AWS
+endpoint from 1.69.0 is not reachable. Integrity does not depend on the provider
+either way — `fetch` verifies a SHA-256 recorded at write time, against every
+engine.
+
 ## What is deliberately absent
 
-**An S3 engine.** The trait is the seam and an implementation is one `impl`, but
-it needs a dependency decision — an AWS SDK, or SigV4 signing written here — and
-it cannot be verified against anything in this build. Flagged for review rather
-than guessed at, the same call the messaging provider adapters got.
+**Presigned URLs.** Every byte goes through the API process, which is the shape
+the rest of this system has: the route that serves a file is the route that
+knows who is asking. Handing a browser a signed URL is a different
+authorization story, and it is the one thing that would be worth taking the AWS
+SDK for.
 
 **Streaming.** A file is read into memory, which is what caps it at `MAX_BYTES`
 (25 MiB). A tenant who needs more needs a different shape rather than a bigger

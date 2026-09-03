@@ -65,6 +65,17 @@ jobs:
       # the macros at the live database instead would let a stale checkout pass
       # here and fail on a machine without one.
       SQLX_OFFLINE: "true"
+      # **The S3 engine is only tested if something is listening.**
+      # `crates/erp-storage/tests/s3.rs` skips when `S3_BUCKET` is unset, and a
+      # test that skips for ever is not coverage — everything that can go wrong
+      # in that engine is on the wire, where a mock cannot reach it. `MinIO` is
+      # started below.
+      S3_BUCKET: documents
+      S3_ENDPOINT: http://localhost:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+      S3_ALLOW_HTTP: "true"
 
     steps:
       - uses: actions/checkout@v4
@@ -111,6 +122,23 @@ jobs:
         run: |
           pg_dump --version
           psql --version
+
+      # **Not a `services:` entry.** MinIO needs `server /data` as arguments and
+      # a service container cannot pass any, so it runs as a step. Same image
+      # and same credentials as `compose.yaml`, for the reason the Postgres
+      # image is pinned: a pair that drifts apart silently is not a gate.
+      - name: A bucket for the S3 engine to be tested against
+        run: |
+          docker run --detach --name minio --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin --env MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
+          for _ in $(seq 60); do
+            curl --silent --fail http://localhost:9000/minio/health/live && break
+            sleep 2
+          done
+          docker run --rm --network host minio/mc:latest sh -c \
+            "mc alias set local http://localhost:9000 minioadmin minioadmin \
+             && mc mb --ignore-existing local/documents"
 
       # fmt, then clippy, then the suite — the order that fails fastest.
       # Ignored tests stay ignored: the soak test, the rebuild benchmark, and

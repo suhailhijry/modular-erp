@@ -80,6 +80,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tracing::warn!("SEALING_KEY is not set; anything that stores a tenant secret will refuse");
     }
 
+    // **Where files go.** `S3_BUCKET` first, then `FILE_ROOT`, then nowhere —
+    // and nowhere is a real answer: every file route refuses, which is the same
+    // call the sealing key makes. A tenant told their contract uploaded when it
+    // went into a container that is about to be replaced is worse served than
+    // one told it did not.
+    if let Some(storage) = erp_storage::from_env()? {
+        tracing::info!(engine = storage.engine(), "storage configured");
+        state = state.storing_in(storage);
+    } else {
+        tracing::warn!(
+            "neither S3_BUCKET nor FILE_ROOT is set; the file routes will refuse uploads"
+        );
+    }
+
     let app = router(state)
         .layer(TraceLayer::new_for_http())
         // 504, not 408: the request was fine, we were slow.

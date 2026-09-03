@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,023 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,043 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -34,7 +34,8 @@ to the log rather than reading four groups, and reconciles to the books; and
 Phase 11a/b/c/e — short links; `modules/messaging`, with templates that fetch
 their own data, audiences resolved rather than frozen and SMS billed by the
 segment; `modules/files`, where a document's record is a key and a checksum rather
-than a URL; 11d — every list is a spreadsheet on `Accept: text/csv`, and an
+than a URL, and now an S3 engine behind the same trait, round-tripped against a
+real bucket; 11d — every list is a spreadsheet on `Accept: text/csv`, and an
 import takes the good rows and reports the bad ones; and Phase 12b/12c/12d/12e — verified inbound
 callbacks, API keys in pairs, a version a client can be refused on by name, and
 signing in with a phone number.
@@ -309,24 +310,24 @@ than the gap.
   drawer and was not a refund. Nothing in this system has seen a bank statement,
   so it is named for what it is rather than claiming a reconciliation to one.
 
-### 15 · No provider adapter ships, and that is deliberate
+### 15 · The providers are chosen — *answered 2026-09-03*
 
-Twilio, Unifonic, FCM, APNs and the WhatsApp Business API are five APIs with
-five sets of credentials, and this build has an account with none of them. A
-client that has never made a successful call is a file that looks finished and
-is not — the same judgement the WPS file got in §4.
+**SMS: Taqnyat. Push: FCM. WhatsApp: the Meta Business API, direct.** All three
+document a public HTTP API, so each is one `impl Transport` in
+`modules/messaging/src/transport.rs` beside the `Relay` that already ships.
 
-What ships is `messaging::Relay`: **an outbound contract this system defines**
-and documents, which an operator points at their own small service. `POST` with
-a bearer token, one JSON body, and three answers that mean retry / never / the
-address is dead. That is the same choice the email handler makes in preferring
-SMTP to one vendor's JSON, and it means the adapter for whichever provider a
-tenant uses is a forty-line service outside this repository rather than a fork
-of it.
+`Relay` stays. It is not a placeholder for these — it is the escape hatch for a
+tenant who uses somebody else, and for a deployment that wants its outbound
+traffic to leave through its own service. Three named adapters and one generic
+contract is the right set.
 
-An adapter inside the crate is one `impl Transport` when somebody has an account
-to verify it against. **Say the word and I will write one against a sandbox
-account you open.**
+**What "done" will and will not mean.** The request shape, the auth header, the
+retry/permanent split and the segment accounting can all be written and tested
+against the documented API with a fake HTTP layer. What cannot be tested here is
+that a real account accepts it — this build has credentials for none of them —
+so each adapter ships with its failure mapping asserted and a note saying the
+first live call is yours. That is the same honesty the ZATCA client carries, and
+it was right there too.
 
 ### 16 · `crm` could not change a customer's phone number
 
@@ -358,25 +359,65 @@ manager, and every piece of that exists. **Not done in this pass** — it belong
 with the rest of 11's producers rather than smuggled into the module that made it
 possible.
 
-### 18 · No S3 engine ships, and this one is a decision rather than a gap
+### 18 · The S3 engine — *answered 2026-09-03, and built*
 
-`erp_storage::Storage` is the seam and `Local` is a complete implementation of
-it, tested against a real disk. An S3-compatible engine is one `impl Storage`
-and it is not here, because writing it means choosing one of two things and
-neither is mine to choose:
+`object_store`, and not `aws-sdk-s3`. The deciding argument was TLS: this build
+links exactly one stack, OpenSSL, and says so in four places in `Cargo.toml`.
+`aws-sdk-s3` offers no native-tls option at all, so taking it would have put
+rustls and `aws-lc-rs` in the same process permanently. `object_store`'s `aws`
+feature does the same — its `aws-base` feature does not, at the price of
+supplying a `CryptoProvider`, which is SHA-256 and HMAC-SHA256 over the OpenSSL
+that is already here.
 
-- **An AWS SDK.** `aws-sdk-s3` is correct, maintained and about eighty crates of
-  dependency tree, in a build whose whole dependency list currently fits on a
-  screen.
-- **SigV4 by hand.** Two hundred lines of signing that cannot be verified
-  against anything in this build — no bucket, no credentials, no MinIO — which
-  is the same "looks finished and is not" the provider adapters got.
+Measured, not estimated: **+8 compiled crates** (`object_store`, `quick-xml`,
+`crc-fast`, `itertools`, `humantime`, `h2`, `fnv`, `spin`), and `reqwest`
+0.12 → 0.13, which `object_store` requires. `rustls` and `ring` appear in
+`Cargo.lock` as unenabled optional dependencies of `reqwest` and are never
+compiled — `cargo tree -e normal -i rustls` prints nothing.
 
-The engine is on every stored file, so a tenant can be moved one document at a
-time once one exists, and `Local` is not a placeholder: for a business that
-keeps its own records it is the shipping answer.
+**One trap worth writing down.** In `reqwest` 0.12 the feature to ask for was
+`default-tls` and it meant native-tls; in 0.13 `default-tls` means *rustls*. The
+manifest line that was correct before the bump would now quietly pull in the
+stack the whole comment above it exists to keep out, so the backend is spelled
+out as `native-tls`.
 
-**Say which and I will build it.** If it is the SDK, it is an afternoon.
+And it is tested against a real bucket rather than a mock: `compose.yaml` runs
+MinIO, and `crates/erp-storage/tests/s3.rs` round-trips five bytes, four
+megabytes, a nested key, a missing key and an overwritten one through it. A mock
+agrees with you by construction, and everything that can go wrong here — the
+SigV4 signature, the wire format, path-style addressing — is on the wire.
+
+**What is deliberately not built:** presigned URLs. Every byte goes through the
+API process, which is the shape the rest of this system has: the route that
+serves a file is the route that knows who is asking. Handing a browser a signed
+URL is a different authorization story. It is also the one thing that would
+change the answer above — the SDK's presigner and its per-provider quirk
+coverage would be worth forty-six crates the day tenants upload direct.
+
+**What this does not prove:** Hetzner or Contabo specifically. MinIO is a
+faithful S3 implementation and is neither of them, and no credentials for either
+exist in this build. Contabo's gateway answers JSON where S3 answers XML, and
+Hetzner documents a `CopyObject` caveat; neither is reachable from here.
+
+### 18a · Two tenants shared a storage key, and one bucket makes that fatal
+
+Found while wiring the engine. `files::key_for` produced
+`invoice/INV-1/doc-1` — no tenant anywhere in it. One process serves every
+tenant and holds **one** `Storage`, and invoice numbers are unique inside a
+tenant and nowhere else, so two companies both having an `INV-1` — the normal
+case, not an exotic one — meant the second upload overwrote the first and the
+first read returned the other company's contract.
+
+`Local` hid it behind the fact that nobody runs two tenants against one
+directory on purpose. A bucket does not hide it.
+
+The key is now `{tenant}/{kind}/{owner}/{file}`, with the tenant's **id** rather
+than its subdomain: a company that renames itself has not moved any of its
+documents. `two_tenants_with_the_same_invoice_number_do_not_share_a_key` is the
+regression test.
+
+No migration is written, because nothing has stored a file under the old shape
+outside a test. If that stops being true before release, it needs one.
 
 ### 19 · The body limit moved from the binary into the router
 
@@ -468,14 +509,12 @@ is checked exactly as much.
 Say the word and it becomes `hmac`; the tests do not change either way, which is
 the point.
 
-### 25 · Phase 12a is the one thing left, and it needs your decision
+### 25 · Phase 12a — the gateways are chosen, *answered 2026-09-03*
 
-Everything else in Phase 12 is built. What is not is **taking a payment**, and
-the reason is the same one the messaging providers and the S3 engine gave: this
-build has an account with no gateway, and a client that has never made a
-successful call is a file that looks finished and is not.
+**Cards: Moyasar. Buy-now-pay-later: Tabby and Tamara.** All three document a
+public HTTP API, so none needs an SDK on the dependency list.
 
-What is ready for it, all of it landed this pass:
+Everything around 12a already exists:
 
 - **The inbound half.** A verified, deduplicated webhook that promises
   `webhook.<provider>` and waits for a handler (12b).
@@ -484,13 +523,18 @@ What is ready for it, all of it landed this pass:
   compose inside one transaction, which is what settlement and fees will need.
 - **A shared secret per provider**, sealed (12b).
 
-What it needs from you is one answer: **which gateway**, and whether an SDK may
-be added to the dependency list. With that, 12a is a module, a handler and the
-posting rules — and the parts of it that are *domain* rather than vendor (a
-refund against a cleared invoice is a credit note; a payout reconciles to
-payments minus fees; a fee is an expense and never a smaller revenue; a BNPL
-receivable is settled by a third party) are specifiable without one, if you would
-rather I build those first and leave the call for last.
+**Tabby and Tamara are not Moyasar wearing different branding**, and the plan
+already says why: the provider pays the merchant and collects from the buyer, so
+the receivable is settled by a third party and the entries differ. Getting that
+wrong shows up as a debtor who has already paid. They share a `Gateway` trait
+and they do not share posting rules.
+
+The parts of this that are **domain rather than vendor** — a refund against a
+cleared invoice is a credit note; a payout reconciles to payments minus fees; a
+fee is an expense and never a smaller revenue; a BNPL receivable is settled by a
+third party — are testable here in full. The parts that are vendor are testable
+against a fake HTTP layer and not against a live account, which is the same
+position §15 leaves the messaging adapters in.
 
 ---
 
@@ -2019,6 +2063,10 @@ already passes. A channel is a `Handler`, and that is the whole integration.
 
 ### 11a · Channels as effects
 
+**Providers chosen 2026-09-03** (review §15): Taqnyat for SMS, FCM for push, the
+Meta Business API for WhatsApp. Each is one `impl Transport` beside the generic
+`Relay`, which stays as the escape hatch.
+
 - [x] `sms.send`, `push.send`, `whatsapp.send` beside `email.send` — one effect
       kind per channel, so a worker without an SMS relay leaves SMS in the
       outbox rather than dead-lettering it during a rollout
@@ -2070,11 +2118,12 @@ a template cannot ask for anything, so somebody must hand it everything.
 
 ### 11c · Files, and where they actually live
 
-- [~] `Storage` as a trait: local disk and S3-compatible object storage to start,
+- [x] `Storage` as a trait: local disk and S3-compatible object storage to start,
       and the tenant chooses. A self-hosted tenant (D15) keeps its own files, and
-      that is the point rather than a configuration detail — the trait and
-      `Local` ship; **S3 does not**, because it needs a dependency decision that
-      is yours. See review §18
+      that is the point rather than a configuration detail. Both engines ship:
+      `Local` against a directory, `S3` against any S3-compatible endpoint —
+      round-tripped against MinIO in `compose.yaml`, not against a mock. **No
+      presigned URLs**; every byte goes through the API process. See review §18
 - [x] An event stores `(engine, key, checksum, size, media_type)` and **never a
       URL**. A URL is where a file is today; a key is what it is
 - [x] The checksum is verified on read. A document that comes back different from
@@ -2142,6 +2191,10 @@ system talking; a gateway talks back, and a callback that is trusted without
 being verified is somebody else's command executed under your authority.
 
 ### 12a · Payments
+
+**Providers chosen 2026-09-03** (review §25): Moyasar for cards, Tabby and
+Tamara for buy-now-pay-later. Public HTTP APIs, so no SDK on the dependency
+list.
 
 - [ ] A card gateway, and **saved cards** — the token is the gateway's, never a
       card number, and it belongs to a customer rather than to a session
