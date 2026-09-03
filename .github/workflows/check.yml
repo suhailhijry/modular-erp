@@ -83,10 +83,34 @@ jobs:
       # is there to speed up.
       - uses: taiki-e/install-action@nextest
 
-      - name: Install psql
+      # **The client has to match the server**, and it does not by default.
+      # `ubuntu-latest` ships `postgresql-client` 16; the service above is 18.3;
+      # and `pg_dump` refuses outright to read a server newer than itself. That
+      # is one test — `erp-control::restore` — failing here and passing on every
+      # developer's machine, which is the worst shape a CI failure comes in.
+      #
+      # PGDG is where a matching client comes from. The version is pinned to the
+      # same number as the image, for the same reason the image is pinned: a
+      # pair that drifts apart silently is not a gate.
+      - name: Install a psql that matches the server
         run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends postgresql-client
+          sudo apt-get install --yes --no-install-recommends postgresql-client-18
+          # Ahead of the 16 client the image already has. `pg_wrapper` chooses a
+          # version from a cluster, there is no cluster on a runner, and what it
+          # picks when there is none is not something to depend on.
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+
+      - name: The client and the server agree
+        run: |
+          pg_dump --version
+          psql --version
 
       # fmt, then clippy, then the suite — the order that fails fastest.
       # Ignored tests stay ignored: the soak test, the rebuild benchmark, and
@@ -130,10 +154,34 @@ jobs:
 
       - uses: extractions/setup-just@v2
 
-      - name: Install psql
+      # **The client has to match the server**, and it does not by default.
+      # `ubuntu-latest` ships `postgresql-client` 16; the service above is 18.3;
+      # and `pg_dump` refuses outright to read a server newer than itself. That
+      # is one test — `erp-control::restore` — failing here and passing on every
+      # developer's machine, which is the worst shape a CI failure comes in.
+      #
+      # PGDG is where a matching client comes from. The version is pinned to the
+      # same number as the image, for the same reason the image is pinned: a
+      # pair that drifts apart silently is not a gate.
+      - name: Install a psql that matches the server
         run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error \
+            --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends postgresql-client
+          sudo apt-get install --yes --no-install-recommends postgresql-client-18
+          # Ahead of the 16 client the image already has. `pg_wrapper` chooses a
+          # version from a cluster, there is no cluster on a runner, and what it
+          # picks when there is none is not something to depend on.
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+
+      - name: The client and the server agree
+        run: |
+          pg_dump --version
+          psql --version
 
       - name: Install sqlx-cli
         run: cargo install sqlx-cli --no-default-features --features postgres,rustls --locked

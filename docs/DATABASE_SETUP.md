@@ -70,6 +70,27 @@ could not connect to Postgres.
 The `from:` line is the useful one. If it says *the built-in default* while you
 have a `.env`, the file is not on the search path from where cargo was invoked.
 
+### If `pg_dump` refuses
+
+```
+pg_dump: error: aborting because of server version mismatch
+```
+
+`pg_dump` will not read a server newer than itself, and `erp-control::restore`
+runs the real thing — the procedure in [RUNNING.md](./RUNNING.md) is executable
+rather than prose, so a client older than the server fails that test and nothing
+else.
+
+The server is 18 (`compose.yaml`, and the CI service). Install a client to
+match:
+
+```bash
+sudo apt-get install postgresql-client-18   # from apt.postgresql.org
+```
+
+Distribution packages lag: Ubuntu 24.04's `postgresql-client` is 16, which is
+what this looks like when it happens on a fresh machine or a CI runner.
+
 ### Leftover databases
 
 Test databases accumulate during a run and are swept at the start of the next
