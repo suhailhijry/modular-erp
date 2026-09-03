@@ -78,6 +78,58 @@ const TIMESTAMP: &str = "x-webhook-timestamp";
 const PAGE: i64 = 200;
 
 /// Where a provider's shared secret is sealed.
+/// **How a callback is authenticated depends on who sent it.**
+///
+/// This system's own contract signs `<timestamp>.<body>` with HMAC-SHA256,
+/// which is the right shape and is what a relay somebody writes should do.
+/// Real payment gateways do not do it: Moyasar puts a shared secret *inside the
+/// JSON body* and signs nothing at all, Tabby offers only a static header, and
+/// Tamara sends a short-lived token that commits to no part of the payload. So
+/// a provider `erp_payments` knows is authenticated its own way, and everything
+/// else falls back to the signed contract.
+///
+/// A gateway's answer is the **payment id to go and ask about** — never what
+/// the body claims happened — which is why it is discarded here. Acting on it
+/// belongs to whichever module handles `webhook.<provider>`, over an
+/// authenticated connection to the gateway.
+fn authenticated(
+    provider: &str,
+    secret: &[u8],
+    headers: &HeaderMap,
+    body: &[u8],
+    locale: Locale,
+) -> Result<(), Problem> {
+    let arrived: Vec<(&str, &str)> = headers
+        .iter()
+        .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
+        .collect();
+
+    match erp_payments::authenticate(provider, secret, &arrived, body) {
+        Ok(_) => Ok(()),
+        Err(erp_payments::CallbackError::UnknownProvider(_)) => erp_web::webhook::verify(
+            secret,
+            header(headers, TIMESTAMP),
+            body,
+            header(headers, SIGNATURE),
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(|e| refused(&e, locale)),
+        Err(erp_payments::CallbackError::NotAuthentic) => {
+            Err(refused(&WebhookError::BadSignature, locale))
+        }
+        Err(erp_payments::CallbackError::Unreadable(why)) => {
+            // Authentic, and still unreadable. Worth saying precisely, because
+            // whoever reads it has already been proved to be the provider.
+            Err(bad_request(
+                erp_web::messages::MALFORMED_BODY,
+                "reason",
+                &why,
+                locale,
+            ))
+        }
+    }
+}
+
 fn secret_key(provider: &str) -> String {
     format!("webhooks.{provider}")
 }
@@ -169,41 +221,7 @@ async fn receive_callback(
         })?
         .ok_or_else(|| unverifiable(&WebhookError::NoSecret, &provider, locale))?;
 
-    // **How a callback is authenticated depends on who sent it.**
-    //
-    // This system's own contract signs `<timestamp>.<body>` with HMAC-SHA256,
-    // which is the right shape and is what a relay somebody writes should do.
-    // Real payment gateways do not do it: Moyasar puts a shared secret *inside
-    // the JSON body* and signs nothing at all. So a provider `erp_payments`
-    // knows is authenticated its own way, and everything else falls back to
-    // the signed contract.
-    //
-    // A gateway's answer is the **payment id to go and ask about** — never
-    // what the body claims happened. See `erp_payments`.
-    match erp_payments::authenticate(&provider, &secret, &body) {
-        Ok(_) => {}
-        Err(erp_payments::CallbackError::UnknownProvider(_)) => erp_web::webhook::verify(
-            &secret,
-            header(&headers, TIMESTAMP),
-            &body,
-            header(&headers, SIGNATURE),
-            chrono::Utc::now().timestamp(),
-        )
-        .map_err(|e| refused(&e, locale))?,
-        Err(erp_payments::CallbackError::NotAuthentic) => {
-            return Err(refused(&WebhookError::BadSignature, locale));
-        }
-        Err(erp_payments::CallbackError::Unreadable(why)) => {
-            // Authentic, and still unreadable. Worth saying precisely, because
-            // whoever reads it has already been proved to be the provider.
-            return Err(bad_request(
-                erp_web::messages::MALFORMED_BODY,
-                "reason",
-                &why,
-                locale,
-            ));
-        }
-    }
+    authenticated(&provider, &secret, &headers, &body, locale)?;
 
     // Only now is the body worth parsing.
     let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {

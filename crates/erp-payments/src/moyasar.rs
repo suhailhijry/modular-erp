@@ -180,7 +180,16 @@ impl Gateway for Moyasar {
             ));
         }
 
-        let Source::Token { token } = &charge.source;
+        // **Moyasar is a card gateway.** A hosted source is what a
+        // buy-now-pay-later provider takes, and quietly charging a card instead
+        // would be a different product than the customer chose.
+        let Source::Token { token } = &charge.source else {
+            return Err(GatewayError::Refused(
+                "Moyasar takes a card token; there is no hosted flow to send a \
+                 customer to"
+                    .to_owned(),
+            ));
+        };
         let response = self
             .post("/v1/payments")
             .json(&serde_json::json!({
@@ -189,7 +198,9 @@ impl Gateway for Moyasar {
                 "amount": charge.amount.minor(),
                 "currency": charge.amount.currency().to_string(),
                 "description": charge.description,
-                "callback_url": charge.return_to,
+                // One URL, and Moyasar's own answer carries the outcome. See
+                // `Returns` for why this system keeps three.
+                "callback_url": charge.returns.success,
                 "source": { "type": "token", "token": token },
             }))
             .send()
@@ -384,11 +395,17 @@ mod tests {
         Charge {
             reference: REFERENCE.to_owned(),
             amount: sar(10_000),
-            return_to: "https://bassat.erp.com/paid".to_owned(),
+            returns: crate::Returns {
+                success: "https://bassat.erp.com/paid".to_owned(),
+                cancel: "https://bassat.erp.com/cancelled".to_owned(),
+                failure: "https://bassat.erp.com/declined".to_owned(),
+            },
             source: Source::Token {
                 token: "token_qbmmXzo97AESrZLS6KpWvof6uK2hAKcQGfEcKg".to_owned(),
             },
             description: "Invoice INV-1".to_owned(),
+            buyer: None,
+            basket: None,
         }
     }
 

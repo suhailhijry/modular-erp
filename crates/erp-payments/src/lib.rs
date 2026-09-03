@@ -46,11 +46,16 @@
 //! what Moyasar's own reference implementation does, and it is the only design
 //! that survives somebody guessing the callback URL.
 
+pub mod decimal;
 pub mod messages;
 
 mod moyasar;
+mod tabby;
+mod tamara;
 
 pub use moyasar::Moyasar;
+pub use tabby::{Tabby, UAE};
+pub use tamara::{SANDBOX, Tamara};
 
 use erp_i18n::{Localize, Message, MessageArg, StaticCatalog};
 use erp_types::Money;
@@ -68,6 +73,61 @@ pub enum Source {
     /// A token the gateway minted in the customer's browser. What a saved card
     /// is, and the only thing this system ever holds.
     Token { token: String },
+    /// Nothing to send: the provider hosts the page where the customer decides.
+    ///
+    /// What every buy-now-pay-later flow is. The customer is scored, shown
+    /// instalment options and asked for a one-time code on the provider's own
+    /// site, and this system never sees any of it.
+    Hosted,
+}
+
+/// Where a customer is sent when the provider is done with them.
+///
+/// Three, because the providers that redirect distinguish three endings and
+/// collapsing them would lose the difference between "they changed their mind"
+/// and "they were declined". A gateway that takes only one — Moyasar — is given
+/// [`Returns::success`], because its own answer carries the outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Returns {
+    pub success: String,
+    /// The customer backed out.
+    pub cancel: String,
+    /// The provider said no. **A normal outcome for buy-now-pay-later**, not an
+    /// error: the customer was scored and declined, and the shop should offer
+    /// them a card.
+    pub failure: String,
+}
+
+/// Who is buying.
+///
+/// Required by both buy-now-pay-later providers, which score the person before
+/// they will lend to them, and unused by card gateways — a card is its own
+/// credit decision, made by somebody else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Buyer {
+    pub name: String,
+    pub email: String,
+    /// The identity a lender actually scores on, and where the one-time code
+    /// goes.
+    pub phone: String,
+}
+
+/// What is being bought.
+///
+/// Also buy-now-pay-later's, and for the same reason: the provider is buying
+/// the receivable and wants to know what it is against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Basket {
+    /// This system's own order reference, echoed back on every callback.
+    pub reference: String,
+    pub items: Vec<Item>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Item {
+    pub title: String,
+    pub quantity: u32,
+    pub unit_price: Money,
 }
 
 /// What a caller is asking the gateway to do.
@@ -81,16 +141,22 @@ pub struct Charge {
     /// this is only a reference, and the crate says so where that is true.
     pub reference: String,
     pub amount: Money,
-    /// Where the customer's browser is sent when the card challenge is done.
+    /// Where the customer's browser is sent when the provider is done.
     ///
     /// **Not evidence of anything.** The query parameters a gateway appends to
-    /// it are attacker-controllable — the customer's own browser follows the
-    /// redirect — so this is where somebody lands, not how this system learns
+    /// these are attacker-controllable — the customer's own browser follows the
+    /// redirect — so they are where somebody lands, not how this system learns
     /// what happened.
-    pub return_to: String,
+    pub returns: Returns,
     pub source: Source,
     /// Shown to the merchant, never to the payer.
     pub description: String,
+    /// **Required by buy-now-pay-later, ignored by cards.** An adapter that
+    /// needs one and is not given it refuses, rather than sending a request the
+    /// provider will reject for a reason nobody here can read.
+    pub buyer: Option<Buyer>,
+    /// The same. See [`Basket`].
+    pub basket: Option<Basket>,
 }
 
 /// Where a payment has got to.
@@ -256,18 +322,45 @@ pub trait Gateway: Send + Sync + std::fmt::Debug {
 /// tenant's shared secret and nothing else. Requiring a configured client to
 /// decide whether a request is authentic would mean unsealing an API key to
 /// answer a question that does not need one.
-pub fn authenticate(provider: &str, secret: &[u8], body: &[u8]) -> Result<String, CallbackError> {
+pub fn authenticate(
+    provider: &str,
+    secret: &[u8],
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<String, CallbackError> {
     match provider {
         "moyasar" => moyasar::authenticate(secret, body),
+        "tabby" => tabby::authenticate(secret, headers, body),
+        "tamara" => tamara::authenticate(secret, headers, body),
         other => Err(CallbackError::UnknownProvider(other.to_owned())),
     }
+}
+
+/// The header a provider that authenticates with one is asked to send.
+///
+/// **This system chooses it**, because both providers that work this way let
+/// the merchant name the header at registration and neither fixes one. Naming
+/// it in a constant means the value a tenant is told to configure and the value
+/// this code looks for cannot drift apart.
+pub const SECRET_HEADER: &str = "x-erp-webhook-secret";
+
+/// Finds a header, case-insensitively.
+///
+/// Callers hand over what arrived; HTTP header names are not case sensitive and
+/// this crate does not get to assume its caller normalised them.
+#[must_use]
+pub fn header<'a>(headers: &[(&str, &'a str)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| *value)
 }
 
 /// Every provider this crate can authenticate a callback from.
 ///
 /// What `authenticate` matches on, in one place, so the guard test and the
 /// dispatch cannot disagree.
-pub const PROVIDERS: &[&str] = &["moyasar"];
+pub const PROVIDERS: &[&str] = &["moyasar", "tabby", "tamara"];
 
 /// Why a callback was not believed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -326,6 +419,14 @@ mod tests {
     }
 
     #[test]
+    fn a_header_is_found_however_it_was_capitalised() {
+        let headers = [("X-Erp-Webhook-Secret", "shhh"), ("content-type", "json")];
+        assert_eq!(header(&headers, SECRET_HEADER), Some("shhh"));
+        assert_eq!(header(&headers, "CONTENT-TYPE"), Some("json"));
+        assert_eq!(header(&headers, "authorization"), None);
+    }
+
+    #[test]
     fn a_secret_is_compared_without_leaking_its_prefix() {
         assert!(secrets_match(b"abc", b"abc"));
         assert!(!secrets_match(b"abc", b"abd"));
@@ -341,13 +442,13 @@ mod tests {
     fn every_provider_this_crate_lists_can_authenticate_a_callback() {
         for provider in PROVIDERS {
             assert_ne!(
-                authenticate(provider, b"s", b"{}"),
+                authenticate(provider, b"s", &[], b"{}"),
                 Err(CallbackError::UnknownProvider((*provider).to_owned())),
                 "{provider} is listed and not dispatched"
             );
         }
         assert_eq!(
-            authenticate("stripe", b"s", b"{}"),
+            authenticate("stripe", b"s", &[], b"{}"),
             Err(CallbackError::UnknownProvider("stripe".to_owned()))
         );
     }

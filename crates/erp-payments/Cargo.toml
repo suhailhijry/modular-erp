@@ -21,6 +21,9 @@ erp-types = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
+# HMAC-SHA256, for Tamara's notification token. The same OpenSSL this build
+# links everywhere else — see `erp_storage::crypto` for the same argument.
+openssl = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

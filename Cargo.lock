@@ -789,6 +789,7 @@ dependencies = [
  "chrono",
  "erp-i18n",
  "erp-types",
+ "openssl",
  "reqwest",
  "serde",
  "serde_json",

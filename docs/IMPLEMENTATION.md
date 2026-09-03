@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,076 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,101 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -584,27 +584,69 @@ third party — are testable here in full. The parts that are vendor are testabl
 against a fake HTTP layer and not against a live account, which is the same
 position §15 leaves the messaging adapters in.
 
-**Started 2026-09-03: `crates/erp-payments` is the vendor half, and Moyasar is
-built.** The split is the one `erp-storage` makes — a thin crate that knows an
-amount, a token and one provider's HTTP API, and knows nothing about invoices or
-accounts. `modules/payments` is the domain half and is next.
+**Built 2026-09-03: `crates/erp-payments` is the vendor half, and all three
+gateways are in it.** The split is the one `erp-storage` makes — a thin crate
+that knows an amount, a buyer and three providers' HTTP APIs, and knows nothing
+about invoices or accounts. `modules/payments` is the domain half and is next.
 
-Three things from the Moyasar work worth carrying into Tabby and Tamara:
+**Money on the wire is the expensive disagreement.** All three want something
+different, and getting it wrong charges a hundred times too much:
 
-- **`amount` needs no conversion, and only for Moyasar.** It is a JSON integer
-  in the smallest currency unit, which is exactly what `Money` stores. Tabby
-  wants a *string* in major units (`"100.00"`) and Tamara a JSON *number* in
-  major units (`100.50`) — and neither can be produced with floating-point
-  arithmetic, which this workspace forbids and which cannot represent `100.50`
-  anyway. `Money`'s `Display` already does the integer division; the conversion
-  is a small function on `erp-types` when the first of those two is written.
-- **`given_id` is Moyasar's idempotency key**, and the client refuses a
-  reference that is not a UUID rather than silently omitting it — without it,
-  every network timeout is a possible double charge. **Neither Tabby nor Tamara
-  has an equivalent**; Tabby has a `reference_id` on capture and refund only.
-- **A card number has nowhere to go.** `Source` has one variant and it holds a
-  token. Moyasar's terms make sending a PAN to the merchant backend grounds for
-  terminating the agreement.
+| | `amount` |
+|---|---|
+| Moyasar | JSON **integer**, minor units — `1.00 SAR` is `100` |
+| Tabby | JSON **string**, major units — `"100.00"` |
+| Tamara | JSON **number**, major units — `100.50` |
+
+Moyasar's is exactly what `Money` stores. The other two go through
+`erp_payments::decimal`, which is integer division and remainder — floating
+point is forbidden here and `100.50` has no exact binary representation anyway,
+so a round trip through `f64` would be a rounding step in the middle of somebody's
+bill. **Tamara forced the body to be built as text**: an unquoted decimal cannot
+be produced by `serde_json` without an `f64`, so that one client writes its own
+JSON and a test asserts the result still parses.
+
+Reading is the same hazard backwards, and it is the one that loses a halala:
+`"amount": 300.50` parsed into a float and multiplied by a hundred. Responses
+are read as raw text and parsed as digits.
+
+**Idempotency: one out of three.** Moyasar's `given_id` is a real one — a UUID
+the caller supplies that *becomes* the payment id — so the client refuses a
+reference that is not a UUID rather than silently omitting it, because without
+it every network timeout is a possible double charge. Tabby has `reference_id`
+on capture and refund and nothing on checkout. **Tamara has none at all.** That
+is a property of the world, written down rather than discovered.
+
+**A card number has nowhere to go.** `Source` has two variants — a gateway token
+and "the provider hosts the page" — and neither holds a PAN. Moyasar's terms
+make sending one to the merchant backend grounds for terminating the agreement.
+
+**What each provider's lifecycle actually means**, since none of the three
+agrees and two of them mislead:
+
+- **Tabby's `CLOSED` is not "paid".** It is the terminal state for captured in
+  full, cancelled without capture, *and* partially captured then closed. So the
+  adapter reports `Paid` only when something was actually captured, and a
+  payment closed with nothing captured is `Voided`. A partial capture also
+  leaves the payment `AUTHORIZED` for ever — the leftover is not released on its
+  own, and Tabby's own backstop is *"after 21 days, Tabby may capture the
+  remaining amount in full on its side"*.
+- **Tamara's `approved` is not `authorised`.** When the customer comes back they
+  have paid the first instalment and **the merchant still has to act**; an order
+  left at `approved` expires after 72 hours. So `approved` reads as
+  `Initiated` — somebody still has to do something — and `capture` authorises
+  first, reading the `auto_captured` flag so an account that captures on
+  authorise is not captured twice.
+- **Only a capture is money for either of them.** *"Orders NOT captured are NOT
+  settled to your account."* Tamara's phrase about `authorised` — "you can
+  consider the order as paid" — is about credit risk, not cash, and the adapter
+  does not repeat it.
+
+**Neither BNPL provider will take an anonymous charge.** Both score the buyer
+before they will lend, so `Charge` carries an optional `Buyer` and `Basket` and
+the adapters refuse without them, naming the missing field. A shop assistant can
+act on "we need their mobile number"; they cannot act on a Tabby validation
+error.
 
 ### 27 · No payment gateway signs its webhooks, and 12b assumed one did
 
@@ -614,9 +656,25 @@ is this system's own contract for a relay somebody writes.
 
 **None of the three chosen gateways does anything like it.** Moyasar puts a
 shared secret *inside the JSON body* as `secret_token` and signs nothing at all;
-Tabby has no signature scheme whatsoever; Tamara sends a JWT that authenticates
-the sender rather than the payload. So the route as built would have rejected
-every real callback.
+Tabby has no signature scheme whatsoever, offering at most a static header the
+merchant names at registration; Tamara sends a JWT that authenticates the sender
+rather than the payload. So the route as built would have rejected every real
+callback.
+
+Tamara's is worth its own sentence, because their documentation is wrong about
+it. The notification token is HS256 over its own header and claims — `iss`,
+`iat`, `exp` and nothing else. Their docs say this "ensures the payload was sent
+from Tamara without any modifications"; **it does not**, because the token
+commits to no part of the body, and it is also sent in the query string where it
+lands in access logs. Anybody who captures one can replay it with a body of
+their choosing for the rest of its fifteen minutes. Two things this build does
+that their own SDK does not: the algorithm is **pinned** to HS256 rather than
+read from the token — a verifier that trusts `alg` accepts `none` — and `iss` is
+checked.
+
+Tabby's header name is the merchant's to choose and Tabby fixes none, so this
+system fixes it: `erp_payments::SECRET_HEADER`, in one constant, so the value a
+tenant is told to register and the value this code looks for cannot drift.
 
 `POST /v1/hooks/{provider}` now authenticates **per provider**: one
 `erp_payments` knows is checked its way, and everything else falls back to the
@@ -2377,10 +2435,13 @@ research changed about 12b.
       number to the merchant backend grounds for termination. **A saved card
       belonging to a customer is not built** — that is a `crm` record pointing
       at a token, and it belongs with the domain half
-- [ ] Buy-now-pay-later, which is **not a card gateway wearing different
+- [~] Buy-now-pay-later, which is **not a card gateway wearing different
       branding**: the provider pays the merchant and collects from the buyer, so
       the receivable is settled by a third party and the entries differ. Getting
-      this wrong shows up as a debtor who has already paid
+      this wrong shows up as a debtor who has already paid. **Both clients are
+      built** (Tabby and Tamara) with their lifecycles read correctly — see §25
+      for what `CLOSED` and `approved` actually mean. **The entries are not**;
+      that is the domain half
 - [~] Capture is idempotent under retry (L8). A timeout is not a failure — it is
       an unknown, and the resolution is a query against the gateway, never a
       second capture. **`Gateway::fetch` is that query and it exists**; the
