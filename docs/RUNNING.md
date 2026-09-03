@@ -103,6 +103,12 @@ SMTP_FROM              # e.g. "ERP <noreply@erp.com>"; required when SMTP_URL is
 S3_BUCKET              # where files go; without it, and without FILE_ROOT,
                        #   the file routes refuse — see below
 FILE_ROOT              # a directory, for a tenant who keeps their own documents
+TAQNYAT_TOKEN          # SMS; needs TAQNYAT_SENDER too — see below
+TAQNYAT_SENDER         # the sender name registered on the Taqnyat account
+FCM_SERVICE_ACCOUNT_FILE   # push; the Firebase service account JSON — see below
+SMS_RELAY_URL          # any channel with no gateway can use a relay instead
+PUSH_RELAY_URL         #   `<CHANNEL>_RELAY_URL` + `<CHANNEL>_RELAY_TOKEN`
+WHATSAPP_RELAY_URL     #   CHANNEL is SMS, PUSH or WHATSAPP
 WORKER_NAME            # for logs; defaults to $HOSTNAME
 RUST_LOG               # e.g. info,erp_worker=debug
 ```
@@ -223,6 +229,34 @@ There is a real one to develop against:
 ```bash
 docker compose up -d minio createbucket    # http://localhost:9001
 ```
+
+**The message gateways are per channel, and each is optional.** A channel with
+no transport leaves its messages **in the outbox** rather than dead-lettering
+them, which is what makes a staggered rollout safe. A named gateway wins over
+the relay for its channel; configuring both means the gateway.
+
+```bash
+# SMS through Taqnyat. The sender name is case sensitive and must be one that is
+# active on the account — a wrong one is a permanent refusal on every message.
+TAQNYAT_TOKEN="…"
+TAQNYAT_SENDER="Bassat"
+
+# Push through Firebase. The service account JSON the Firebase console hands
+# out. Prefer the file: the key is a multi-line PEM, and an environment
+# variable holding one is a variable somebody eventually pastes into a chat.
+FCM_SERVICE_ACCOUNT_FILE="/run/secrets/firebase.json"
+FCM_SERVICE_ACCOUNT='{"type":"service_account", …}'   # or the JSON itself
+```
+
+**There is no WhatsApp gateway**, deliberately. Meta accepts only pre-approved
+templates outside a 24-hour window the customer opens, and this system renders a
+finished message. `WHATSAPP_RELAY_URL` still works if you have a service that
+handles the template mapping.
+
+**`<CHANNEL>_RELAY_URL` is the escape hatch** for a provider with no adapter.
+One `POST` per message with a bearer token; `410 Gone` means the address is
+dead, any other `4xx` is permanent, `5xx` is retried. The contract is documented
+on `messaging::Relay`.
 
 **`SEALING_KEY` is what module secrets are sealed under.** Without it the API
 refuses to store a tenant's ZATCA private key (503, `request.no_sealing_key`)

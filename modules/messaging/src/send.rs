@@ -55,6 +55,19 @@ pub struct Outbound {
     pub subject: String,
     pub body: String,
     pub locale: Locale,
+    /// **Push only**, and what kind of token `to` is.
+    ///
+    /// A raw APNs token and an FCM registration token are both opaque strings
+    /// and neither transport can tell them apart by looking. Carrying it means
+    /// the FCM adapter refuses an Apple one with a sentence somebody can act
+    /// on, instead of forwarding it and getting back an `INVALID_ARGUMENT`
+    /// that reads like a payload bug.
+    ///
+    /// `None` on every other channel, and on push effects enqueued before this
+    /// field existed — which is why it is optional rather than defaulted to a
+    /// platform that would be a guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<crate::push::Platform>,
 }
 
 impl Outbound {
@@ -254,6 +267,7 @@ pub async fn send(conn: &mut PgConnection, sending: &Sending) -> Result<Sent, Se
             subject: subject.clone(),
             body: body.clone(),
             locale,
+            platform: address.platform,
         };
 
         // **No cause.** The key is the caller's, which is what an effect with
@@ -305,9 +319,10 @@ async fn to(
         return Ok(crate::push::tokens(conn, &owner)
             .await?
             .into_iter()
-            .map(|token| Address {
+            .map(|device| Address {
                 channel: Channel::Push,
-                value: token,
+                value: device.token,
+                platform: Some(device.platform),
             })
             .collect());
     }

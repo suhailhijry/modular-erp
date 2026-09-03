@@ -36,6 +36,11 @@ erp-types = { workspace = true, features = ["sqlx"] }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+# FCM authenticates with a hand-signed RS256 JWT. `openssl` is the library this
+# build already links for everything else cryptographic; `base64` is the
+# url-safe unpadded encoding a JWT is made of. Both are already compiled.
+base64 = { workspace = true }
+openssl = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

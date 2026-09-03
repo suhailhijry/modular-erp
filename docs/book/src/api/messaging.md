@@ -101,15 +101,51 @@ dispatcher bytes.
 A booking somebody moved this morning is described as it stands this morning,
 which is the property that matters.
 
-## What is honestly not here
+## The gateways
 
-**A provider adapter.** Twilio, Unifonic, FCM, APNs and the WhatsApp Business
-API are five APIs with five sets of credentials, and this build has an account
-with none of them. A client that has never made a successful call is a file that
-looks finished and is not — the same judgement the WPS file got in Phase 9.
+Two named ones, and a generic contract for everything else. A named gateway wins
+over the relay for its channel — a channel with two handlers on one effect kind
+would deliver every message twice — and a channel with **neither** leaves its
+messages in the outbox rather than dead-lettering them, which is what makes a
+staggered rollout safe.
 
-What ships is `Relay`: an outbound contract this system defines, which an
-operator points at their own small service.
+### `Taqnyat` — SMS
+
+`POST /v1/messages`, a bearer token, and the three fields the OpenAPI spec marks
+required. Three things worth knowing:
+
+- `recipients` is an array of **unquoted JSON numbers**. That is what every
+  example Taqnyat publishes sends; a quoted string is documented nowhere. A
+  number written the Saudi way — `0500000000` — is refused here rather than
+  sent, because parsing it as an integer drops the leading zero and addresses a
+  different number that might exist.
+- **A `201` is not a send.** The body carries `accepted` and `rejected`, and a
+  rejected recipient still comes back `201`. Both are strings shaped
+  `"[966500000000,]"` — bracketed, trailing comma, not JSON.
+- **One documented `400` is retryable** (`SMS-API not responding`). An empty
+  balance, an unregistered sender name and an unauthorised IP are permanent, and
+  retrying an empty balance on a timer never becomes money.
+
+### `Fcm` — push
+
+HTTP v1. The legacy `Authorization: key=…` API was shut down from July 2024, so
+this authenticates with a short-lived OAuth 2.0 access token: an RS256 JWT
+signed with the service account key, exchanged at Google's token endpoint,
+cached to fifty-five minutes.
+
+`UNREGISTERED` retires the device token. **`SENDER_ID_MISMATCH` does not** — it
+means the credentials belong to a different Firebase project, which is one wrong
+environment variable, and retiring on it would erase every push token a tenant
+has because of a deployment mistake.
+
+`Outbound` carries the device's `platform`, so an Apple token offered to FCM is
+refused with a sentence rather than forwarded and returned as an
+`INVALID_ARGUMENT` that reads like a payload bug.
+
+### `Relay` — everything else
+
+An outbound contract this system defines, which an operator points at their own
+small service.
 
 ```json
 POST https://relay.example/send
@@ -120,15 +156,37 @@ Authorization: Bearer …
 ```
 
 `key` is the idempotency key and the relay must treat two posts with the same
-one as the same message. `410 Gone` means the address is dead — a retired push
+one as the same message. **None of the three real providers offers one** — not
+Meta, not Google, not Taqnyat — so a delivery that times out after the gateway
+accepted it is sent, retried and billed twice. The alternative is treating a
+timeout as permanent, which loses real messages to a slow network; losing a
+reminder is worse than sending it twice. `410 Gone` means the address is dead — a retired push
 token — and is never retried; any other `4xx` is dead-lettered; `5xx`, a timeout
 or a refused connection is worth another go.
 
 That is the same choice the email handler makes in preferring SMTP to one
-vendor's JSON, and it means the adapter for whichever provider a tenant uses is
-a forty-line service outside this repository rather than a fork of it. A
-provider adapter inside the crate is one `impl Transport` when somebody has an
-account to verify it against.
+vendor's JSON, and it means the provider a tenant uses without an adapter here
+is a forty-line service outside this repository rather than a fork of it.
+
+## What is honestly not here
+
+**A live account for either gateway.** Neither Taqnyat nor FCM has been called
+for real by this build. What is tested is the bytes each client puts on the wire
+and the answer it makes of every documented reply — against a hand-written
+server that shows those bytes, not a mock that agrees by construction. The first
+live call is the operator's, which is where the ZATCA client stands too.
+
+**A WhatsApp adapter, and it is not an oversight.** Meta accepts free-form text
+only inside a 24-hour window the *customer* opens by messaging the business.
+Outside it, only pre-approved templates are accepted — and the obvious escape
+hatch, a passthrough template whose body is a single variable, is rejected at
+template creation. This module hands a transport a finished string, so a client
+written to `Transport` would fail with `131047` on every reminder it sent.
+
+What WhatsApp needs is a *template model*, not an adapter: a provider template
+name and language per message template, structured parameters instead of a
+rendered body, and approval state so a tenant knows which of theirs are live.
+That is a phase, and it puts an operational obligation on every tenant.
 
 **Delivery receipts.** "Sent" and "delivered" are different words and should
 stay that way, but a receipt arrives as an *inbound* callback and this system

@@ -176,6 +176,9 @@ pub struct Address {
     pub channel: Channel,
     /// An email address, an E.164 number, or a device token.
     pub value: String,
+    /// **Push only** — what kind of token `value` is. See
+    /// [`crate::send::Outbound::platform`].
+    pub platform: Option<crate::push::Platform>,
 }
 
 /// Who a message would reach, right now.
@@ -229,7 +232,13 @@ impl Person {
             Channel::Sms | Channel::WhatsApp => self.phone,
             Channel::Push => None,
         }?;
-        Some(Address { channel, value })
+        Some(Address {
+            channel,
+            value,
+            // Never push: a device is not a property of a person in any read
+            // model, so `crate::send` resolves those separately.
+            platform: None,
+        })
     }
 }
 

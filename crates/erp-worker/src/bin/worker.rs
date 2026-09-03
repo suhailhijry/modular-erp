@@ -465,11 +465,18 @@ fn mailer()
 ///
 /// # Why each one is optional, and separately
 ///
-/// The same call `mailer()` makes: a worker with no SMS relay configured
+/// The same call `mailer()` makes: a worker with no SMS gateway configured
 /// registers no SMS handler, so SMS effects **wait in the outbox** for a worker
 /// that has one rather than being dead-lettered during a staggered rollout.
 /// That is the dispatcher's documented behaviour and the reason a channel is an
 /// effect kind rather than a field on one.
+///
+/// # A named gateway, or the generic relay
+///
+/// Each channel takes at most one transport, and a named provider **wins over**
+/// the relay for that channel: a deployment that configures both meant the
+/// provider, and registering two handlers for one effect kind would deliver
+/// every message twice.
 ///
 /// Email is the exception in shape only: it goes over SMTP like the control
 /// plane's, so the transport wraps the mailer that already exists.
@@ -491,14 +498,28 @@ fn message_transports() -> Vec<Arc<dyn messaging::Transport>> {
         (messaging::Channel::Push, "PUSH"),
         (messaging::Channel::WhatsApp, "WHATSAPP"),
     ] {
+        // A named gateway wins over the relay for its channel. **WhatsApp has
+        // none**, deliberately: outside a customer service window Meta accepts
+        // only pre-approved templates, and this system hands a transport a
+        // finished string. See review §21 in the plan.
+        let gateway = match channel {
+            messaging::Channel::Sms => taqnyat(),
+            messaging::Channel::Push => fcm(),
+            messaging::Channel::Email | messaging::Channel::WhatsApp => None,
+        };
+        if let Some(transport) = gateway {
+            transports.push(transport);
+            continue;
+        }
+
         let (Ok(url), Ok(token)) = (
             std::env::var(format!("{prefix}_RELAY_URL")),
             std::env::var(format!("{prefix}_RELAY_TOKEN")),
         ) else {
             tracing::warn!(
                 channel = channel.as_str(),
-                "{prefix}_RELAY_URL is not set; messages on this channel are still \
-                 promised and wait in the outbox until a relay is configured"
+                "no gateway and no {prefix}_RELAY_URL; messages on this channel are \
+                 still promised and wait in the outbox until one is configured"
             );
             continue;
         };
@@ -514,6 +535,71 @@ fn message_transports() -> Vec<Arc<dyn messaging::Transport>> {
     }
 
     transports
+}
+
+/// SMS through Taqnyat, if this deployment has an account.
+///
+/// The sender name is required and case sensitive — an unregistered one is a
+/// permanent refusal on **every** message, so it is refused here where somebody
+/// is reading a log rather than silently on the first reminder.
+fn taqnyat() -> Option<Arc<dyn messaging::Transport>> {
+    let token = std::env::var("TAQNYAT_TOKEN").ok()?;
+    let Ok(sender) = std::env::var("TAQNYAT_SENDER") else {
+        tracing::warn!(
+            "TAQNYAT_TOKEN is set and TAQNYAT_SENDER is not; Taqnyat needs the sender \
+             name registered on the account and will refuse every message without it"
+        );
+        return None;
+    };
+    match messaging::Taqnyat::new(&token, &sender) {
+        Ok(sms) => {
+            tracing::info!(sender = %sender, "SMS will be delivered through Taqnyat");
+            Some(Arc::new(sms))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Taqnyat is configured and not usable");
+            None
+        }
+    }
+}
+
+/// Push through Firebase, if this deployment has a service account.
+///
+/// `FCM_SERVICE_ACCOUNT_FILE` is the path a container secret is mounted at, and
+/// is preferred: the key is a multi-line PEM and an environment variable
+/// holding one is a variable somebody will eventually paste into a chat window.
+/// `FCM_SERVICE_ACCOUNT` takes the JSON itself, for deployments with no files.
+fn fcm() -> Option<Arc<dyn messaging::Transport>> {
+    let json = match std::env::var("FCM_SERVICE_ACCOUNT_FILE") {
+        Ok(path) => match std::fs::read_to_string(&path) {
+            Ok(json) => json,
+            Err(error) => {
+                tracing::warn!(%path, %error, "the FCM service account file cannot be read");
+                return None;
+            }
+        },
+        Err(_) => std::env::var("FCM_SERVICE_ACCOUNT").ok()?,
+    };
+
+    let account = match messaging::fcm::ServiceAccount::parse(&json) {
+        Ok(account) => account,
+        Err(error) => {
+            tracing::warn!(%error, "the FCM service account is not usable");
+            return None;
+        }
+    };
+    let project = account.project_id.clone();
+
+    match messaging::Fcm::new(account) {
+        Ok(push) => {
+            tracing::info!(%project, "push will be delivered through FCM");
+            Some(Arc::new(push))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "FCM is configured and not usable");
+            None
+        }
+    }
 }
 
 /// The SMTP mailer, as a message transport.

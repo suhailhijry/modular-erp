@@ -8,22 +8,27 @@
 //! must never send a real message by accident. `erp_worker::mail::Mailer` and
 //! `tax_sa`'s `Registrar` are the same shape for the same reason.
 //!
-//! # What is honestly not here
+//! # What is here, and what is honestly not
 //!
-//! **No provider adapter.** Twilio, Unifonic, FCM, APNs and the `WhatsApp`
-//! Business API are five different APIs with five sets of credentials, and this
-//! build has an account with none of them. Writing five clients that have never
-//! made a successful call would be five files that look finished and are not —
-//! the same judgement the WPS file got in Phase 9.
+//! Two named gateways — [`crate::Taqnyat`] for SMS and [`crate::Fcm`] for push —
+//! and [`Relay`], the outbound contract this system defines for everything else.
+//! A named gateway wins over the relay for its channel; a channel with neither
+//! leaves its messages in the outbox rather than dead-lettering them.
 //!
-//! What is here instead is [`Relay`]: an outbound contract this system defines
-//! and documents, which an operator points at their own small service. That is
-//! the same choice the email handler makes in preferring SMTP to one vendor's
-//! JSON, and it means the adapter for whichever provider a tenant uses is a
-//! forty-line service outside this repository rather than a fork of it.
+//! Neither gateway has been used against a real account by this build. What is
+//! tested is the bytes each puts on the wire and the answer it makes of every
+//! documented reply, against a server that shows those bytes — see
+//! `crate::fake`. The first live call is the operator's, which is the same
+//! position the ZATCA client is in and was right there too.
 //!
-//! A provider adapter *inside* this crate is one `impl Transport` when somebody
-//! has an account to verify it against.
+//! **No `WhatsApp` adapter, and it is not an oversight.** Meta accepts free-form
+//! text only inside a 24-hour window the *customer* opens by messaging the
+//! business; outside it only pre-approved templates are accepted, and a
+//! passthrough template whose body is one variable is rejected at creation. This
+//! module hands a transport a finished string, so a `WhatsApp` client written to
+//! this trait would fail `131047` on every reminder it sent. What it needs is a
+//! template model rather than an adapter — review §26 in the plan. `Relay` is
+//! the answer for a deployment that has built that mapping outside this system.
 
 use std::sync::Arc;
 

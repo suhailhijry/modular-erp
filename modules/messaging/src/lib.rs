@@ -80,20 +80,28 @@ pub mod audience;
 pub mod bindings;
 pub mod budget;
 pub mod channel;
+pub mod fcm;
 pub mod http;
 pub mod messages;
 pub mod push;
 pub mod send;
 pub mod settings;
+pub mod taqnyat;
 pub mod template;
 pub mod transport;
+
+/// A gateway that is not a gateway. Tests only.
+#[cfg(test)]
+mod fake;
 
 pub use audience::{Address, Audience, Subject, Topic};
 pub use budget::{Budget, OverBudget, SpendError, Spent};
 pub use channel::{Channel, UnknownChannel, segments};
-pub use push::{Device, Platform};
+pub use fcm::Fcm;
+pub use push::{Device, Platform, Registered};
 pub use send::{Outbound, SendError, Sending, Sent, send};
 pub use settings::Settings;
+pub use taqnyat::Taqnyat;
 pub use template::{Body, Template, TemplateError, Templates};
 pub use transport::{MessageHandler, Relay, Transport, TransportError, handlers};
 

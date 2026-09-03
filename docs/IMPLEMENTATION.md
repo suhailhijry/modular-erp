@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,043 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,061 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -35,7 +35,7 @@ Phase 11a/b/c/e — short links; `modules/messaging`, with templates that fetch
 their own data, audiences resolved rather than frozen and SMS billed by the
 segment; `modules/files`, where a document's record is a key and a checksum rather
 than a URL, and now an S3 engine behind the same trait, round-tripped against a
-real bucket; 11d — every list is a spreadsheet on `Accept: text/csv`, and an
+real bucket, plus the Taqnyat and FCM gateways behind `Transport`; 11d — every list is a spreadsheet on `Accept: text/csv`, and an
 import takes the good rows and reports the bad ones; and Phase 12b/12c/12d/12e — verified inbound
 callbacks, API keys in pairs, a version a client can be refused on by name, and
 signing in with a phone number.
@@ -310,24 +310,72 @@ than the gap.
   drawer and was not a refund. Nothing in this system has seen a bank statement,
   so it is named for what it is rather than claiming a reconciliation to one.
 
-### 15 · The providers are chosen — *answered 2026-09-03*
+### 15 · The providers are chosen — *answered 2026-09-03*; two of three built
 
-**SMS: Taqnyat. Push: FCM. WhatsApp: the Meta Business API, direct.** All three
-document a public HTTP API, so each is one `impl Transport` in
-`modules/messaging/src/transport.rs` beside the `Relay` that already ships.
+**SMS: Taqnyat — built.** `modules/messaging/src/taqnyat.rs`. `POST /v1/messages`
+with a bearer token and the three fields the OpenAPI spec marks required. Three
+things the documentation makes non-obvious, and all three are tested:
 
-`Relay` stays. It is not a placeholder for these — it is the escape hatch for a
-tenant who uses somebody else, and for a deployment that wants its outbound
-traffic to leave through its own service. Three named adapters and one generic
-contract is the right set.
+- `recipients` is an array of **unquoted JSON numbers**. Every example Taqnyat
+  publishes — the spec, the docs curl, both of their own SDKs — sends
+  `[966500000000]`, and whether a quoted string is accepted is documented
+  nowhere. A number written the Saudi way, `0500000000`, is refused here rather
+  than sent: parsing it as an integer drops the leading zero and addresses
+  `500000000`, which is a different number that might exist.
+- **A `201` is not a send.** The body carries `accepted` and `rejected`, and a
+  rejected recipient still comes back `201`. Reporting that as delivered would
+  be the worst kind of wrong, so the body is read on success too. Both fields
+  are strings shaped `"[966500000000,]"` — bracketed, trailing comma, not JSON.
+- **Exactly one documented 400 is retryable** (`SMS-API not responding`).
+  Everything else — an empty balance, an unregistered sender, an unauthorised
+  IP — is permanent, and retrying an empty balance on a timer never becomes
+  money.
 
-**What "done" will and will not mean.** The request shape, the auth header, the
-retry/permanent split and the segment accounting can all be written and tested
-against the documented API with a fake HTTP layer. What cannot be tested here is
-that a real account accepts it — this build has credentials for none of them —
-so each adapter ships with its failure mapping asserted and a note saying the
-first live call is yours. That is the same honesty the ZATCA client carries, and
-it was right there too.
+**Push: FCM — built.** `modules/messaging/src/fcm.rs`. The legacy
+`Authorization: key=…` API was shut down from July 2024, so this is HTTP v1 and
+authenticates with a short-lived OAuth 2.0 access token: an RS256 JWT signed
+with the service account's key, exchanged at Google's token endpoint, cached to
+fifty-five minutes. Google's own documentation says to use their client library;
+their library is not available here without a second TLS stack, and the flow is
+one signed assertion over a POST. The test verifies the signature it produces
+against the public half of the key that signed it, which is what Google's server
+does with it.
+
+**One decision worth reading**: `UNREGISTERED` retires a device token and
+**`SENDER_ID_MISMATCH` does not**. The second means the credentials in this
+process belong to a different Firebase project — one wrong environment variable
+— and retiring on it would erase every push token a tenant has, unrecoverably,
+because of a deployment mistake. Google's own token-management guidance names
+only `UNREGISTERED` and `INVALID_ARGUMENT` as invalid-token signals, and
+`INVALID_ARGUMENT` also covers "your payload is broken". So one code retires,
+and it is the one that means the app is gone.
+
+**WhatsApp: not built, and the reason is architectural rather than effort.** See
+§26.
+
+`Relay` stays, and is now the escape hatch it was always meant to be rather than
+a stand-in: a named gateway wins over the relay for its channel, and a channel
+with neither leaves its effects in the outbox.
+
+**What is still not proven.** No account exists for either provider, so the
+first live call is the operator's. What is tested is the bytes each client puts
+on the wire and the answer it makes of every documented reply — against a
+hand-written server that shows those bytes rather than a mock that agrees by
+construction. That is the same honesty the ZATCA client carries.
+
+### 15a · Two push tokens that look identical
+
+Found writing the FCM adapter. `push::tokens` returned `Vec<String>` — the
+platform column was dropped on the way out — so a transport was handed an opaque
+string with no way to tell an Apple token from a Firebase one by looking. FCM
+would have answered `INVALID_ARGUMENT`, which reads exactly like a payload bug
+and is one of the two codes Google names as an invalid-token signal.
+
+`Outbound` now carries `platform: Option<Platform>`, set on push and nothing
+else, and the FCM adapter refuses an `apns` token with a sentence somebody can
+act on. Optional rather than defaulted, so push effects enqueued before this
+field existed still deserialize instead of being dead-lettered on a rolling
+deploy.
 
 ### 16 · `crm` could not change a customer's phone number
 
@@ -535,6 +583,67 @@ fee is an expense and never a smaller revenue; a BNPL receivable is settled by a
 third party — are testable here in full. The parts that are vendor are testable
 against a fake HTTP layer and not against a live account, which is the same
 position §15 leaves the messaging adapters in.
+
+### 26 · WhatsApp cannot take a finished string, and that is a design decision
+
+**The adapter is not built and should not be built as an adapter.** This is the
+one place where the provider's model and this system's disagree, and writing the
+client anyway would produce a file that passes its tests and fails every real
+message.
+
+Meta's rule, quoted: *"When the window closes, you can only send pre-approved
+template messages."* A 24-hour **customer service window** opens when the user
+messages or calls the business, and only then. Free-form `type: "text"` is
+accepted inside it and refused outside it with error `131047` — *"More than 24
+hours have passed since the recipient last replied to the sender number."*
+
+Every WhatsApp message this system would send is a reminder or a notification
+the business initiates. All of them are outside the window, always.
+
+**The obvious escape hatch does not exist.** A "passthrough" template whose body
+is a single variable — hand it our rendered string and let Meta send it — is
+rejected at *template creation*: error `2388299`, "Leading or trailing
+parameters not allowed", and `2388293`, "Parameters words ratio exceeds limit".
+Templates are structurally slot-based with a static-text-to-variable floor, by
+design. Verified against Meta's own error-code reference.
+
+**So the work is not a transport, it is a template model.** What it needs:
+
+- A **provider template** per message template and locale — name plus language
+  code, matching one a human created and Meta approved in WhatsApp Manager.
+  Approval is per name+language and takes hours to days.
+- **Structured parameters on `Outbound`**, not a rendered body. Meta's current
+  form takes named parameters (`parameter_name`), which is a near-exact fit for
+  the `{placeholder}` names `Template::placeholders` already returns — so the
+  render step would emit the values map instead of collapsing it to a string.
+- **Approval state**, because sending against an unapproved or paused template
+  is a permanent failure per message, and the tenant needs to be told which of
+  their templates are live before the reminders start.
+
+That is a phase, not an afternoon, and it puts an operational obligation on
+every tenant — someone has to create and get each template approved.
+
+**Answered 2026-09-03: left as it stands, for now.** The `whatsapp.send` effect
+kind and the channel stay; there is no adapter, and `WHATSAPP_RELAY_URL` is the
+way in for a deployment that has built the template mapping outside this system.
+Nothing is decided against — the template model above is still the design when
+somebody wants the channel for real. What this costs today is nothing, and what
+it defers is a lot of per-tenant onboarding for a channel SMS already reaches.
+
+Two smaller things settled while looking, worth keeping either way:
+
+- **`HTTP 200` is not delivery.** The response can carry
+  `messages[0].message_status: "accepted"`, and the message can still fail
+  later, arriving as a `failed` status webhook with its own error code. Whichever
+  design wins, the code→classification table has to be fed from both the POST
+  response and the webhook — which is 11a's deferred delivery-receipt item, and
+  12b is now the surface it can land on.
+- **No idempotency key**, on any of the three providers. Not Meta, not Google,
+  not Taqnyat — searched for specifically in each. A delivery that times out
+  after the gateway accepted it is sent, retried and billed twice. The
+  alternative is treating a timeout as permanent, which loses real messages to a
+  slow network; losing a reminder is worse than sending it twice. Written down
+  because it is a property of the world, not a bug to find later.
 
 ---
 
@@ -2063,9 +2172,12 @@ already passes. A channel is a `Handler`, and that is the whole integration.
 
 ### 11a · Channels as effects
 
-**Providers chosen 2026-09-03** (review §15): Taqnyat for SMS, FCM for push, the
-Meta Business API for WhatsApp. Each is one `impl Transport` beside the generic
-`Relay`, which stays as the escape hatch.
+**Taqnyat (SMS) and FCM (push) are built** — review §15. **WhatsApp is not**, and
+that is a design decision rather than a gap: Meta accepts only pre-approved
+templates outside a 24-hour window opened by the customer, and this system hands
+a transport a finished string. See §26 for what a correct WhatsApp integration
+needs and why it is your call. `Relay` stays as the escape hatch for any
+provider without an adapter.
 
 - [x] `sms.send`, `push.send`, `whatsapp.send` beside `email.send` — one effect
       kind per channel, so a worker without an SMS relay leaves SMS in the
@@ -2085,7 +2197,8 @@ Meta Business API for WhatsApp. Each is one `impl Transport` beside the generic
       per-tenant budget refuses rather than overspends (L6)
 - [x] Push tokens expire. Cleaning them up is scheduled work, not an
       afterthought — retired by the platform's own rejection, swept after a
-      grace period by `messaging.retire_push_tokens`
+      grace period by `messaging.retire_push_tokens`. FCM's `UNREGISTERED` is
+      that rejection; `SENDER_ID_MISMATCH` deliberately is **not** — see §15
 
 ### 11b · Templates that fetch their own data
 

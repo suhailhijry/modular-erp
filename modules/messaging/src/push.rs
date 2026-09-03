@@ -105,15 +105,41 @@ pub async fn register(
 
 /// Every working token for somebody. Empty is ordinary — most people have no
 /// app installed.
-pub async fn tokens(conn: &mut PgConnection, recipient: &str) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar!(
-        r#"SELECT token as "token!" FROM push_token
+pub async fn tokens(
+    conn: &mut PgConnection,
+    recipient: &str,
+) -> Result<Vec<Registered>, sqlx::Error> {
+    // **The platform travels with the token.** Two device tokens are both
+    // opaque strings, and a transport handed one it cannot deliver to has no
+    // way to tell by looking — see `crate::send::Outbound::platform`.
+    let rows = sqlx::query!(
+        r#"SELECT token as "token!", platform as "platform!" FROM push_token
             WHERE recipient = $1 AND retired_at IS NULL
             ORDER BY registered_at DESC"#,
         recipient,
     )
     .fetch_all(&mut *conn)
-    .await
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(Registered {
+                token: row.token,
+                // A platform this build does not know is a row a future version
+                // wrote. Skipping it is better than sending to a transport that
+                // cannot read it.
+                platform: row.platform.parse().ok()?,
+            })
+        })
+        .collect())
+}
+
+/// A token, and what kind of token it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Registered {
+    pub token: String,
+    pub platform: Platform,
 }
 
 /// Records that the platform will not accept this token any more.
