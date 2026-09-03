@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,061 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,076 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -583,6 +583,64 @@ fee is an expense and never a smaller revenue; a BNPL receivable is settled by a
 third party — are testable here in full. The parts that are vendor are testable
 against a fake HTTP layer and not against a live account, which is the same
 position §15 leaves the messaging adapters in.
+
+**Started 2026-09-03: `crates/erp-payments` is the vendor half, and Moyasar is
+built.** The split is the one `erp-storage` makes — a thin crate that knows an
+amount, a token and one provider's HTTP API, and knows nothing about invoices or
+accounts. `modules/payments` is the domain half and is next.
+
+Three things from the Moyasar work worth carrying into Tabby and Tamara:
+
+- **`amount` needs no conversion, and only for Moyasar.** It is a JSON integer
+  in the smallest currency unit, which is exactly what `Money` stores. Tabby
+  wants a *string* in major units (`"100.00"`) and Tamara a JSON *number* in
+  major units (`100.50`) — and neither can be produced with floating-point
+  arithmetic, which this workspace forbids and which cannot represent `100.50`
+  anyway. `Money`'s `Display` already does the integer division; the conversion
+  is a small function on `erp-types` when the first of those two is written.
+- **`given_id` is Moyasar's idempotency key**, and the client refuses a
+  reference that is not a UUID rather than silently omitting it — without it,
+  every network timeout is a possible double charge. **Neither Tabby nor Tamara
+  has an equivalent**; Tabby has a `reference_id` on capture and refund only.
+- **A card number has nowhere to go.** `Source` has one variant and it holds a
+  token. Moyasar's terms make sending a PAN to the merchant backend grounds for
+  terminating the agreement.
+
+### 27 · No payment gateway signs its webhooks, and 12b assumed one did
+
+The inbound surface built in 12b verifies an HMAC-SHA256 over
+`<timestamp>.<body>` in `x-webhook-signature`. That is the right shape, and it
+is this system's own contract for a relay somebody writes.
+
+**None of the three chosen gateways does anything like it.** Moyasar puts a
+shared secret *inside the JSON body* as `secret_token` and signs nothing at all;
+Tabby has no signature scheme whatsoever; Tamara sends a JWT that authenticates
+the sender rather than the payload. So the route as built would have rejected
+every real callback.
+
+`POST /v1/hooks/{provider}` now authenticates **per provider**: one
+`erp_payments` knows is checked its way, and everything else falls back to the
+signed contract, which is still right for a relay.
+
+**The deeper consequence is the interesting one.** Because none of these bodies
+is signed, a callback proves *nothing about the amount* — anybody who learns the
+URL can post a plausible one. So `erp_payments::authenticate` returns the
+**payment id and nothing else**, and its Moyasar implementation deserializes
+only `{secret_token, data: {id}}`: there is nowhere for a body to put a number.
+What happened is then asked of the gateway over an authenticated connection, and
+the amount **and currency** are compared against what was expected before
+anything is recorded. That is what Moyasar's own reference plugin does.
+
+Two smaller rules fall out of the same argument, and both are tested:
+
+- **The secret is checked before the body means anything**, and a malformed body
+  answers "not authentic" rather than "unreadable". A caller who can tell those
+  apart has an oracle. `Unreadable` is kept for a body that *did* authenticate
+  and still made no sense, where the answer helps whoever is on call.
+- **`callback_url` is not a channel.** The `id`, `status` and `message` query
+  parameters a gateway appends are followed by the *customer's own browser* and
+  are therefore theirs to edit. It is where somebody lands, not how anything is
+  learned.
 
 ### 26 · WhatsApp cannot take a finished string, and that is a design decision
 
@@ -2307,17 +2365,27 @@ being verified is somebody else's command executed under your authority.
 
 **Providers chosen 2026-09-03** (review §25): Moyasar for cards, Tabby and
 Tamara for buy-now-pay-later. Public HTTP APIs, so no SDK on the dependency
-list.
+list. **`crates/erp-payments` is the vendor half and Moyasar is built**; see
+§25 for what carries over to the other two, and §27 for what the webhook
+research changed about 12b.
 
-- [ ] A card gateway, and **saved cards** — the token is the gateway's, never a
-      card number, and it belongs to a customer rather than to a session
+- [~] A card gateway, and **saved cards** — the token is the gateway's, never a
+      card number, and it belongs to a customer rather than to a session. **The
+      gateway half is built** (`crates/erp-payments`, Moyasar): charge, fetch,
+      capture, refund, void, and callback authentication. `Source` has one
+      variant and it holds a token, because Moyasar's terms make sending a card
+      number to the merchant backend grounds for termination. **A saved card
+      belonging to a customer is not built** — that is a `crm` record pointing
+      at a token, and it belongs with the domain half
 - [ ] Buy-now-pay-later, which is **not a card gateway wearing different
       branding**: the provider pays the merchant and collects from the buyer, so
       the receivable is settled by a third party and the entries differ. Getting
       this wrong shows up as a debtor who has already paid
-- [ ] Capture is idempotent under retry (L8). A timeout is not a failure — it is
+- [~] Capture is idempotent under retry (L8). A timeout is not a failure — it is
       an unknown, and the resolution is a query against the gateway, never a
-      second capture
+      second capture. **`Gateway::fetch` is that query and it exists**; the
+      charge carries Moyasar's `given_id` so a retried *create* lands on the
+      same payment. What is not built is the caller that chooses between them
 - [ ] Refunds, partial refunds, and what a refund does to a cleared tax invoice.
       ZATCA has an opinion (`tax_sa`), and it is a credit note
 - [ ] **Settlement.** A gateway pays out in batches, net of fees, days later. The

@@ -624,6 +624,7 @@ dependencies = [
  "erp-i18n",
  "erp-links",
  "erp-occupancy",
+ "erp-payments",
  "erp-projection",
  "erp-recurrence",
  "erp-storage",
@@ -775,6 +776,22 @@ dependencies = [
  "erp-types",
  "serde",
  "sqlx",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "erp-payments"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "erp-i18n",
+ "erp-types",
+ "reqwest",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

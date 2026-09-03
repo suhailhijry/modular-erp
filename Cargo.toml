@@ -19,6 +19,7 @@ erp-eventlog = { path = "crates/erp-eventlog" }
 erp-occupancy = { path = "crates/erp-occupancy" }
 erp-links = { path = "crates/erp-links" }
 erp-storage = { path = "crates/erp-storage" }
+erp-payments = { path = "crates/erp-payments" }
 erp-recurrence = { path = "crates/erp-recurrence" }
 erp-projection = { path = "crates/erp-projection" }
 erp-types = { path = "crates/erp-types" }

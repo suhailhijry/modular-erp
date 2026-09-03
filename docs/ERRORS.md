@@ -785,6 +785,34 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **ar** — {n} مجموعة بلغت حدّها الأقصى.
 
 
+## `payments`
+
+### `payments.no_such_payment`
+
+- **en** — The payment provider has no record of {id}.
+- **ar** — لا يوجد لدى مزوّد الدفع أي سجل لـ {id}.
+
+### `payments.refused`
+
+- **en** — The payment was refused: {reason}
+- **ar** — رُفضت عملية الدفع: {reason}
+
+### `payments.unauthenticated`
+
+- **en** — This business's payment provider is not configured correctly, so nothing was charged.
+- **ar** — إعدادات مزوّد الدفع لهذا النشاط غير صحيحة، فلم يُخصم أي مبلغ.
+
+### `payments.unreachable`
+
+- **en** — The payment provider could not be reached. Try again.
+- **ar** — تعذّر الوصول إلى مزوّد الدفع. أعد المحاولة.
+
+### `payments.unreadable`
+
+- **en** — The payment provider answered in a way this system did not understand, so nothing was recorded.
+- **ar** — ردّ مزوّد الدفع بصيغة لم يفهمها النظام، فلم يُسجَّل شيء.
+
+
 ## `payroll`
 
 ### `payroll.amount_out_of_range`

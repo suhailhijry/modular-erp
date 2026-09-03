@@ -39,6 +39,7 @@ pub static CATALOG: Composite = Composite::new(&[
     // different from what was stored" is a refusal an API has to be able to
     // render.
     &erp_storage::CATALOG,
+    &erp_payments::CATALOG,
     &booking::CATALOG,
     &crm::CATALOG,
     &ledger::CATALOG,

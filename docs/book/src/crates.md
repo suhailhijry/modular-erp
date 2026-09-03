@@ -12,6 +12,7 @@ erp-occupancy   capacity over time: does one more fit
 erp-recurrence  when something repeats: which days, between which two times
 erp-links       short links: a token, where it points, who followed it
 erp-storage     where a file lives: an engine, a key, a checksum verified on read
+erp-payments    asking a gateway for money, and what a callback is actually worth
 erp-projection  groups, ProjectionCtx, the runner, shadow replay and the differ
 erp-tenant      TenantDb, the Budget trait, roles, EnabledModules, ModuleSetup
 erp-control     identities, tenants, entitlements, clusters, placement, the fleet

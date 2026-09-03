@@ -1,0 +1,30 @@
+[package]
+name = "erp-payments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Talking to a payment gateway: a charge, what came back, and what a callback is worth."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Deliberately thin, like `erp-storage`. **No database and no ledger.** This
+# crate knows how to ask a gateway for money and how to read the answer; what a
+# payment *means* — which invoice it clears, which accounts it posts to, whether
+# a refund is a credit note — is `modules/payments`', and the day this crate
+# learns any of it is the day it stops being swappable for another provider.
+erp-i18n = { workspace = true }
+erp-types = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

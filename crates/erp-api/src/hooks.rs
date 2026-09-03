@@ -14,8 +14,25 @@
 //! # A webhook is a command with the provider's id as its key
 //!
 //! It will be delivered more than once, out of order, and replayed by anybody
-//! who kept a copy. All three are answered by two decisions: verify the
-//! signature, and record the id.
+//! who kept a copy. All three are answered by two decisions: authenticate the
+//! caller, and record the id.
+//!
+//! # How it is authenticated depends on who sent it
+//!
+//! This system's own contract signs `<timestamp>.<body>` with HMAC-SHA256,
+//! which is the right shape and is what a relay somebody writes should do.
+//!
+//! **No real payment gateway does it.** Moyasar puts a shared secret inside the
+//! JSON body and signs nothing; Tabby signs nothing at all; Tamara sends a token
+//! that authenticates the sender rather than the payload. So a provider
+//! [`erp_payments`] knows is authenticated its own way, and everything else
+//! falls back to the signed contract.
+//!
+//! The consequence is worth stating plainly: because those bodies are not
+//! signed, **a callback proves nothing about money**. It says which payment to
+//! go and look at. What actually happened is asked of the gateway over an
+//! authenticated connection — see `erp_payments::authenticate`, which returns
+//! an id and deliberately cannot return an amount.
 //!
 //! # Accepted fast, processed as an effect
 //!
@@ -23,11 +40,11 @@
 //! the route verifies, records and promises — and answers `202` — leaving the
 //! work to whichever module registered a handler for `webhook.<provider>`.
 //!
-//! **Nothing registers one yet.** Payments are 12a and a delivery receipt is
-//! `messaging`'s to claim; until one does, a verified callback is recorded and
-//! its effect waits in the outbox, which is the dispatcher's documented
-//! behaviour for a kind nobody handles. `GET .../events` is what makes that
-//! visible in the meantime.
+//! **Nothing registers one yet.** `modules/payments` is the half of 12a that
+//! will, and a delivery receipt is `messaging`'s to claim; until one does, an
+//! authenticated callback is recorded and its effect waits in the outbox, which
+//! is the dispatcher's documented behaviour for a kind nobody handles.
+//! `GET .../events` is what makes that visible in the meantime.
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -152,14 +169,41 @@ async fn receive_callback(
         })?
         .ok_or_else(|| unverifiable(&WebhookError::NoSecret, &provider, locale))?;
 
-    erp_web::webhook::verify(
-        &secret,
-        header(&headers, TIMESTAMP),
-        &body,
-        header(&headers, SIGNATURE),
-        chrono::Utc::now().timestamp(),
-    )
-    .map_err(|e| refused(&e, locale))?;
+    // **How a callback is authenticated depends on who sent it.**
+    //
+    // This system's own contract signs `<timestamp>.<body>` with HMAC-SHA256,
+    // which is the right shape and is what a relay somebody writes should do.
+    // Real payment gateways do not do it: Moyasar puts a shared secret *inside
+    // the JSON body* and signs nothing at all. So a provider `erp_payments`
+    // knows is authenticated its own way, and everything else falls back to
+    // the signed contract.
+    //
+    // A gateway's answer is the **payment id to go and ask about** — never
+    // what the body claims happened. See `erp_payments`.
+    match erp_payments::authenticate(&provider, &secret, &body) {
+        Ok(_) => {}
+        Err(erp_payments::CallbackError::UnknownProvider(_)) => erp_web::webhook::verify(
+            &secret,
+            header(&headers, TIMESTAMP),
+            &body,
+            header(&headers, SIGNATURE),
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(|e| refused(&e, locale))?,
+        Err(erp_payments::CallbackError::NotAuthentic) => {
+            return Err(refused(&WebhookError::BadSignature, locale));
+        }
+        Err(erp_payments::CallbackError::Unreadable(why)) => {
+            // Authentic, and still unreadable. Worth saying precisely, because
+            // whoever reads it has already been proved to be the provider.
+            return Err(bad_request(
+                erp_web::messages::MALFORMED_BODY,
+                "reason",
+                &why,
+                locale,
+            ));
+        }
+    }
 
     // Only now is the body worth parsing.
     let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {

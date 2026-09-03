@@ -36,6 +36,7 @@
 - [erp-recurrence](./api/erp-recurrence.md)
 - [erp-links](./api/erp-links.md)
 - [erp-storage](./api/erp-storage.md)
+- [erp-payments](./api/erp-payments.md)
 - [erp-projection](./api/erp-projection.md)
 - [erp-tenant](./api/erp-tenant.md)
 - [erp-control](./api/erp-control.md)
