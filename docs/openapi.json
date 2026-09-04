@@ -24541,6 +24541,16 @@
             },
             "description": "Your role here does not permit this."
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This tenant has not enabled the payments module"
+          },
           "500": {
             "content": {
               "application/json": {

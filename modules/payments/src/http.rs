@@ -589,6 +589,7 @@ async fn set_gateway(
     tag = "payments",
     responses(
         (status = OK, body = SettlementView),
+        (status = NOT_FOUND, description = "This tenant has not enabled the payments module", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),

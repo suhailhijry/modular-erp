@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,135 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,148 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -94,7 +94,10 @@ and look like load rather than a shared cause:
   rather than waits, so a timing window is plausible.
 - `erp-control::leases re_claiming_your_own_tenant_renews_it` — failed once
   under a full run and passed immediately in isolation. Same family: a lease
-  whose timing assumption is tighter than a loaded machine honours.
+  whose timing assumption is tighter than a loaded machine honours. **Seen
+  again 2026-09-04**, on the settlement run: failed once at position 300 of
+  1,148, passed 4/4 in isolation, and the next full run was clean. Twice now is
+  not "once", and it is the one of these four worth actually fixing.
 
 - `erp-worker::modules an_invitation_is_promised_by_the_control_plane_and_delivered_by_the_worker`
   — failed once on the run that added API keys, passed immediately in isolation
