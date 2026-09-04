@@ -178,6 +178,7 @@ impl Fixture {
             &self.db,
             &code(id),
             &sales::Draft {
+                prepayment: false,
                 customer: sales::Customer {
                     id: None,
                     name: "زبون".to_owned(),
@@ -188,6 +189,7 @@ impl Fixture {
                 due_on: None,
                 currency: sar(),
                 lines: vec![sales::DraftLine {
+                    allowances: Vec::new(),
                     description: "قص".to_owned(),
                     net,
                     category: ledger::VatCategory::Standard,
@@ -507,6 +509,7 @@ async fn takings_are_attributed_to_whoever_had_the_till_open() {
                 address: None,
             },
             lines: vec![sales::DraftLine {
+                allowances: Vec::new(),
                 description: "قص".to_owned(),
                 net: riyals(100),
                 category: ledger::VatCategory::Standard,

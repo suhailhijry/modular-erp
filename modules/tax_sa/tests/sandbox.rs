@@ -142,6 +142,7 @@ fn document(kind: Kind, type_code: TypeCode, link: Link) -> Document {
             Kind::Simplified => None,
         },
         lines: vec![Line {
+            allowances: Vec::new(),
             description: "اشتراك شهري".to_owned(),
             net,
             category: VatCategory::Standard,

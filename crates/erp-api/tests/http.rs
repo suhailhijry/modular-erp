@@ -1879,6 +1879,13 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("save_gateway_card", &["owner", "accountant", "clerk"]),
     ("forget_gateway_card", &["owner", "accountant", "clerk"]),
     ("charge_saved_card", &["owner", "accountant", "clerk"]),
+    // Keeping a deposit raises an invoice and declares tax, so it sits with the
+    // rest of `post_entries`. **Whether keeping one is a supply at all is a tax
+    // position**, which is the owner's — the same call as handing over a
+    // gateway's secret key.
+    ("retain_deposit", &["owner", "accountant", "clerk"]),
+    ("deposit_policy", ALL_ROLES),
+    ("set_deposit_policy", &["owner"]),
     // The org chart. Reading it is ordinary — a staff list is on the wall in
     // most businesses. Changing it is changing the authorization structure, and
     // granting a claim escalates every ancestor, so it is the owner's.
@@ -1933,6 +1940,10 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("attach_customer", OWNER),
     ("record_payment", &["owner", "accountant", "clerk"]),
     ("credit_note", &["owner", "accountant", "clerk"]),
+    // A partial credit note moves the books and the VAT return, so it sits with
+    // the rest of `post_entries`. Reading them is ordinary bookkeeping.
+    ("list_credit_notes", ALL_ROLES),
+    ("credit_invoice_part", &["owner", "accountant", "clerk"]),
     ("record_bill", &["owner", "accountant", "clerk"]),
     ("pay_bill", &["owner", "accountant", "clerk"]),
     // Taking a booking, moving it along, and picking the room. This is the
@@ -2090,8 +2101,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        191,
-        "expected a hundred and ninety-one role-scoped operations"
+        196,
+        "expected a hundred and ninety-six role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

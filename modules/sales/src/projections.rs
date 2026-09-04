@@ -71,9 +71,11 @@ impl Projection for Invoices {
                 lines,
                 discounts,
                 totals,
+                prepayment,
                 note,
             } => {
                 let invoice = NewInvoice {
+                    prepayment,
                     // Issued before this system numbered anything: the number
                     // *was* the client-chosen id, and that is the number on the
                     // copy the customer holds.
@@ -99,6 +101,14 @@ impl Projection for Invoices {
                     .bind(&credit_note)
                     .execute(&mut *conn)
                     .await?;
+            }
+
+            // **Its own rows, not two columns on the invoice.** A partial
+            // credit note has lines and bands of its own, and the `vat_entry`
+            // view reads them rather than negating the invoice's — which is the
+            // whole reason it needed a table.
+            kept @ InvoiceEvent::Credited { .. } => {
+                write_credit_note(ctx, envelope, conn, id, &kept).await?;
             }
 
             InvoiceEvent::PaymentRecorded {
@@ -174,6 +184,7 @@ struct NewInvoice {
     lines: Vec<crate::invoice::InvoiceLine>,
     discounts: Vec<crate::invoice::Discount>,
     totals: crate::vat::Totals,
+    prepayment: bool,
     note: String,
 }
 
@@ -188,8 +199,8 @@ async fn write_issued(
     sqlx::query(
         "INSERT INTO invoice
              (id, number, customer, customer_vat, customer_id, issued_on, due_on,
-              currency, net, tax, gross, discount, note, recorded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+              currency, net, tax, gross, discount, prepayment, note, recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(id)
     .bind(&invoice.number)
@@ -209,6 +220,7 @@ async fn write_issued(
     .bind(invoice.totals.tax.minor())
     .bind(invoice.totals.gross.minor())
     .bind(invoice.totals.discount().minor())
+    .bind(invoice.prepayment)
     .bind(&invoice.note)
     // The event's time, never the wall clock (L2).
     .bind(ctx.event_time())
@@ -234,26 +246,7 @@ async fn write_issued(
         .await?;
     }
 
-    for (index, line) in invoice.lines.iter().enumerate() {
-        let index = i32::try_from(index).unwrap_or(i32::MAX);
-        sqlx::query(
-            "INSERT INTO invoice_line
-                 (id, invoice_id, line_index, description, net,
-                  vat_category, vat_rate_bp)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        // Derived from the position, so a rebuild produces the same key.
-        // `Uuid::new_v4()` here would make every replay differ.
-        .bind(ctx.derive_id(&format!("line-{index}")))
-        .bind(id)
-        .bind(index)
-        .bind(&line.description)
-        .bind(line.net.minor())
-        .bind(line.vat.category.as_str())
-        .bind(line.vat.basis_points)
-        .execute(&mut *conn)
-        .await?;
-    }
+    write_lines(ctx, conn, id, &invoice.lines).await?;
 
     for band in &invoice.totals.bands {
         sqlx::query(
@@ -273,6 +266,150 @@ async fn write_issued(
         .bind(band.tax.minor())
         .execute(&mut *conn)
         .await?;
+    }
+
+    Ok(())
+}
+
+/// Writes a partial credit note and its lines and bands.
+///
+/// A free function for the reason `write_invoice` is one: the arm that calls it
+/// is three tables' worth of inserts, and inlining it makes `apply` a page
+/// nobody reads.
+async fn write_credit_note(
+    ctx: &ProjectionCtx<'_>,
+    envelope: &Envelope,
+    conn: &mut PgConnection,
+    invoice: &str,
+    kept: &InvoiceEvent,
+) -> Result<(), ProjectionError> {
+    let InvoiceEvent::Credited {
+        credit_note,
+        reference,
+        lines,
+        totals,
+        reason,
+        on,
+    } = kept
+    else {
+        return Ok(());
+    };
+
+    sqlx::query(
+        "INSERT INTO credit_note
+             (id, invoice_id, reference, currency, net, tax, gross,
+              reason, issued_on, recorded_at, position)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(credit_note)
+    .bind(invoice)
+    .bind(reference)
+    .bind(totals.net.currency().as_str())
+    .bind(totals.net.minor())
+    .bind(totals.tax.minor())
+    .bind(totals.gross.minor())
+    .bind(reason)
+    .bind(on)
+    // The event's time, never the wall clock (L2).
+    .bind(ctx.event_time())
+    .bind(envelope.position)
+    .execute(&mut *conn)
+    .await?;
+
+    for (index, line) in lines.iter().enumerate() {
+        let index = i32::try_from(index).unwrap_or(i32::MAX);
+        sqlx::query(
+            "INSERT INTO credit_note_line
+                 (id, credit_note_id, line_index, against, description, net,
+                  vat_category, vat_rate_bp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        // Derived from the position for the reason an invoice line's is: a
+        // rebuild has to produce the same key.
+        .bind(ctx.derive_id(&format!("credit-line-{index}")))
+        .bind(credit_note)
+        .bind(index)
+        .bind(i32::from(line.against))
+        .bind(&line.line.description)
+        .bind(line.line.net.minor())
+        .bind(line.line.vat.category.as_str())
+        .bind(line.line.vat.basis_points)
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    for band in &*totals.bands {
+        sqlx::query(
+            "INSERT INTO credit_note_tax
+                 (id, credit_note_id, vat_category, vat_rate_bp, net, tax)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(ctx.derive_id(&format!(
+            "credit-tax-{}-{}",
+            band.category.as_str(),
+            band.basis_points
+        )))
+        .bind(credit_note)
+        .bind(band.category.as_str())
+        .bind(band.basis_points)
+        .bind(band.net.minor())
+        .bind(band.tax.minor())
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// The lines and their allowances.
+///
+/// Split out for the reason `write_issued` itself is: three tables' worth of
+/// inserts in one arm is a page nobody reads.
+async fn write_lines(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    lines: &[crate::invoice::InvoiceLine],
+) -> Result<(), ProjectionError> {
+    for (index, line) in lines.iter().enumerate() {
+        let index = i32::try_from(index).unwrap_or(i32::MAX);
+        sqlx::query(
+            "INSERT INTO invoice_line
+                 (id, invoice_id, line_index, description, net,
+                  vat_category, vat_rate_bp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        // Derived from the position, so a rebuild produces the same key.
+        // `Uuid::new_v4()` here would make every replay differ.
+        .bind(ctx.derive_id(&format!("line-{index}")))
+        .bind(id)
+        .bind(index)
+        .bind(&line.description)
+        .bind(line.net.minor())
+        .bind(line.vat.category.as_str())
+        .bind(line.vat.basis_points)
+        .execute(&mut *conn)
+        .await?;
+
+        for (nth, allowance) in line.allowances.iter().enumerate() {
+            let nth = i32::try_from(nth).unwrap_or(i32::MAX);
+            sqlx::query(
+                "INSERT INTO invoice_line_allowance
+                     (id, invoice_id, line_index, allowance_index, reason, amount)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(ctx.derive_id(&format!("line-{index}-allowance-{nth}")))
+            .bind(id)
+            .bind(index)
+            .bind(nth)
+            .bind(&allowance.reason)
+            .bind(allowance.amount.minor())
+            .execute(&mut *conn)
+            .await?;
+        }
     }
 
     Ok(())
@@ -957,4 +1094,59 @@ fn resume_receivables(
         .map_err(|_| malformed())?;
     let customer = cursor.part(1).ok_or_else(malformed)?.to_owned();
     Ok((Some(total), Some(customer)))
+}
+
+/// A credit note against part of an invoice, as a document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreditNoteRow {
+    /// The statutory number, which is also its id.
+    pub number: String,
+    pub invoice: String,
+    /// The caller's own key for it.
+    pub reference: String,
+    pub net: Money,
+    pub tax: Money,
+    pub gross: Money,
+    pub reason: String,
+    pub issued_on: Timestamp,
+}
+
+/// Every partial credit note against one invoice, newest first.
+///
+/// **Whole-invoice cancellations are not in here.** Those are two columns on
+/// the invoice itself — `credit_note` and `cancelled_on` — because a
+/// cancellation is a fact about the invoice rather than a document with lines
+/// of its own. A caller wanting both asks for the invoice too.
+pub async fn credit_notes(
+    conn: &mut sqlx::PgConnection,
+    invoice: &str,
+) -> Result<Vec<CreditNoteRow>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id as "id!", invoice_id as "invoice_id!", reference as "reference!",
+                  currency as "currency!", net as "net!", tax as "tax!", gross as "gross!",
+                  reason as "reason!", issued_on as "issued_on!"
+             FROM proj_sales.credit_note
+            WHERE invoice_id = $1
+            ORDER BY issued_on DESC, id DESC"#,
+        invoice,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let currency = CurrencyCode::new(&r.currency).ok()?;
+            Some(CreditNoteRow {
+                number: r.id,
+                invoice: r.invoice_id,
+                reference: r.reference,
+                net: Money::from_minor(r.net, currency),
+                tax: Money::from_minor(r.tax, currency),
+                gross: Money::from_minor(r.gross, currency),
+                reason: r.reason,
+                issued_on: r.issued_on,
+            })
+        })
+        .collect())
 }

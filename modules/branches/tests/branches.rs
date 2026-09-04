@@ -288,6 +288,7 @@ fn service(net: i64) -> Basket {
     Basket {
         customer: sales::Customer::new("زبون"),
         lines: vec![sales::DraftLine {
+            allowances: Vec::new(),
             description: "قص".to_owned(),
             net: money(net),
             category: ledger::VatCategory::Standard,

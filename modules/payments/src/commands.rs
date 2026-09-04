@@ -27,9 +27,11 @@ use erp_payments::{Charged, Status};
 use erp_types::{AggregateId, Money, Timestamp};
 
 use crate::card::{Card, CardEvent, token_key};
-use crate::payment::{Payment, PaymentEvent, Stage};
+use crate::payment::{Collects, Payment, PaymentEvent, Stage};
 use crate::payout::{Payout, PayoutEvent};
-use crate::posting::{PostingAccounts, Settlement, entry_for_fee, entry_for_payout};
+use crate::posting::{
+    PostingAccounts, Settlement, entry_for_fee, entry_for_forfeit, entry_for_payout,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PaymentsError {
@@ -44,6 +46,13 @@ pub enum PaymentsError {
     NotCollectable { id: String, stage: &'static str },
     #[error("{0} is more than is left to refund")]
     RefundTooLarge(Money),
+    /// Keeping an invoice payment. **Refused**: there is nothing to keep,
+    /// because the supply it paid for already happened and was already
+    /// invoiced. Retention is a deposit's question.
+    #[error("payment {0} is against an invoice; there is no deposit to keep")]
+    NotADeposit(String),
+    #[error("there is nothing left of {0} to keep")]
+    NothingToRetain(String),
     #[error("payout {0} has already been recorded")]
     PayoutRecorded(String),
     /// A payout naming payments this system has never settled. **Refused**: the
@@ -91,7 +100,8 @@ pub struct Attempt {
     pub provider: String,
     /// **The gateway's own id.** What every callback names.
     pub gateway_id: String,
-    pub invoice: AggregateId,
+    /// An invoice, or a deposit taken before there was one. See [`Collects`].
+    pub collects: Collects,
     pub amount: Money,
 }
 
@@ -117,10 +127,12 @@ pub async fn start_in(
                 // A retried request. The stored attempt wins.
                 return Ok(Decision::nothing());
             }
+            let (invoice, advance) = attempt.collects.split();
             Ok(Decision::one(PaymentEvent::Started {
                 provider: attempt.provider.clone(),
                 gateway_id: attempt.gateway_id.clone(),
-                invoice: attempt.invoice.clone(),
+                invoice,
+                advance,
                 amount: attempt.amount,
                 started_at: at,
             }))
@@ -189,15 +201,18 @@ pub async fn settle_in(
                     found: charged.amount,
                 });
             }
-            let invoice = state
-                .invoice
-                .clone()
+            let collects = state
+                .collects
+                .as_ref()
                 .ok_or_else(|| PaymentsError::NotStarted(id.as_str().to_owned()))?;
 
             Ok(Decision::one(PaymentEvent::Settled {
                 amount: charged.amount,
                 fee: charged.fee,
-                invoice,
+                // **A deposit's invoice is derived, not stored**, so it is the
+                // same id here, at the refund months later, and on a replay.
+                invoice: collects.invoice(id),
+                advance: collects.advance().cloned(),
                 into: accounts.holding(Settlement::of(&state.provider)),
                 reference: state.gateway_id.clone(),
                 settled_at: at,
@@ -211,6 +226,7 @@ pub async fn settle_in(
         amount,
         fee,
         invoice,
+        advance,
         into,
         reference,
         ..
@@ -218,6 +234,15 @@ pub async fn settle_in(
     else {
         return Ok(committed);
     };
+
+    // **A deposit becomes a document the moment the money is real.** Receiving
+    // consideration is itself a tax point — the earliest of supply, invoice and
+    // payment is when VAT falls due — so the prepayment invoice is raised here,
+    // in the same transaction, and everything after this line treats a deposit
+    // as the ordinary invoice payment it now is.
+    if let Some(advance) = advance {
+        bill_the_deposit(&mut *conn, invoice, advance, *amount, at, metadata).await?;
+    }
 
     // `sales` owns what a payment does to an invoice: it clears the receivable,
     // refuses an overpayment, and dedupes on the reference.
@@ -253,6 +278,86 @@ pub async fn settle_in(
     }
 
     Ok(committed)
+}
+
+/// **Raises the prepayment invoice a deposit is billed under.**
+///
+/// # Why a document rather than a liability
+///
+/// Because the tax is due now. Receiving consideration is a tax point in its
+/// own right, so a deposit that sat in a liability with no document would leave
+/// the output tax undeclared in the period it fell due and declared in whatever
+/// period the booking was finally served — or never, if the customer did not
+/// come back. The authority wants the document within fifteen days of that
+/// month's end, and the only way it reaches a VAT return is by being a `sales`
+/// invoice, because that is what the return is built from.
+///
+/// # Why the net is carried rather than divided out
+///
+/// A deposit is a fraction of something already priced, and the price had a net
+/// and a gross. Working the net back out of the gross does not always land —
+/// at 15% there is no net whose tax comes to exactly 10.00 — so the net travels
+/// with the deposit from the moment it is worked out, and the tax runs forwards
+/// from it the way it does on every other invoice.
+///
+/// **What it does not do is guess.** If the invoice does not come to what the
+/// customer was actually charged, the deposit was computed against a rate this
+/// tenant no longer has, and that stops rather than posting a document for a
+/// different number (L6).
+async fn bill_the_deposit(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    advance: &crate::Advance,
+    charged: Money,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<PaymentsError>> {
+    let numbered = sales::issue_in(
+        &mut *conn,
+        invoice,
+        &sales::Draft {
+            customer: {
+                let mut customer = sales::Customer::new(&advance.buyer.name);
+                customer.vat_number.clone_from(&advance.buyer.vat_number);
+                customer
+            },
+            issued_on: at,
+            due_on: None,
+            currency: advance.net.currency(),
+            lines: vec![sales::DraftLine {
+                allowances: Vec::new(),
+                description: format!("Deposit · {}", advance.against),
+                net: advance.net,
+                category: sales::VatCategory::Standard,
+            }],
+            discounts: Vec::new(),
+            // **386, not 388.** The document says it bills for money taken
+            // before the supply, which is a different tax point and a different
+            // thing to report.
+            prepayment: true,
+            note: String::new(),
+        },
+        &format!("Deposit · {}", advance.against),
+        metadata,
+    )
+    .await
+    .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))?;
+
+    // A retry: the invoice was raised on the attempt that came before this one.
+    if numbered.committed.events.is_empty() {
+        return Ok(());
+    }
+
+    let Some(sales::InvoiceEvent::Issued { totals, .. }) = numbered.committed.events.first() else {
+        return Ok(());
+    };
+    if totals.gross != charged {
+        return Err(ExecuteError::Rejected(PaymentsError::WrongAmount {
+            expected: totals.gross,
+            found: charged,
+        }));
+    }
+    Ok(())
 }
 
 /// What to write when the gateway's answer moves no money.
@@ -387,9 +492,10 @@ pub async fn refund_in(
                 return Err(PaymentsError::RefundTooLarge(amount));
             }
             let invoice = state
-                .invoice
-                .clone()
-                .ok_or_else(|| PaymentsError::NotStarted(id.as_str().to_owned()))?;
+                .collects
+                .as_ref()
+                .ok_or_else(|| PaymentsError::NotStarted(id.as_str().to_owned()))?
+                .invoice(id);
 
             Ok(Decision::one(PaymentEvent::Refunded {
                 amount,
@@ -413,6 +519,10 @@ pub async fn refund_in(
         return Ok(committed);
     };
 
+    // **One path, because a deposit has an invoice too.** Its prepayment
+    // invoice is as much an invoice as any other, which is the whole point of
+    // raising one: giving a deposit back is a credit note and the money, exactly
+    // as it is for a sale.
     sales::refund_in(
         &mut *conn,
         invoice,
@@ -480,6 +590,148 @@ async fn credit_the_invoice(
     sales::credit_what_is_clear(&mut *conn, invoice, reference, reason, at, metadata)
         .await
         .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))
+}
+
+/// **Keeps a deposit the customer did not come back for.**
+///
+/// It keeps everything that has not already been given back, and there is no
+/// amount to pass: a policy that returns half is a refund of half followed by
+/// this, which is two facts recorded as two facts rather than one number that
+/// means both.
+///
+/// # The tax was settled when the money arrived
+///
+/// This raises no document and declares nothing. A deposit is billed by a
+/// prepayment invoice at settlement, so the VAT on it was declared in the period
+/// the customer paid — which is when it fell due — and keeping the money changes
+/// none of that. **It is deliberately not reversed either**: the authority's own
+/// guidance is to reverse a prepayment only when it actually goes back to the
+/// buyer, and this is the case where it does not.
+///
+/// # What the setting decides
+///
+/// Whether the money the business kept is a **sale** or something else. A
+/// tenant whose adviser says a forfeited deposit is compensation rather than
+/// consideration books it separately, so their profit and loss can tell service
+/// income from deposits nobody came back for. See [`crate::Retention`] for why
+/// the default is a sale, and for the limit of what this can express.
+pub async fn retain_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    let accounts = PostingAccounts::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Config(e)))?;
+    let retention = crate::Retention::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Config(e)))?;
+
+    let committed = try_execute::<Payment, _, PaymentsError>(
+        &mut *conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            let state = &loaded.aggregate;
+            if state.stage == Stage::Retained {
+                // A retry. The money is already the business's.
+                return Ok(Decision::nothing());
+            }
+            let Some(advance) = state.collects.as_ref().and_then(Collects::advance) else {
+                return Err(if state.collects.is_some() {
+                    PaymentsError::NotADeposit(id.as_str().to_owned())
+                } else {
+                    PaymentsError::NotStarted(id.as_str().to_owned())
+                });
+            };
+            let Some(left) = state.refundable().filter(|m| m.is_positive()) else {
+                return Err(PaymentsError::NothingToRetain(id.as_str().to_owned()));
+            };
+
+            Ok(Decision::one(PaymentEvent::Retained {
+                amount: left,
+                supply: retention.supply,
+                advance_for: advance.against.clone(),
+                retained_at: at,
+            }))
+        },
+    )
+    .await?;
+
+    let Some(PaymentEvent::Retained { amount, supply, .. }) = committed.events.first() else {
+        return Ok(committed);
+    };
+
+    // **A sale needs nothing doing.** The prepayment invoice already recognised
+    // it and already declared the tax; keeping the money is the supply
+    // happening, not a new fact about it.
+    if *supply {
+        return Ok(committed);
+    }
+
+    // **Not a sale, so it moves out of revenue** — and only the revenue does.
+    // The tax stays where it was declared: reclaiming it would be reversing a
+    // prepayment the buyer never got back, which is the one thing the
+    // authority's guidance says not to do.
+    let net = amount
+        .checked_sub(tax_on_kept(&mut *conn, *amount).await?)
+        .map_err(|e| {
+            ExecuteError::Rejected(PaymentsError::Unbalanced(ledger::Unbalanced::Money(e)))
+        })?;
+    // Out of the account the prepayment invoice credited, which is `sales`' to
+    // name — the same reason `settle_in` asks it where the receivable is.
+    let revenue = sales::PostingAccounts::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Config(e)))?
+        .revenue;
+    let lines = entry_for_forfeit(net, &revenue, &accounts)
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Unbalanced(e)))?;
+    ledger::post_entry_in(
+        &mut *conn,
+        &retention_entry(id),
+        at,
+        &format!("Deposit forfeited · {id}"),
+        &lines,
+        metadata,
+    )
+    .await
+    .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))?;
+
+    Ok(committed)
+}
+
+/// The tax inside a kept deposit, at the rate its prepayment invoice carried.
+///
+/// Resolved rather than remembered because the reclassification is a fact about
+/// the money now, and the only thing it needs is how much of it was never
+/// revenue in the first place.
+async fn tax_on_kept(
+    conn: &mut sqlx::PgConnection,
+    gross: Money,
+) -> Result<Money, ExecuteError<PaymentsError>> {
+    let rates = ledger::Rates::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Config(e)))?;
+    let bp = rates.of(sales::VatCategory::Standard);
+    let net = gross
+        .apportioned(10_000, i64::from(10_000 + bp))
+        .map_err(|e| {
+            ExecuteError::Rejected(PaymentsError::Unbalanced(ledger::Unbalanced::Money(e)))
+        })?;
+    gross.checked_sub(net).map_err(|e| {
+        ExecuteError::Rejected(PaymentsError::Unbalanced(ledger::Unbalanced::Money(e)))
+    })
+}
+
+/// The entry a retention posts under.
+#[expect(
+    clippy::expect_used,
+    reason = "a prefix on an id that is already valid is valid"
+)]
+fn retention_entry(payment: &AggregateId) -> AggregateId {
+    AggregateId::new(format!("pk-{}", payment.as_str())).expect("a prefixed aggregate id is one")
 }
 
 /// What a gateway sent, and what it says it covers.
@@ -780,7 +1032,9 @@ pub async fn forget_card_in(
 pub struct Collection {
     pub card: AggregateId,
     pub provider: String,
-    pub invoice: AggregateId,
+    /// An invoice, or a deposit taken before there was one. See [`Collects`] —
+    /// a saved card is exactly how a booking deposit gets charged.
+    pub collects: Collects,
     pub amount: Money,
     /// Where the gateway sends the customer if it decides it needs them.
     pub callback_url: String,
@@ -828,10 +1082,12 @@ pub async fn request_in(
                 // alternative is charging somebody twice.
                 return Ok(Decision::nothing());
             }
+            let (invoice, advance) = collection.collects.split();
             Ok(Decision::one(PaymentEvent::Requested {
                 card: collection.card.clone(),
                 provider: collection.provider.clone(),
-                invoice: collection.invoice.clone(),
+                invoice,
+                advance,
                 amount: collection.amount,
                 callback_url: collection.callback_url.clone(),
                 requested_at: at,

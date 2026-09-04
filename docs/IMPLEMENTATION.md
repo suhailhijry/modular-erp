@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,170 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,203 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -651,6 +651,276 @@ the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
 
+### 38 · Two of the credit-note tests asserted nothing, and falsification said so
+
+**The question was whether a fully credited invoice refuses the next credit
+note.** It does, and it always did — but it was not tested, and writing the test
+turned up something worse.
+
+The new tests passed on the first run, which is the moment to be suspicious
+rather than pleased. So both caps were removed in turn to see which tests
+noticed.
+
+**Removing the band cap** failed the two tests that name it. Good.
+
+**Removing the line cap failed nothing.** All three tests that claimed to
+exercise it still passed, because every case they set up was *also* over the
+band:
+
+- `credits_are_capped_per_line_and_not_by_the_total` used one standard-rated
+  line and one zero-rated one, so crediting 1,000 of standard against a band of
+  500 was caught by the band.
+- `one_credit_note_cannot_take_a_line_twice` used a single line, so 60 + 60
+  against a band of 100 was caught by the band.
+
+Both were renamed and rebuilt around **two lines at the same rate**, which is the
+only shape where the line cap is the thing doing the work: 500 off a line of 300
+sits inside a band of 500 and is still more of that item than was ever sold.
+Removing the line cap now fails both, and restoring it passes both.
+
+**The lesson is the one this document keeps relearning**: a test that passes the
+first time has not been shown to test anything. The cheap way to find out is to
+break the code it names and watch. It cost ten minutes and it caught two tests
+that would have sat there looking like protection.
+
+**What was actually asked, answered:** a fully credited invoice refuses the next
+credit note, on either route to exhaustion — line by line where there is no
+document discount, and by the band where there is, since a discounted invoice
+still has line room left over once it has been credited for what it charged.
+`a_fully_credited_invoice_refuses_another_credit_note` and
+`a_discounted_invoice_credited_to_its_band_refuses_the_line_room_left_over` are
+the two, and the second is the one that fails if the band cap is ever dropped as
+redundant.
+
+### 37 · A credit note names a line, and the compatibility gate had a hole
+
+**One mode, not two.** A credit line used to carry a description, an amount and
+a treatment, all typed by the caller — so a credit note could describe something
+the invoice never sold, at a rate it never charged, and the only thing stopping
+the second was a band lookup. It now names a **line**, and the description and
+the rate come off that line. Crediting a treatment the invoice never carried
+stopped being a refusal and became unrepresentable.
+
+**Both caps, because they catch different things.** The line cap stops a credit
+note taking back more of an item than was sold. The band cap is still there and
+still needed: a document discount comes off the *band*, so an invoice's lines
+sum to more than its bands whenever it carried one. Two lines of 100 with 50 off
+the document were charged 150 — the per-line cap would allow both in full, and
+the band cap is what refuses the extra 50 and the 7.50 of VAT never collected on
+it. `the_band_cap_still_bites_when_a_document_discount_shrank_the_invoice` is
+that test, and it is the one worth reading.
+
+Two lines of one credit note naming the same invoice line are capped on what
+they come to together, which is a separate test because it is a separate way to
+get it wrong.
+
+**And the gate that should have caught the API break did not.**
+`compatibility.rs` reported nothing when `against` appeared as a required field.
+Its `required_of` read only the **top level** of a request schema, so a required
+field appearing inside a nested object — a new field on each element of `lines`
+— was invisible. That is exactly the defect the response side had, found and
+fixed when a rename of `ServiceView::name` sailed through; the two halves had
+simply drifted apart and only one was ever repaired.
+
+It walks now, with one rule the response side does not need: **it descends only
+into properties that are themselves required.** A field required inside an
+*optional* object breaks nobody, because a caller who omits the object omits the
+field with it — and reporting those trains people to run `just baseline` without
+reading it, which is worse than not having the gate.
+
+Verified by falsification rather than by argument: with a baseline doctored to
+hold the old line shape, it reports *"credit_invoice_part now requires
+`lines.against` in its body"*, and without the fix it reports nothing.
+
+**No baseline was accepted.** The credit-note path is newer than the last
+`just baseline`, so there was no promise to break — which is also why the hole
+went unnoticed at the time.
+
+### 36 · A discount can belong to a line, and ZATCA has always said so
+
+**Checked, because I had it wrong twice in a row.** §35 was written on a forum
+quote — *"once you provide discounts at line level, there is no need to provide
+a sub-total or aggregation of line level discount amount again anywhere else"* —
+passed on as guidance without reading it against the standard, which is the same
+mistake as guessing at a tax point. The correction came from being asked whether
+line discounts must still reach the document summaries. They must, and they do:
+
+| | |
+|---|---|
+| **BT-131** line net amount | already **after** the line's own allowances |
+| **BR-CO-10** | `LineExtensionAmount` (BT-106) = Σ BT-131 |
+| **BR-CO-11** | `AllowanceTotalAmount` (BT-107) = Σ **document-level** allowances only |
+| **BR-CO-13** | BT-109 = BT-106 − BT-107 + BT-108 |
+
+So a line allowance reaches the totals by making its line smaller, and putting
+it in BT-107 as well would double-count it. The forum was right about BT-107 and
+the sentence read as though line discounts never touch the totals, which is
+false.
+
+**And the line-level allowance is a different element from the document one.**
+`cac:AllowanceCharge` inside `cac:InvoiceLine` takes an indicator, an amount and
+a reason, and has **no `cac:TaxCategory`** — the line it sits in already says how
+it is taxed. The document-level one has no line to inherit from, so it must name
+the category and the rate or the taxable amounts do not add up. That asymmetry is
+now the difference between `sales::Allowance` and `sales::Discount`, and it is
+why one writer emits a category and the other does not.
+
+**What changed.** `DraftLine` and `InvoiceLine` carry `allowances`, and
+`InvoiceLine::net` is the amount *after* them — BT-131, which is what `vat::total`
+was already summing, so the band arithmetic needed no change at all. `tax_sa`
+emits them inside the line, before `cac:TaxTotal` because the sequence is the
+schema's, and `cbc:PriceAmount` became the figure *before* the allowances so
+BT-131 holds. Both are `#[serde(default)]`, so every invoice issued before this
+decodes as one with none — which is what it was.
+
+**What this unblocks.** A credit note that names a line. §32's cap is on the
+band because a line's face value was not what it was charged once a document
+discount existed; a line that carries its own allowances *is* what it was
+charged, so capping per line becomes exact. That is the follow-on, not done here.
+
+**Still to confirm against a sandbox**, and named rather than assumed: the
+per-category taxable amount in `cac:TaxSubtotal` with line allowances present.
+The rendering is right by the rules above; the only way to know ZATCA agrees is
+to submit one, and that needs a real certificate.
+
+### 35 · The deposit is a document, and that undid most of §33 and §34
+
+**Three questions, one mistake.** Asked in this order: if the deposit is taxed,
+why is it not already an invoice; is a cancellation not just a credit note and a
+refund; and if not, why derive the tax out of a total instead of keeping it from
+the start. All three were right, and all three were the same error seen from a
+different side.
+
+**The tax point is receipt.** VAT falls due on the earliest of supply, invoice
+and consideration received, so a deposit is taxable the day the customer pays.
+§33 held it in a liability with no document and declared nothing — and §34 then
+declared it at *retention*, which is whatever quarter the customer failed to turn
+up in. The amount came out right eventually; the period did not, which is the
+same defect §31 fixed pointing the other way.
+
+So `settle_in` raises a **prepayment invoice** — ZATCA type 386, a `sales`
+invoice with `prepayment: true` — in the transaction that records the money.
+Everything after that is an ordinary invoice payment.
+
+**And that is what makes a cancellation just a credit note and a refund.**
+`refund_in` no longer has two paths: a deposit has an invoice like anything else,
+so giving one back is `sales::refund_in` plus the credit note §31 already wired.
+The `Advance` case is the only place that still knows a deposit is different, and
+only for as long as it takes to raise the document.
+
+**The rounding was self-inflicted.** `net_of_gross` existed to divide a gross
+deposit back into a net and a tax, and could not always land — at 15% no net
+comes to exactly 10.00. But the net was never unavailable:
+`booking::pricing::Charged` has carried a net and a gross since 8d. So `Advance`
+carries the net, the tax runs forwards from it the way it does on every other
+invoice, and the function and its residue account are gone. Writing careful code
+to recover information already thrown away is the shape of the error, and it is
+the part that should have been caught while writing it.
+
+**What §34's setting became.** It cannot decide the tax — that was settled by
+the tax point, and the guidance is not to reverse a prepayment that was kept. So
+`Retention` decides whether the money is a **sale**: the default leaves it as one
+and posts nothing at all, and a business whose adviser disagrees moves the net
+into `4910 Forfeited deposits` while the tax stays declared. The field is
+`supply`, not `taxable`, because a name that claims to move tax and does not is
+worse than no setting at all.
+
+**What went in the bin:** `2410 Customer deposits received` and every entry that
+posted to it, `net_of_gross` and its residue, `entry_for_advance`,
+`entry_for_advance_refund`, `entry_for_applying_advance`, and the invoice-raising
+half of `retain_in`. Two turns' work, most of it deleted by getting the tax point
+right.
+
+**One gap left, and it is named.** A *partial* refund of a deposit gives the
+money back and leaves the prepayment invoice standing for the full amount,
+because crediting part of an invoice needs to know which band the part came out
+of — the allocation §32 refuses to guess. Every deposit is a single-band invoice,
+where there is only one answer, so teaching `credit_what_is_clear` to issue a
+partial credit note in that case is the next thing to build.
+
+### 33 · A payment can collect against something that is not an invoice
+
+**The assumption ran all the way through.** `Started` carried an invoice,
+`settle_in` called `sales::pay_in` with it, and every entry cleared a
+receivable. Right for a customer paying a bill; wrong for the one that pays for
+a booking before there is a bill at all — and 12a was built entirely on the
+first.
+
+`Collects` is the widening: an invoice, or an **advance** against something
+opaque. Settling an invoice payment is unchanged. Settling an advance posts
+`Dr clearing / Cr 2410` and calls `sales` not at all, because there is no
+receivable to clear and no supply to recognise.
+
+**Two `Option`s on the wire, one enum in the domain.** `invoice` went from
+required to optional and `advance_for` arrived beside it, both
+`#[serde(default)]` — so every payment written before advances existed decodes
+as exactly what it was, with no upcaster and no event version two. `Collects::of`
+is where the pair becomes a decision, and it refuses *neither* and *both*; the
+`payment_collects_one_thing` check says the same in the database, because a
+row that means nothing is worse than one that is refused.
+
+**Corrected by §35.** This section's first version held the money in a
+liability and declared no tax, which put the output tax in the wrong period. A
+deposit is billed by a prepayment invoice the moment it settles, and
+`Collects::Advance` survives as what it should always have been: the state
+between a charge being created and the gateway confirming it, and no longer.
+
+**What this does not do.** It does not take a deposit at booking. It makes the
+money-shaped half work: a gateway payment, a saved-card charge or a callback can
+name a booking, the document is raised when the money is real, and a refund is a
+credit note like any other. The rest — a public surface a stranger can pay on, a
+phone they have verified, and a hold that expires — is still ahead.
+
+### 32 · Partial credit notes, and why they needed a table
+
+**The thing that unblocked them was research, not code.** A cancellation policy
+that keeps half a deposit needs a credit note for half an invoice, and this
+system could only credit whole ones. ZATCA's shape settled how: a credit note
+(381) is a document with its own number, its own tax point and **its own
+lines**, and the authority computes its VAT from those rather than from the
+invoice it references.
+
+That is what made the old `ponytail:` note in `install.sql` right — *"partial
+credit notes would carry their own bands rather than borrowing the invoice's,
+which is a table of their own"*. Three tables now: `credit_note`,
+`credit_note_line`, `credit_note_tax`, mirroring the invoice's. The `vat_entry`
+view unions them; a whole-invoice cancellation still borrows the invoice's bands
+because it credits every one of them, and that arm is unchanged.
+
+**It posts its own entry rather than reversing the invoice's.** `cancel_in`
+calls `ledger::reverse_in`, which is exactly right for a whole invoice and
+impossible for part of one — there is no reversing half a journal entry. So
+`entry_for_credit` is `entry_for_issue` with the sides swapped, written out
+rather than expressed as a negation, the way `entry_for_refund` already is.
+
+**The rates come off the invoice, never today's configuration.** A caller sends
+a treatment and an amount; the rate is looked up in the invoice's own bands.
+That single lookup is both halves of the guard: an invoice issued at 5% is
+credited at 5% for ever (L5), and a category the invoice never carried has no
+rate to be given — which is `DiscountWithoutABand`'s argument one step along,
+and the difference between crediting a supply and reclaiming tax nobody charged.
+
+**Capped per band, cumulatively, not by the total.** An invoice of 500
+standard-rated and 500 zero-rated credited 1,000 standard-rated has a gross that
+agrees perfectly and reclaims 75 riyals of VAT that was never charged.
+`credits_are_capped_per_band_and_not_by_the_total` is the test.
+
+**The two shapes are mutually exclusive**, in both directions, and both refuse
+with `sales.already_credited`. They share the credit-note series, because both
+produce a credit note and the authority does not care which shape made one.
+
+**One bug the tests found.** The first version set `invoice.credit_note` on a
+partial credit and answered a retry from it. That is wrong the moment an invoice
+has two — "the credit note" stops being a question with one answer. The
+aggregate now keeps `(reference, number)` pairs and a retry is answered with the
+number *its own reference* was given; `invoice.credit_note` stays what it always
+meant, which is the cancellation's.
+
+**What this unblocks.** A cancellation policy that keeps a fraction, which is
+the shape every one of these businesses actually wants and which could only
+express 0% or 100% before. That is the next piece, and §33 has yet to be
+written.
+
 ### 31 · A refund issues the credit note, and the work found a second bug
 
 **The gap was one missing call.** Everything a credit note needs already
@@ -1245,13 +1515,23 @@ first `Idempotency-Key` and `ETag` have a real mutation to attach to.
 - [x] Reversals — an entry posted in error is undone by posting its opposite,
       both in one transaction, refused if already undone
 - [x] Credit notes — an invoice issued in error is cancelled by crediting it,
-      which reverses its journal entry. Whole-invoice only, and refused while
-      payments stand against it
+      which reverses its journal entry. Whole-invoice, and refused while
+      payments stand against it — **and mutually exclusive with the partial
+      credit notes below**: reversing the whole issue entry on an invoice
+      already partly credited would take the credited part back twice
 - [x] Fiscal periods — `ledger::period`, one watermark, checked in
       `post_entry_in` where every posting in the system arrives. An entry dated
       into a closed period is refused whether it is a hand-written journal entry,
       a reversal, an invoice's tax point, a payment, or a credit note
-- [ ] Partial credit notes, drafts, multi-currency entries with FX
+- [~] **Partial credit notes — built.** A credit note against part of an
+      invoice, as a document with lines, bands and a tax point of its own:
+      `POST /v1/sales/invoices/{invoice}/credit-notes`. It posts its own entry
+      rather than reversing the invoice's, because there is no such thing as
+      reversing part of a journal entry — and the rates come off the invoice's
+      own bands, so a 2019 invoice is credited at 5% for ever. Capped **per
+      band** and cumulatively, which is the check that protects the tax. See §32.
+
+      Drafts and multi-currency entries with FX are still open.
 - [ ] An entry-level read model *(a `proj_ledger.entry` table would show which
       entry reversed which, and let entries be listed at all — but adding a
       table to a module's install script needs the fleet-wide module refresh
@@ -3143,14 +3423,23 @@ same-origin server-rendered site would never have needed.
       degradation L6 refuses, and failing closed makes a cache outage an outage.
       Per-node is the honest third answer, and the sharper key — a thing the
       caller *holds* rather than asserts — is Phase 12c's API key.
-- [~] **Deposits at booking.** `prepaid` already models one: an entitlement with
-      no uses, held against the booking it secures. What is missing is the half
-      that takes the money, and card payments are Phase 12a.
+- [~] **Deposits at booking.** The money-shaped half is built: a gateway
+      payment can collect against a **booking** rather than an invoice, and a
+      settled one is a liability (`2410`) rather than revenue or a cleared
+      receivable — see §33. A saved card can be charged for one, and giving one
+      back clears the liability and issues no credit note.
 
-      So the setting exists and is **recorded rather than charged**, which the
-      response says: a site can tell a customer what will be asked for, and
-      nothing in this build claims to have collected it. Building it any other
-      way would be a booking that reports itself secured and is not.
+      **What is still missing is the booking-shaped half**, and it is larger
+      than this checkbox implied when it was written. A stranger paying at the
+      moment of booking needs a public surface they can pay on, a phone number
+      they have verified, and a hold that expires when they do not — and the
+      documents are a **386 prepayment invoice then a 388 with the advance
+      deducted**, not one invoice moved later, because receiving consideration
+      is itself a tax point.
+
+      **Keeping one is built and is the business's call** — a sale by default,
+      `payments.retention` to say otherwise. The tax is not what it decides:
+      that was settled when the deposit was billed. See §34 and §35.
 - [x] **`docs/openapi.json` as a contract.** `docs/openapi.baseline.json` is what
       clients may rely on, and `tests/compatibility.rs` fails on a change that
       would break one: an operation that disappears or is renamed, a required

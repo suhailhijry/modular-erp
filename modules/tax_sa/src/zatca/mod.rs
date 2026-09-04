@@ -143,6 +143,14 @@ pub enum TypeCode {
     CreditNote,
     /// Increases one. Not issued here yet — `sales` has no such command.
     DebitNote,
+    /// **An invoice for money taken before the supply.** A deposit.
+    ///
+    /// Its own code because receiving consideration is itself a tax point: the
+    /// VAT is due when the money arrives, not when the service happens, and the
+    /// authority wants the document within fifteen days of that month's end.
+    /// The final invoice that follows carries a deduction line pointing back at
+    /// this one, so the same money is not taxed twice.
+    Prepayment,
 }
 
 impl TypeCode {
@@ -152,6 +160,7 @@ impl TypeCode {
             Self::Invoice => 388,
             Self::CreditNote => 381,
             Self::DebitNote => 383,
+            Self::Prepayment => 386,
         }
     }
 
@@ -189,11 +198,21 @@ pub struct Buyer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line {
     pub description: String,
+    /// **BT-131**, the line net amount: after this line's own allowances, and
+    /// what the tax is worked out on.
     pub net: Money,
     pub category: VatCategory,
     /// Basis points, as stamped on the invoice. Never today's rate.
     pub rate_bp: i32,
     pub tax: Money,
+    /// **What came off this line** — UBL's `cac:AllowanceCharge` inside
+    /// `cac:InvoiceLine`.
+    ///
+    /// No tax category on these, unlike [`Allowance`]: the line already carries
+    /// one, and the standard's line-level allowance has no place to put a
+    /// second. See `crate::zatca::ubl`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowances: Vec<LineAllowance>,
 }
 
 impl Line {
@@ -201,6 +220,34 @@ impl Line {
     pub fn gross(&self) -> Option<Money> {
         self.net.checked_add(self.tax).ok()
     }
+
+    /// **BT-146**, the item net price: what the line came to before its own
+    /// allowances, and the base the allowances were taken from.
+    ///
+    /// The standard defines BT-131 as this less the line's allowances, so a
+    /// document that printed the same figure for both would fail the rule the
+    /// moment a line carried one.
+    pub fn before_allowances(&self) -> Option<Money> {
+        self.allowances
+            .iter()
+            .try_fold(self.net, |running, a| running.checked_add(a.amount))
+            .ok()
+    }
+}
+
+/// Something taken off one line — UBL's `cac:AllowanceCharge` within
+/// `cac:InvoiceLine`.
+///
+/// **Deliberately smaller than [`Allowance`].** A line-level allowance takes an
+/// indicator, an amount and a reason, and has **no `cac:TaxCategory`** — the
+/// line it sits in already says how it is taxed. The document-level one has no
+/// line to inherit from, so it must name the category and the rate or the
+/// taxable amounts do not add up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineAllowance {
+    pub reason: String,
+    /// Positive: what comes off.
+    pub amount: Money,
 }
 
 /// A band of the document's tax total: everything at one treatment and rate.

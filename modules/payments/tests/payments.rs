@@ -130,6 +130,7 @@ impl Fixture {
             ("1160", AccountKind::Asset),
             ("2100", AccountKind::Liability),
             ("4000", AccountKind::Revenue),
+            ("4910", AccountKind::Revenue),
             ("5400", AccountKind::Expense),
             ("5420", AccountKind::Expense),
         ] {
@@ -196,11 +197,13 @@ impl Fixture {
             &self.db,
             &code(id),
             &Draft {
+                prepayment: false,
                 customer: sales::Customer::new("سارة"),
                 issued_on: when(),
                 due_on: None,
                 currency: sar(),
                 lines: vec![DraftLine {
+                    allowances: Vec::new(),
                     description: "Massage".to_owned(),
                     net: riyals(100),
                     category: VatCategory::Standard,
@@ -214,6 +217,41 @@ impl Fixture {
         .expect("issues");
     }
 
+    /// A payment collecting a **deposit** — money taken before anything was
+    /// billed, against a booking rather than an invoice.
+    async fn start_deposit(
+        &self,
+        id: &str,
+        provider: &str,
+        against: &str,
+        net: Money,
+        amount: Money,
+    ) {
+        let mut tx = self.db.begin().await.expect("transaction");
+        payments::start_in(
+            &mut tx,
+            &code(id),
+            &Attempt {
+                provider: provider.to_owned(),
+                gateway_id: id.to_owned(),
+                collects: payments::Collects::Advance(payments::Advance {
+                    against: code(against),
+                    net,
+                    buyer: payments::Buyer {
+                        name: "سارة".to_owned(),
+                        vat_number: None,
+                    },
+                }),
+                amount,
+            },
+            when(),
+            &Metadata::default(),
+        )
+        .await
+        .expect("starts");
+        tx.commit().await.expect("commits");
+    }
+
     async fn start(&self, id: &str, provider: &str, invoice: &str, amount: Money) {
         let mut tx = self.db.begin().await.expect("transaction");
         payments::start_in(
@@ -222,7 +260,7 @@ impl Fixture {
             &Attempt {
                 provider: provider.to_owned(),
                 gateway_id: id.to_owned(),
-                invoice: code(invoice),
+                collects: payments::Collects::Invoice(code(invoice)),
                 amount,
             },
             when(),
@@ -333,7 +371,7 @@ impl Fixture {
             &payments::Collection {
                 card: code(card),
                 provider: "moyasar".to_owned(),
-                invoice: code(invoice),
+                collects: payments::Collects::Invoice(code(invoice)),
                 amount,
                 callback_url: "https://bassat.sa/paid".to_owned(),
             },
@@ -1830,4 +1868,393 @@ async fn refunding_one_of_two_payments_credits_nothing_until_both_are_back() {
     fixture.project().await;
     assert!(fixture.credit_note_on("INV-1").await.is_some());
     assert_eq!(fixture.balance("1100").await, money(0));
+}
+
+// ---------------------------------------------------------------------------
+// Money taken before there is anything to bill
+// ---------------------------------------------------------------------------
+
+/// **A deposit becomes a document the moment the money is real.** Receiving
+/// consideration is itself a tax point, so the prepayment invoice is raised at
+/// settlement and the VAT is declared in the period the customer paid — not in
+/// whatever quarter they eventually turn up, or fail to.
+#[tokio::test]
+async fn a_settled_deposit_is_billed_and_its_tax_declared() {
+    let fixture = Fixture::new("deposit").await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    fixture
+        .settle(
+            "pay_1",
+            &charged("pay_1", Status::Paid, riyals(115), Some(money(316))),
+        )
+        .await
+        .expect("settles");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1150").await, money(11_184), "less the fee");
+    assert_eq!(fixture.balance("2100").await, riyals(-15), "tax declared");
+    assert_eq!(fixture.balance("4000").await, riyals(-100), "the supply");
+    assert_eq!(
+        fixture.balance("1100").await,
+        money(0),
+        "the deposit paid it"
+    );
+    assert_eq!(fixture.balance("5400").await, money(316), "the fee");
+
+    // **And it is on the return, in the period the money arrived.**
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let filed = sales::vat_return(
+        &mut conn,
+        sar(),
+        chrono::DateTime::from_timestamp(0, 0).expect("valid"),
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("reads");
+    assert_eq!(filed.tax, riyals(15));
+
+    // The document is a prepayment invoice, keyed off the payment's own id.
+    let invoice = sales::invoice(&mut conn, "dep-pay_1")
+        .await
+        .expect("reads")
+        .expect("a prepayment invoice was raised");
+    assert_eq!(invoice.summary.gross, riyals(115));
+    drop(conn);
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let row = payments::payment(&mut conn, "pay_1")
+        .await
+        .expect("reads")
+        .expect("there");
+    assert_eq!(row.stage, "settled");
+    assert_eq!(row.invoice.as_deref(), Some("dep-pay_1"));
+    assert_eq!(row.advance_for.as_deref(), Some("BOOK-1"));
+}
+
+/// **A deposit given back is a credit note and the money** — the same two facts
+/// as any other refund, which is the whole point of billing it in the first
+/// place. The supply is undone and the tax comes back off the return.
+#[tokio::test]
+async fn a_returned_deposit_is_credited_like_any_other_sale() {
+    let fixture = Fixture::new("deposit-back").await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+
+    fixture
+        .refund("pay_1", "refund-1", riyals(115))
+        .await
+        .expect("gives it back");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1150").await, money(0));
+    assert_eq!(fixture.balance("4000").await, money(0), "no supply stands");
+    assert_eq!(fixture.balance("2100").await, money(0), "no tax owed");
+    assert_eq!(fixture.balance("1100").await, money(0), "nothing owed");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let invoice = sales::invoice(&mut conn, "dep-pay_1")
+        .await
+        .expect("reads")
+        .expect("there");
+    assert!(
+        invoice.summary.credit_note.is_some(),
+        "the deposit went back and nothing credited it"
+    );
+}
+
+/// **Part of a deposit returned.** The money moves and the invoice is left
+/// holding the rest — and no credit note is issued, because crediting part of
+/// an invoice needs to know which band the part came out of, and only the
+/// caller of a partial credit note knows that. See the note in the plan: for a
+/// single-band invoice, which every deposit is, the answer is obvious and this
+/// is the next thing to close.
+#[tokio::test]
+async fn part_of_a_deposit_can_be_returned() {
+    let fixture = Fixture::new("deposit-part").await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+
+    fixture
+        .refund("pay_1", "refund-1", money(5_750))
+        .await
+        .expect("gives half back");
+    fixture.project().await;
+
+    assert_eq!(
+        fixture.balance("1150").await,
+        money(5_750),
+        "half went back"
+    );
+    // Still settled, not refunded: half the money is here.
+    let mut conn = fixture.db.read().await.expect("connection");
+    let row = payments::payment(&mut conn, "pay_1")
+        .await
+        .expect("reads")
+        .expect("there");
+    assert_eq!(row.stage, "settled");
+    assert_eq!(row.refunded, money(5_750));
+}
+
+/// **Exactly one target, until settlement gives a deposit both.** A payment
+/// that names neither has nothing to settle against; one that names two at the
+/// *start* is a caller who has not decided. After a deposit settles it names
+/// its own prepayment invoice as well as the booking, which is the point of
+/// raising one.
+#[tokio::test]
+async fn a_payment_collects_against_exactly_one_thing() {
+    let deposit = payments::Advance {
+        against: code("BOOK-1"),
+        net: riyals(100),
+        buyer: payments::Buyer {
+            name: "سارة".to_owned(),
+            vat_number: None,
+        },
+    };
+    assert!(payments::Collects::of(Some(&code("INV-1")), None).is_some());
+    assert!(payments::Collects::of(None, Some(&deposit)).is_some());
+    assert!(payments::Collects::of(None, None).is_none());
+    assert!(payments::Collects::of(Some(&code("INV-1")), Some(&deposit)).is_none());
+
+    // A deposit's invoice is derived from the payment, so the same answer
+    // comes back at settlement and at a refund months later.
+    assert_eq!(
+        payments::deposit_invoice(&code("pay_1")).as_str(),
+        "dep-pay_1"
+    );
+
+    // And the database refuses a row that names nothing.
+    let fixture = Fixture::new("one-target").await;
+    let pool = fixture.tenant_pool().await;
+    let refused = sqlx::query(
+        "INSERT INTO proj_payments.payment
+             (id, provider, gateway_id, amount_minor, currency, stage,
+              started_at, position)
+         VALUES ('x', 'moyasar', 'x', 100, 'SAR', 'pending', now(), 1)",
+    )
+    .execute(&pool)
+    .await;
+    assert!(refused.is_err(), "a row named nothing and was accepted");
+    pool.close().await;
+}
+
+/// A deposit and an invoice payment against the same thing are both listed by
+/// it: a caller asking what has been collected does not care which shape it is.
+#[tokio::test]
+async fn a_booking_lists_the_deposits_taken_against_it() {
+    let fixture = Fixture::new("deposit-list").await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", money(4_348), riyals(50))
+        .await;
+    fixture
+        .start_deposit("pay_2", "moyasar", "BOOK-1", money(2_174), riyals(25))
+        .await;
+    fixture.project().await;
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let rows = payments::against(&mut conn, "BOOK-1", 10)
+        .await
+        .expect("reads");
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.invoice.is_none()));
+}
+
+// ---------------------------------------------------------------------------
+// Keeping a deposit the customer did not come back for
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    async fn set_supply(&self, supply: bool) {
+        let mut conn = self.db.acquire().await.expect("connection");
+        erp_eventlog::configuration::set(
+            &mut conn,
+            payments::Retention::KEY,
+            &payments::Retention { supply },
+            None,
+        )
+        .await
+        .expect("stores the policy");
+    }
+
+    async fn retain(&self, id: &str) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::retain_in(&mut tx, &code(id), when(), &Metadata::default())
+            .await
+            .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+}
+
+/// **The default: keeping it is a sale, and there is nothing to do.** The
+/// prepayment invoice already recognised the supply and already declared the
+/// tax, in the period the customer paid. Retention records that nobody is
+/// getting it back and posts nothing at all.
+#[tokio::test]
+async fn a_kept_deposit_is_a_sale_by_default_and_posts_nothing() {
+    let fixture = Fixture::new("kept-supply").await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+    fixture.project().await;
+    let before = fixture.balance("4000").await;
+
+    fixture.retain("pay_1").await.expect("keeps it");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("4000").await, before, "it was billed twice");
+    assert_eq!(fixture.balance("2100").await, riyals(-15), "tax unchanged");
+    assert_eq!(fixture.balance("4910").await, money(0), "not forfeited");
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let row = payments::payment(&mut conn, "pay_1")
+        .await
+        .expect("reads")
+        .expect("there");
+    assert_eq!(row.stage, "retained");
+}
+
+/// **The business's call, and what it moves is the revenue.** A tenant whose
+/// adviser reads a forfeited deposit as compensation rather than a service
+/// books it in a line of its own — so a year later they can say how much of
+/// their income was selling something.
+///
+/// **The tax stays declared.** Reclaiming it would be reversing a prepayment
+/// the buyer never got back, which is the one thing the authority's guidance
+/// says not to do.
+#[tokio::test]
+async fn a_business_can_decide_a_kept_deposit_is_not_a_sale() {
+    let fixture = Fixture::new("kept-forfeit").await;
+    fixture.set_supply(false).await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+
+    fixture.retain("pay_1").await.expect("keeps it");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("4000").await, money(0), "out of revenue");
+    assert_eq!(fixture.balance("4910").await, riyals(-100), "forfeited");
+    assert_eq!(fixture.balance("2100").await, riyals(-15), "tax stays");
+
+    // And it is still on the return, because the supply was still declared.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let filed = sales::vat_return(
+        &mut conn,
+        sar(),
+        chrono::DateTime::from_timestamp(0, 0).expect("valid"),
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("reads");
+    assert_eq!(filed.tax, riyals(15));
+}
+
+/// **Refund half, keep the rest** — the cancellation-policy shape, as two facts
+/// rather than one number meaning both.
+#[tokio::test]
+async fn half_returned_and_half_kept_is_a_refund_and_a_retention() {
+    let fixture = Fixture::new("kept-half").await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", riyals(200), riyals(230))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(230), None))
+        .await
+        .expect("settles");
+
+    fixture
+        .refund("pay_1", "refund-1", riyals(115))
+        .await
+        .expect("gives half back");
+    fixture.retain("pay_1").await.expect("keeps the rest");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1150").await, riyals(115), "half went back");
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let row = payments::payment(&mut conn, "pay_1")
+        .await
+        .expect("reads")
+        .expect("there");
+    assert_eq!(row.stage, "retained");
+    assert_eq!(row.refunded, riyals(115));
+}
+
+/// A deposit that has been kept **cannot then be refunded**: the money has been
+/// recognised, possibly on a filed return, and handing it back afterwards would
+/// be revenue that never existed.
+#[tokio::test]
+async fn a_kept_deposit_cannot_be_given_back() {
+    let fixture = Fixture::new("kept-final").await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+    fixture.retain("pay_1").await.expect("keeps it");
+
+    let refused = fixture.refund("pay_1", "refund-1", riyals(115)).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ExecuteError::Rejected(PaymentsError::NotCollectable { .. }))
+        ),
+        "{refused:?}"
+    );
+
+    // And keeping it again is a no-op.
+    fixture.retain("pay_1").await.expect("is a retry");
+    fixture.project().await;
+    assert_eq!(fixture.balance("4000").await, riyals(-100), "billed twice");
+}
+
+/// **There is nothing to keep on an invoice payment.** The supply it paid for
+/// already happened and was already invoiced; billing it again would be a
+/// second sale of the same thing.
+#[tokio::test]
+async fn an_invoice_payment_has_no_deposit_to_keep() {
+    let fixture = Fixture::new("kept-invoice").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+
+    let refused = fixture.retain("pay_1").await;
+    assert!(
+        matches!(
+            refused,
+            Err(ExecuteError::Rejected(PaymentsError::NotADeposit(_)))
+        ),
+        "{refused:?}"
+    );
 }

@@ -36,7 +36,7 @@
 //! | change | why it breaks |
 //! |---|---|
 //! | an operation disappears or is renamed | the call 404s |
-//! | a required request field appears | every existing call becomes a 400 |
+//! | a required request field appears, at any depth | every existing call becomes a 400 |
 //! | a response field disappears | the client reads `undefined` |
 //! | a path gains a parameter | the URL the client builds is wrong |
 //!
@@ -187,18 +187,83 @@ fn operations(doc: &Value) -> BTreeMap<String, Promise> {
 }
 
 /// The properties a request body marks required.
+/// The properties a request body requires, as dotted paths.
+///
+/// **Nested, for the reason [`success_fields`] is.** The first version of this
+/// read only the top level, and a required field appearing *inside* a nested
+/// object — a new field on each element of `lines`, say — sailed straight
+/// through while breaking every caller in exactly the way this exists to catch.
+/// That is the same defect the response side had and was fixed for; the two had
+/// simply drifted apart.
+///
+/// Found by a change that added `against` to a credit note's lines and was
+/// waved through.
 fn required_of(doc: &Value, body: &Value) -> BTreeSet<String> {
-    let schema = resolve(doc, &body["content"]["application/json"]["schema"]);
-    schema["required"]
+    let mut required = BTreeSet::new();
+    walk_required(
+        doc,
+        &body["content"]["application/json"]["schema"],
+        "",
+        0,
+        &mut BTreeSet::new(),
+        &mut required,
+    );
+    required
+}
+
+/// Collects every required property, at every level, as a dotted path.
+fn walk_required(
+    doc: &Value,
+    schema: &Value,
+    prefix: &str,
+    depth: usize,
+    seen: &mut BTreeSet<String>,
+    into: &mut BTreeSet<String>,
+) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    if let Some(reference) = schema["$ref"].as_str()
+        && !seen.insert(reference.to_owned())
+    {
+        return;
+    }
+    let schema = resolve(doc, schema);
+
+    // An array's requirements are its items': a caller filling in `lines[0]`
+    // has to satisfy whatever one element requires.
+    if !schema["items"].is_null() {
+        walk_required(doc, &schema["items"], prefix, depth, seen, into);
+    }
+
+    let named = |name: &str| {
+        if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}.{name}")
+        }
+    };
+    let required: BTreeSet<&str> = schema["required"]
         .as_array()
-        .map(|names| {
-            names
-                .iter()
-                .filter_map(|n| n.as_str())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    for name in &required {
+        into.insert(named(name));
+    }
+
+    let Some(properties) = schema["properties"].as_object() else {
+        return;
+    };
+    // **Only into what a caller has to send.** A field required *inside* an
+    // optional object breaks nobody: a caller who omits the object omits the
+    // field with it. Descending into one anyway reports every new nested shape
+    // as a break, which trains people to run `just baseline` without reading
+    // it — and a gate nobody reads is not a gate.
+    for (name, property) in properties {
+        if required.contains(name.as_str()) {
+            walk_required(doc, property, &named(name), depth + 1, seen, into);
+        }
+    }
 }
 
 /// The properties a 2xx response carries, as dotted paths.

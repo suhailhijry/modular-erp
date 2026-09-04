@@ -34,6 +34,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(record_payment))
         .routes(routes!(refund_payment))
         .routes(routes!(credit_note))
+        .routes(routes!(list_credit_notes, credit_invoice_part))
         // Typed on purpose. The store underneath is key-value; this is not, so
         // a value that reaches it has already been through the type that gives
         // it meaning. See `erp_eventlog::config`.
@@ -104,6 +105,14 @@ struct NewInvoice {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+struct NewLineAllowance {
+    /// Why, printed on the invoice — ZATCA shows it to the customer.
+    reason: String,
+    /// Minor units, **positive**: what comes off this line.
+    amount: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 struct NewDiscount {
     /// Why, printed on the invoice — ZATCA shows it to the customer.
     reason: String,
@@ -162,8 +171,17 @@ struct NewAddress {
 #[derive(Debug, Deserialize, ToSchema)]
 struct NewInvoiceLine {
     description: String,
-    /// Minor units, in the invoice's currency. Excluding tax.
+    /// Minor units, in the invoice's currency. Excluding tax, and **before this
+    /// line's own allowances** — what is charged is this less them.
     net: i64,
+    /// What comes off **this line**, each printed as its own figure.
+    ///
+    /// No treatment on them: the line already says how it is taxed, so an
+    /// allowance on it reduces the taxable amount at that line's rate. A
+    /// discount on the whole *document* is the other field, and that one has to
+    /// name which treatment it comes off.
+    #[serde(default)]
+    allowances: Vec<NewLineAllowance>,
     /// `standard`, `zero` or `exempt`. The *rate* is not a client's to choose —
     /// it is statutory, and resolved here. Zero-rated and exempt are both 0%
     /// and mean different things on a return, so both are kept.
@@ -438,6 +456,14 @@ async fn issue_invoice(
             description: line.description,
             net: erp_types::Money::from_minor(line.net, currency),
             category,
+            allowances: line
+                .allowances
+                .into_iter()
+                .map(|a| crate::Allowance {
+                    reason: a.reason,
+                    amount: erp_types::Money::from_minor(a.amount, currency),
+                })
+                .collect(),
         });
     }
 
@@ -480,6 +506,10 @@ async fn issue_invoice(
     }
 
     let draft = Draft {
+        // **Not a client's to declare.** A prepayment invoice is what
+        // `payments` raises when a deposit settles; an ordinary caller issuing
+        // one would be choosing a tax point.
+        prepayment: false,
         customer,
         issued_on: body.issued_on,
         due_on: body.due_on,
@@ -639,8 +669,12 @@ async fn refund_payment(
 /// A `POST`, not a `DELETE`: the invoice stays, its journal entry is reversed,
 /// and the books show both.
 ///
-/// Cancels the whole invoice. ponytail: partial credit notes are not built —
-/// they need the credit note to be a document with its own tax point.
+/// **The whole invoice.** For part of one, see
+/// `POST /v1/sales/invoices/{invoice}/credit-notes` — a different shape, because
+/// a partial credit note is a document with lines and a tax point of its own
+/// rather than a fact about the invoice. The two are mutually exclusive: this
+/// reverses the invoice's journal entry, which on an invoice already partly
+/// credited would take the credited part back twice.
 #[utoipa::path(
     post,
     path = "/v1/sales/invoices/{invoice}/credit-note",
@@ -690,6 +724,205 @@ async fn credit_note(
         id: body.id,
         number: committed.number,
         position: committed.committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+/// One line of a credit note: which invoice line, and how much of it.
+#[derive(Debug, Deserialize, ToSchema)]
+struct NewCreditLine {
+    /// **Which line of the invoice this credits**, counting from zero.
+    ///
+    /// The description and the tax treatment come from it. That is the point:
+    /// a credit note can only describe something the invoice charged for, and
+    /// is credited at the rate that invoice carried — one issued at 5% is
+    /// credited at 5% for ever.
+    against: u16,
+    /// Excluding tax, and positive — stated the way the invoice stated it
+    /// rather than as a negative. May be less than the line: part of a line
+    /// can come back.
+    amount: Amount,
+}
+
+/// A credit note against part of an invoice.
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "reference": "returned-the-shampoo",
+    "reason": "Returned unopened",
+    "on": "2026-03-04T09:00:00Z",
+    "lines": [{"against": 1, "amount": {"minor": 5750, "currency": "SAR"}}]
+}))]
+struct NewPartialCreditNote {
+    /// **Your own key for this credit note, not its number.** Sending the same
+    /// one twice is a no-op. The number is allocated here, from the same
+    /// gapless series a cancellation draws on.
+    reference: String,
+    lines: Vec<NewCreditLine>,
+    #[serde(default)]
+    reason: String,
+    /// The credit note's **own** tax point — the period it falls in. Usually
+    /// today, and not the invoice's date.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    on: Timestamp,
+}
+
+/// A credit note as a list shows it.
+#[derive(Debug, Serialize, ToSchema)]
+struct CreditNoteView {
+    /// The statutory number.
+    number: String,
+    invoice: String,
+    reference: String,
+    net: i64,
+    tax: i64,
+    gross: i64,
+    currency: String,
+    reason: String,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    issued_on: Timestamp,
+}
+
+/// Credit notes against part of one invoice, newest first.
+///
+/// **A whole-invoice cancellation is not in here.** That is `credit_note` and
+/// `cancelled_on` on the invoice itself, because it is a fact about the invoice
+/// rather than a document with lines of its own.
+#[utoipa::path(
+    get,
+    path = "/v1/sales/invoices/{invoice}/credit-notes",
+    tag = "sales",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("invoice" = String, Path, description = "The invoice."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
+    ),
+    responses(
+        (status = OK, body = Vec<CreditNoteView>),
+        (status = BAD_REQUEST, description = "An unusable id", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure, or the projection did not catch up in time. Retryable.", body = Problem),
+    ),
+)]
+async fn list_credit_notes(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<CreditNoteView>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    let raw = params.get("invoice").map_or("", String::as_str);
+    let invoice = parse_id(raw, locale)?;
+
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let rows = crate::credit_notes(&mut conn, invoice.as_str())
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| CreditNoteView {
+                number: row.number,
+                invoice: row.invoice,
+                reference: row.reference,
+                net: row.net.minor(),
+                tax: row.tax.minor(),
+                gross: row.gross.minor(),
+                currency: row.net.currency().to_string(),
+                reason: row.reason,
+                issued_on: row.issued_on,
+            })
+            .collect(),
+    ))
+}
+
+/// Credit part of an invoice.
+///
+/// # Not the same act as cancelling
+///
+/// Cancelling reverses the invoice's journal entry and says the whole supply is
+/// undone. This posts its **own** entry for what it takes back, because there is
+/// no such thing as reversing part of a journal entry — and it produces a
+/// document with its own lines, which is what ZATCA computes a credit note's VAT
+/// from.
+///
+/// An invoice can have several of these. It cannot have these **and** a
+/// cancellation.
+///
+/// # It does not hand any money back
+///
+/// A credit note says the supply is undone; the cash is
+/// `POST /v1/sales/invoices/{invoice}/refunds`, and a business may need both. An
+/// invoice paid in full and then partly credited leaves the customer owed the
+/// difference, which is `outstanding` going negative.
+#[utoipa::path(
+    post,
+    path = "/v1/sales/invoices/{invoice}/credit-notes",
+    tag = "sales",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("invoice" = String, Path, description = "The invoice being credited."),
+    ),
+    request_body = NewPartialCreditNote,
+    responses(
+        (status = OK, description = "Credited, or already credited under this key.", body = Issued),
+        (status = BAD_REQUEST, description = "An unusable id, or an amount that is not one", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "The invoice was already cancelled outright", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such invoice, no such line, or more than is left to credit", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn credit_invoice_part(
+    tenant: Allowed<PostEntries>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+    Json(body): Json<NewPartialCreditNote>,
+) -> Result<Json<Issued>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    let raw = params.get("invoice").map_or("", String::as_str);
+    let invoice = parse_id(raw, locale)?;
+
+    let mut lines = Vec::with_capacity(body.lines.len());
+    for line in body.lines {
+        lines.push(crate::CreditLine {
+            against: line.against,
+            net: line.amount.parse(locale)?,
+        });
+    }
+
+    let credited = crate::credit_invoice_part(
+        &tenant.db,
+        &invoice,
+        &crate::CreditNote {
+            reference: body.reference.clone(),
+            lines,
+            reason: body.reason,
+            on: body.on,
+        },
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| sales_problem(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+
+    Ok(Json(Issued {
+        id: body.reference,
+        number: credited.number,
+        position: credited.committed.at.map(erp_types::LogPosition::get),
     }))
 }
 

@@ -51,6 +51,75 @@ pub struct PostingAccounts {
     /// [`Self::fees`], because a chargeback and a processing fee are different
     /// facts about a business.
     pub differences: AggregateId,
+    /// **A deposit the customer did not come back for**, when the business has
+    /// decided that keeping it is not a supply. See [`Retention`].
+    ///
+    /// Its own account rather than the ordinary revenue one, because a VAT
+    /// return has to be able to tell income that carried tax from income that
+    /// did not — and one revenue line makes that unanswerable a year later.
+    pub forfeited: AggregateId,
+}
+
+/// **What keeping a deposit means, when the customer does not come back.**
+///
+/// # The tax is not what this decides
+///
+/// It cannot be. A deposit is billed by a prepayment invoice when the money
+/// arrives, because receiving consideration is itself a tax point — so the VAT
+/// was declared in the period the customer paid, whatever happens afterwards.
+/// And it is not reversed when the money is kept: the authority's guidance is
+/// to reverse a prepayment **only if it actually goes back to the buyer**, which
+/// is precisely not this case.
+///
+/// # What it does decide
+///
+/// Whether the money is a **sale**. A business whose adviser reads a forfeited
+/// deposit as compensation for a loss rather than consideration for a service
+/// wants it out of service revenue and in a line of its own, so that a year
+/// later they can say how much of their income was selling something and how
+/// much was people not turning up.
+///
+/// # Why the default is a sale
+///
+/// It is the conservative one, and it is what the document already says: a
+/// prepayment invoice was issued and cleared, declaring a supply of that value.
+/// Booking the money as anything else while that document stands is the
+/// position that needs an argument, so it is the one a business has to ask for.
+///
+/// # What this cannot express
+///
+/// Reclaiming the VAT. A business certain that keeping a deposit is outside the
+/// scope of tax needs the prepayment invoice credited, and `sales` refuses to
+/// credit an invoice while the business is still holding the money — which is
+/// the right rule, and the same one the guidance above states. Undoing a supply
+/// and keeping the cash is a position somebody has to take deliberately, with
+/// their adviser, and not one this system will produce on a toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retention {
+    /// Whether keeping a deposit is a sale. See above for what it does not do.
+    pub supply: bool,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self { supply: true }
+    }
+}
+
+impl Retention {
+    /// Where a tenant's choice is stored.
+    pub const KEY: &'static str = "payments.retention";
+
+    /// What this tenant has decided, or the conservative default.
+    ///
+    /// A stored value that will not parse is an error rather than the default,
+    /// for the reason [`PostingAccounts::resolve`] gives — except that here the
+    /// stakes are a tax position, so it matters more.
+    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, erp_eventlog::ConfigError> {
+        Ok(erp_eventlog::configuration::get::<Self>(conn, Self::KEY)
+            .await?
+            .map_or_else(Self::default, |configured| configured.value))
+    }
 }
 
 impl PostingAccounts {
@@ -77,6 +146,7 @@ impl PostingAccounts {
             instalments: code("1160"),
             fees: code("5400"),
             differences: code("5420"),
+            forfeited: code("4910"),
         }
     }
 
@@ -186,6 +256,28 @@ pub fn entry_for_payout(
 )]
 fn code(literal: &'static str) -> AggregateId {
     AggregateId::new(literal).expect("account codes in this crate are valid literals")
+}
+
+/// A deposit the business kept, when keeping it is **not** a sale.
+///
+/// **Only the revenue moves.** The tax stays declared where the prepayment
+/// invoice put it: reclaiming it would be reversing a prepayment the buyer
+/// never got back, which is the one thing the authority's guidance says not to
+/// do. What this does is take the money out of service revenue and put it in a
+/// line of its own, so a year later the business can say how much of its income
+/// was selling something and how much was people not turning up.
+pub fn entry_for_forfeit(
+    net: Money,
+    revenue: &AggregateId,
+    accounts: &PostingAccounts,
+) -> Result<BalancedLines, Unbalanced> {
+    BalancedLines::new(vec![
+        Line::new(revenue.clone(), net),
+        Line::new(
+            accounts.forfeited.clone(),
+            net.checked_neg().map_err(Unbalanced::Money)?,
+        ),
+    ])
 }
 
 #[cfg(test)]
@@ -329,5 +421,19 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    /// **The default is what the document already says.** A prepayment invoice
+    /// was issued and cleared, declaring a supply of that value; booking the
+    /// money as anything else while that stands is the position that needs an
+    /// argument.
+    #[test]
+    fn keeping_a_deposit_is_a_sale_until_a_business_says_otherwise() {
+        assert!(Retention::default().supply);
     }
 }

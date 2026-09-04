@@ -16,7 +16,12 @@ pub const NO_SUCH_CARD: MessageCode = MessageCode::new("payments.no_such_card");
 pub const CARD_FORGOTTEN: MessageCode = MessageCode::new("payments.card_forgotten");
 pub const NOT_A_CARD: MessageCode = MessageCode::new("payments.not_a_card");
 
+pub const NOT_A_DEPOSIT: MessageCode = MessageCode::new("payments.not_a_deposit");
+pub const NOTHING_TO_RETAIN: MessageCode = MessageCode::new("payments.nothing_to_retain");
+
 pub static CODES: &[MessageCode] = &[
+    NOT_A_DEPOSIT,
+    NOTHING_TO_RETAIN,
     NOT_STARTED,
     ALREADY_STARTED,
     WRONG_AMOUNT,
@@ -181,5 +186,25 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_A_CARD,
         Locale::Arabic,
         Template::Simple("لا يمكن حفظ ذلك كبطاقة: {reason}."),
+    ),
+    (
+        NOT_A_DEPOSIT,
+        Locale::English,
+        Template::Simple("Payment {id} is against an invoice, so there is no deposit to keep."),
+    ),
+    (
+        NOT_A_DEPOSIT,
+        Locale::Arabic,
+        Template::Simple("عملية الدفع {id} مقابل فاتورة، فلا توجد دفعة مقدمة يمكن الاحتفاظ بها."),
+    ),
+    (
+        NOTHING_TO_RETAIN,
+        Locale::English,
+        Template::Simple("There is nothing left of {id} to keep."),
+    ),
+    (
+        NOTHING_TO_RETAIN,
+        Locale::Arabic,
+        Template::Simple("لم يتبق من {id} ما يمكن الاحتفاظ به."),
     ),
 ];

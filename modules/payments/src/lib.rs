@@ -66,12 +66,14 @@ mod sweep;
 pub use card::{Card, CardEvent, SAVES_CARDS, token_key};
 pub use commands::{
     Attempt, Collection, PaymentsError, SavedCard, Transfer, fail_in, forget_card_in,
-    record_payout_in, refund_in, request_in, save_card_in, settle_in, start_in, void_in,
+    record_payout_in, refund_in, request_in, retain_in, save_card_in, settle_in, start_in, void_in,
 };
 pub use gateways::{Credentials, GatewayConfigError, PROVIDERS, configure, credentials};
-pub use payment::{Payment, PaymentEvent, Stage};
+pub use payment::{Advance, Buyer, Collects, Payment, PaymentEvent, Stage, deposit_invoice};
 pub use payout::{Payout, PayoutEvent};
-pub use posting::{PostingAccounts, Settlement, entry_for_fee, entry_for_payout};
+pub use posting::{
+    PostingAccounts, Retention, Settlement, entry_for_fee, entry_for_forfeit, entry_for_payout,
+};
 pub use projections::{
     Awaiting, CardRow, Collected, Kept, PaymentRow, Payments, PayoutRow, against, awaiting_payout,
     by_gateway_id, card, cards, payment, payouts, projections,

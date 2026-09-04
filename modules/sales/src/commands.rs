@@ -27,7 +27,9 @@ use crate::invoice::{
     Customer, Discount as InvoiceDiscount, DraftDiscount, DraftLine, Invoice, InvoiceEvent,
     InvoiceLine,
 };
-use crate::posting::{PostingAccounts, entry_for_issue, entry_for_payment, entry_for_refund};
+use crate::posting::{
+    PostingAccounts, entry_for_credit, entry_for_issue, entry_for_payment, entry_for_refund,
+};
 use crate::vat::TaxError;
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +53,34 @@ pub enum SalesError {
     AlreadyCancelled { invoice: String, by: String },
     #[error("invoice {0} has been paid; refund it before crediting it")]
     HasPayments(String),
+    /// A credit note naming a treatment the invoice never carried.
+    ///
+    /// **Unreachable by construction now that a credit line names an invoice
+    /// line**: the treatment comes off that line, so it is one the invoice had.
+    /// Kept as a stop rather than an unwrap — if it ever fires, the aggregate's
+    /// bands and its lines disagree, and that is a corrupt log rather than
+    /// something to guess past (L6).
+    #[error("invoice {invoice} has nothing treated as {category}")]
+    CreditWithoutABand { invoice: String, category: String },
+    /// More credited than is left — of a **line**, or of a **band**.
+    ///
+    /// Both caps, because they catch different things. The line one stops a
+    /// credit note taking back more of an item than was sold. The band one
+    /// stops the total exceeding what was charged at that rate — and it is
+    /// still needed, because a document discount comes off the band, so an
+    /// invoice's lines sum to more than its bands whenever it carried one.
+    #[error("{amount} is more than is left to credit")]
+    CreditTooLarge { amount: Money },
+    /// A credit note naming a line the invoice does not have.
+    #[error("invoice {invoice} has no line {line}")]
+    NoSuchLine { invoice: String, line: u16 },
+    /// A credit note against an invoice that has already been cancelled
+    /// outright, or a cancellation of one that has been partly credited. Both
+    /// would credit the same supply twice.
+    #[error("invoice {0} has already been credited")]
+    AlreadyCredited(String),
+    #[error("a credit note must credit something")]
+    NothingToCredit,
     #[error("{0} cannot be used as a reference")]
     InvalidReference(String),
     #[error("there is no customer {0} to issue this to")]
@@ -99,6 +129,19 @@ impl erp_i18n::Localize for SalesError {
             }
             Self::HasPayments(invoice) => Message::new(messages::HAS_PAYMENTS)
                 .with("invoice", MessageArg::text(invoice.clone())),
+            Self::CreditWithoutABand { invoice, category } => {
+                Message::new(messages::CREDIT_WITHOUT_A_BAND)
+                    .with("invoice", MessageArg::text(invoice.clone()))
+                    .with("category", MessageArg::text(category.clone()))
+            }
+            Self::NoSuchLine { invoice, line } => Message::new(messages::NO_SUCH_LINE)
+                .with("invoice", MessageArg::text(invoice.clone()))
+                .with("line", MessageArg::Count(i64::from(*line))),
+            Self::CreditTooLarge { amount } => Message::new(messages::CREDIT_TOO_LARGE)
+                .with("amount", MessageArg::text(amount.to_string())),
+            Self::AlreadyCredited(invoice) => Message::new(messages::ALREADY_CREDITED)
+                .with("invoice", MessageArg::text(invoice.clone())),
+            Self::NothingToCredit => Message::new(messages::NOTHING_TO_CREDIT),
             Self::InvalidReference(reference) => Message::new(messages::INVALID_REFERENCE)
                 .with("reference", MessageArg::text(reference.clone())),
             Self::Tax(TaxError::MixedCurrencies) => Message::new(messages::MIXED_CURRENCIES),
@@ -154,6 +197,12 @@ pub struct Draft {
     /// number with no explanation.
     #[allow(clippy::struct_field_names, reason = "it is what it is called")]
     pub discounts: Vec<DraftDiscount>,
+    /// **Bills for money taken before the supply.** A deposit.
+    ///
+    /// The document is a prepayment invoice to the authority rather than an
+    /// ordinary one, because receiving consideration is its own tax point.
+    /// Everything else about issuing it is the same.
+    pub prepayment: bool,
     pub note: String,
 }
 
@@ -257,15 +306,7 @@ pub async fn issue_in(
         .await
         .map_err(|e| ExecuteError::Rejected(SalesError::Config(e)))?;
 
-    let lines: Vec<InvoiceLine> = draft
-        .lines
-        .iter()
-        .map(|line| InvoiceLine {
-            description: line.description.clone(),
-            net: line.net,
-            vat: crate::vat::Vat::at(rates, line.category),
-        })
-        .collect();
+    let lines = priced_lines(&draft.lines, rates)?;
 
     // The rate comes from the same configuration the lines' does, so a discount
     // on a standard-rated invoice reduces the tax at the rate that invoice was
@@ -327,6 +368,7 @@ pub async fn issue_in(
         |_loaded| {
             Ok(Decision::one(InvoiceEvent::Issued {
                 number: Some(number.clone()),
+                prepayment: draft.prepayment,
                 customer: Box::new(draft.customer.clone()),
                 issued_on: draft.issued_on,
                 due_on: draft.due_on,
@@ -950,6 +992,13 @@ async fn cancel_in(
                     by: by.clone(),
                 });
             }
+            // **A cancellation reverses the whole issue entry.** On an invoice
+            // that has already been partly credited, that would take back what
+            // has already been taken back — the credited part twice, in the
+            // books and in the VAT return. Credit the rest instead.
+            if state.is_partly_credited() {
+                return Err(SalesError::AlreadyCredited(invoice.as_str().to_owned()));
+            }
             // **What matters is the money, not whether a payment exists.**
             // This used to refuse any invoice that had ever been paid, which
             // made a till sale — paid the instant it happens — impossible to
@@ -994,6 +1043,47 @@ async fn cancel_in(
     };
 
     Ok(Numbered { committed, number })
+}
+
+/// Resolves each draft line: its allowances come off, and the rate goes on.
+///
+/// **The allowances come off before anything else sees the line.** What the
+/// caller gets back is BT-131 — the line net amount, which the standard defines
+/// as the price less the line's own allowances — so the bands, the tax and the
+/// posting all follow from one number and nothing has to remember to subtract
+/// twice.
+fn priced_lines(
+    draft: &[DraftLine],
+    rates: ledger::Rates,
+) -> Result<Vec<InvoiceLine>, ExecuteError<SalesError>> {
+    draft
+        .iter()
+        .map(|line| {
+            if line.allowances.iter().any(|a| !a.amount.is_positive()) {
+                // A negative allowance is a surcharge, which is a different
+                // element and a different conversation.
+                return Err(ExecuteError::Rejected(SalesError::Tax(
+                    crate::vat::TaxError::NotADiscount,
+                )));
+            }
+            let net = line
+                .allowances
+                .iter()
+                .try_fold(line.net, |running, a| running.checked_sub(a.amount))
+                .map_err(|e| ExecuteError::Rejected(SalesError::Tax(e.into())))?;
+            if !line.allowances.is_empty() && !net.is_positive() {
+                return Err(ExecuteError::Rejected(SalesError::Tax(
+                    crate::vat::TaxError::DiscountTooLarge,
+                )));
+            }
+            Ok(InvoiceLine {
+                description: line.description.clone(),
+                net,
+                vat: crate::vat::Vat::at(rates, line.category),
+                allowances: line.allowances.clone(),
+            })
+        })
+        .collect()
 }
 
 /// The accounts a sale moves, plus metadata stamped with the generation they
@@ -1100,4 +1190,284 @@ mod entry_name_tests {
             credit_entry_of("inv-1", "cn-9")
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Partial credit notes
+// ---------------------------------------------------------------------------
+
+/// One line of a credit note.
+///
+/// **No rate on it.** What a line is treated as is the caller's to say; the rate
+/// that treatment was charged at is the *invoice's*, and reading it from
+/// anywhere else is how a 2019 invoice gets credited at today's 15%.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreditLine {
+    /// **Which line of the invoice this credits**, by position.
+    ///
+    /// The description and the treatment come from it, so a credit note cannot
+    /// describe something the invoice never charged for, and cannot be given a
+    /// rate the invoice never carried.
+    pub against: u16,
+    /// Excluding tax, and positive: what is being taken back off that line,
+    /// stated the way the invoice stated it rather than as a negative. It may
+    /// be less than the line — part of a line can come back.
+    pub net: Money,
+}
+
+/// A credit note against part of an invoice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreditNote {
+    /// The client's key. Sending it again is a retry, not a second credit note.
+    pub reference: String,
+    pub lines: Vec<CreditLine>,
+    /// Why, for the customer to read. **It reaches ZATCA** as the document's
+    /// note, so it is worth a sentence.
+    pub reason: String,
+    /// The credit note's own tax point. Not the invoice's — a credit note is a
+    /// document in its own right and falls in the period it was issued in.
+    pub on: Timestamp,
+}
+
+/// **Credits part of an invoice**, as a document with lines of its own.
+///
+/// # How this differs from cancelling
+///
+/// [`cancel_invoice`] says the supply is undone and *reverses the journal entry
+/// the invoice posted*. This says some of it is undone and posts its own entry
+/// for what it takes back — because there is no such thing as reversing part of
+/// a journal entry, and because the authority computes a credit note's tax from
+/// the credit note's own lines rather than from the invoice's.
+///
+/// The two are mutually exclusive on one invoice: cancelling something already
+/// partly credited would take the credited part back twice, in the books and in
+/// the return. Both draw on the same gapless credit-note series, because both
+/// produce a credit note and ZATCA does not care which shape made one.
+///
+/// # Where the rates come from
+///
+/// The invoice's own bands, never the tenant's current configuration. An
+/// invoice issued at 5% is credited at 5% for ever (L5), and a category the
+/// invoice never carried is refused rather than given today's rate — which is
+/// the same refusal [`crate::vat::TaxError::DiscountWithoutABand`] makes, for
+/// the same reason: reclaiming tax that was never charged.
+///
+/// # What it does not do
+///
+/// **It does not touch what was paid.** A credit note says the supply is undone;
+/// handing the money back is [`refund_invoice`], and a business can do either
+/// without the other — an unpaid invoice is credited and no cash moves, a paid
+/// one needs both. Unlike [`cancel_invoice`] this does **not** require the
+/// invoice to be clear of payments, because a part-credited invoice the customer
+/// has paid in full is an ordinary thing: they are owed the difference, and
+/// `outstanding` going negative is what says so.
+pub async fn credit_invoice_part(
+    db: &TenantDb,
+    invoice: &AggregateId,
+    note: &CreditNote,
+    metadata: &Metadata,
+) -> NumberedOutcome {
+    for _ in 1..=MAX_ATTEMPTS {
+        let mut tx = db.begin().await?;
+        match credit_part_in(&mut tx, invoice, note, metadata).await {
+            Ok(numbered) => {
+                tx.commit().await.map_err(ExecuteError::from)?;
+                return Ok(numbered);
+            }
+            Err(e) if e.is_conflict() => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+            }
+            Err(e) => {
+                tx.rollback().await.map_err(ExecuteError::from)?;
+                return Err(e.into());
+            }
+        }
+    }
+
+    Err(contended(invoice))
+}
+
+/// One attempt at crediting part of an invoice, in the caller's transaction.
+///
+/// Public for the reason [`issue_in`] and [`refund_in`] are: a cancellation
+/// policy that keeps half a deposit credits and refunds in one write.
+pub async fn credit_part_in(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    note: &CreditNote,
+    metadata: &Metadata,
+) -> Result<Numbered, ExecuteError<SalesError>> {
+    if note.lines.is_empty() {
+        return Err(ExecuteError::Rejected(SalesError::NothingToCredit));
+    }
+    let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
+    let credit_id = money_entry("cn", invoice, &note.reference)?;
+    let memo = format!("Credit note · invoice {invoice}");
+
+    // **The counter first**, for the reason `issue_in` gives: it fixes the lock
+    // order — counter, then stream — so two concurrent credits cannot deadlock
+    // by taking them the other way round.
+    let reserved = erp_eventlog::numbering::reserve(&mut *conn, crate::CREDIT_NOTE_SERIES)
+        .await
+        .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
+    let number = crate::format_number(crate::CREDIT_NOTE_PREFIX, reserved);
+
+    let committed = try_execute::<Invoice, _, SalesError>(
+        &mut *conn,
+        invoice,
+        crate::upcasters(),
+        &metadata,
+        |loaded| {
+            let state = &loaded.aggregate;
+            if !state.issued {
+                return Err(SalesError::NotIssued(invoice.as_str().to_owned()));
+            }
+            // A retry. The stored credit note wins, and the number reserved
+            // above is simply not consumed.
+            if state.has_credit(&note.reference) {
+                return Ok(Decision::nothing());
+            }
+            // Already cancelled outright, so there is nothing left to credit.
+            if state.cancelled_by.is_some() {
+                return Err(SalesError::AlreadyCredited(invoice.as_str().to_owned()));
+            }
+            let currency = state
+                .currency
+                .ok_or_else(|| SalesError::NotIssued(invoice.as_str().to_owned()))?;
+
+            let lines = priced_for_credit(state, &note.lines, invoice)?;
+            let totals = crate::vat::total(
+                lines.iter().map(|l| (l.line.vat, l.line.net)),
+                // **No allowances on a credit note.** A discount is something
+                // taken off before tax was worked out; a credit takes back what
+                // was actually charged, and the caller states that directly.
+                std::iter::empty(),
+                currency,
+            )
+            .map_err(SalesError::Tax)?;
+
+            // **Per band, against what is left in that band.** Checked here,
+            // inside the decision, because it is a fact about the invoice's
+            // history and nowhere else knows it.
+            for band in &totals.bands {
+                let left = state
+                    .creditable_in(band.category, band.basis_points)
+                    .ok_or_else(|| SalesError::CreditWithoutABand {
+                        invoice: invoice.as_str().to_owned(),
+                        category: band.category.as_str().to_owned(),
+                    })?;
+                if band.net.minor() > left.minor() {
+                    return Err(SalesError::CreditTooLarge { amount: band.net });
+                }
+            }
+
+            Ok(Decision::one(InvoiceEvent::Credited {
+                credit_note: number.clone(),
+                reference: note.reference.clone(),
+                lines,
+                totals,
+                reason: note.reason.trim().to_owned(),
+                on: note.on,
+            }))
+        },
+    )
+    .await?;
+
+    let Some(InvoiceEvent::Credited { totals, .. }) = committed.events.first() else {
+        // A retry. Tell the caller the number **this reference** was given, not
+        // the most recent credit note — an invoice may have several, which is
+        // the whole point of partial ones. The number reserved above is simply
+        // not consumed.
+        let existing = erp_eventlog::load::<Invoice>(&mut *conn, invoice, crate::upcasters())
+            .await?
+            .aggregate
+            .credit_note_for(&note.reference)
+            .map_or(number, str::to_owned);
+        return Ok(Numbered {
+            committed,
+            number: existing,
+        });
+    };
+
+    erp_eventlog::numbering::consume(&mut *conn, crate::CREDIT_NOTE_SERIES)
+        .await
+        .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
+
+    let entry_lines = entry_for_credit(totals, &accounts).map_err(|e| {
+        ExecuteError::Rejected(match e {
+            ledger::Unbalanced::TooFewLines(_) => SalesError::NothingToCredit,
+            other => SalesError::Unbalanced(other),
+        })
+    })?;
+    ledger::post_entry_in(
+        &mut *conn,
+        &credit_id,
+        note.on,
+        &memo,
+        &entry_lines,
+        &metadata,
+    )
+    .await
+    .map_err(lift)?;
+
+    Ok(Numbered { committed, number })
+}
+
+/// Resolves each credit line against the invoice line it names.
+///
+/// **The lookup and the caps are one pass.** Naming a line settles three things
+/// at once that used to be separate: what the credit note says, what rate it
+/// credits at, and how much of that line is left to credit. A line the invoice
+/// does not have has no answer to any of them, which is a refusal rather than a
+/// default.
+fn priced_for_credit(
+    state: &Invoice,
+    lines: &[CreditLine],
+    invoice: &AggregateId,
+) -> Result<Vec<crate::invoice::CreditedLine>, SalesError> {
+    // Two lines of one credit note may name the same invoice line; the cap is
+    // on what they come to together, not on each in turn.
+    let mut taken: Vec<Money> = state.credited_lines.clone();
+
+    lines
+        .iter()
+        .map(|line| {
+            if !line.net.is_positive() {
+                return Err(SalesError::NothingToCredit);
+            }
+            let nowhere = || SalesError::NoSuchLine {
+                invoice: invoice.as_str().to_owned(),
+                line: line.against,
+            };
+            let against = state.lines.get(line.against as usize).ok_or_else(nowhere)?;
+            let slot = taken.get_mut(line.against as usize).ok_or_else(nowhere)?;
+
+            // What is left of this line, counting earlier credit notes and the
+            // rest of this one.
+            let running = slot
+                .checked_add(line.net)
+                .map_err(|e| SalesError::Tax(e.into()))?;
+            if running.minor() > against.net.minor() {
+                return Err(SalesError::CreditTooLarge { amount: line.net });
+            }
+            *slot = running;
+
+            Ok(crate::invoice::CreditedLine {
+                against: line.against,
+                line: InvoiceLine {
+                    // **The invoice's words, not the caller's.** A credit note
+                    // that could describe anything described nothing.
+                    description: against.description.clone(),
+                    net: line.net,
+                    // And the invoice's rate: one issued at 5% is credited at
+                    // 5% for ever (L5).
+                    vat: against.vat,
+                    // **Stated at what is coming back.** The invoice's own
+                    // allowances are what made this line smaller in the first
+                    // place; they are not taken off a second time.
+                    allowances: Vec::new(),
+                },
+            })
+        })
+        .collect()
 }

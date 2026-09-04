@@ -19,7 +19,19 @@ pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("sales.amount_out_
 /// The invoice named a customer record that is not there, or is archived.
 pub const NO_SUCH_CUSTOMER: MessageCode = MessageCode::new("sales.no_such_customer");
 
+pub const CREDIT_WITHOUT_A_BAND: MessageCode = MessageCode::new("sales.credit_without_a_band");
+pub const CREDIT_TOO_LARGE: MessageCode = MessageCode::new("sales.credit_too_large");
+pub const ALREADY_CREDITED: MessageCode = MessageCode::new("sales.already_credited");
+pub const NOTHING_TO_CREDIT: MessageCode = MessageCode::new("sales.nothing_to_credit");
+
+pub const NO_SUCH_LINE: MessageCode = MessageCode::new("sales.no_such_line");
+
 pub static CODES: &[MessageCode] = &[
+    NO_SUCH_LINE,
+    CREDIT_WITHOUT_A_BAND,
+    CREDIT_TOO_LARGE,
+    ALREADY_CREDITED,
+    NOTHING_TO_CREDIT,
     NOTHING_TO_INVOICE,
     NOT_ISSUED,
     OVERPAYMENT,
@@ -207,5 +219,61 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Template::Simple(
             "لا يوجد عميل {customer} لإصدار الفاتورة له. سجّله أولًا أو اترك مرجع العميل فارغًا.",
         ),
+    ),
+    // **The refusal that protects the tax.** Crediting a treatment the invoice
+    // never carried reclaims VAT that was never charged.
+    (
+        CREDIT_WITHOUT_A_BAND,
+        Locale::English,
+        Template::Simple(
+            "Invoice {invoice} has nothing treated as {category}, so there is nothing to credit at that rate.",
+        ),
+    ),
+    (
+        CREDIT_WITHOUT_A_BAND,
+        Locale::Arabic,
+        Template::Simple(
+            "الفاتورة {invoice} لا تتضمن أي بند بمعاملة {category}، فلا يوجد ما يمكن إصداره كإشعار دائن بذلك المعدل.",
+        ),
+    ),
+    (
+        CREDIT_TOO_LARGE,
+        Locale::English,
+        Template::Simple("{amount} is more than is left to credit."),
+    ),
+    (
+        CREDIT_TOO_LARGE,
+        Locale::Arabic,
+        Template::Simple("{amount} أكبر مما تبقى لإصدار إشعار دائن به."),
+    ),
+    (
+        ALREADY_CREDITED,
+        Locale::English,
+        Template::Simple("Invoice {invoice} has already been credited."),
+    ),
+    (
+        ALREADY_CREDITED,
+        Locale::Arabic,
+        Template::Simple("سبق إصدار إشعار دائن للفاتورة {invoice}."),
+    ),
+    (
+        NOTHING_TO_CREDIT,
+        Locale::English,
+        Template::Simple("A credit note has to credit something."),
+    ),
+    (
+        NOTHING_TO_CREDIT,
+        Locale::Arabic,
+        Template::Simple("يجب أن يتضمن الإشعار الدائن ما يتم إصداره عنه."),
+    ),
+    (
+        NO_SUCH_LINE,
+        Locale::English,
+        Template::Simple("Invoice {invoice} has no line {line}."),
+    ),
+    (
+        NO_SUCH_LINE,
+        Locale::Arabic,
+        Template::Simple("الفاتورة {invoice} لا تحتوي على البند {line}."),
     ),
 ];

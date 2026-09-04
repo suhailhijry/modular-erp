@@ -112,6 +112,7 @@ fn sample(
             Kind::Simplified => None,
         },
         lines: vec![Line {
+            allowances: Vec::new(),
             description: "بند اختبار".to_owned(),
             net,
             category: VatCategory::Standard,
@@ -136,14 +137,16 @@ fn sample(
         // A credit or debit note has to say what it is against, and ZATCA
         // refuses one that does not.
         reference: match type_code {
-            TypeCode::Invoice => None,
+            // A prepayment stands alone: it is the *first* document about a
+            // supply, not an adjustment to one.
+            TypeCode::Invoice | TypeCode::Prepayment => None,
             TypeCode::CreditNote | TypeCode::DebitNote => Some(Reference {
                 number: format!("COMPLIANCE-388-{index}"),
                 issued_at: at,
             }),
         },
         note: match type_code {
-            TypeCode::Invoice => String::new(),
+            TypeCode::Invoice | TypeCode::Prepayment => String::new(),
             TypeCode::CreditNote => "إرجاع للاختبار".to_owned(),
             TypeCode::DebitNote => "تعديل للاختبار".to_owned(),
         },
@@ -214,7 +217,9 @@ mod tests {
         );
         for document in &documents {
             match document.type_code {
-                TypeCode::Invoice => assert!(document.reference.is_none()),
+                TypeCode::Invoice | TypeCode::Prepayment => {
+                    assert!(document.reference.is_none());
+                }
                 TypeCode::CreditNote | TypeCode::DebitNote => {
                     assert!(
                         document.reference.is_some(),

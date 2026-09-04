@@ -23,6 +23,135 @@ use erp_eventlog::{Aggregate, DomainEvent};
 use erp_types::{AggregateId, DomainName, EventName, Money, SchemaVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 
+/// Who a prepayment invoice is made out to.
+///
+/// Deliberately smaller than `sales::Customer` and **not** that type: this ends
+/// up in this module's event log, and a log that carries another module's
+/// serialization shape is a log that breaks when that module changes one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Buyer {
+    pub name: String,
+    /// Giving one makes the document a standard invoice, which ZATCA clears
+    /// before the buyer may be handed it. Leaving it out makes it simplified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vat_number: Option<String>,
+}
+
+/// Money taken before the supply, and everything needed to bill for it.
+///
+/// **The net is carried, not derived.** A deposit is a fraction of something
+/// already priced — `booking::pricing::Charged` has a net and a gross — so the
+/// tax runs forwards from a known net rather than backwards out of a total.
+/// Dividing a gross by a rate does not always land: at 15% there is no net
+/// whose tax brings it to exactly 10.00. Nothing here has to find out, because
+/// nothing here throws the net away.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Advance {
+    /// What the deposit secures. Opaque: this module does not know what a
+    /// booking is, the same way `prepaid` does not know what its `against` is.
+    pub against: AggregateId,
+    /// **Before tax.** The prepayment invoice is raised for this, and the tax
+    /// is worked out from it.
+    pub net: Money,
+    pub buyer: Buyer,
+}
+
+/// **What a payment is collecting against.**
+///
+/// # Why this is not always an invoice
+///
+/// It was, and the assumption ran all the way through: `Started` carried an
+/// invoice, `settle_in` called `sales::pay_in` with it, and every entry cleared
+/// a receivable. That is right for a customer paying a bill, and wrong for the
+/// money that arrives *before* there is one.
+///
+/// # But it becomes one, and quickly
+///
+/// [`Self::Advance`] is a state that lasts from the charge being created to the
+/// gateway confirming it, and no longer. **Receiving consideration is itself a
+/// tax point** — the earliest of supply, invoice and payment is what makes VAT
+/// due — so settling a deposit raises a *prepayment invoice* for it there and
+/// then. Everything after that is an ordinary invoice payment: a refund is a
+/// credit note and the money back, exactly as it is for any other sale.
+///
+/// The first version of this held the money in a liability with no document and
+/// no tax, and declared the tax later, when the business decided to keep it.
+/// That put the output tax in whatever quarter the customer failed to turn up
+/// in rather than the one they paid in — the same defect §31 fixed in the other
+/// direction, and the reason this shape replaced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Collects {
+    /// A bill. `sales` clears the receivable and dedupes on the gateway's id.
+    Invoice(AggregateId),
+    /// Money taken before anything was billed. Settling it raises the bill.
+    Advance(Advance),
+}
+
+impl Collects {
+    /// **The invoice this settles against, raising one if it has to.**
+    ///
+    /// A deposit's document is derived from the payment's own id rather than
+    /// chosen, so the same answer comes back however often it is asked and
+    /// whoever asks — which is what lets a refund months later find the
+    /// document it has to credit.
+    #[must_use]
+    pub fn invoice(&self, payment: &AggregateId) -> AggregateId {
+        match self {
+            Self::Invoice(id) => id.clone(),
+            Self::Advance(_) => deposit_invoice(payment),
+        }
+    }
+
+    /// The deposit's own details, when it is one.
+    #[must_use]
+    pub const fn advance(&self) -> Option<&Advance> {
+        match self {
+            Self::Advance(advance) => Some(advance),
+            Self::Invoice(_) => None,
+        }
+    }
+
+    /// Rebuilds one from the pair an event carries.
+    ///
+    /// **Two fields on the wire and one enum in the domain**, which is the same
+    /// split `sales` makes between `DraftLine` and `InvoiceLine`. The pair is
+    /// what lets every event written before deposits existed decode as what it
+    /// was — an invoice payment — with no upcaster and no version two.
+    #[must_use]
+    pub fn of(invoice: Option<&AggregateId>, advance: Option<&Advance>) -> Option<Self> {
+        match (invoice, advance) {
+            (Some(id), None) => Some(Self::Invoice(id.clone())),
+            (None, Some(advance)) => Some(Self::Advance(advance.clone())),
+            // Neither, or both. A payment that collects against nothing cannot
+            // be settled, and one that names two things is a bug in whatever
+            // wrote it — neither is a state to guess at (L6).
+            _ => None,
+        }
+    }
+
+    /// The pair to write onto an event.
+    #[must_use]
+    pub fn split(&self) -> (Option<AggregateId>, Option<Advance>) {
+        match self {
+            Self::Invoice(id) => (Some(id.clone()), None),
+            Self::Advance(advance) => (None, Some(advance.clone())),
+        }
+    }
+}
+
+/// The prepayment invoice a deposit is billed under.
+///
+/// Derived, so it is the same string every time it is worked out and nothing
+/// has to be stored to find it again.
+#[expect(
+    clippy::expect_used,
+    reason = "a prefix on an id that is already valid is valid"
+)]
+#[must_use]
+pub fn deposit_invoice(payment: &AggregateId) -> AggregateId {
+    AggregateId::new(format!("dep-{}", payment.as_str())).expect("a prefixed aggregate id is one")
+}
+
 /// What happened to one attempt to collect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -45,7 +174,11 @@ pub enum PaymentEvent {
         /// fact to be wrong.
         card: AggregateId,
         provider: String,
-        invoice: AggregateId,
+        /// See [`Collects`] for why this is a pair rather than an invoice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invoice: Option<AggregateId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        advance: Option<Advance>,
         amount: Money,
         /// Where the gateway sends the customer **if it decides it needs
         /// them**. A saved-card charge usually completes with nobody watching;
@@ -60,8 +193,18 @@ pub enum PaymentEvent {
         provider: String,
         /// The gateway's own id for it. What every later message names.
         gateway_id: String,
-        /// What this is collecting against.
-        invoice: AggregateId,
+        /// What this is collecting against, when it is an invoice.
+        ///
+        /// **A pair, not an enum, and `Option` where it used to be required.**
+        /// Every payment written before this module could collect an advance
+        /// carries an invoice and decodes as one, which is what makes this a
+        /// widening rather than a new event version. See [`Collects`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        invoice: Option<AggregateId>,
+        /// The deposit this collects, when there is no invoice yet. Settling it
+        /// raises one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        advance: Option<Advance>,
         amount: Money,
         started_at: Timestamp,
     },
@@ -81,8 +224,14 @@ pub enum PaymentEvent {
         /// The gateway's cut, when it says. `None` is ordinary: most report it
         /// on the payout rather than on the payment.
         fee: Option<Money>,
-        /// What this cleared.
+        /// **What this cleared**, which for a deposit is the prepayment
+        /// invoice raised in the same transaction.
         invoice: AggregateId,
+        /// The deposit it was, when it was one — so the posting knows to raise
+        /// the invoice before paying it. Everything the posting needs is on the
+        /// event (L7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        advance: Option<Advance>,
         /// Where the money landed — a card clearing account, or an instalment
         /// provider's receivable.
         into: AggregateId,
@@ -102,6 +251,8 @@ pub enum PaymentEvent {
     /// Carries what the posting needs, for the reason [`Self::Settled`] does.
     Refunded {
         amount: Money,
+        /// What is being credited. A deposit's prepayment invoice is as much an
+        /// invoice as any other, which is the point of raising one.
         invoice: AggregateId,
         /// Where it comes back out of — the account it went into.
         out_of: AggregateId,
@@ -109,18 +260,37 @@ pub enum PaymentEvent {
         reference: String,
         refunded_at: Timestamp,
     },
+    /// **A deposit the business is keeping.** The customer did not come back,
+    /// the money stays, and the liability it was held under goes away.
+    ///
+    /// Only ever written against an advance: an invoice payment has nothing to
+    /// retain, because the supply it paid for already happened.
+    Retained {
+        /// What was kept — everything that had not been given back, including
+        /// the tax that was declared on it when it arrived.
+        amount: Money,
+        /// **Whether keeping it counts as a sale.** The tenant's decision, from
+        /// `crate::Retention`, recorded on the event rather than looked up
+        /// later: a setting changed next year must not restate what the books
+        /// said this year (L5).
+        supply: bool,
+        /// What it was being held against.
+        advance_for: AggregateId,
+        retained_at: Timestamp,
+    },
     /// Cancelled before it settled. Cheaper than a refund, and possible for a
     /// much shorter time.
     Voided { voided_at: Timestamp },
 }
 
 impl PaymentEvent {
-    pub const NAMES: [&'static str; 6] = [
+    pub const NAMES: [&'static str; 7] = [
         "payments.payment.requested",
         "payments.payment.started",
         "payments.payment.settled",
         "payments.payment.failed",
         "payments.payment.refunded",
+        "payments.payment.retained",
         "payments.payment.voided",
     ];
 }
@@ -133,7 +303,8 @@ impl DomainEvent for PaymentEvent {
             Self::Settled { .. } => Self::NAMES[2],
             Self::Failed { .. } => Self::NAMES[3],
             Self::Refunded { .. } => Self::NAMES[4],
-            Self::Voided { .. } => Self::NAMES[5],
+            Self::Retained { .. } => Self::NAMES[5],
+            Self::Voided { .. } => Self::NAMES[6],
         })
     }
 
@@ -156,6 +327,8 @@ pub enum Stage {
     Settled,
     Failed,
     Refunded,
+    /// A deposit the customer did not come back for, which the business kept.
+    Retained,
     Voided,
 }
 
@@ -168,6 +341,7 @@ impl Stage {
             Self::Settled => "settled",
             Self::Failed => "failed",
             Self::Refunded => "refunded",
+            Self::Retained => "retained",
             Self::Voided => "voided",
         }
     }
@@ -179,7 +353,10 @@ impl Stage {
     /// revival of this one.
     #[must_use]
     pub const fn is_finished(self) -> bool {
-        matches!(self, Self::Failed | Self::Voided)
+        // **A retained deposit is finished.** The money is the business's, the
+        // liability is gone, and there is nothing left to give back — which is
+        // exactly what makes it different from `Settled`.
+        matches!(self, Self::Failed | Self::Voided | Self::Retained)
     }
 }
 
@@ -195,7 +372,10 @@ pub struct Payment {
     pub started: bool,
     pub provider: String,
     pub gateway_id: String,
-    pub invoice: Option<AggregateId>,
+    /// **What this payment collects against.** `None` before it is started,
+    /// and on a payment whose event named neither an invoice nor an advance —
+    /// which is a corrupt log rather than a state a command can produce.
+    pub collects: Option<Collects>,
     pub amount: Option<Money>,
     pub stage: Stage,
     /// What has been given back so far.
@@ -224,6 +404,10 @@ impl Payment {
     }
 
     /// What could still be given back.
+    ///
+    /// `None` once the business has kept it: a retained deposit is theirs, and
+    /// refunding one afterwards would hand back money that has already been
+    /// recognised — as revenue, and possibly on a filed return.
     #[must_use]
     pub fn refundable(&self) -> Option<Money> {
         let amount = self.amount?;
@@ -250,6 +434,7 @@ impl Aggregate for Payment {
                 card,
                 provider,
                 invoice,
+                advance,
                 amount,
                 callback_url,
                 ..
@@ -257,7 +442,7 @@ impl Aggregate for Payment {
                 self.requested = true;
                 self.card = Some(card.clone());
                 self.provider.clone_from(provider);
-                self.invoice = Some(invoice.clone());
+                self.collects = Collects::of(invoice.as_ref(), advance.as_ref());
                 self.amount = Some(*amount);
                 self.callback_url.clone_from(callback_url);
                 self.stage = Stage::Requested;
@@ -266,13 +451,14 @@ impl Aggregate for Payment {
                 provider,
                 gateway_id,
                 invoice,
+                advance,
                 amount,
                 ..
             } => {
                 self.started = true;
                 self.provider.clone_from(provider);
                 self.gateway_id.clone_from(gateway_id);
-                self.invoice = Some(invoice.clone());
+                self.collects = Collects::of(invoice.as_ref(), advance.as_ref());
                 self.amount = Some(*amount);
                 self.stage = Stage::Pending;
             }
@@ -294,6 +480,7 @@ impl Aggregate for Payment {
                     self.stage = Stage::Refunded;
                 }
             }
+            PaymentEvent::Retained { .. } => self.stage = Stage::Retained,
             PaymentEvent::Voided { .. } => self.stage = Stage::Voided,
         }
     }
@@ -319,7 +506,8 @@ mod tests {
         PaymentEvent::Started {
             provider: "moyasar".to_owned(),
             gateway_id: "pay_1".to_owned(),
-            invoice: id("INV-1"),
+            invoice: Some(id("INV-1")),
+            advance: None,
             amount: sar(10_000),
             started_at: Timestamp::from(chrono::Utc::now()),
         }
@@ -330,6 +518,7 @@ mod tests {
             amount,
             fee,
             invoice: id("INV-1"),
+            advance: None,
             into: id("1150"),
             reference: "pay_1".to_owned(),
             settled_at: Timestamp::from(chrono::Utc::now()),
@@ -414,7 +603,8 @@ mod tests {
             PaymentEvent::Requested {
                 card: id("card-1"),
                 provider: "moyasar".to_owned(),
-                invoice: id("INV-1"),
+                invoice: Some(id("INV-1")),
+                advance: None,
                 amount: sar(10_000),
                 callback_url: "https://bassat.sa/paid".to_owned(),
                 requested_at: Timestamp::from(chrono::Utc::now()),
@@ -426,6 +616,12 @@ mod tests {
                 failed_at: Timestamp::from(chrono::Utc::now()),
             },
             refund(sar(1)),
+            PaymentEvent::Retained {
+                amount: sar(1),
+                supply: true,
+                advance_for: id("BOOK-1"),
+                retained_at: Timestamp::from(chrono::Utc::now()),
+            },
             PaymentEvent::Voided {
                 voided_at: Timestamp::from(chrono::Utc::now()),
             },

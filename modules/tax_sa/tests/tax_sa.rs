@@ -196,11 +196,13 @@ impl Fixture {
             &self.db,
             &code(id),
             &Draft {
+                prepayment: false,
                 customer: Customer::new("Rawabi").with_vat_number("310000000000003"),
                 issued_on: on(day),
                 due_on: None,
                 currency: sar(),
                 lines: vec![DraftLine {
+                    allowances: Vec::new(),
                     description: "Consulting".to_owned(),
                     net,
                     category: VatCategory::Standard,
@@ -571,11 +573,13 @@ impl Fixture {
             &self.db,
             &code(id),
             &Draft {
+                prepayment: false,
                 customer: Customer::new("زبون"),
                 issued_on: on(day),
                 due_on: None,
                 currency: sar(),
                 lines: vec![DraftLine {
+                    allowances: Vec::new(),
                     description: "قهوة".to_owned(),
                     net,
                     category: VatCategory::Standard,

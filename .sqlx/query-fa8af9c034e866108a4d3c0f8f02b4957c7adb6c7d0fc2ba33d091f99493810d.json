@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", provider as \"provider!\", gateway_id as \"gateway_id!\",\n                  invoice as \"invoice!\", amount_minor as \"amount_minor!\",\n                  currency as \"currency!\", stage as \"stage!\", fee_minor,\n                  refunded_minor as \"refunded_minor!\", failed_why,\n                  started_at as \"started_at!\", settled_at\n             FROM proj_payments.payment WHERE id = $1",
+  "query": "SELECT id as \"id!\", provider as \"provider!\", gateway_id as \"gateway_id!\",\n                  invoice, advance_for, amount_minor as \"amount_minor!\",\n                  currency as \"currency!\", stage as \"stage!\", fee_minor,\n                  refunded_minor as \"refunded_minor!\", failed_why,\n                  started_at as \"started_at!\", settled_at\n             FROM proj_payments.payment\n            WHERE invoice = $1 OR advance_for = $1\n            ORDER BY started_at DESC LIMIT $2",
   "describe": {
     "columns": [
       {
@@ -38,7 +38,7 @@
       },
       {
         "ordinal": 3,
-        "name": "invoice!",
+        "name": "invoice",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -49,6 +49,17 @@
       },
       {
         "ordinal": 4,
+        "name": "advance_for",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "advance_for"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "amount_minor!",
         "type_info": "Int8",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "currency!",
         "type_info": "Text",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "stage!",
         "type_info": "Text",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "fee_minor",
         "type_info": "Int8",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "refunded_minor!",
         "type_info": "Int8",
         "origin": {
@@ -103,7 +114,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "failed_why",
         "type_info": "Text",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "started_at!",
         "type_info": "Timestamptz",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "settled_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -138,14 +149,16 @@
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Text",
+        "Int8"
       ]
     },
     "nullable": [
       false,
       false,
       false,
-      false,
+      true,
+      true,
       false,
       false,
       false,
@@ -156,5 +169,5 @@
       true
     ]
   },
-  "hash": "e9e31a4095636463e508040a83e932fa9b493a8d4818a217f9a642a6b95f2a3a"
+  "hash": "fa8af9c034e866108a4d3c0f8f02b4957c7adb6c7d0fc2ba33d091f99493810d"
 }

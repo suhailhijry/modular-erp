@@ -1533,6 +1533,55 @@
         ],
         "type": "object"
       },
+      "CreditNoteView": {
+        "description": "A credit note as a list shows it.",
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "gross": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "invoice": {
+            "type": "string"
+          },
+          "issued_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "net": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "number": {
+            "description": "The statutory number.",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number",
+          "invoice",
+          "reference",
+          "net",
+          "tax",
+          "gross",
+          "currency",
+          "reason",
+          "issued_on"
+        ],
+        "type": "object"
+      },
       "CsrView": {
         "properties": {
           "compliance_documents": {
@@ -1775,6 +1824,19 @@
         "required": [
           "deferred",
           "revenue"
+        ],
+        "type": "object"
+      },
+      "DepositPolicy": {
+        "description": "Whether keeping a deposit is a sale.",
+        "properties": {
+          "supply": {
+            "description": "**The tax is not what this decides.** A deposit is billed by a\nprepayment invoice when the money arrives, so the VAT was declared then\nand is not reversed when the money is kept.\n\nWhat it decides is whether the money the business kept is service\nrevenue or a line of its own — which is what lets them say, a year\nlater, how much of their income was selling something and how much was\npeople not turning up. Defaults to `true`, which is what the document\nalready says.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "supply"
         ],
         "type": "object"
       },
@@ -2428,6 +2490,13 @@
       },
       "GatewayPaymentView": {
         "properties": {
+          "advance_for": {
+            "description": "**What a deposit was taken for**, when it does not. Exactly one of the\ntwo is present, and a settled deposit has both — its own prepayment\ninvoice, and the booking it secures.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "amount": {
             "format": "int64",
             "type": "integer"
@@ -2457,7 +2526,11 @@
             "type": "string"
           },
           "invoice": {
-            "type": "string"
+            "description": "The invoice, when it collects against one.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "provider": {
             "type": "string"
@@ -2486,7 +2559,6 @@
           "id",
           "provider",
           "gateway_id",
-          "invoice",
           "amount",
           "currency",
           "stage",
@@ -3704,6 +3776,26 @@
         ],
         "type": "object"
       },
+      "NewCreditLine": {
+        "description": "One line of a credit note: which invoice line, and how much of it.",
+        "properties": {
+          "against": {
+            "description": "**Which line of the invoice this credits**, counting from zero.\n\nThe description and the tax treatment come from it. That is the point:\na credit note can only describe something the invoice charged for, and\nis credited at the rate that invoice carried — one issued at 5% is\ncredited at 5% for ever.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/Amount",
+            "description": "Excluding tax, and positive — stated the way the invoice stated it\nrather than as a negative. May be less than the line: part of a line\ncan come back."
+          }
+        },
+        "required": [
+          "against",
+          "amount"
+        ],
+        "type": "object"
+      },
       "NewCreditNote": {
         "example": {
           "id": "CN-2026-0001",
@@ -3864,6 +3956,37 @@
         },
         "required": [
           "minutes"
+        ],
+        "type": "object"
+      },
+      "NewDeposit": {
+        "description": "A deposit: what it secures, what it comes to before tax, and who it is\nbilled to.\n\n**The net is sent, not the gross alone.** A deposit is a fraction of\nsomething already priced, and the price had a net; working the net back out\nof a total does not always land, so it travels with the deposit instead. The\n`amount` charged must equal this plus the tax on it, and settling refuses if\nit does not.",
+        "properties": {
+          "against": {
+            "description": "What it secures — a booking. Opaque to this module.",
+            "type": "string"
+          },
+          "buyer_name": {
+            "description": "The buyer, as the prepayment invoice will print them.",
+            "type": "string"
+          },
+          "buyer_vat_number": {
+            "description": "Giving one makes it a standard invoice rather than a simplified one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "net": {
+            "description": "**Before tax**, in minor units. The prepayment invoice is raised for it.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "against",
+          "net",
+          "buyer_name"
         ],
         "type": "object"
       },
@@ -4334,13 +4457,27 @@
             "description": "ISO-4217, three letters.",
             "type": "string"
           },
+          "deposit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NewDeposit",
+                "description": "**A deposit**, when nothing has been billed yet. Settling it raises a\nprepayment invoice, because receiving the money is itself a tax point."
+              }
+            ]
+          },
           "gateway_id": {
             "description": "**The gateway's own id**, from the charge you created against it. Every\ncallback names this and nothing else, so a payment recorded without one\ncan never be settled.",
             "type": "string"
           },
           "invoice": {
-            "description": "The invoice this is collecting against.",
-            "type": "string"
+            "description": "The invoice this is collecting against. **Exactly one of this and\n`advance_for`.**",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "provider": {
             "description": "`moyasar`, `tabby` or `tamara`.",
@@ -4358,7 +4495,6 @@
         "required": [
           "provider",
           "gateway_id",
-          "invoice",
           "amount",
           "currency"
         ],
@@ -4479,11 +4615,18 @@
       },
       "NewInvoiceLine": {
         "properties": {
+          "allowances": {
+            "description": "What comes off **this line**, each printed as its own figure.\n\nNo treatment on them: the line already says how it is taxed, so an\nallowance on it reduces the taxable amount at that line's rate. A\ndiscount on the whole *document* is the other field, and that one has to\nname which treatment it comes off.",
+            "items": {
+              "$ref": "#/components/schemas/NewLineAllowance"
+            },
+            "type": "array"
+          },
           "description": {
             "type": "string"
           },
           "net": {
-            "description": "Minor units, in the invoice's currency. Excluding tax.",
+            "description": "Minor units, in the invoice's currency. Excluding tax, and **before this\nline's own allowances** — what is charged is this less them.",
             "format": "int64",
             "type": "integer"
           },
@@ -4589,6 +4732,24 @@
           "description",
           "net",
           "vat"
+        ],
+        "type": "object"
+      },
+      "NewLineAllowance": {
+        "properties": {
+          "amount": {
+            "description": "Minor units, **positive**: what comes off this line.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Why, printed on the invoice — ZATCA shows it to the customer.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "amount"
         ],
         "type": "object"
       },
@@ -4733,6 +4894,49 @@
         "required": [
           "domain",
           "origin"
+        ],
+        "type": "object"
+      },
+      "NewPartialCreditNote": {
+        "description": "A credit note against part of an invoice.",
+        "example": {
+          "lines": [
+            {
+              "against": 1,
+              "amount": {
+                "currency": "SAR",
+                "minor": 5750
+              }
+            }
+          ],
+          "on": "2026-03-04T09:00:00Z",
+          "reason": "Returned unopened",
+          "reference": "returned-the-shampoo"
+        },
+        "properties": {
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/NewCreditLine"
+            },
+            "type": "array"
+          },
+          "on": {
+            "description": "The credit note's **own** tax point — the period it falls in. Usually\ntoday, and not the invoice's date.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "reference": {
+            "description": "**Your own key for this credit note, not its number.** Sending the same\none twice is a no-op. The number is allocated here, from the same\ngapless series a cancellation draws on.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "lines",
+          "on"
         ],
         "type": "object"
       },
@@ -5304,13 +5508,26 @@
             "description": "ISO-4217, three letters.",
             "type": "string"
           },
+          "deposit": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NewDeposit",
+                "description": "A deposit, when there is no invoice. A saved card is exactly how a\nreturning customer's deposit gets charged."
+              }
+            ]
+          },
           "invoice": {
-            "description": "The invoice this is collecting against.",
-            "type": "string"
+            "description": "The invoice this is collecting against. **Exactly one of this and\n`advance_for`.**",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
-          "invoice",
           "amount",
           "currency",
           "callback_url"
@@ -24132,7 +24349,7 @@
         "operationId": "list_payments",
         "parameters": [
           {
-            "description": "The invoice to list attempts against.",
+            "description": "**What to list attempts against** — an invoice, or the booking a deposit\nwas taken for. One parameter for both, because a caller asking what has\nbeen collected against a thing does not want to know which shape the\nanswer is.",
             "in": "path",
             "name": "invoice",
             "required": true,
@@ -24854,6 +25071,214 @@
         ]
       }
     },
+    "/v1/payments/deposit-policy": {
+      "get": {
+        "operationId": "deposit_policy",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositPolicy"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "What this business has decided a kept deposit is.",
+        "tags": [
+          "payments"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "**An accounting position, so it is the owner's**, the same as choosing which\naccounts a sale posts to. It changes where a kept deposit lands in the\nprofit and loss, which is not a preference.",
+        "operationId": "set_deposit_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepositPolicy"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Recorded."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Decide whether keeping a deposit is a supply.",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
     "/v1/payments/gateways/{provider}": {
       "parameters": [
         {
@@ -25484,6 +25909,123 @@
           }
         },
         "summary": "Give money back.",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/payments/{payment}/retention": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "It keeps everything not already refunded. A policy that returns half is a\nrefund of half and then this — two facts, recorded as two.\n\n**It raises no document and declares no tax.** Both happened when the\ndeposit settled, because receiving the money is itself a tax point. What\nthis records is that nobody is getting it back.",
+        "operationId": "retain_deposit",
+        "parameters": [
+          {
+            "description": "The deposit being kept.",
+            "in": "path",
+            "name": "payment",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayPaymentRecorded"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was understood and asks for something impossible. `code` says which part."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such payment"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "It is against an invoice, or there is nothing left of it"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "**Keep a deposit the customer did not come back for.**",
         "tags": [
           "payments"
         ]
@@ -32448,7 +32990,7 @@
         }
       ],
       "post": {
-        "description": "A `POST`, not a `DELETE`: the invoice stays, its journal entry is reversed,\nand the books show both.\n\nCancels the whole invoice. ponytail: partial credit notes are not built —\nthey need the credit note to be a document with its own tax point.",
+        "description": "A `POST`, not a `DELETE`: the invoice stays, its journal entry is reversed,\nand the books show both.\n\n**The whole invoice.** For part of one, see\n`POST /v1/sales/invoices/{invoice}/credit-notes` — a different shape, because\na partial credit note is a document with lines and a tax point of its own\nrather than a fact about the invoice. The two are mutually exclusive: this\nreverses the invoice's journal entry, which on an invoice already partly\ncredited would take the credited part back twice.",
         "operationId": "credit_note",
         "parameters": [
           {
@@ -32593,6 +33135,285 @@
           }
         },
         "summary": "Cancels an invoice by crediting it.",
+        "tags": [
+          "sales"
+        ]
+      }
+    },
+    "/v1/sales/invoices/{invoice}/credit-notes": {
+      "get": {
+        "description": "**A whole-invoice cancellation is not in here.** That is `credit_note` and\n`cancelled_on` on the invoice itself, because it is a fact about the invoice\nrather than a document with lines of its own.",
+        "operationId": "list_credit_notes",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The invoice.",
+            "in": "path",
+            "name": "invoice",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CreditNoteView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unusable id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "Credit notes against part of one invoice, newest first.",
+        "tags": [
+          "sales"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "# Not the same act as cancelling\n\nCancelling reverses the invoice's journal entry and says the whole supply is\nundone. This posts its **own** entry for what it takes back, because there is\nno such thing as reversing part of a journal entry — and it produces a\ndocument with its own lines, which is what ZATCA computes a credit note's VAT\nfrom.\n\nAn invoice can have several of these. It cannot have these **and** a\ncancellation.\n\n# It does not hand any money back\n\nA credit note says the supply is undone; the cash is\n`POST /v1/sales/invoices/{invoice}/refunds`, and a business may need both. An\ninvoice paid in full and then partly credited leaves the customer owed the\ndifference, which is `outstanding` going negative.",
+        "operationId": "credit_invoice_part",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The invoice being credited.",
+            "in": "path",
+            "name": "invoice",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPartialCreditNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Issued"
+                }
+              }
+            },
+            "description": "Credited, or already credited under this key."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unusable id, or an amount that is not one"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The invoice was already cancelled outright"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such invoice, no such line, or more than is left to credit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Credit part of an invoice.",
         "tags": [
           "sales"
         ]

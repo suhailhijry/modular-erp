@@ -156,18 +156,24 @@ impl Projection for Collected {
             PaymentEvent::Settled {
                 amount,
                 fee,
+                invoice,
                 settled_at,
                 ..
             } => {
+                // **The invoice lands here for a deposit**, because a deposit
+                // does not have one until it settles: the prepayment invoice is
+                // raised in the same transaction, and this is where the row
+                // learns which document its money cleared.
                 sqlx::query(
                     "UPDATE payment
                         SET stage = 'settled', amount_minor = $2, fee_minor = $3,
-                            settled_at = $4, position = $5
+                            invoice = $4, settled_at = $5, position = $6
                       WHERE id = $1",
                 )
                 .bind(&id)
                 .bind(amount.minor())
                 .bind(fee.map(Money::minor))
+                .bind(invoice.as_str())
                 .bind(settled_at)
                 .bind(position)
                 .execute(&mut *conn)
@@ -195,6 +201,22 @@ impl Projection for Collected {
                                 ELSE stage
                             END,
                             position = $3
+                      WHERE id = $1",
+                )
+                .bind(&id)
+                .bind(amount.minor())
+                .bind(position)
+                .execute(&mut *conn)
+                .await?;
+            }
+            // **Kept, and there is nothing left to give back.** The amount is
+            // recorded as refunded-out because that is what the column means —
+            // how much of this payment is no longer available — and the stage
+            // is what says where it went.
+            PaymentEvent::Retained { amount, .. } => {
+                sqlx::query(
+                    "UPDATE payment
+                        SET stage = 'retained', retained_minor = $2, position = $3
                       WHERE id = $1",
                 )
                 .bind(&id)
@@ -235,6 +257,7 @@ impl Collected {
             card,
             provider,
             invoice,
+            advance,
             amount,
             callback_url,
             requested_at,
@@ -251,14 +274,21 @@ impl Collected {
 
         sqlx::query(
             "INSERT INTO payment
-                (id, provider, gateway_id, invoice, amount_minor, currency,
-                 stage, card, callback_url, started_at, position)
-             VALUES ($1, $2, $1, $3, $4, $5, 'requested', $6, $7, $8, $9)
+                (id, provider, gateway_id, invoice, advance_for,
+                 advance_net_minor, advance_buyer, advance_buyer_vat,
+                 amount_minor, currency, stage, card, callback_url,
+                 started_at, position)
+             VALUES ($1, $2, $1, $3, $4, $5, $6, $7, $8, $9, 'requested',
+                     $10, $11, $12, $13)
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(envelope.stream.id.as_str())
         .bind(&provider)
-        .bind(invoice.as_str())
+        .bind(invoice.as_ref().map(AggregateId::as_str))
+        .bind(advance.as_ref().map(|a| a.against.as_str()))
+        .bind(advance.as_ref().map(|a| a.net.minor()))
+        .bind(advance.as_ref().map(|a| a.buyer.name.clone()))
+        .bind(advance.as_ref().and_then(|a| a.buyer.vat_number.clone()))
         .bind(amount.minor())
         .bind(amount.currency().to_string())
         .bind(card.as_str())
@@ -285,6 +315,7 @@ impl Collected {
             provider,
             gateway_id,
             invoice,
+            advance,
             amount,
             started_at,
         } = ctx
@@ -300,9 +331,10 @@ impl Collected {
 
         sqlx::query(
             "INSERT INTO payment
-                (id, provider, gateway_id, invoice, amount_minor, currency,
-                 stage, started_at, position)
-             VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
+                (id, provider, gateway_id, invoice, advance_for,
+                 advance_net_minor, advance_buyer, advance_buyer_vat,
+                 amount_minor, currency, stage, started_at, position)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', $11, $12)
              ON CONFLICT (id) DO UPDATE
                 SET stage = 'pending',
                     gateway_id = EXCLUDED.gateway_id,
@@ -313,7 +345,11 @@ impl Collected {
         .bind(envelope.stream.id.as_str())
         .bind(&provider)
         .bind(&gateway_id)
-        .bind(invoice.as_str())
+        .bind(invoice.as_ref().map(AggregateId::as_str))
+        .bind(advance.as_ref().map(|a| a.against.as_str()))
+        .bind(advance.as_ref().map(|a| a.net.minor()))
+        .bind(advance.as_ref().map(|a| a.buyer.name.clone()))
+        .bind(advance.as_ref().and_then(|a| a.buyer.vat_number.clone()))
         .bind(amount.minor())
         .bind(amount.currency().to_string())
         .bind(started_at)
@@ -391,7 +427,10 @@ pub struct PaymentRow {
     pub id: String,
     pub provider: String,
     pub gateway_id: String,
-    pub invoice: String,
+    /// The invoice, when it collects against one.
+    pub invoice: Option<String>,
+    /// What a deposit was taken for, when it does not.
+    pub advance_for: Option<String>,
     pub amount: Money,
     pub stage: String,
     pub fee: Option<Money>,
@@ -427,7 +466,7 @@ pub async fn payment(
 ) -> Result<Option<PaymentRow>, sqlx::Error> {
     let row = sqlx::query!(
         r#"SELECT id as "id!", provider as "provider!", gateway_id as "gateway_id!",
-                  invoice as "invoice!", amount_minor as "amount_minor!",
+                  invoice, advance_for, amount_minor as "amount_minor!",
                   currency as "currency!", stage as "stage!", fee_minor,
                   refunded_minor as "refunded_minor!", failed_why,
                   started_at as "started_at!", settled_at
@@ -444,6 +483,7 @@ pub async fn payment(
             provider: r.provider,
             gateway_id: r.gateway_id,
             invoice: r.invoice,
+            advance_for: r.advance_for,
             amount: Money::from_minor(r.amount_minor, currency),
             stage: r.stage,
             fee: r.fee_minor.map(|m| Money::from_minor(m, currency)),
@@ -455,7 +495,11 @@ pub async fn payment(
     }))
 }
 
-/// What has been tried against one invoice, newest first.
+/// What has been tried against one thing, newest first.
+///
+/// **An invoice or a booking.** One column each and one query: a caller asking
+/// "what has been collected against this" does not want to know which of the
+/// two shapes the answer happens to be, and two reads would make them care.
 pub async fn against(
     conn: &mut sqlx::PgConnection,
     invoice: &str,
@@ -463,11 +507,12 @@ pub async fn against(
 ) -> Result<Vec<PaymentRow>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"SELECT id as "id!", provider as "provider!", gateway_id as "gateway_id!",
-                  invoice as "invoice!", amount_minor as "amount_minor!",
+                  invoice, advance_for, amount_minor as "amount_minor!",
                   currency as "currency!", stage as "stage!", fee_minor,
                   refunded_minor as "refunded_minor!", failed_why,
                   started_at as "started_at!", settled_at
-             FROM proj_payments.payment WHERE invoice = $1
+             FROM proj_payments.payment
+            WHERE invoice = $1 OR advance_for = $1
             ORDER BY started_at DESC LIMIT $2"#,
         invoice,
         limit,
@@ -484,6 +529,7 @@ pub async fn against(
                 provider: r.provider,
                 gateway_id: r.gateway_id,
                 invoice: r.invoice,
+                advance_for: r.advance_for,
                 amount: Money::from_minor(r.amount_minor, currency),
                 stage: r.stage,
                 fee: r.fee_minor.map(|m| Money::from_minor(m, currency)),

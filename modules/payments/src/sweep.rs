@@ -171,7 +171,8 @@ pub struct Waiting {
     /// use — it is passed as Moyasar's `given_id`.
     pub id: AggregateId,
     pub card: AggregateId,
-    pub invoice: AggregateId,
+    /// An invoice, or the booking a deposit was taken for.
+    pub collects: crate::Collects,
     pub amount: Money,
     pub callback_url: String,
 }
@@ -197,7 +198,8 @@ pub async fn requested(
     limit: i64,
 ) -> Result<Vec<Waiting>, sqlx::Error> {
     let rows = sqlx::query!(
-        r#"SELECT id as "id!", card as "card!", invoice as "invoice!",
+        r#"SELECT id as "id!", card as "card!", invoice, advance_for,
+                  advance_net_minor, advance_buyer, advance_buyer_vat,
                   amount_minor as "amount_minor!", currency as "currency!",
                   callback_url as "callback_url!"
              FROM proj_payments.payment
@@ -212,11 +214,29 @@ pub async fn requested(
     Ok(rows
         .into_iter()
         .filter_map(|row| {
+            let currency = CurrencyCode::new(&row.currency).ok()?;
+            let invoice = row
+                .invoice
+                .as_deref()
+                .and_then(|v| AggregateId::new(v).ok());
+            // **Rebuilt, not looked up.** Everything a deposit needs in order
+            // to be billed travels with it, so the pass that charges it can
+            // hand the whole thing on without loading an aggregate (L7).
+            let advance = row.advance_for.as_deref().and_then(|against| {
+                Some(crate::Advance {
+                    against: AggregateId::new(against).ok()?,
+                    net: Money::from_minor(row.advance_net_minor?, currency),
+                    buyer: crate::Buyer {
+                        name: row.advance_buyer.clone()?,
+                        vat_number: row.advance_buyer_vat.clone(),
+                    },
+                })
+            });
             Some(Waiting {
                 id: AggregateId::new(&row.id).ok()?,
                 card: AggregateId::new(&row.card).ok()?,
-                invoice: AggregateId::new(&row.invoice).ok()?,
-                amount: Money::from_minor(row.amount_minor, CurrencyCode::new(&row.currency).ok()?),
+                collects: crate::Collects::of(invoice.as_ref(), advance.as_ref())?,
+                amount: Money::from_minor(row.amount_minor, currency),
                 callback_url: row.callback_url,
             })
         })
@@ -293,7 +313,7 @@ pub async fn charge_requested(
                         failure: want.callback_url.clone(),
                     },
                     source: Source::Token { token },
-                    description: format!("Saved card · {}", want.invoice),
+                    description: format!("Saved card · {}", want.collects.invoice(&want.id)),
                     buyer: None,
                     basket: None,
                 };
@@ -326,7 +346,7 @@ pub async fn charge_requested(
             &crate::Attempt {
                 provider: gateway.provider().to_owned(),
                 gateway_id: charged.id.clone(),
-                invoice: want.invoice.clone(),
+                collects: want.collects.clone(),
                 amount: want.amount,
             },
             now,

@@ -822,6 +822,11 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **en** — That cannot be saved as a card: {reason}.
 - **ar** — لا يمكن حفظ ذلك كبطاقة: {reason}.
 
+### `payments.not_a_deposit`
+
+- **en** — Payment {id} is against an invoice, so there is no deposit to keep.
+- **ar** — عملية الدفع {id} مقابل فاتورة، فلا توجد دفعة مقدمة يمكن الاحتفاظ بها.
+
 ### `payments.not_collectable`
 
 - **en** — Payment {id} is {stage}, so there is nothing to give back.
@@ -836,6 +841,11 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — There is no payment {id} to settle.
 - **ar** — لا توجد عملية دفع {id} لتسويتها.
+
+### `payments.nothing_to_retain`
+
+- **en** — There is nothing left of {id} to keep.
+- **ar** — لم يتبق من {id} ما يمكن الاحتفاظ به.
 
 ### `payments.payout_currency`
 
@@ -1394,10 +1404,25 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **en** — That invoice was already cancelled by credit note {by}.
 - **ar** — تم إلغاء هذه الفاتورة بالفعل بإشعار دائن {by}.
 
+### `sales.already_credited`
+
+- **en** — Invoice {invoice} has already been credited.
+- **ar** — سبق إصدار إشعار دائن للفاتورة {invoice}.
+
 ### `sales.amount_out_of_range`
 
 - **en** — That amount is too large to record.
 - **ar** — هذا المبلغ أكبر من أن يُسجَّل.
+
+### `sales.credit_too_large`
+
+- **en** — {amount} is more than is left to credit.
+- **ar** — {amount} أكبر مما تبقى لإصدار إشعار دائن به.
+
+### `sales.credit_without_a_band`
+
+- **en** — Invoice {invoice} has nothing treated as {category}, so there is nothing to credit at that rate.
+- **ar** — الفاتورة {invoice} لا تتضمن أي بند بمعاملة {category}، فلا يوجد ما يمكن إصداره كإشعار دائن بذلك المعدل.
 
 ### `sales.discount_too_large`
 
@@ -1429,6 +1454,11 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **en** — There is no customer {customer} to issue this to. Record them first, or leave the customer reference out.
 - **ar** — لا يوجد عميل {customer} لإصدار الفاتورة له. سجّله أولًا أو اترك مرجع العميل فارغًا.
 
+### `sales.no_such_line`
+
+- **en** — Invoice {invoice} has no line {line}.
+- **ar** — الفاتورة {invoice} لا تحتوي على البند {line}.
+
 ### `sales.not_a_discount`
 
 - **en** — A discount is the amount taken off, so it is positive. A negative one is a charge.
@@ -1443,6 +1473,11 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — Invoice {invoice} has not been issued.
 - **ar** — لم تُصدَر الفاتورة {invoice}.
+
+### `sales.nothing_to_credit`
+
+- **en** — A credit note has to credit something.
+- **ar** — يجب أن يتضمن الإشعار الدائن ما يتم إصداره عنه.
 
 ### `sales.nothing_to_invoice`
 

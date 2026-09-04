@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS invoice (
     -- has to print both, which is why the smaller number alone will not do.
     discount     BIGINT NOT NULL DEFAULT 0 CHECK (discount >= 0),
 
+    -- **Whether this billed for money taken before the supply.** A deposit.
+    -- It changes what the document is to the authority — a prepayment invoice
+    -- rather than an ordinary one — because receiving consideration is itself a
+    -- tax point.
+    prepayment   BOOLEAN NOT NULL DEFAULT FALSE,
+
     note         TEXT NOT NULL DEFAULT '',
 
     -- Cancelled by a credit note. The invoice stays: accounting does not
@@ -119,6 +125,29 @@ CREATE TABLE IF NOT EXISTS invoice_line (
 CREATE INDEX IF NOT EXISTS invoice_line_by_invoice_idx
     ON invoice_line (invoice_id, line_index);
 
+-- What was taken off **one line**, and why.
+--
+-- Its own table rather than columns on `invoice_line`, because a line may carry
+-- several and each is printed as its own figure — UBL's `cac:AllowanceCharge`
+-- inside `cac:InvoiceLine`.
+--
+-- **No tax treatment here**, unlike `invoice_discount`. A line allowance
+-- reduces the line, and the line already says how it is taxed; a document
+-- discount is attached to nothing, so it has to name what it comes off.
+CREATE TABLE IF NOT EXISTS invoice_line_allowance (
+    id             UUID PRIMARY KEY,
+    invoice_id     TEXT NOT NULL REFERENCES invoice (id) ON DELETE CASCADE,
+    line_index     INT  NOT NULL CHECK (line_index >= 0),
+    allowance_index INT NOT NULL CHECK (allowance_index >= 0),
+
+    reason         TEXT NOT NULL,
+    -- Positive: what comes off. `invoice_line.net` is already net of it.
+    amount         BIGINT NOT NULL CHECK (amount > 0),
+
+    CONSTRAINT invoice_line_allowance_is_unique
+        UNIQUE (invoice_id, line_index, allowance_index)
+);
+
 -- The tax breakdown a Saudi invoice has to print: one row per rate, taxed once
 -- on the subtotal rather than line by line.
 CREATE TABLE IF NOT EXISTS invoice_tax (
@@ -157,6 +186,75 @@ CREATE INDEX IF NOT EXISTS invoice_payment_by_invoice_idx
 
 -- The output-tax side of a VAT return, as entries on a tax point.
 --
+-- A credit note against part of an invoice.
+--
+-- **Its own table because it is its own document.** A whole-invoice
+-- cancellation is a fact *about* the invoice — it reverses that invoice's entry
+-- and negates that invoice's bands — so it lives as two columns on `invoice`.
+-- A partial credit note is not: it has its own lines, its own tax breakdown and
+-- its own tax point, and the authority computes its VAT from those rather than
+-- from the invoice it references.
+CREATE TABLE IF NOT EXISTS credit_note (
+    -- The statutory number, from the same gapless series a cancellation draws
+    -- on. Both are credit notes and ZATCA does not care which shape made one.
+    id            TEXT PRIMARY KEY,
+    invoice_id    TEXT NOT NULL REFERENCES invoice (id) ON DELETE CASCADE,
+    -- The client's own key. What makes a retry a no-op.
+    reference     TEXT NOT NULL,
+
+    currency      CHAR(3) NOT NULL,
+    net           BIGINT NOT NULL,
+    tax           BIGINT NOT NULL,
+    gross         BIGINT NOT NULL CHECK (gross = net + tax),
+
+    reason        TEXT NOT NULL DEFAULT '',
+    -- **The credit note's own tax point**, not the invoice's. A credit note
+    -- falls in the period it was issued in, which is the whole argument the
+    -- `vat_entry` view makes below.
+    issued_on     TIMESTAMPTZ NOT NULL,
+    recorded_at   TIMESTAMPTZ NOT NULL,
+    position      BIGINT NOT NULL,
+
+    CONSTRAINT credit_note_reference_is_unique UNIQUE (invoice_id, reference)
+);
+
+CREATE INDEX IF NOT EXISTS credit_note_by_invoice_idx
+    ON credit_note (invoice_id, issued_on DESC);
+
+CREATE TABLE IF NOT EXISTS credit_note_line (
+    id             UUID PRIMARY KEY,
+    credit_note_id TEXT NOT NULL REFERENCES credit_note (id) ON DELETE CASCADE,
+    line_index     INT  NOT NULL CHECK (line_index >= 0),
+
+    -- **Which line of the invoice this credits.** The description and the rate
+    -- below were taken from it, which is what stops a credit note describing
+    -- something the invoice never charged for.
+    against        INT  NOT NULL CHECK (against >= 0),
+
+    description    TEXT NOT NULL,
+    net            BIGINT NOT NULL,
+    -- **The rate the invoice charged**, never today's. A 2019 invoice is
+    -- credited at 5% for ever.
+    vat_category   TEXT NOT NULL CHECK (vat_category IN ('standard', 'zero', 'exempt')),
+    vat_rate_bp    INT  NOT NULL CHECK (vat_rate_bp >= 0),
+
+    CONSTRAINT credit_note_line_is_unique UNIQUE (credit_note_id, line_index)
+);
+
+-- The credit note's own tax breakdown. **Not the invoice's negated** — that is
+-- what a whole-invoice cancellation does, and it is exactly what a partial one
+-- must not do.
+CREATE TABLE IF NOT EXISTS credit_note_tax (
+    id             UUID PRIMARY KEY,
+    credit_note_id TEXT NOT NULL REFERENCES credit_note (id) ON DELETE CASCADE,
+    vat_category   TEXT NOT NULL CHECK (vat_category IN ('standard', 'zero', 'exempt')),
+    vat_rate_bp    INT  NOT NULL CHECK (vat_rate_bp >= 0),
+    net            BIGINT NOT NULL,
+    tax            BIGINT NOT NULL,
+
+    CONSTRAINT credit_note_tax_is_unique UNIQUE (credit_note_id, vat_category, vat_rate_bp)
+);
+
 -- One row per document per rate band: an invoice on the day it was issued, and
 -- a credit note **on its own tax point**, negating what the invoice declared.
 --
@@ -193,11 +291,9 @@ SELECT i.id            AS document_id,
 
 UNION ALL
 
--- The adjustment, negating the same bands the invoice declared. A credit note
--- cancels the whole invoice, so it reverses every band of it.
--- ponytail: partial credit notes would carry their own bands rather than
--- borrowing the invoice's, which is a table of their own and the reason they
--- are not built yet.
+-- The adjustment, negating the same bands the invoice declared. A **whole
+-- invoice** cancellation reverses every band of it, so it can borrow the
+-- invoice's own breakdown.
 SELECT i.credit_note   AS document_id,
        i.credit_note   AS document_number,
        'credit_note'   AS kind,
@@ -209,7 +305,26 @@ SELECT i.credit_note   AS document_id,
        -t.tax
   FROM invoice i
   JOIN invoice_tax t ON t.invoice_id = i.id
- WHERE i.cancelled_on IS NOT NULL;
+ WHERE i.cancelled_on IS NOT NULL
+
+UNION ALL
+
+-- **A partial credit note carries its own bands**, which is why it needed a
+-- table rather than a pair of columns. Borrowing the invoice's would credit the
+-- whole supply for a document that credited part of it — and the return would
+-- be wrong by the difference, in the direction of tax the business never got
+-- back.
+SELECT c.id            AS document_id,
+       c.id            AS document_number,
+       'credit_note'   AS kind,
+       c.issued_on     AS tax_point,
+       c.currency,
+       t.vat_category,
+       t.vat_rate_bp,
+       -t.net,
+       -t.tax
+  FROM credit_note c
+  JOIN credit_note_tax t ON t.credit_note_id = c.id;
 
 -- What is still owed, summed rather than maintained.
 --

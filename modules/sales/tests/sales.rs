@@ -48,6 +48,7 @@ fn riyals(major: i64) -> Money {
 
 fn line(description: &str, net: Money, category: VatCategory) -> DraftLine {
     DraftLine {
+        allowances: Vec::new(),
         description: description.to_owned(),
         net,
         category,
@@ -56,6 +57,7 @@ fn line(description: &str, net: Money, category: VatCategory) -> DraftLine {
 
 fn draft(lines: Vec<DraftLine>) -> Draft {
     Draft {
+        prepayment: false,
         customer: Customer::new("Rawabi Trading").with_vat_number("310000000000003"),
         issued_on: when(),
         due_on: None,
@@ -1324,6 +1326,7 @@ async fn issue_on(fixture: &Fixture, id: &str, day: &str, lines: Vec<DraftLine>)
         &fixture.db,
         &code(id),
         &Draft {
+            prepayment: false,
             customer: Customer::new("Rawabi Trading"),
             issued_on: on(day),
             due_on: None,
@@ -2446,6 +2449,7 @@ async fn owe(
         &fixture.db,
         &code(id),
         &Draft {
+            prepayment: false,
             customer: Customer::new(customer),
             issued_on: on(issued),
             due_on: due.map(on),
@@ -2799,6 +2803,7 @@ async fn owe_customer(
         &fixture.db,
         &code(id),
         &Draft {
+            prepayment: false,
             customer: Customer::new(printed).of(code(reference)),
             issued_on: on(issued),
             due_on: Some(on(issued)),
@@ -3238,6 +3243,7 @@ async fn an_unmatched_buyer_can_be_matched_to_a_record_afterwards() {
             &fixture.db,
             &code(id),
             &Draft {
+                prepayment: false,
                 customer: Customer::new(printed),
                 issued_on: on("2026-03-01"),
                 due_on: Some(on("2026-03-31")),
@@ -3408,6 +3414,963 @@ async fn matching_to_a_customer_who_is_not_there_is_refused() {
     )
     .await
     .expect("the log knows, even though the projection has not run");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Partial credit notes
+// ---------------------------------------------------------------------------
+
+async fn credit_part(
+    fixture: &Fixture,
+    invoice: &str,
+    reference: &str,
+    lines: Vec<sales::CreditLine>,
+) -> Result<sales::Numbered, CommandError<SalesError>> {
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code(invoice),
+        &sales::CreditNote {
+            reference: reference.to_owned(),
+            lines,
+            reason: "cancelled within 24 hours".to_owned(),
+            on: when(),
+        },
+        &Metadata::default(),
+    )
+    .await
+}
+
+/// Credit `net` off line `against` of the invoice. The description and the
+/// treatment come from that line, which is the point.
+fn credit_line(against: u16, net: Money) -> sales::CreditLine {
+    sales::CreditLine { against, net }
+}
+
+/// **The half-a-deposit case**, which is the one a cancellation policy needs.
+/// It posts its own entry rather than reversing the invoice's, because there is
+/// no such thing as reversing half a journal entry.
+#[tokio::test]
+async fn crediting_part_of_an_invoice_takes_back_only_that_part() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-1",
+        vec![line(
+            "Colour treatment",
+            riyals(1_000),
+            VatCategory::Standard,
+        )],
+    )
+    .await
+    .expect("issues");
+
+    let credited = credit_part(
+        &fixture,
+        "INV-PC-1",
+        "half",
+        vec![credit_line(0, riyals(500))],
+    )
+    .await
+    .expect("credits half");
+
+    // Its own number, from the same gapless series a cancellation draws on.
+    assert!(!credited.number.is_empty());
+
+    fixture.project().await;
+
+    // The invoice was 1,000 + 150 VAT. Half is credited, so half stands.
+    assert_eq!(fixture.balance("1100").await, riyals(575), "half is owed");
+    assert_eq!(
+        fixture.balance("4000").await,
+        riyals(-500),
+        "half is revenue"
+    );
+    assert_eq!(fixture.balance("2100").await, money(-7_500), "half the VAT");
+
+    // **The invoice is not cancelled.** `credit_note` and `cancelled_on` mean
+    // "a credit note undid this invoice", and none did — an invoice can carry
+    // several partial ones, so there is no single answer to put there.
+    let invoice = fixture.invoice("INV-PC-1").await.expect("is there");
+    assert_eq!(invoice.summary.credit_note, None);
+
+    let notes = {
+        let mut conn = fixture.db.acquire().await.expect("connection");
+        sales::credit_notes(&mut conn, "INV-PC-1")
+            .await
+            .expect("reads")
+    };
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].net, riyals(500));
+    assert_eq!(notes[0].tax, money(7_500));
+    assert_eq!(notes[0].reference, "half");
+
+    fixture.cleanup().await;
+}
+
+/// **A treatment the invoice never carried is now unrepresentable.** It used to
+/// be a refusal — a caller could name `standard` against a zero-rated invoice
+/// and reclaim VAT nobody charged. Naming a line instead means the rate is the
+/// invoice's by construction, and the only thing left to get wrong is naming a
+/// line that is not there.
+#[tokio::test]
+async fn a_credit_note_cannot_name_a_line_the_invoice_does_not_have() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-2",
+        vec![line("Exported service", riyals(1_000), VatCategory::Zero)],
+    )
+    .await
+    .expect("issues");
+
+    let refused = credit_part(
+        &fixture,
+        "INV-PC-2",
+        "sneaky",
+        vec![credit_line(3, riyals(500))],
+    )
+    .await
+    .expect_err("there is no line 3");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::NoSuchLine { .. })),
+        "{refused:?}"
+    );
+
+    // Nothing moved.
+    fixture.project().await;
+    assert_eq!(fixture.balance("2100").await, money(0));
+    assert_eq!(fixture.balance("1100").await, riyals(1_000));
+
+    fixture.cleanup().await;
+}
+
+/// **Per line, and both lines are at the same rate on purpose.**
+///
+/// With one line standard-rated and one zero-rated the *band* cap catches
+/// everything, and this passes with no per-line check at all — which is what
+/// the first version of this test did, so it asserted nothing it claimed to.
+/// Two lines in one band is the only shape where the line cap does the work:
+/// 500 off a line of 300 sits inside a band of 500 and is still more of that
+/// item than was ever sold.
+#[tokio::test]
+async fn credits_are_capped_per_line_even_within_one_band() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-3",
+        vec![
+            line("Consulting", riyals(300), VatCategory::Standard),
+            line("Products", riyals(200), VatCategory::Standard),
+        ],
+    )
+    .await
+    .expect("issues");
+
+    let refused = credit_part(
+        &fixture,
+        "INV-PC-3",
+        "too-much-of-one-line",
+        vec![credit_line(0, riyals(500))],
+    )
+    .await
+    .expect_err("500 off a line that only ever held 300");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::CreditTooLarge { .. })),
+        "{refused:?}"
+    );
+
+    // The same 500, taken off the lines that actually hold it, is fine.
+    credit_part(
+        &fixture,
+        "INV-PC-3",
+        "both",
+        vec![credit_line(0, riyals(300)), credit_line(1, riyals(200))],
+    )
+    .await
+    .expect("credits each line in full");
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, money(0));
+    assert_eq!(fixture.balance("2100").await, money(0));
+
+    fixture.cleanup().await;
+}
+
+/// Several credit notes against one invoice, and the cap is cumulative.
+#[tokio::test]
+async fn credits_accumulate_until_there_is_nothing_left() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-4",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+
+    for reference in ["first", "second"] {
+        credit_part(
+            &fixture,
+            "INV-PC-4",
+            reference,
+            vec![credit_line(0, riyals(400))],
+        )
+        .await
+        .expect("credits");
+    }
+
+    let refused = credit_part(
+        &fixture,
+        "INV-PC-4",
+        "third",
+        vec![credit_line(0, riyals(400))],
+    )
+    .await
+    .expect_err("only 200 is left");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::CreditTooLarge { .. })),
+        "{refused:?}"
+    );
+
+    credit_part(
+        &fixture,
+        "INV-PC-4",
+        "third",
+        vec![credit_line(0, riyals(200))],
+    )
+    .await
+    .expect("the rest fits");
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, money(0));
+    assert_eq!(fixture.balance("4000").await, money(0));
+
+    let notes = {
+        let mut conn = fixture.db.acquire().await.expect("connection");
+        sales::credit_notes(&mut conn, "INV-PC-4")
+            .await
+            .expect("reads")
+    };
+    assert_eq!(notes.len(), 3, "three documents, three numbers");
+    let mut numbers: Vec<_> = notes.iter().map(|n| n.number.clone()).collect();
+    numbers.sort();
+    numbers.dedup();
+    assert_eq!(numbers.len(), 3, "a number was reused");
+
+    fixture.cleanup().await;
+}
+
+/// A retry issues one document and does not move the series.
+#[tokio::test]
+async fn a_retried_partial_credit_issues_one_document() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-5",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+
+    let first = credit_part(
+        &fixture,
+        "INV-PC-5",
+        "once",
+        vec![credit_line(0, riyals(300))],
+    )
+    .await
+    .expect("credits");
+    let again = credit_part(
+        &fixture,
+        "INV-PC-5",
+        "once",
+        vec![credit_line(0, riyals(300))],
+    )
+    .await
+    .expect("is a retry");
+
+    assert_eq!(again.number, first.number);
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("4000").await,
+        riyals(-700),
+        "the retry credited a second time"
+    );
+
+    // And the next credit note takes the *next* number, not one further on.
+    let next = credit_part(
+        &fixture,
+        "INV-PC-5",
+        "twice",
+        vec![credit_line(0, riyals(100))],
+    )
+    .await
+    .expect("credits");
+    assert_ne!(next.number, first.number);
+
+    fixture.cleanup().await;
+}
+
+/// **The two shapes are mutually exclusive.** Cancelling reverses the whole
+/// issue entry, so on an invoice already partly credited it would take the
+/// credited part back twice — in the books and in the return.
+#[tokio::test]
+async fn a_partly_credited_invoice_cannot_also_be_cancelled() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-6",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    credit_part(
+        &fixture,
+        "INV-PC-6",
+        "part",
+        vec![credit_line(0, riyals(300))],
+    )
+    .await
+    .expect("credits part");
+
+    let refused = credit(&fixture, "INV-PC-6", "CN-WHOLE")
+        .await
+        .expect_err("cancelling would credit the same part twice");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::AlreadyCredited(_))),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// And the other way round: an invoice cancelled outright has nothing left.
+#[tokio::test]
+async fn a_cancelled_invoice_cannot_be_partly_credited() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-7",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    credit(&fixture, "INV-PC-7", "CN-WHOLE")
+        .await
+        .expect("cancels");
+
+    let refused = credit_part(
+        &fixture,
+        "INV-PC-7",
+        "part",
+        vec![credit_line(0, riyals(300))],
+    )
+    .await
+    .expect_err("there is nothing left");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::AlreadyCredited(_))),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The reason it exists, in the one place a tax authority looks.** A partial
+/// credit note carries its own bands; borrowing the invoice's would take the
+/// whole supply out of the return for a document that credited part of it.
+#[tokio::test]
+async fn a_partial_credit_takes_only_its_own_share_out_of_the_vat_return() {
+    let fixture = Fixture::new().await;
+    issue_on(
+        &fixture,
+        "VR-PART",
+        "2026-02-01",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let read = async |fixture: &Fixture| {
+        let mut conn = fixture.db.acquire().await.expect("connection");
+        let filed = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-04-01"))
+            .await
+            .expect("reads");
+        drop(conn);
+        filed
+    };
+    assert_eq!(read(&fixture).await.tax, riyals(150));
+
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code("VR-PART"),
+        &sales::CreditNote {
+            reference: "quarter".to_owned(),
+            lines: vec![credit_line(0, riyals(250))],
+            reason: "partly cancelled".to_owned(),
+            on: on("2026-02-20"),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("credits");
+    fixture.project().await;
+
+    let after = read(&fixture).await;
+    assert_eq!(
+        after.net,
+        riyals(750),
+        "three quarters of the supply stands"
+    );
+    assert_eq!(after.tax, money(11_250), "15% of 750, not zero and not 150");
+
+    fixture.cleanup().await;
+}
+
+/// **A credit note falls in its own period**, like every other document. An
+/// invoice supplied in Q1 and partly credited in Q2 is a Q1 supply and a Q2
+/// adjustment, because re-running a filed return must give the number filed.
+#[tokio::test]
+async fn a_partial_credit_in_a_later_period_does_not_reach_back() {
+    let fixture = Fixture::new().await;
+    issue_on(
+        &fixture,
+        "VR-PART-2",
+        "2026-02-01",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code("VR-PART-2"),
+        &sales::CreditNote {
+            reference: "next-quarter".to_owned(),
+            lines: vec![credit_line(0, riyals(500))],
+            reason: "partly cancelled".to_owned(),
+            on: on("2026-05-05"),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("credits");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let q1 = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-04-01"))
+        .await
+        .expect("reads");
+    let q2 = sales::vat_return(&mut conn, sar(), on("2026-04-01"), on("2026-07-01"))
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(q1.tax, riyals(150), "Q1 is what was filed");
+    assert_eq!(q2.tax, money(-7_500), "the adjustment lands in Q2");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Line-level allowances
+// ---------------------------------------------------------------------------
+
+fn line_with(
+    description: &str,
+    net: Money,
+    category: VatCategory,
+    allowances: Vec<sales::Allowance>,
+) -> DraftLine {
+    DraftLine {
+        description: description.to_owned(),
+        net,
+        category,
+        allowances,
+    }
+}
+
+fn off(reason: &str, amount: Money) -> sales::Allowance {
+    sales::Allowance {
+        reason: reason.to_owned(),
+        amount,
+    }
+}
+
+/// **A line's allowance comes off before the tax**, because the standard says
+/// the line net amount *is* the price less its allowances — and that is the
+/// figure a return is built from.
+#[tokio::test]
+async fn an_allowance_on_a_line_reduces_what_that_line_is_taxed_on() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-LA-1",
+        vec![line_with(
+            "Consulting",
+            riyals(1_000),
+            VatCategory::Standard,
+            vec![off("Loyalty", riyals(100))],
+        )],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    // 1,000 less 100 is 900, taxed at 15% is 135.
+    let invoice = fixture.invoice("INV-LA-1").await.expect("is there");
+    assert_eq!(
+        invoice.summary.net,
+        riyals(900),
+        "net is after the allowance"
+    );
+    assert_eq!(invoice.summary.tax, money(13_500));
+    assert_eq!(invoice.summary.gross, money(103_500));
+
+    assert_eq!(fixture.balance("4000").await, riyals(-900), "revenue");
+    assert_eq!(fixture.balance("2100").await, money(-13_500), "output tax");
+
+    fixture.cleanup().await;
+}
+
+/// It reaches the VAT return as the smaller number, which is the only place
+/// getting this wrong would cost anything.
+#[tokio::test]
+async fn a_line_allowance_reaches_the_vat_return() {
+    let fixture = Fixture::new().await;
+    issue_on(
+        &fixture,
+        "VR-LA",
+        "2026-02-01",
+        vec![line_with(
+            "Consulting",
+            riyals(1_000),
+            VatCategory::Standard,
+            vec![off("Loyalty", riyals(200))],
+        )],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let filed = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-04-01"))
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(filed.net, riyals(800), "800, not 1,000");
+    assert_eq!(filed.tax, riyals(120), "15% of 800");
+
+    fixture.cleanup().await;
+}
+
+/// **A line allowance and a document discount are different things**, and an
+/// invoice can carry both: the line one comes off first, then the document one
+/// comes off the band.
+#[tokio::test]
+async fn a_line_allowance_and_a_document_discount_both_apply() {
+    let fixture = Fixture::new().await;
+    sales::issue_invoice(
+        &fixture.db,
+        &code("INV-LA-2"),
+        &Draft {
+            prepayment: false,
+            customer: sales::Customer::new("سارة"),
+            issued_on: when(),
+            due_on: None,
+            currency: sar(),
+            lines: vec![line_with(
+                "Consulting",
+                riyals(1_000),
+                VatCategory::Standard,
+                vec![off("Loyalty", riyals(100))],
+            )],
+            discounts: vec![sales::DraftDiscount {
+                reason: "Goodwill".to_owned(),
+                amount: riyals(50),
+                category: VatCategory::Standard,
+            }],
+            note: String::new(),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    // 1,000 − 100 (line) = 900; − 50 (document) = 850; tax 127.50.
+    let invoice = fixture.invoice("INV-LA-2").await.expect("is there");
+    assert_eq!(invoice.summary.net, riyals(850));
+    assert_eq!(invoice.summary.tax, money(12_750));
+    // **The line one is inside the line; the document one is the invoice's.**
+    // 850 could only come from both being applied, each once.
+
+    fixture.cleanup().await;
+}
+
+/// An allowance bigger than the line it comes off is refused. A line that comes
+/// to nothing or less is not a discount, it is a mistake.
+#[tokio::test]
+async fn an_allowance_cannot_be_larger_than_its_line() {
+    let fixture = Fixture::new().await;
+    let refused = issue(
+        &fixture,
+        "INV-LA-3",
+        vec![line_with(
+            "Consulting",
+            riyals(100),
+            VatCategory::Standard,
+            vec![off("Too much", riyals(100))],
+        )],
+    )
+    .await
+    .expect_err("an allowance that swallows its line");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::Tax(_))),
+        "{refused:?}"
+    );
+
+    let refused = issue(
+        &fixture,
+        "INV-LA-4",
+        vec![line_with(
+            "Consulting",
+            riyals(100),
+            VatCategory::Standard,
+            vec![off("Backwards", riyals(-10))],
+        )],
+    )
+    .await
+    .expect_err("a negative allowance is a surcharge");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::Tax(_))),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **It survives a rebuild.** The allowance is on the event, so a replay
+/// reproduces the line and the document it renders to.
+#[tokio::test]
+async fn a_line_allowance_survives_a_rebuild() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-LA-5",
+        vec![line_with(
+            "Consulting",
+            riyals(1_000),
+            VatCategory::Standard,
+            vec![off("Loyalty", riyals(100)), off("Damaged", riyals(50))],
+        )],
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let pool = fixture.tenant_pool().await;
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT reason, amount FROM proj_sales.invoice_line_allowance
+          WHERE invoice_id = 'INV-LA-5' ORDER BY allowance_index",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("reads");
+    pool.close().await;
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0], ("Loyalty".to_owned(), 10_000));
+    assert_eq!(rows[1], ("Damaged".to_owned(), 5_000));
+
+    let invoice = fixture.invoice("INV-LA-5").await.expect("is there");
+    assert_eq!(invoice.summary.net, riyals(850));
+
+    fixture.cleanup().await;
+}
+
+/// **Both caps, because they catch different things.**
+///
+/// A document discount comes off the *band*, so an invoice's lines sum to more
+/// than its bands whenever it carried one — two lines of 100 with 50 off the
+/// document were charged 150, not 200. The per-line cap would happily allow
+/// both lines in full; the band cap is what refuses the extra 50 and the 7.50
+/// of VAT that was never collected on it.
+#[tokio::test]
+async fn the_band_cap_still_bites_when_a_document_discount_shrank_the_invoice() {
+    let fixture = Fixture::new().await;
+    sales::issue_invoice(
+        &fixture.db,
+        &code("INV-PC-8"),
+        &Draft {
+            prepayment: false,
+            customer: sales::Customer::new("سارة"),
+            issued_on: when(),
+            due_on: None,
+            currency: sar(),
+            lines: vec![
+                line("Consulting", riyals(100), VatCategory::Standard),
+                line("Training", riyals(100), VatCategory::Standard),
+            ],
+            discounts: vec![sales::DraftDiscount {
+                reason: "Goodwill".to_owned(),
+                amount: riyals(50),
+                category: VatCategory::Standard,
+            }],
+            note: String::new(),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("issues");
+    fixture.project().await;
+
+    let invoice = fixture.invoice("INV-PC-8").await.expect("is there");
+    assert_eq!(invoice.summary.net, riyals(150), "the lines say 200");
+
+    // Each line is within its own cap, and together they exceed the band.
+    let refused = credit_part(
+        &fixture,
+        "INV-PC-8",
+        "both-in-full",
+        vec![credit_line(0, riyals(100)), credit_line(1, riyals(100))],
+    )
+    .await
+    .expect_err("200 credited against 150 charged");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::CreditTooLarge { .. })),
+        "{refused:?}"
+    );
+
+    // What was actually charged, credited in full, is fine.
+    credit_part(
+        &fixture,
+        "INV-PC-8",
+        "what-was-charged",
+        vec![credit_line(0, riyals(100)), credit_line(1, riyals(50))],
+    )
+    .await
+    .expect("150 is what it came to");
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, money(0), "square");
+    assert_eq!(fixture.balance("2100").await, money(0), "no tax left");
+
+    fixture.cleanup().await;
+}
+
+/// **The document says what the invoice said.** The description and the rate
+/// come off the named line, so a credit note cannot describe something that was
+/// never sold — which is what it could do when the caller typed them.
+#[tokio::test]
+async fn a_credit_note_takes_its_wording_and_its_rate_from_the_line() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-9",
+        vec![
+            line("Colour treatment", riyals(300), VatCategory::Standard),
+            line("Exported advice", riyals(200), VatCategory::Zero),
+        ],
+    )
+    .await
+    .expect("issues");
+
+    let credited = credit_part(
+        &fixture,
+        "INV-PC-9",
+        "returned",
+        vec![credit_line(1, riyals(200))],
+    )
+    .await
+    .expect("credits the zero-rated line");
+    fixture.project().await;
+
+    let pool = fixture.tenant_pool().await;
+    let rows: Vec<(String, i64, String, i32)> = sqlx::query_as(
+        "SELECT description, net, vat_category, vat_rate_bp
+           FROM proj_sales.credit_note_line WHERE credit_note_id = $1",
+    )
+    .bind(&credited.number)
+    .fetch_all(&pool)
+    .await
+    .expect("reads");
+    pool.close().await;
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "Exported advice", "it invented a description");
+    assert_eq!(rows[0].2, "zero", "it credited at the wrong treatment");
+    assert_eq!(rows[0].3, 0, "it credited at the wrong rate");
+
+    // Zero-rated, so nothing comes off the tax.
+    assert_eq!(fixture.balance("2100").await, money(-4_500), "15% of 300");
+
+    fixture.cleanup().await;
+}
+
+/// Two lines of one credit note naming the same invoice line are capped on what
+/// they come to **together**, not each in turn.
+#[tokio::test]
+async fn one_credit_note_cannot_take_a_line_twice() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-10",
+        // **A second line, so the band has room.** With one line the band cap
+        // would catch this and the test would prove nothing about the line cap.
+        vec![
+            line("Consulting", riyals(100), VatCategory::Standard),
+            line("Products", riyals(100), VatCategory::Standard),
+        ],
+    )
+    .await
+    .expect("issues");
+
+    let refused = credit_part(
+        &fixture,
+        "INV-PC-10",
+        "twice",
+        vec![credit_line(0, riyals(60)), credit_line(0, riyals(60))],
+    )
+    .await
+    .expect_err("120 off a line of 100, with band room to spare");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::CreditTooLarge { .. })),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **An invoice credited in full refuses the next credit note**, whether it got
+/// there in one go or in instalments. Nothing is left to take back.
+#[tokio::test]
+async fn a_fully_credited_invoice_refuses_another_credit_note() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-PC-11",
+        vec![
+            line("Consulting", riyals(300), VatCategory::Standard),
+            line("Exported", riyals(200), VatCategory::Zero),
+        ],
+    )
+    .await
+    .expect("issues");
+
+    // Down to nothing, in pieces.
+    for (nth, (against, amount)) in [(0_u16, riyals(100)), (0, riyals(200)), (1, riyals(200))]
+        .into_iter()
+        .enumerate()
+    {
+        credit_part(
+            &fixture,
+            "INV-PC-11",
+            &format!("part-{nth}"),
+            vec![credit_line(against, amount)],
+        )
+        .await
+        .expect("credits");
+    }
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, money(0), "nothing owed");
+    assert_eq!(fixture.balance("4000").await, money(0), "no supply stands");
+    assert_eq!(fixture.balance("2100").await, money(0), "no tax owed");
+
+    // **And now there is nothing left**, on either line, however small.
+    for against in [0_u16, 1] {
+        let refused = credit_part(
+            &fixture,
+            "INV-PC-11",
+            &format!("one-more-{against}"),
+            vec![credit_line(against, money(1))],
+        )
+        .await
+        .expect_err("a fully credited invoice was credited again");
+        assert!(
+            matches!(rejection(&refused), Some(SalesError::CreditTooLarge { .. })),
+            "{refused:?}"
+        );
+    }
+
+    // Nothing moved on the refusal.
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, money(0));
+    let notes = {
+        let mut conn = fixture.db.acquire().await.expect("connection");
+        sales::credit_notes(&mut conn, "INV-PC-11")
+            .await
+            .expect("reads")
+    };
+    assert_eq!(notes.len(), 3, "a refused credit note was issued anyway");
+
+    fixture.cleanup().await;
+}
+
+/// **The discounted case, where the line cap alone would let it through.**
+///
+/// Two lines of 100 with 50 off the document were charged 150. Credit that 150
+/// and the invoice is square — but 50 of *line* room is still sitting there,
+/// because lines are stated before a document discount. Only the band cap knows
+/// the difference, and this is the test that would fail if it were dropped.
+#[tokio::test]
+async fn a_discounted_invoice_credited_to_its_band_refuses_the_line_room_left_over() {
+    let fixture = Fixture::new().await;
+    sales::issue_invoice(
+        &fixture.db,
+        &code("INV-PC-12"),
+        &Draft {
+            prepayment: false,
+            customer: sales::Customer::new("سارة"),
+            issued_on: when(),
+            due_on: None,
+            currency: sar(),
+            lines: vec![
+                line("Consulting", riyals(100), VatCategory::Standard),
+                line("Training", riyals(100), VatCategory::Standard),
+            ],
+            discounts: vec![sales::DraftDiscount {
+                reason: "Goodwill".to_owned(),
+                amount: riyals(50),
+                category: VatCategory::Standard,
+            }],
+            note: String::new(),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("issues");
+
+    credit_part(
+        &fixture,
+        "INV-PC-12",
+        "all-of-it",
+        vec![credit_line(0, riyals(100)), credit_line(1, riyals(50))],
+    )
+    .await
+    .expect("credits what was charged");
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, money(0), "square");
+    assert_eq!(fixture.balance("2100").await, money(0), "no tax owed");
+
+    // Line 1 still has 50 of face value that was never charged. The band knows.
+    let refused = credit_part(
+        &fixture,
+        "INV-PC-12",
+        "the-leftover",
+        vec![credit_line(1, riyals(50))],
+    )
+    .await
+    .expect_err("credited the discount back as though it had been charged");
+    assert!(
+        matches!(rejection(&refused), Some(SalesError::CreditTooLarge { .. })),
+        "{refused:?}"
+    );
 
     fixture.cleanup().await;
 }

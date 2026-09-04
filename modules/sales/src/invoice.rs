@@ -6,7 +6,7 @@ use erp_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::vat::{Totals, Vat};
+use crate::vat::{TaxBand, Totals, Vat};
 
 /// Who the invoice is addressed to, **as it was at the time**.
 ///
@@ -127,12 +127,81 @@ impl Customer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvoiceLine {
     pub description: String,
-    /// Excluding tax. Negative is allowed: a discount is a line.
+    /// **What this line is charged, excluding tax and after its own
+    /// allowances.** UBL's `LineExtensionAmount`, BT-131 — which the standard
+    /// defines as the price less the line's allowances, and which is what the
+    /// tax is worked out on.
+    ///
+    /// Negative is allowed: a discount is a line.
     pub net: Money,
     /// The treatment **and the rate that applied when it was issued**. Written
     /// once and never recomputed, so a rate change cannot restate a filed
     /// return (architecture L5).
     pub vat: Vat,
+    /// **What was taken off this line**, each printed as its own figure.
+    ///
+    /// A line's allowance carries no tax treatment of its own: it reduces the
+    /// line, and the line already says how it is taxed. That is the difference
+    /// from [`Discount`], which is taken off the *document* and therefore has
+    /// to name which treatment it comes off — and it is why UBL puts a
+    /// `cac:TaxCategory` on one and not the other.
+    ///
+    /// `#[serde(default)]`, so every line written before this existed decodes
+    /// as one with none, which is what it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowances: Vec<Allowance>,
+}
+
+impl InvoiceLine {
+    /// What the line came to **before** its own allowances — UBL's item net
+    /// price, BT-146, and the base the allowance is taken from.
+    ///
+    /// Derived rather than stored, so the two cannot disagree.
+    pub fn before_allowances(&self) -> Result<Money, crate::vat::TaxError> {
+        self.allowances
+            .iter()
+            .try_fold(self.net, |running, a| running.checked_add(a.amount))
+            .map_err(Into::into)
+    }
+}
+
+/// One line of a credit note, and the invoice line it comes off.
+///
+/// **The reference is the point.** A credit note that only said "500 of
+/// standard-rated" described nothing: the description was retyped by the caller
+/// and could say anything, and nothing tied the document to what was actually
+/// returned. Naming the line takes the wording and the treatment from the
+/// invoice, so a credit note can only ever describe something the invoice
+/// charged for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreditedLine {
+    /// Which line of the invoice, by position.
+    pub against: u16,
+    /// The line as this credit note states it — the invoice line's own
+    /// description and treatment, at the amount being credited.
+    #[serde(flatten)]
+    pub line: InvoiceLine,
+}
+
+/// Something taken off **one line**.
+///
+/// # Why this has no tax treatment and [`Discount`] does
+///
+/// Because the line already has one. An allowance on a line reduces that line,
+/// so what it comes off at is settled; a discount on the whole document is not
+/// attached to anything, so it has to say which treatment it reduces or the
+/// taxable amounts do not add up.
+///
+/// UBL models the difference the same way: `cac:AllowanceCharge` inside
+/// `cac:InvoiceLine` takes an amount and a reason and **no `cac:TaxCategory`**,
+/// while the document-level one requires the category and the rate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Allowance {
+    /// Why. A customer reads it, so it is text rather than a code.
+    pub reason: String,
+    /// What comes off, **positive**. A negative allowance is a surcharge, which
+    /// is a different element and a different conversation.
+    pub amount: Money,
 }
 
 /// A line as a client sends it: what is being charged for, and how it is
@@ -143,8 +212,13 @@ pub struct InvoiceLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftLine {
     pub description: String,
+    /// **Before this line's own allowances.** The list amount; what is charged
+    /// is this less [`Self::allowances`], and that is what gets taxed.
     pub net: Money,
     pub category: ledger::VatCategory,
+    /// What comes off this line, each with its own reason.
+    #[allow(clippy::struct_field_names, reason = "it is what it is called")]
+    pub allowances: Vec<Allowance>,
 }
 
 /// Something taken off the whole invoice, rather than off one line.
@@ -222,6 +296,18 @@ pub enum InvoiceEvent {
         /// rate change or a rounding fix silently restate a document somebody
         /// has already filed a return against.
         totals: Totals,
+        /// **Whether this bills for money taken before the supply.** A deposit.
+        ///
+        /// It changes what the document *is* to the authority — a prepayment
+        /// invoice rather than an ordinary one — because receiving
+        /// consideration is itself a tax point and the two are reported
+        /// differently. Nothing else about it differs: same series, same
+        /// clearance, same bands.
+        ///
+        /// `#[serde(default)]`, so every invoice issued before deposits existed
+        /// decodes as the ordinary one it was, and no upcaster is needed.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        prepayment: bool,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
     },
@@ -243,6 +329,40 @@ pub enum InvoiceEvent {
         /// thing — see [`Invoice::cancelled_by`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<String>,
+        reason: String,
+        on: Timestamp,
+    },
+    /// **Part of the invoice credited, as a document with lines of its own.**
+    ///
+    /// The difference from [`Self::Cancelled`] is not the size. A cancellation
+    /// says the supply is undone and reverses the journal entry the invoice
+    /// posted; this says *some* of it is undone and posts its own entry for
+    /// what it takes back. So it carries lines, allowances and totals the way
+    /// [`Self::Issued`] does — because a credit note is a document in its own
+    /// right, with its own number, its own tax point and its own place in the
+    /// ZATCA chain, and the authority computes its bands from its own lines.
+    ///
+    /// **The rates are the invoice's, never today's.** A 2019 invoice is
+    /// credited at 5% for ever; resolving the current rate here would restate a
+    /// return somebody filed six years ago (L5). The command reads them off the
+    /// invoice's own bands, which is also what makes crediting a category the
+    /// invoice never had impossible rather than merely discouraged.
+    ///
+    /// An invoice may have several of these. It may not have one *and* a
+    /// [`Self::Cancelled`] — see `Invoice::credited`.
+    Credited {
+        /// The credit note's number, from the tenant's gapless series. The same
+        /// series [`Self::Cancelled`] draws on: both are credit notes, and the
+        /// authority does not care which shape produced one.
+        credit_note: String,
+        /// The client's key for this credit, which is what makes a retried
+        /// request a no-op.
+        reference: String,
+        /// Each line, and **which line of the invoice it credits**.
+        lines: Vec<CreditedLine>,
+        /// Computed once, here, and stored — the same argument
+        /// [`Self::Issued`] makes about its own.
+        totals: Totals,
         reason: String,
         on: Timestamp,
     },
@@ -294,10 +414,11 @@ pub enum InvoiceEvent {
 }
 
 impl InvoiceEvent {
-    pub const NAMES: [&'static str; 5] = [
+    pub const NAMES: [&'static str; 6] = [
         "sales.invoice.issued",
         "sales.invoice.payment_recorded",
         "sales.invoice.cancelled",
+        "sales.invoice.credited",
         "sales.invoice.refunded",
         "sales.invoice.customer_attached",
     ];
@@ -309,8 +430,9 @@ impl DomainEvent for InvoiceEvent {
             Self::Issued { .. } => Self::NAMES[0],
             Self::PaymentRecorded { .. } => Self::NAMES[1],
             Self::Cancelled { .. } => Self::NAMES[2],
-            Self::Refunded { .. } => Self::NAMES[3],
-            Self::CustomerAttached { .. } => Self::NAMES[4],
+            Self::Credited { .. } => Self::NAMES[3],
+            Self::Refunded { .. } => Self::NAMES[4],
+            Self::CustomerAttached { .. } => Self::NAMES[5],
         })
     }
 
@@ -334,10 +456,42 @@ pub struct Invoice {
     /// Cancelled, and under which client key — the client's `reference`, or on
     /// an older event the credit note's identifier, which was the same thing.
     /// Compared against on a retry.
+    /// Whether it billed for money taken before the supply.
+    pub prepayment: bool,
     pub cancelled_by: Option<String>,
     /// The credit note's number, for reporting it back to a caller who asked to
     /// cancel an invoice that was already cancelled.
     pub credit_note: Option<String>,
+    /// **The lines this invoice was issued with**, which is what a credit note
+    /// names. Kept on the aggregate rather than looked up, because what a line
+    /// said and what it was charged at are facts about *this* invoice and there
+    /// is nowhere else that still knows them.
+    pub lines: Vec<InvoiceLine>,
+    /// What has been credited against each line so far, cumulatively, indexed
+    /// alongside [`Self::lines`].
+    pub credited_lines: Vec<Money>,
+    /// **The bands this invoice was issued under.**
+    ///
+    /// Kept as well as the lines, and not derivable from them: a document
+    /// discount comes off the *band*, so the lines sum to more than the bands
+    /// on any invoice that carried one. Both caps are needed and they catch
+    /// different things — see `crate::commands::credit_part_in`.
+    pub bands: Vec<TaxBand>,
+    /// What has been credited so far, per band, cumulatively.
+    ///
+    /// **Per band and not one total**, because that is the check that protects
+    /// the tax: crediting 100 of standard-rated against an invoice of 50
+    /// standard and 50 zero-rated reclaims VAT that was never charged, and a
+    /// gross total of 100 against 100 would not notice.
+    pub credited: Vec<TaxBand>,
+    /// Credit notes already issued against part of this invoice, as
+    /// `(the caller's reference, the number it got)`.
+    ///
+    /// **Both halves, because a retry needs the number it was given the first
+    /// time.** An invoice may have several, so "the credit note" is not a
+    /// question with one answer here — which is also why `credit_note` above
+    /// stays the *cancellation's* and is not touched by these.
+    pub credits: Vec<(String, String)>,
     /// Payment references already recorded. Small — an invoice is settled in a
     /// handful of instalments at most — and the only way to make recording a
     /// payment idempotent without a separate table.
@@ -368,6 +522,8 @@ impl Aggregate for Invoice {
                 customer,
                 currency,
                 totals,
+                lines,
+                prepayment,
                 ..
             } => {
                 self.issued = true;
@@ -377,6 +533,44 @@ impl Aggregate for Invoice {
                 self.gross = Some(totals.gross);
                 self.paid = Some(Money::zero(*currency));
                 self.refunded = Some(Money::zero(*currency));
+                self.bands.clone_from(&totals.bands);
+                self.lines.clone_from(lines);
+                self.credited_lines = lines
+                    .iter()
+                    .map(|line| Money::zero(line.net.currency()))
+                    .collect();
+                self.prepayment = *prepayment;
+            }
+            InvoiceEvent::Credited {
+                credit_note,
+                reference,
+                lines,
+                totals,
+                ..
+            } => {
+                self.credits.push((reference.clone(), credit_note.clone()));
+                for line in lines {
+                    if let Some(seen) = self.credited_lines.get_mut(line.against as usize) {
+                        // Saturating for the reason `paid` is: `apply` cannot
+                        // fail, and the command refused anything that would not
+                        // fit before this ran.
+                        *seen = seen.checked_add(line.line.net).unwrap_or(*seen);
+                    }
+                }
+                for band in &totals.bands {
+                    match self.credited.iter_mut().find(|b| {
+                        b.category == band.category && b.basis_points == band.basis_points
+                    }) {
+                        // Saturating for the reason `paid` is: `apply` cannot
+                        // fail, and the command refused anything that would not
+                        // fit before this ran.
+                        Some(seen) => {
+                            seen.net = seen.net.checked_add(band.net).unwrap_or(seen.net);
+                            seen.tax = seen.tax.checked_add(band.tax).unwrap_or(seen.tax);
+                        }
+                        None => self.credited.push(*band),
+                    }
+                }
             }
             InvoiceEvent::Cancelled {
                 credit_note,
@@ -414,6 +608,60 @@ impl Aggregate for Invoice {
 }
 
 impl Invoice {
+    /// The number a credit note under this reference was issued as, if one was.
+    ///
+    /// **What a retry is answered with.** Reporting the most recent credit
+    /// note would be wrong the moment an invoice has two, which is the whole
+    /// point of partial ones.
+    #[must_use]
+    pub fn credit_note_for(&self, reference: &str) -> Option<&str> {
+        self.credits
+            .iter()
+            .find(|(seen, _)| seen == reference)
+            .map(|(_, number)| number.as_str())
+    }
+
+    /// Whether this credit note has already been issued.
+    #[must_use]
+    pub fn has_credit(&self, reference: &str) -> bool {
+        self.credit_note_for(reference).is_some()
+    }
+
+    /// Whether any part of this invoice has been credited.
+    #[must_use]
+    pub fn is_partly_credited(&self) -> bool {
+        !self.credits.is_empty()
+    }
+
+    /// The rate this invoice charged a category at, if it charged one at all.
+    ///
+    /// **The band check, as a lookup.** A category with no band was never on
+    /// this invoice, so there is no rate to credit it at and no tax to reclaim
+    /// — which is why this returning `None` is a refusal and not a default.
+    #[must_use]
+    pub fn rate_for(&self, category: ledger::VatCategory) -> Option<i32> {
+        self.bands
+            .iter()
+            .find(|b| b.category == category)
+            .map(|b| b.basis_points)
+    }
+
+    /// What is left to credit in one band. `None` when the invoice had no such
+    /// band at that rate.
+    #[must_use]
+    pub fn creditable_in(&self, category: ledger::VatCategory, basis_points: i32) -> Option<Money> {
+        let issued = self
+            .bands
+            .iter()
+            .find(|b| b.category == category && b.basis_points == basis_points)?;
+        let credited = self
+            .credited
+            .iter()
+            .find(|b| b.category == category && b.basis_points == basis_points)
+            .map_or_else(|| Money::zero(issued.net.currency()), |b| b.net);
+        issued.net.checked_sub(credited).ok()
+    }
+
     /// What is still owed. `None` before the invoice exists.
     #[must_use]
     pub fn outstanding(&self) -> Option<Money> {
@@ -471,12 +719,14 @@ mod tests {
         let vat = Vat::shipped(VatCategory::Standard);
         let net = Money::from_minor(gross_net, currency);
         InvoiceEvent::Issued {
+            prepayment: false,
             number: Some("INV-00001".to_owned()),
             customer: Box::new(Customer::new("Acme")),
             issued_on: Timestamp::UNIX_EPOCH,
             due_on: None,
             currency,
             lines: vec![InvoiceLine {
+                allowances: Vec::new(),
                 description: "Consulting".to_owned(),
                 net,
                 vat,

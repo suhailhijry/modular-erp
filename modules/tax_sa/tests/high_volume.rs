@@ -222,6 +222,7 @@ impl Busy {
             &self.db,
             &code(&format!("INV-{i:07}")),
             &Draft {
+                prepayment: false,
                 customer,
                 issued_on: on(&format!("2026-{month:02}-{day:02}")),
                 due_on: Some(on(&format!("2026-{month:02}-{day:02}"))),
@@ -231,11 +232,13 @@ impl Busy {
                         description: "استشارات".to_owned(),
                         net: Money::from_minor(25_000 + (i % 997) * 13, sar()),
                         category: VatCategory::Standard,
+                        allowances: Vec::new(),
                     },
                     DraftLine {
                         description: "مصاريف".to_owned(),
                         net: Money::from_minor(4_500, sar()),
                         category: VatCategory::Standard,
+                        allowances: Vec::new(),
                     },
                 ],
                 discounts: Vec::new(),

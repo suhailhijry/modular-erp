@@ -223,6 +223,7 @@ fn coffee(tenders: Vec<Tender>) -> Basket {
     Basket {
         customer: sales::Customer::new("زبون"),
         lines: vec![sales::DraftLine {
+            allowances: Vec::new(),
             description: "قهوة".to_owned(),
             net: money(1_500),
             category: ledger::VatCategory::Standard,

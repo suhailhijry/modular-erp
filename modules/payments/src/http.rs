@@ -46,6 +46,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_saved_cards, save_gateway_card))
         .routes(routes!(forget_gateway_card))
         .routes(routes!(charge_saved_card))
+        .routes(routes!(retain_deposit))
+        .routes(routes!(deposit_policy, set_deposit_policy))
 }
 
 /// This module's own failures plus everything any route can produce.
@@ -80,8 +82,14 @@ struct NewGatewayPayment {
     /// callback names this and nothing else, so a payment recorded without one
     /// can never be settled.
     gateway_id: String,
-    /// The invoice this is collecting against.
-    invoice: String,
+    /// The invoice this is collecting against. **Exactly one of this and
+    /// `advance_for`.**
+    #[serde(default)]
+    invoice: Option<String>,
+    /// **A deposit**, when nothing has been billed yet. Settling it raises a
+    /// prepayment invoice, because receiving the money is itself a tax point.
+    #[serde(default)]
+    deposit: Option<NewDeposit>,
     /// Minor units — halalas for SAR. Never a decimal.
     amount: i64,
     /// ISO-4217, three letters.
@@ -90,6 +98,27 @@ struct NewGatewayPayment {
     #[serde(default)]
     #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
     started_at: Option<Timestamp>,
+}
+
+/// A deposit: what it secures, what it comes to before tax, and who it is
+/// billed to.
+///
+/// **The net is sent, not the gross alone.** A deposit is a fraction of
+/// something already priced, and the price had a net; working the net back out
+/// of a total does not always land, so it travels with the deposit instead. The
+/// `amount` charged must equal this plus the tax on it, and settling refuses if
+/// it does not.
+#[derive(Debug, Deserialize, ToSchema)]
+struct NewDeposit {
+    /// What it secures — a booking. Opaque to this module.
+    against: String,
+    /// **Before tax**, in minor units. The prepayment invoice is raised for it.
+    net: i64,
+    /// The buyer, as the prepayment invoice will print them.
+    buyer_name: String,
+    /// Giving one makes it a standard invoice rather than a simplified one.
+    #[serde(default)]
+    buyer_vat_number: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -119,7 +148,12 @@ struct GatewayPaymentView {
     id: String,
     provider: String,
     gateway_id: String,
-    invoice: String,
+    /// The invoice, when it collects against one.
+    invoice: Option<String>,
+    /// **What a deposit was taken for**, when it does not. Exactly one of the
+    /// two is present, and a settled deposit has both — its own prepayment
+    /// invoice, and the booking it secures.
+    advance_for: Option<String>,
     amount: i64,
     currency: String,
     /// `pending`, `settled`, `failed`, `refunded` or `voided`.
@@ -138,7 +172,10 @@ struct GatewayPaymentView {
 
 #[derive(Debug, Deserialize, ToSchema, utoipa::IntoParams)]
 struct Against {
-    /// The invoice to list attempts against.
+    /// **What to list attempts against** — an invoice, or the booking a deposit
+    /// was taken for. One parameter for both, because a caller asking what has
+    /// been collected against a thing does not want to know which shape the
+    /// answer is.
     invoice: String,
 }
 
@@ -148,6 +185,7 @@ fn view(row: crate::PaymentRow) -> GatewayPaymentView {
         provider: row.provider,
         gateway_id: row.gateway_id,
         invoice: row.invoice,
+        advance_for: row.advance_for,
         amount: row.amount.minor(),
         currency: row.amount.currency().to_string(),
         stage: row.stage,
@@ -230,7 +268,6 @@ async fn start_payment(
 ) -> Result<(StatusCode, Json<GatewayPaymentRecorded>), Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
 
-    let invoice = parse_id(&body.invoice, locale)?;
     let currency = erp_types::CurrencyCode::new(&body.currency).map_err(|e| {
         bad_request(
             erp_web::messages::MALFORMED_BODY,
@@ -239,6 +276,12 @@ async fn start_payment(
             locale,
         )
     })?;
+    let collects = collects_of(
+        body.invoice.as_ref(),
+        body.deposit.as_ref(),
+        currency,
+        locale,
+    )?;
     if !body.amount.is_positive() {
         return Err(bad_request(
             erp_web::messages::MALFORMED_BODY,
@@ -259,7 +302,7 @@ async fn start_payment(
         &crate::Attempt {
             provider: body.provider.clone(),
             gateway_id: body.gateway_id.clone(),
-            invoice,
+            collects,
             amount: Money::from_minor(body.amount, currency),
         },
         body.started_at.unwrap_or_else(chrono::Utc::now),
@@ -798,8 +841,14 @@ struct NewSavedCard {
 /// What somebody wants taken off a card that is already on file.
 #[derive(Debug, Deserialize, ToSchema)]
 struct NewSavedCardCharge {
-    /// The invoice this is collecting against.
-    invoice: String,
+    /// The invoice this is collecting against. **Exactly one of this and
+    /// `advance_for`.**
+    #[serde(default)]
+    invoice: Option<String>,
+    /// A deposit, when there is no invoice. A saved card is exactly how a
+    /// returning customer's deposit gets charged.
+    #[serde(default)]
+    deposit: Option<NewDeposit>,
     /// Minor units — halalas for SAR. Never a decimal.
     amount: i64,
     /// ISO-4217, three letters.
@@ -1032,7 +1081,6 @@ async fn charge_saved_card(
     require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let card = parse_id(&card, locale)?;
-    let invoice = parse_id(&body.invoice, locale)?;
     let currency = erp_types::CurrencyCode::new(&body.currency).map_err(|e| {
         bad_request(
             erp_web::messages::MALFORMED_BODY,
@@ -1041,6 +1089,12 @@ async fn charge_saved_card(
             locale,
         )
     })?;
+    let collects = collects_of(
+        body.invoice.as_ref(),
+        body.deposit.as_ref(),
+        currency,
+        locale,
+    )?;
     if !body.amount.is_positive() {
         return Err(bad_request(
             erp_web::messages::MALFORMED_BODY,
@@ -1107,7 +1161,7 @@ async fn charge_saved_card(
         &crate::Collection {
             card,
             provider: on_file.provider,
-            invoice,
+            collects,
             amount: Money::from_minor(body.amount, currency),
             callback_url: body.callback_url,
         },
@@ -1126,6 +1180,172 @@ async fn charge_saved_card(
             position: committed.at.map(erp_types::LogPosition::get),
         }),
     ))
+}
+
+/// Whether keeping a deposit is a sale.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+struct DepositPolicy {
+    /// **The tax is not what this decides.** A deposit is billed by a
+    /// prepayment invoice when the money arrives, so the VAT was declared then
+    /// and is not reversed when the money is kept.
+    ///
+    /// What it decides is whether the money the business kept is service
+    /// revenue or a line of its own — which is what lets them say, a year
+    /// later, how much of their income was selling something and how much was
+    /// people not turning up. Defaults to `true`, which is what the document
+    /// already says.
+    supply: bool,
+}
+
+/// **Keep a deposit the customer did not come back for.**
+///
+/// It keeps everything not already refunded. A policy that returns half is a
+/// refund of half and then this — two facts, recorded as two.
+///
+/// **It raises no document and declares no tax.** Both happened when the
+/// deposit settled, because receiving the money is itself a tax point. What
+/// this records is that nobody is getting it back.
+#[utoipa::path(
+    post,
+    path = "/v1/payments/{payment}/retention",
+    tag = "payments",
+    params(("payment" = String, Path, description = "The deposit being kept.")),
+    responses(
+        (status = OK, body = GatewayPaymentRecorded),
+        (status = BAD_REQUEST, body = Problem),
+        (status = NOT_FOUND, description = "No such payment", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "It is against an invoice, or there is nothing left of it", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn retain_deposit(
+    tenant: Allowed<PostEntries>,
+    Language(locale): Language,
+    State(state): State<AppState>,
+    Path(payment): Path<String>,
+) -> Result<Json<GatewayPaymentRecorded>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let id = parse_id(&payment, locale)?;
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    let committed = crate::retain_in(
+        &mut tx,
+        &id,
+        chrono::Utc::now(),
+        &erp_web::metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(GatewayPaymentRecorded {
+        id: id.to_string(),
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+/// What this business has decided a kept deposit is.
+#[utoipa::path(
+    get,
+    path = "/v1/payments/deposit-policy",
+    tag = "payments",
+    responses(
+        (status = OK, body = DepositPolicy),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn deposit_policy(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<DepositPolicy>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let policy = crate::Retention::resolve(&mut conn)
+        .await
+        .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+
+    Ok(Json(DepositPolicy {
+        supply: policy.supply,
+    }))
+}
+
+/// Decide whether keeping a deposit is a supply.
+///
+/// **An accounting position, so it is the owner's**, the same as choosing which
+/// accounts a sale posts to. It changes where a kept deposit lands in the
+/// profit and loss, which is not a preference.
+#[utoipa::path(
+    put,
+    path = "/v1/payments/deposit-policy",
+    tag = "payments",
+    request_body = DepositPolicy,
+    responses(
+        (status = NO_CONTENT, description = "Recorded."),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn set_deposit_policy(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+    Json(body): Json<DepositPolicy>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    erp_eventlog::configuration::set(
+        &mut conn,
+        crate::Retention::KEY,
+        &crate::Retention {
+            supply: body.supply,
+        },
+        // Who changed a tax position, which is the one thing somebody will ask
+        // about it later.
+        Some(&tenant.session.identity.to_string()),
+    )
+    .await
+    .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// **Exactly one of an invoice and a booking**, parsed once for both routes.
+///
+/// A payment that names neither has nothing to settle against; one that names
+/// both is a caller who has not decided. Refusing here means neither reaches a
+/// command, and the database says the same thing a second time — see
+/// `payment_collects_one_thing`.
+fn collects_of(
+    invoice: Option<&String>,
+    deposit: Option<&NewDeposit>,
+    currency: erp_types::CurrencyCode,
+    locale: Locale,
+) -> Result<crate::Collects, Problem> {
+    match (invoice, deposit) {
+        (Some(id), None) => Ok(crate::Collects::Invoice(parse_id(id, locale)?)),
+        (None, Some(deposit)) => Ok(crate::Collects::Advance(crate::Advance {
+            against: parse_id(&deposit.against, locale)?,
+            net: erp_types::Money::from_minor(deposit.net, currency),
+            buyer: crate::Buyer {
+                name: deposit.buyer_name.clone(),
+                vat_number: deposit.buyer_vat_number.clone(),
+            },
+        })),
+        _ => Err(bad_request(
+            erp_web::messages::MALFORMED_BODY,
+            "reason",
+            "a payment collects against exactly one of `invoice` and `deposit`",
+            locale,
+        )),
+    }
 }
 
 /// The same shape `erp_payments::moyasar` refuses on, checked at the edge so a
@@ -1170,6 +1390,12 @@ impl Localize for PaymentsError {
                 Message::new(crate::messages::PAYOUT_CURRENCY)
                     .with("expected", MessageArg::text(expected.to_string()))
                     .with("found", MessageArg::text(found.to_string()))
+            }
+            Self::NotADeposit(id) => {
+                Message::new(crate::messages::NOT_A_DEPOSIT).with("id", MessageArg::text(id))
+            }
+            Self::NothingToRetain(id) => {
+                Message::new(crate::messages::NOTHING_TO_RETAIN).with("id", MessageArg::text(id))
             }
             Self::NoSavedCards(provider) => Message::new(crate::messages::NO_SAVED_CARDS)
                 .with("provider", MessageArg::text(provider)),

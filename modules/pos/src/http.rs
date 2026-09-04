@@ -738,6 +738,9 @@ fn lines(
     sent.iter()
         .map(|line| {
             Ok(sales::DraftLine {
+                // A till rings a price; anything off it is a different price,
+                // not an allowance printed beside one.
+                allowances: Vec::new(),
                 description: line.description.clone(),
                 net: Money::from_minor(line.net, currency),
                 category: category(&line.vat, locale)?,

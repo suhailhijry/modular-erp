@@ -657,6 +657,9 @@ async fn take_the_money(
 
 fn draft_from(basket: &Basket) -> sales::Draft {
     sales::Draft {
+        // A till sells a thing and bills for it in one breath; there is never
+        // money taken ahead of the supply here.
+        prepayment: false,
         customer: basket.customer.clone(),
         // **The tax point is the moment of the sale**, which at a counter is
         // also the moment of payment and the moment of handover.

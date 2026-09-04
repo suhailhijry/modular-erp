@@ -39,18 +39,21 @@ mod projections;
 mod vat;
 
 pub use commands::{
-    Draft, Numbered, Receipt, SalesError, attach_customer, cancel_invoice, credit_entry_of,
-    credit_in, credit_what_is_clear, issue_entry_of, issue_in, issue_invoice, pay_in,
-    record_payment, refund_in, refund_invoice,
+    CreditLine, CreditNote, Draft, Numbered, Receipt, SalesError, attach_customer, cancel_invoice,
+    credit_entry_of, credit_in, credit_invoice_part, credit_part_in, credit_what_is_clear,
+    issue_entry_of, issue_in, issue_invoice, pay_in, record_payment, refund_in, refund_invoice,
 };
 pub use invoice::{
-    Address, Customer, Discount, DraftDiscount, DraftLine, Invoice, InvoiceEvent, InvoiceLine,
+    Address, Allowance, Customer, Discount, DraftDiscount, DraftLine, Invoice, InvoiceEvent,
+    InvoiceLine,
 };
-pub use posting::{PostingAccounts, entry_for_issue, entry_for_payment, entry_for_refund};
+pub use posting::{
+    PostingAccounts, entry_for_credit, entry_for_issue, entry_for_payment, entry_for_refund,
+};
 pub use projections::{
-    AgedCustomer, InvoiceDetail, InvoiceLineRow, InvoiceSummary, Invoices, Overpaid, PaymentRow,
-    Sales, TaxRow, UnmatchedCustomer, VatBand, VatReturn, invoice, invoices, overpaid, projections,
-    receivables, unmatched_customers, vat_return,
+    AgedCustomer, CreditNoteRow, InvoiceDetail, InvoiceLineRow, InvoiceSummary, Invoices, Overpaid,
+    PaymentRow, Sales, TaxRow, UnmatchedCustomer, VatBand, VatReturn, credit_notes, invoice,
+    invoices, overpaid, projections, receivables, unmatched_customers, vat_return,
 };
 pub use vat::{TaxBand, TaxError, Totals, Vat, VatCategory, total};
 

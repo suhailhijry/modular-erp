@@ -136,9 +136,15 @@ jobs:
             curl --silent --fail http://localhost:9000/minio/health/live && break
             sleep 2
           done
-          docker run --rm --network host minio/mc:latest sh -c \
-            "mc alias set local http://localhost:9000 minioadmin minioadmin \
-             && mc mb --ignore-existing local/documents"
+          # **No shell and no `alias set`.** `minio/mc`'s entrypoint is `mc`
+          # itself, so anything passed here is read as an `mc` subcommand —
+          # `sh -c …` used to work and now fails with "`sh` is not a recognized
+          # command". `MC_HOST_<alias>` is how `mc` takes a target from the
+          # environment, which needs neither a shell nor the alias state that
+          # only exists inside a container we throw away.
+          docker run --rm --network host \
+            --env MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
+            minio/mc:latest mb --ignore-existing local/documents
 
       # fmt, then clippy, then the suite — the order that fails fastest.
       # Ignored tests stay ignored: the soak test, the rebuild benchmark, and

@@ -652,6 +652,29 @@ fn invoice_line(
         currency,
     );
 
+    // **Before `cac:TaxTotal`, and that is the schema's order, not a
+    // preference.** UBL's `InvoiceLine` is a sequence; an element in the wrong
+    // place is rejected before any business rule is looked at.
+    //
+    // **No `cac:TaxCategory` on these.** The standard's line-level allowance
+    // has an indicator, an amount and a reason and nothing else — the line it
+    // sits in already says how it is taxed. The document-level one has no line
+    // to inherit from, which is why `discount` below writes a category and
+    // this does not.
+    for allowance in &line.allowances {
+        out.push_str("    <cac:AllowanceCharge>\n");
+        text(out, 3, "cbc:ChargeIndicator", "false", "allowance")?;
+        text(
+            out,
+            3,
+            "cbc:AllowanceChargeReason",
+            &allowance.reason,
+            "allowance_reason",
+        )?;
+        money(out, 3, "cbc:Amount", &amount(allowance.amount), currency);
+        out.push_str("    </cac:AllowanceCharge>\n");
+    }
+
     out.push_str("    <cac:TaxTotal>\n");
     money(out, 3, "cbc:TaxAmount", &amount(line.tax), currency);
     if let Some(gross) = line.gross() {
@@ -678,8 +701,17 @@ fn invoice_line(
     out.push_str("      </cac:ClassifiedTaxCategory>\n");
     out.push_str("    </cac:Item>\n");
 
+    // **The price is what the line came to *before* its allowances**, because
+    // the standard defines the line net amount as the price less them:
+    //
+    //   BT-131 = quantity × (BT-146 / base quantity) + charges − Σ BT-136
+    //
+    // With quantity one that reads `LineExtensionAmount = PriceAmount − Σ
+    // allowances`, so printing the same figure for both would fail the rule the
+    // moment a line carried one.
+    let priced = line.before_allowances().unwrap_or(line.net);
     out.push_str("    <cac:Price>\n");
-    money(out, 3, "cbc:PriceAmount", &amount(line.net), currency);
+    money(out, 3, "cbc:PriceAmount", &amount(priced), currency);
     out.push_str("    </cac:Price>\n");
 
     let _ = writeln!(out, "  </{element}>");
@@ -781,6 +813,7 @@ pub(crate) mod tests {
                 })),
             }),
             lines: vec![Line {
+                allowances: Vec::new(),
                 description: "استشارات".to_owned(),
                 net,
                 category: VatCategory::Standard,
@@ -1336,5 +1369,102 @@ pub(crate) mod tests {
         let stored = with_declaration(&canonical);
         assert!(stored.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Invoice"));
         assert!(stored.ends_with(&canonical));
+    }
+
+    /// **A line's own allowance, where the standard puts it.**
+    ///
+    /// `cac:AllowanceCharge` inside `cac:InvoiceLine`, before `cac:TaxTotal`
+    /// because the sequence is the schema's, and with **no `cac:TaxCategory`**
+    /// — the line already carries one, and the line-level allowance has
+    /// nowhere to put a second.
+    #[test]
+    fn a_line_allowance_is_written_inside_its_line_and_carries_no_category() {
+        let mut document = document();
+        document.lines = vec![Line {
+            description: "استشارات".to_owned(),
+            net: Money::from_minor(9_000, sar()),
+            category: VatCategory::Standard,
+            rate_bp: 1_500,
+            tax: Money::from_minor(1_350, sar()),
+            allowances: vec![super::super::LineAllowance {
+                reason: "خصم الولاء".to_owned(),
+                amount: Money::from_minor(1_000, sar()),
+            }],
+        }];
+        let xml = render(&document).expect("renders");
+
+        let line = xml.find("<cac:InvoiceLine>").expect("a line");
+        let close = xml.find("</cac:InvoiceLine>").expect("a line ends");
+        let inside = &xml[line..close];
+        assert!(
+            inside.contains("<cac:AllowanceCharge>"),
+            "the allowance is not inside the line: {inside}"
+        );
+        assert!(
+            inside.contains("<cbc:AllowanceChargeReason>خصم الولاء</cbc:AllowanceChargeReason>"),
+            "{inside}"
+        );
+
+        // The order the schema requires.
+        let allowance = inside.find("<cac:AllowanceCharge>").expect("allowance");
+        let total = inside.find("<cac:TaxTotal>").expect("tax total");
+        assert!(
+            allowance < total,
+            "cac:AllowanceCharge must precede cac:TaxTotal"
+        );
+
+        // **No tax category**, which is what separates it from a document one.
+        let end = inside
+            .find("</cac:AllowanceCharge>")
+            .expect("allowance ends");
+        assert!(
+            !inside[allowance..end].contains("cac:TaxCategory"),
+            "a line allowance carried a tax category: {}",
+            &inside[allowance..end]
+        );
+    }
+
+    /// **BT-131 = BT-146 − the allowances**, with quantity one. Printing the
+    /// same figure for both is what the rule exists to catch.
+    #[test]
+    fn the_price_is_before_the_allowance_and_the_line_total_is_after() {
+        let mut document = document();
+        document.lines = vec![Line {
+            description: "استشارات".to_owned(),
+            net: Money::from_minor(9_000, sar()),
+            category: VatCategory::Standard,
+            rate_bp: 1_500,
+            tax: Money::from_minor(1_350, sar()),
+            allowances: vec![super::super::LineAllowance {
+                reason: "خصم".to_owned(),
+                amount: Money::from_minor(1_000, sar()),
+            }],
+        }];
+        let xml = render(&document).expect("renders");
+
+        assert!(
+            xml.contains(
+                "<cbc:LineExtensionAmount currencyID=\"SAR\">90.00</cbc:LineExtensionAmount>"
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<cbc:PriceAmount currencyID=\"SAR\">100.00</cbc:PriceAmount>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<cbc:Amount currencyID=\"SAR\">10.00</cbc:Amount>"),
+            "{xml}"
+        );
+    }
+
+    /// A line with none is byte-identical to what it was before line
+    /// allowances existed — which is what makes this a widening.
+    #[test]
+    fn a_line_without_allowances_writes_nothing_extra() {
+        let xml = render(&document()).expect("renders");
+        let line = xml.find("<cac:InvoiceLine>").expect("a line");
+        let close = xml.find("</cac:InvoiceLine>").expect("a line ends");
+        assert!(!xml[line..close].contains("<cac:AllowanceCharge>"));
     }
 }

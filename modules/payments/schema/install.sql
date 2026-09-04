@@ -17,7 +17,16 @@ CREATE TABLE IF NOT EXISTS payment (
     -- **The gateway's own id.** What every callback names, and what a
     -- reconciliation against a payout report matches on.
     gateway_id    TEXT NOT NULL,
-    invoice       TEXT NOT NULL,
+    -- **What this collects against.** An invoice, or a deposit against
+    -- something not yet billed — and after a deposit settles, **both**: its
+    -- own prepayment invoice, and the booking it secures.
+    --
+    -- The check is that it names something. A payment against nothing cannot
+    -- be settled, and there is no honest guess to make about one.
+    invoice       TEXT,
+    advance_for   TEXT,
+    CONSTRAINT payment_collects_something
+        CHECK (invoice IS NOT NULL OR advance_for IS NOT NULL),
 
     -- Minor units, and the currency beside them. Never a float: see
     -- `erp_payments::decimal` for what that costs.
@@ -26,11 +35,18 @@ CREATE TABLE IF NOT EXISTS payment (
 
     stage         TEXT NOT NULL
                   CHECK (stage IN ('requested', 'pending', 'settled',
-                                   'failed', 'refunded', 'voided')),
+                                   'failed', 'refunded', 'retained', 'voided')),
 
     -- **Which saved card this was asked against**, for the pass that charges
     -- it. Null for every payment the client created at the gateway itself,
     -- which is all of them until somebody saves a card.
+    -- **What a deposit is billed as**, when it is one. Kept here because the
+    -- worker needs them to raise the prepayment invoice at settlement, and a
+    -- worker may not load an aggregate to find out (L7).
+    advance_net_minor  BIGINT,
+    advance_buyer      TEXT,
+    advance_buyer_vat  TEXT,
+
     card          TEXT,
     -- Where the gateway sends the customer if it decides it needs them. Kept
     -- because a saved-card charge that raises a 3-D Secure challenge has to
@@ -42,6 +58,9 @@ CREATE TABLE IF NOT EXISTS payment (
     fee_minor     BIGINT,
     -- What has gone back so far.
     refunded_minor BIGINT NOT NULL DEFAULT 0,
+    -- **What the business kept**, when a customer did not come back for a
+    -- deposit. Null on every payment that is not one.
+    retained_minor BIGINT,
 
     -- In the gateway's words, when it refused. For a person to read.
     failed_why    TEXT,
@@ -71,7 +90,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS payment_by_gateway_id
     ON payment (provider, gateway_id);
 
 -- "What is still owed on this invoice, and what has been tried."
-CREATE INDEX IF NOT EXISTS payment_by_invoice ON payment (invoice, started_at DESC);
+CREATE INDEX IF NOT EXISTS payment_by_invoice ON payment (invoice, started_at DESC)
+    WHERE invoice IS NOT NULL;
+
+-- "What has been taken against this booking", which is the deposit question.
+CREATE INDEX IF NOT EXISTS payment_by_advance
+    ON payment (advance_for, started_at DESC) WHERE advance_for IS NOT NULL;
 
 -- "What has not resolved", which is the list somebody actually chases.
 CREATE INDEX IF NOT EXISTS payment_pending

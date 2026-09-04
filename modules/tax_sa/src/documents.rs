@@ -132,6 +132,7 @@ impl Projection for ZatcaDocuments {
                 lines,
                 discounts,
                 totals,
+                prepayment,
                 ..
             } => {
                 // An invoice from before this system numbered anything cannot be
@@ -148,7 +149,15 @@ impl Projection for ZatcaDocuments {
                 };
                 let built = Built {
                     kind: Kind::of(customer.vat_number.as_ref()),
-                    type_code: TypeCode::Invoice,
+                    // **386, not 388, when it bills for money taken up front.**
+                    // The authority reports the two differently because the tax
+                    // point is different: consideration received rather than a
+                    // supply made.
+                    type_code: if prepayment {
+                        TypeCode::Prepayment
+                    } else {
+                        TypeCode::Invoice
+                    },
                     number,
                     source: envelope.stream.id.as_str().to_owned(),
                     issued_at: issued_on,
@@ -201,6 +210,15 @@ impl Projection for ZatcaDocuments {
                 };
                 write(conn, ctx.event_time(), &built).await
             }
+
+            // **A partial credit note builds from its own lines**, not from
+            // the invoice's. That is the whole difference: a cancellation
+            // credits everything the invoice declared and can borrow its lines
+            // wholesale, while this credits part and the authority computes the
+            // VAT from what the document itself says. Borrowing here would
+            // clear a credit note for the full supply against a business that
+            // only gave part of it back.
+            part @ InvoiceEvent::Credited { .. } => credit_part(ctx, envelope, conn, &part).await,
 
             // A payment changes nothing ZATCA sees. The document was cleared on
             // what was charged, not on what has been collected — and a refund
@@ -400,6 +418,65 @@ async fn next_link(conn: &mut PgConnection) -> Result<Link, ProjectionError> {
     })
 }
 
+/// Builds the ZATCA credit note for a partial credit.
+///
+/// It **references** the invoice — a credit note has to name what it is against
+/// — and takes everything else from its own event: the lines it credited, the
+/// bands those came to, and its own tax point.
+///
+/// A free function because the arm that calls it would otherwise make `apply` a
+/// page nobody reads, which is the same reason `sales`' projection split its.
+async fn credit_part(
+    ctx: &ProjectionCtx<'_>,
+    envelope: &Envelope,
+    conn: &mut PgConnection,
+    part: &InvoiceEvent,
+) -> Result<(), ProjectionError> {
+    let InvoiceEvent::Credited {
+        credit_note,
+        lines,
+        totals,
+        reason,
+        on,
+        ..
+    } = part
+    else {
+        return Ok(());
+    };
+
+    let source = envelope.stream.id.as_str().to_owned();
+    let Some(invoice) = invoice_of(conn, &source).await? else {
+        // The invoice had no number, so there is no document to credit.
+        return Ok(());
+    };
+
+    let built = Built {
+        kind: invoice.kind,
+        type_code: TypeCode::CreditNote,
+        number: credit_note.clone(),
+        source,
+        issued_at: *on,
+        currency: invoice.currency,
+        buyer: invoice.buyer.clone(),
+        // **What it credits, as the invoice worded it.** A credit line names
+        // an invoice line, and its description and rate were taken from there
+        // — so the document says what came back rather than what somebody
+        // typed.
+        lines: lines.iter().map(|credited| line(&credited.line)).collect(),
+        // **No allowances.** A discount is something taken off before the tax
+        // was worked out; this credits what was actually charged, stated
+        // directly, so there is nothing to take off it.
+        allowances: Vec::new(),
+        totals: totals_of(totals),
+        reference: Some(Reference {
+            number: invoice.number.clone(),
+            issued_at: invoice.issued_at,
+        }),
+        note: reason.clone(),
+    };
+    write(conn, ctx.event_time(), &built).await
+}
+
 /// The document already built for an invoice, so a credit note can be built
 /// against it.
 async fn invoice_of(
@@ -434,6 +511,14 @@ fn line(line: &InvoiceLine) -> Line {
         category: line.vat.category,
         rate_bp: line.vat.basis_points,
         tax: tax_of(line),
+        allowances: line
+            .allowances
+            .iter()
+            .map(|a| crate::zatca::LineAllowance {
+                reason: a.reason.clone(),
+                amount: a.amount,
+            })
+            .collect(),
     }
 }
 

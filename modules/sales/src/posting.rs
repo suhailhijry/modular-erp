@@ -95,6 +95,28 @@ pub fn entry_for_issue(
     BalancedLines::new(lines.into_iter().filter(|l| !l.amount.is_zero()).collect())
 }
 
+/// What a credit note takes back.
+///
+/// **Exactly [`entry_for_issue`] with the sides swapped**, because that is what
+/// crediting is: the revenue was never earned, the tax was never owed, and the
+/// customer never owed the money. Written out rather than expressed as a
+/// negation of the other, for the reason [`entry_for_refund`] is.
+///
+/// It posts its *own* amounts rather than reversing the invoice's entry, which
+/// is the whole difference from a cancellation: a partial credit takes back
+/// part, and there is no such thing as reversing part of a journal entry.
+pub fn entry_for_credit(
+    totals: &Totals,
+    accounts: &PostingAccounts,
+) -> Result<BalancedLines, Unbalanced> {
+    let lines = [
+        Line::new(accounts.revenue.clone(), totals.net),
+        Line::new(accounts.output_vat.clone(), totals.tax),
+        Line::new(accounts.receivable.clone(), negate(totals.gross)?),
+    ];
+    BalancedLines::new(lines.into_iter().filter(|l| !l.amount.is_zero()).collect())
+}
+
 /// What a receipt does to the books.
 ///
 /// Debit whatever took the money, credit the customer's balance. Nothing here

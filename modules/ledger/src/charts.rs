@@ -193,6 +193,17 @@ static SERVICES: &[TemplateAccount] = &[
         "إيرادات مؤجلة",
         AccountKind::Liability,
     ),
+    // **A deposit the customer did not come back for**, when the business has
+    // decided that keeping it is not a supply — see `payments::Retention`. Its
+    // own account rather than `4000`, because a VAT return has to be able to
+    // tell income that carried tax from income that did not, and a single
+    // revenue line makes that unanswerable a year later.
+    account(
+        "4910",
+        "Forfeited deposits",
+        "دفعات مقدمة مصادرة",
+        AccountKind::Revenue,
+    ),
     account("3000", "Owner's capital", "رأس المال", AccountKind::Equity),
     account(
         "3100",
@@ -353,6 +364,17 @@ static RETAIL: &[TemplateAccount] = &[
         "Deferred revenue",
         "إيرادات مؤجلة",
         AccountKind::Liability,
+    ),
+    // **A deposit the customer did not come back for**, when the business has
+    // decided that keeping it is not a supply — see `payments::Retention`. Its
+    // own account rather than `4000`, because a VAT return has to be able to
+    // tell income that carried tax from income that did not, and a single
+    // revenue line makes that unanswerable a year later.
+    account(
+        "4910",
+        "Forfeited deposits",
+        "دفعات مقدمة مصادرة",
+        AccountKind::Revenue,
     ),
     account("3000", "Owner's capital", "رأس المال", AccountKind::Equity),
     account(
@@ -554,6 +576,11 @@ mod tests {
             assert!(
                 has("5420"),
                 "{} has nowhere to put a payout difference",
+                c.id
+            );
+            assert!(
+                has("4910"),
+                "{} has nowhere to put a deposit the customer forfeited",
                 c.id
             );
         }
