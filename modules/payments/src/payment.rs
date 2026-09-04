@@ -200,9 +200,23 @@ pub struct Payment {
     pub stage: Stage,
     /// What has been given back so far.
     pub refunded_minor: i64,
+    /// **The references of the refunds already made**, so a retried request is
+    /// a no-op rather than a second one.
+    ///
+    /// Its own list rather than a count, because a retry is identified by the
+    /// caller's own key and nothing else: `refunded_minor` reaching the total
+    /// says the money is all back, not that *this* request is the one that did
+    /// it. `pos` learned the same lesson from a drawer that went down twice.
+    pub refunds: Vec<String>,
 }
 
 impl Payment {
+    /// Whether this refund has already been made.
+    #[must_use]
+    pub fn has_refund(&self, reference: &str) -> bool {
+        self.refunds.iter().any(|seen| seen == reference)
+    }
+
     /// Whether the money has arrived and not all of it has gone back.
     #[must_use]
     pub fn is_collected(&self) -> bool {
@@ -269,8 +283,11 @@ impl Aggregate for Payment {
                 self.amount = Some(*amount);
             }
             PaymentEvent::Failed { .. } => self.stage = Stage::Failed,
-            PaymentEvent::Refunded { amount, .. } => {
+            PaymentEvent::Refunded {
+                amount, reference, ..
+            } => {
                 self.refunded_minor += amount.minor();
+                self.refunds.push(reference.clone());
                 if let Some(total) = self.amount
                     && self.refunded_minor >= total.minor()
                 {
@@ -354,6 +371,17 @@ mod tests {
         assert!(payment.is_collected());
         assert_eq!(payment.amount, Some(sar(6_000)));
         assert_eq!(payment.refundable(), Some(sar(6_000)));
+    }
+
+    /// **A retried refund is one refund.** Recognised by the caller's own key,
+    /// because the amount alone cannot tell a retry from a second, identical
+    /// refund somebody meant.
+    #[test]
+    fn a_payment_knows_which_refunds_it_has_already_made() {
+        let payment = replay(&[started(), settled(sar(10_000), None), refund(sar(3_000))]);
+        assert!(payment.has_refund("refund-1"));
+        assert!(!payment.has_refund("refund-2"));
+        assert!(!Payment::default().has_refund("refund-1"));
     }
 
     #[test]

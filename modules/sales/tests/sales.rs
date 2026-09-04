@@ -1420,6 +1420,65 @@ async fn a_vat_return_reports_what_was_charged_by_rate() {
     fixture.cleanup().await;
 }
 
+/// **The whole point of crediting on refund**, in the one place a tax authority
+/// looks. A refund that moved money and issued no document left a VAT return
+/// declaring output tax on a supply the business had already unwound — which is
+/// tax paid on a sale that did not happen, quarter after quarter, with nothing
+/// in the system to say so.
+#[tokio::test]
+async fn a_refund_takes_its_supply_out_of_the_vat_return() {
+    let fixture = Fixture::new().await;
+
+    issue_on(
+        &fixture,
+        "VR-REFUND",
+        "2026-02-01",
+        vec![line("Consulting", riyals(1_000), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    pay(&fixture, "VR-REFUND", "wire-1", riyals(1_150))
+        .await
+        .expect("records");
+    fixture.project().await;
+
+    let read = async |fixture: &Fixture| {
+        let mut conn = fixture.db.acquire().await.expect("connection");
+        let filed = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-04-01"))
+            .await
+            .expect("reads");
+        drop(conn);
+        filed
+    };
+    assert_eq!(read(&fixture).await.tax, riyals(150), "15% of 1,000");
+
+    sales::refund_invoice(
+        &fixture.db,
+        &code("VR-REFUND"),
+        &Receipt {
+            reference: "refund-1".to_owned(),
+            amount: riyals(1_150),
+            received_on: on("2026-02-20"),
+            into: code("1010"),
+        },
+        "the engagement was cancelled",
+        &Metadata::default(),
+    )
+    .await
+    .expect("refunds");
+    fixture.project().await;
+
+    let after = read(&fixture).await;
+    assert_eq!(
+        after.tax,
+        riyals(0),
+        "output tax on a supply that was unwound"
+    );
+    assert_eq!(after.net, riyals(0));
+
+    fixture.cleanup().await;
+}
+
 /// A credited invoice is not a supply, so it leaves the return.
 #[tokio::test]
 async fn a_credit_note_in_the_same_period_nets_the_supply_out() {
@@ -2978,16 +3037,19 @@ async fn refund(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> 
             received_on: when(),
             into: code("1010"),
         },
+        "the customer changed their mind",
         &Metadata::default(),
     )
     .await
 }
 
-/// **Money back, then the credit note.** The order is the point: a credit note
-/// may not undo a supply while the business keeps the cash, so the refusal
-/// above stands until the cash has gone.
+/// **Money back, and the credit note with it.** The order is the point: a
+/// credit note may not undo a supply while the business keeps the cash, so
+/// crediting is refused until the cash has gone — and then the refund issues
+/// the document itself, because ZATCA wants one and a business that has to
+/// remember a second call is a business whose books drift.
 #[tokio::test]
-async fn refunding_what_was_paid_makes_an_invoice_creditable_again() {
+async fn refunding_what_was_paid_credits_the_invoice() {
     let fixture = Fixture::new().await;
     issue(
         &fixture,
@@ -3021,17 +3083,30 @@ async fn refunding_what_was_paid_makes_an_invoice_creditable_again() {
         "paid is net of refunds — it is what the business is holding"
     );
 
-    credit(&fixture, "INV-REF-1", "CN-REF-1")
-        .await
-        .expect("nothing is held any more");
+    // **The refund issued it.** Its own number from the tenant's gapless
+    // series, not the caller's reference.
+    let credit_note = invoice
+        .summary
+        .credit_note
+        .expect("the refund issued no credit note");
+    assert_ne!(credit_note, "refund-1");
 
-    fixture.project().await;
     assert_eq!(
         fixture.balance("1100").await,
         money(0),
         "the receivable is square"
     );
     assert_eq!(fixture.balance("4000").await, money(0), "revenue reversed");
+
+    // And crediting it again is refused: the document exists, and a second
+    // one would be a statutory number issued against nothing.
+    let error = credit(&fixture, "INV-REF-1", "CN-REF-1")
+        .await
+        .expect_err("a second credit note was issued");
+    assert!(matches!(
+        rejection(&error),
+        Some(SalesError::AlreadyCancelled { .. })
+    ));
 
     fixture.cleanup().await;
 }

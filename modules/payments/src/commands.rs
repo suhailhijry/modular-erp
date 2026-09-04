@@ -353,6 +353,7 @@ pub async fn refund_in(
     id: &AggregateId,
     reference: &str,
     amount: Money,
+    reason: &str,
     at: Timestamp,
     metadata: &Metadata,
 ) -> Outcome {
@@ -367,6 +368,15 @@ pub async fn refund_in(
         metadata,
         |loaded| {
             let state = &loaded.aggregate;
+            // **Before anything else.** A fully refunded payment is no longer
+            // collectable, so a retry of the refund that finished it would be
+            // refused rather than answered — and the client that timed out on
+            // the first one has no way to tell that from a real failure. It
+            // would also be the one path that could issue a **second credit
+            // note**, which is a statutory document that must not exist twice.
+            if state.has_refund(reference) {
+                return Ok(Decision::nothing());
+            }
             let Some(refundable) = state.refundable() else {
                 return Err(PaymentsError::NotCollectable {
                     id: id.as_str().to_owned(),
@@ -418,7 +428,58 @@ pub async fn refund_in(
     .await
     .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))?;
 
+    // **And the document the money implies.** In the same transaction, because
+    // a refund recorded without its credit note is a tax invoice overstating
+    // what was sold, and nobody would find it.
+    credit_the_invoice(&mut *conn, invoice, reference, reason, at, metadata).await?;
+
     Ok(committed)
+}
+
+/// Issues the credit note a refund owes, **if the invoice is now clear**.
+///
+/// # Why ZATCA cares
+///
+/// A tax invoice is a statement about a supply, and giving the money back
+/// changes the supply. The Kingdom's answer is not to amend the invoice — it
+/// was issued, the customer holds a copy, and it was cleared — but to issue a
+/// **credit note**, which is a document in its own right with its own number
+/// and its own tax point. Everything downstream of that already exists:
+/// `tax_sa::documents` builds one from `sales.invoice.cancelled`, the VAT
+/// return nets it, and the signing and submission jobs carry it. What was
+/// missing was anybody asking.
+///
+/// # Why it asks `sales` rather than deciding
+///
+/// Whether the invoice is clear is `sales`' own question and it can only be
+/// answered from the invoice's history — a gateway payment does not know
+/// whether it was the only one. So `sales::credit_what_is_clear` is what
+/// decides, and this only carries the failure into this module's error type.
+/// The alternative was for `payments` to load `sales`' aggregate (L7) or to
+/// read another projection group that has not seen the refund committed a line
+/// ago (L3), and both are worse than one call on a path that runs when
+/// somebody hands money back.
+///
+/// # What it does not do
+///
+/// **A partial refund gets no document**, and that is the deferral rather than
+/// a decision taken here: a credit note for part of an invoice carries bands of
+/// its own, and how a refund of an arbitrary amount divides across a
+/// standard-rated line and a zero-rated one is not something this system may
+/// guess. `sales` has recorded that as an open item since Phase 3d. Until it
+/// lands, a partly-refunded invoice is a tax invoice this system knows is
+/// overstated — named in the plan rather than silently looking like success.
+async fn credit_the_invoice(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    reference: &str,
+    reason: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<PaymentsError>> {
+    sales::credit_what_is_clear(&mut *conn, invoice, reference, reason, at, metadata)
+        .await
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))
 }
 
 /// What a gateway sent, and what it says it covers.

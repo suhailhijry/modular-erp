@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,164 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,170 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -650,6 +650,53 @@ before they will lend, so `Charge` carries an optional `Buyer` and `Basket` and
 the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
+
+### 31 · A refund issues the credit note, and the work found a second bug
+
+**The gap was one missing call.** Everything a credit note needs already
+existed — `sales::credit_in` reverses the issue entry and takes a number from
+the gapless series, `tax_sa::documents` builds a ZATCA credit note from
+`sales.invoice.cancelled`, the VAT return nets it, and the signing and
+submission jobs carry it. `pos::take_back` had been composing refund-then-credit
+since Phase 15. Neither refund path did, so a refunded invoice stayed cleared at
+the full amount and kept declaring output tax on a supply that had been unwound.
+
+`a_refund_takes_its_supply_out_of_the_vat_return` is the test worth reading: it
+asserts the return goes to zero, which is where a tax authority would have
+noticed and nothing in this system would have.
+
+**Both paths, not just the one asked about.** `payments::refund_in` was the path
+named, and `sales::refund_invoice` — the non-gateway route — had the same gap.
+Fixing one would have left the other quietly wrong.
+
+**The rule lives in `sales`, once.** `credit_what_is_clear` calls `credit_in`
+and reads two refusals as "not yet, and that is fine": `HasPayments`, which
+after a partial refund is simply true, and `AlreadyCancelled`, where the
+document already exists. `payments` calls it rather than keeping a second copy
+of which refusals mean what.
+
+It is deliberately **not** folded into `sales::refund_in`. That one is a
+per-money-movement primitive — a till calls it once per tender — and a credit
+note is per document; crediting there would issue one against a single tender's
+reference and then try again for every other.
+
+**A partial refund still gets no document.** A credit note for part of an
+invoice carries tax bands of its own, and how a refund of an arbitrary amount
+divides across a standard-rated line and a zero-rated one is not something this
+system may guess. `sales` recorded that as an open item in Phase 3d and it
+stays open. What has changed is that the case is tested and named rather than
+indistinguishable from success.
+
+**And the bug the work exposed.** A retried refund was *refused*, not repeated:
+a fully refunded payment is no longer collectable, so the second attempt got
+`NotCollectable` — and the client that timed out on the first had no way to tell
+that from a real failure. The route's own documentation said "sending it again
+is a retry, not a second refund", which was not true of the code. It matters
+more now than it did: that path was the one thing that could have issued a
+**second credit note**, which is a statutory document that must not exist twice.
+`Payment` now keeps the references it has already refunded — a seen-list, the
+same shape `pos` grew after a till return took the drawer down twice — and
+`a_retried_refund_issues_one_credit_note` holds it.
 
 ### 30 · A saved card lives in `payments`, and its token is not in the log
 
@@ -2598,13 +2645,16 @@ research changed about 12b.
       is a delete rather than a projection that looks away. Charging one is a
       worker pass, not a route: `POST /v1/payments/cards/{card}/charges` answers
       `202` and `payments.settle` sends it
-- [~] Buy-now-pay-later, which is **not a card gateway wearing different
+- [x] Buy-now-pay-later, which is **not a card gateway wearing different
       branding**: the provider pays the merchant and collects from the buyer, so
       the receivable is settled by a third party and the entries differ. Getting
-      this wrong shows up as a debtor who has already paid. **Both clients are
-      built** (Tabby and Tamara) with their lifecycles read correctly — see §25
-      for what `CLOSED` and `approved` actually mean. **The entries are not**;
-      that is the domain half
+      this wrong shows up as a debtor who has already paid. Both clients are
+      built (Tabby and Tamara) with their lifecycles read correctly — see §25
+      for what `CLOSED` and `approved` actually mean. **And the entries differ**:
+      `Settlement::of` sends a card to `1150` and an instalment provider to
+      `1160`, so what a lender owes is never mixed with what a card processor
+      is holding. `an_instalment_provider_owes_the_money_and_not_the_card_gateway`
+      is the test
 - [x] Capture is idempotent under retry (L8). A timeout is not a failure — it is
       an unknown, and the resolution is a query against the gateway, never a
       second capture. **`payments.settle` is that caller**: it asks
@@ -2612,8 +2662,16 @@ research changed about 12b.
       back, so an answer this system missed is one it goes and gets. The charge
       carries Moyasar's `given_id` so a retried *create* lands on the same
       payment
-- [ ] Refunds, partial refunds, and what a refund does to a cleared tax invoice.
-      ZATCA has an opinion (`tax_sa`), and it is a credit note
+- [x] Refunds, partial refunds, and what a refund does to a cleared tax invoice.
+      ZATCA has an opinion (`tax_sa`) and it is a credit note. **A refund that
+      leaves the invoice holding nothing now issues one**, in the same
+      transaction, on both refund paths — the gateway one and `sales`' own. The
+      pipeline behind it already existed: `tax_sa::documents` builds a credit
+      note from `sales.invoice.cancelled`, the VAT return nets it, and the
+      signing and submission jobs carry it. Nobody was asking.
+      `a_refund_takes_its_supply_out_of_the_vat_return` is the test that says
+      why it mattered. **A partial refund still gets no document** — see §31 and
+      the partial-credit-note item in 3d
 - [~] **Settlement.** A gateway pays out in batches, net of fees, days later. The
       reconciliation is: this payout equals these payments minus this fee — and
       it posts to `ledger`. **Built**, and it is *not* the Phase 8 bank-statement

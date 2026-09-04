@@ -507,10 +507,30 @@ pub async fn attach_customer(
 /// Refunding more than is held is refused for the reason overpaying is: a
 /// business handing back money it never took has made a decision somebody needs
 /// to see, and a negative balance is how that decision never gets made.
+///
+/// # It issues the credit note as well, when the invoice comes clear
+///
+/// A tax invoice is a statement about a supply, and handing the money back
+/// changes the supply. The Kingdom's answer is a **credit note** — its own
+/// number, its own tax point — and `tax_sa` already builds, signs and submits
+/// one from `sales.invoice.cancelled`. What was missing was anybody asking, so
+/// a refunded invoice stayed cleared at the full amount and the customer still
+/// owed for it in the books.
+///
+/// Both in one transaction: a refund recorded without its credit note is a
+/// document nobody would go looking for.
+///
+/// **A partial refund gets no credit note**, and that is the deferral rather
+/// than a decision taken here — one for part of an invoice carries tax bands of
+/// its own, and how an arbitrary amount divides across a standard-rated line
+/// and a zero-rated one is not something this system may guess. [`cancel_in`]
+/// answers `HasPayments` while the invoice is still holding money, which is
+/// what that refusal means and why it is read rather than propagated.
 pub async fn refund_invoice(
     db: &TenantDb,
     invoice: &AggregateId,
     receipt: &Receipt,
+    reason: &str,
     metadata: &Metadata,
 ) -> Outcome {
     if !receipt.amount.is_positive() {
@@ -520,7 +540,21 @@ pub async fn refund_invoice(
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
-        match refund_in(&mut tx, invoice, receipt, &memo, metadata).await {
+        let refunded = async {
+            let committed = refund_in(&mut tx, invoice, receipt, &memo, metadata).await?;
+            credit_what_is_clear(
+                &mut tx,
+                invoice,
+                &receipt.reference,
+                reason,
+                receipt.received_on,
+                metadata,
+            )
+            .await?;
+            Ok::<_, ExecuteError<SalesError>>(committed)
+        }
+        .await;
+        match refunded {
             Ok(committed) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
                 return Ok(committed);
@@ -536,6 +570,33 @@ pub async fn refund_invoice(
     }
 
     Err(contended(invoice))
+}
+
+/// Credits an invoice a refund has left holding nothing.
+///
+/// **`HasPayments` is the ordinary answer, not a failure.** It is what
+/// [`cancel_in`] says while an invoice is still holding money, which after a
+/// partial refund is simply true. `AlreadyCancelled` is the same: the document
+/// exists, which is the outcome wanted.
+///
+/// Not folded into [`refund_in`], deliberately. That one is a per-money-movement
+/// primitive — a till calls it once per tender — and a credit note is per
+/// document. Crediting there would issue one against a single tender's
+/// reference and try again for every other.
+pub async fn credit_what_is_clear(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    reference: &str,
+    reason: &str,
+    on: Timestamp,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<SalesError>> {
+    match credit_in(&mut *conn, invoice, reference, reason, on, metadata).await {
+        Err(ExecuteError::Rejected(
+            SalesError::HasPayments(_) | SalesError::AlreadyCancelled { .. },
+        )) => Ok(()),
+        other => other.map(|_| ()),
+    }
 }
 
 /// One attempt at refunding, in the caller's transaction. Public for the reason

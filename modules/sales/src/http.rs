@@ -197,13 +197,19 @@ struct NewPayment {
 }))]
 struct NewRefund {
     /// Your reference for handing the money back. Sending the same one twice
-    /// against the same invoice is a no-op.
+    /// against the same invoice is a no-op — **and it keys the credit note
+    /// too**, so a retry does not issue a second document.
     reference: String,
     amount: Amount,
     #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     refunded_on: Timestamp,
     /// The cash or bank account it went out of.
     account: String,
+    /// Why, in the customer's language. **Printed on the credit note** and sent
+    /// to ZATCA as the document's note, so a real sentence is worth more than
+    /// the default.
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -601,6 +607,10 @@ async fn refund_payment(
     let invoice = parse_id(raw, locale)?;
     let account = parse_id(&body.account, locale)?;
 
+    let reason = body
+        .reason
+        .unwrap_or_else(|| format!("Refunded · {}", body.reference));
+
     let committed = crate::refund_invoice(
         &tenant.db,
         &invoice,
@@ -610,6 +620,7 @@ async fn refund_payment(
             received_on: body.refunded_on,
             into: account,
         },
+        &reason,
         &metadata(&tenant),
     )
     .await

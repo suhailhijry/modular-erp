@@ -233,6 +233,41 @@ impl Fixture {
         tx.commit().await.expect("commits");
     }
 
+    async fn refund(
+        &self,
+        id: &str,
+        reference: &str,
+        amount: Money,
+    ) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::refund_in(
+            &mut tx,
+            &code(id),
+            reference,
+            amount,
+            "the customer changed their mind",
+            when(),
+            &Metadata::default(),
+        )
+        .await
+        .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+
+    /// The credit note on an invoice, if it has one.
+    async fn credit_note_on(&self, invoice: &str) -> Option<String> {
+        let mut conn = self.db.read().await.expect("connection");
+        sales::invoice(&mut conn, invoice)
+            .await
+            .expect("reads")
+            .and_then(|detail| detail.summary.credit_note)
+    }
+
     async fn save_card(
         &self,
         id: &str,
@@ -562,6 +597,7 @@ async fn a_refund_takes_the_money_back_out_of_where_it_landed() {
         &code("pay_1"),
         "refund-1",
         riyals(115),
+        "the customer changed their mind",
         when(),
         &Metadata::default(),
     )
@@ -575,7 +611,11 @@ async fn a_refund_takes_the_money_back_out_of_where_it_landed() {
         money(-316),
         "only the fee is left"
     );
-    assert_eq!(fixture.balance("1100").await, riyals(115), "owed again");
+    // **Nothing is owed.** The refund puts the receivable back and the credit
+    // note the refund issues takes the sale away, which is the point of it: a
+    // customer who has had their money back does not also owe for the invoice.
+    assert_eq!(fixture.balance("1100").await, money(0), "nothing is owed");
+    assert_eq!(fixture.balance("4000").await, money(0), "no sale stands");
     assert_eq!(
         fixture.balance("5400").await,
         money(316),
@@ -609,6 +649,7 @@ async fn a_refund_larger_than_the_payment_is_refused() {
         &code("pay_1"),
         "refund-1",
         riyals(200),
+        "the customer changed their mind",
         when(),
         &Metadata::default(),
     )
@@ -1628,4 +1669,165 @@ async fn what_cannot_be_a_card_is_refused_at_the_boundary() {
             "{last4}/{month}/{year} was accepted"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The document a refund owes
+// ---------------------------------------------------------------------------
+
+/// **A refund is not just money.** A tax invoice is a statement about a supply
+/// and giving the money back changes the supply, so the Kingdom wants a credit
+/// note — its own number, its own tax point, its own document. Refunding a
+/// gateway payment used to move the money and leave the invoice saying it was
+/// for the full amount.
+#[tokio::test]
+async fn a_full_refund_issues_the_credit_note_zatca_requires() {
+    let fixture = Fixture::new("credit-note").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+    fixture.project().await;
+    assert_eq!(fixture.credit_note_on("INV-1").await, None);
+
+    fixture
+        .refund("pay_1", "refund-1", riyals(115))
+        .await
+        .expect("refunds");
+    fixture.project().await;
+
+    // A number from the tenant's own gapless series, not the caller's key.
+    let credit_note = fixture
+        .credit_note_on("INV-1")
+        .await
+        .expect("a credit note was issued");
+    assert_ne!(
+        credit_note, "refund-1",
+        "the caller's key became the number"
+    );
+    assert!(!credit_note.is_empty());
+
+    // And the sale is undone in the books as well as on paper: the receivable
+    // is back and the clearing account has given the money up.
+    assert_eq!(fixture.balance("1100").await, money(0), "nothing is owed");
+    assert_eq!(fixture.balance("4000").await, money(0), "no sale stands");
+    assert_eq!(fixture.balance("1150").await, money(0));
+}
+
+/// **A partial refund gets no credit note, deliberately.** One for part of an
+/// invoice carries bands of its own, and how an arbitrary amount divides across
+/// a standard-rated line and a zero-rated one is not something this system may
+/// guess. What it must not do is look like it succeeded — the money moves, the
+/// document does not, and the invoice still holds the rest.
+#[tokio::test]
+async fn a_partial_refund_moves_money_and_issues_no_document() {
+    let fixture = Fixture::new("part-refund").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+
+    fixture
+        .refund("pay_1", "refund-1", riyals(40))
+        .await
+        .expect("refunds part");
+    fixture.project().await;
+
+    assert_eq!(
+        fixture.credit_note_on("INV-1").await,
+        None,
+        "a partial refund invented a whole-invoice credit note"
+    );
+    // The money did move, and the invoice is holding what is left.
+    assert_eq!(fixture.balance("1150").await, riyals(75));
+
+    // And finishing the refund does issue one.
+    fixture
+        .refund("pay_1", "refund-2", riyals(75))
+        .await
+        .expect("refunds the rest");
+    fixture.project().await;
+    assert!(
+        fixture.credit_note_on("INV-1").await.is_some(),
+        "the refund that cleared the invoice issued nothing"
+    );
+}
+
+/// A retried refund gives the money back once **and issues one document**. The
+/// credit note is keyed on the caller's reference, so the second attempt finds
+/// the cancellation that already happened rather than burning a number.
+#[tokio::test]
+async fn a_retried_refund_issues_one_credit_note() {
+    let fixture = Fixture::new("credit-retry").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+
+    fixture
+        .refund("pay_1", "refund-1", riyals(115))
+        .await
+        .expect("refunds");
+    fixture.project().await;
+    let first = fixture.credit_note_on("INV-1").await.expect("issued");
+
+    fixture
+        .refund("pay_1", "refund-1", riyals(115))
+        .await
+        .expect("is a retry");
+    fixture.project().await;
+
+    assert_eq!(
+        fixture.credit_note_on("INV-1").await,
+        Some(first),
+        "a retry issued a second credit note"
+    );
+    assert_eq!(fixture.balance("1100").await, money(0));
+}
+
+/// Two payments against one invoice: a deposit and the balance. **Refunding the
+/// deposit alone credits nothing**, because the invoice is still holding the
+/// rest — and that is `sales`' answer, not a guess made here.
+#[tokio::test]
+async fn refunding_one_of_two_payments_credits_nothing_until_both_are_back() {
+    let fixture = Fixture::new("two-payments").await;
+    fixture.invoice("INV-1").await;
+    for (id, amount) in [("pay_1", riyals(40)), ("pay_2", riyals(75))] {
+        fixture.start(id, "moyasar", "INV-1", amount).await;
+        fixture
+            .settle(id, &charged(id, Status::Paid, amount, None))
+            .await
+            .expect("settles");
+    }
+
+    fixture
+        .refund("pay_1", "refund-1", riyals(40))
+        .await
+        .expect("refunds the deposit");
+    fixture.project().await;
+    assert_eq!(
+        fixture.credit_note_on("INV-1").await,
+        None,
+        "the invoice was credited while it still held the balance"
+    );
+
+    fixture
+        .refund("pay_2", "refund-2", riyals(75))
+        .await
+        .expect("refunds the balance");
+    fixture.project().await;
+    assert!(fixture.credit_note_on("INV-1").await.is_some());
+    assert_eq!(fixture.balance("1100").await, money(0));
 }

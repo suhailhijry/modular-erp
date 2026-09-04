@@ -4374,8 +4374,15 @@
               "null"
             ]
           },
+          "reason": {
+            "description": "Why, in the customer's language. **It is printed on the credit note**\nand reaches ZATCA as the document's note, so \"damaged in transit\" is\nworth more than the default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "reference": {
-            "description": "Your own reference for this refund. Sending it again is a retry, not a\nsecond refund.",
+            "description": "Your own reference for this refund. Sending it again is a retry, not a\nsecond refund — **and it is the credit note's key too**, so a retry does\nnot issue a second document either.",
             "type": "string"
           }
         },
@@ -4926,8 +4933,15 @@
           "amount": {
             "$ref": "#/components/schemas/Amount"
           },
+          "reason": {
+            "description": "Why, in the customer's language. **Printed on the credit note** and sent\nto ZATCA as the document's note, so a real sentence is worth more than\nthe default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "reference": {
-            "description": "Your reference for handing the money back. Sending the same one twice\nagainst the same invoice is a no-op.",
+            "description": "Your reference for handing the money back. Sending the same one twice\nagainst the same invoice is a no-op — **and it keys the credit note\ntoo**, so a retry does not issue a second document.",
             "type": "string"
           },
           "refunded_on": {
@@ -25335,7 +25349,7 @@
         }
       ],
       "post": {
-        "description": "**Records and posts; it does not ask the gateway.** Instruct the gateway\nfirst and record what it confirmed — a refund posted here that the gateway\nrefused is a set of books saying money went back when it did not.",
+        "description": "**Issues the credit note ZATCA requires**, when the refund leaves the\ninvoice holding nothing. A partial refund does not get one — see\n`credit_the_invoice` for why that is a deferral rather than a decision.\n\n**Records and posts; it does not ask the gateway.** Instruct the gateway\nfirst and record what it confirmed — a refund posted here that the gateway\nrefused is a set of books saying money went back when it did not.",
         "operationId": "refund_gateway_payment",
         "parameters": [
           {

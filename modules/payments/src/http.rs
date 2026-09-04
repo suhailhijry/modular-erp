@@ -95,11 +95,17 @@ struct NewGatewayPayment {
 #[derive(Debug, Deserialize, ToSchema)]
 struct NewGatewayRefund {
     /// Your own reference for this refund. Sending it again is a retry, not a
-    /// second refund.
+    /// second refund — **and it is the credit note's key too**, so a retry does
+    /// not issue a second document either.
     reference: String,
     /// Minor units. Omit to give back everything that is left.
     #[serde(default)]
     amount: Option<i64>,
+    /// Why, in the customer's language. **It is printed on the credit note**
+    /// and reaches ZATCA as the document's note, so "damaged in transit" is
+    /// worth more than the default.
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -316,6 +322,10 @@ async fn get_payment(
 
 /// Give money back.
 ///
+/// **Issues the credit note ZATCA requires**, when the refund leaves the
+/// invoice holding nothing. A partial refund does not get one — see
+/// `credit_the_invoice` for why that is a deferral rather than a decision.
+///
 /// **Records and posts; it does not ask the gateway.** Instruct the gateway
 /// first and record what it confirmed — a refund posted here that the gateway
 /// refused is a set of books saying money went back when it did not.
@@ -370,11 +380,19 @@ async fn refund_gateway_payment(
         record.amount.currency(),
     );
 
+    // Truthful when nobody says more, and it names the provider so the credit
+    // note reads as something that happened rather than as an adjustment
+    // somebody made.
+    let reason = body
+        .reason
+        .unwrap_or_else(|| format!("Refunded through {} · {}", record.provider, body.reference));
+
     let committed = crate::refund_in(
         &mut tx,
         &id,
         &body.reference,
         amount,
+        &reason,
         chrono::Utc::now(),
         &creating(&tenant, &key),
     )

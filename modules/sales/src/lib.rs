@@ -40,8 +40,8 @@ mod vat;
 
 pub use commands::{
     Draft, Numbered, Receipt, SalesError, attach_customer, cancel_invoice, credit_entry_of,
-    credit_in, issue_entry_of, issue_in, issue_invoice, pay_in, record_payment, refund_in,
-    refund_invoice,
+    credit_in, credit_what_is_clear, issue_entry_of, issue_in, issue_invoice, pay_in,
+    record_payment, refund_in, refund_invoice,
 };
 pub use invoice::{
     Address, Customer, Discount, DraftDiscount, DraftLine, Invoice, InvoiceEvent, InvoiceLine,
