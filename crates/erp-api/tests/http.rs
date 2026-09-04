@@ -1852,6 +1852,14 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("revoke_key", &["owner"]),
     ("upload_file", &["owner", "accountant", "clerk"]),
     ("remove_file", &["owner", "accountant", "clerk"]),
+    // Gateway payments. Reading what was tried against an invoice is ordinary —
+    // a clerk on the phone to a customer needs it. Recording a charge and
+    // giving money back both move the books, so they sit with the rest of
+    // `post_entries`.
+    ("list_payments", ALL_ROLES),
+    ("get_payment", ALL_ROLES),
+    ("start_payment", &["owner", "accountant", "clerk"]),
+    ("refund_gateway_payment", &["owner", "accountant", "clerk"]),
     // The org chart. Reading it is ordinary — a staff list is on the wall in
     // most businesses. Changing it is changing the authorization structure, and
     // granting a claim escalates every ancestor, so it is the owner's.
@@ -2063,8 +2071,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        180,
-        "expected a hundred and eighty role-scoped operations"
+        184,
+        "expected a hundred and eighty-four role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

@@ -457,6 +457,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
         replay!(pool, tax_sa, tax_sa::TaxSa, "zatca_document"),
         replay!(pool, reports, reports::Reports, "revenue"),
         replay!(pool, files, files::Files, "file"),
+        replay!(pool, payments, payments::Payments, "payment"),
     ];
 
     pool.close().await;

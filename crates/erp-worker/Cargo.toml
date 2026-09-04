@@ -18,6 +18,7 @@ erp-types = { workspace = true }
 booking = { workspace = true }
 crm = { workspace = true }
 ledger = { workspace = true }
+payments = { workspace = true }
 sales = { workspace = true }
 prepaid = { workspace = true }
 branches = { workspace = true }

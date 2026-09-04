@@ -93,6 +93,12 @@ const REGISTERED: &[Registered] = &[
         catalog: &hr::CATALOG,
     },
     Registered {
+        name: "payments",
+        setup: payments::setup,
+        http: payments::http::routes,
+        catalog: &payments::CATALOG,
+    },
+    Registered {
         name: "payroll",
         setup: payroll::setup,
         http: payroll::http::routes,

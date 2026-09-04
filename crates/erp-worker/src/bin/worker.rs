@@ -1042,6 +1042,14 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
             .for_module(crm::module_id()),
         ),
         Arc::new(
+            ProjectionJob::<payments::Payments>::new(
+                payments::projections(),
+                Arc::new(payments::upcasters().clone()),
+                200,
+            )
+            .for_module(payments::module_id()),
+        ),
+        Arc::new(
             ProjectionJob::<ledger::Ledger>::new(
                 ledger::projections(),
                 Arc::new(ledger::upcasters().clone()),

@@ -15,6 +15,7 @@ erp-web = { workspace = true }
 erp-links = { workspace = true }
 erp-storage = { workspace = true }
 erp-payments = { workspace = true }
+payments = { workspace = true }
 erp-recurrence = { workspace = true }
 erp-control = { workspace = true }
 erp-eventlog = { workspace = true }

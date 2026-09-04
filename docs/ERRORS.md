@@ -787,10 +787,35 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 ## `payments`
 
+### `payments.already_started`
+
+- **en** — Payment {id} has already been started.
+- **ar** — عملية الدفع {id} بدأت بالفعل.
+
+### `payments.no_gateway`
+
+- **en** — This business has no payment provider configured, so nothing was charged.
+- **ar** — لا يوجد مزوّد دفع مُهيّأ لهذا النشاط، فلم يُخصم أي مبلغ.
+
 ### `payments.no_such_payment`
 
 - **en** — The payment provider has no record of {id}.
 - **ar** — لا يوجد لدى مزوّد الدفع أي سجل لـ {id}.
+
+### `payments.not_collectable`
+
+- **en** — Payment {id} is {stage}, so there is nothing to give back.
+- **ar** — عملية الدفع {id} في حالة {stage}، فلا يوجد ما يُرد.
+
+### `payments.not_started`
+
+- **en** — There is no payment {id} to settle.
+- **ar** — لا توجد عملية دفع {id} لتسويتها.
+
+### `payments.refund_too_large`
+
+- **en** — {amount} is more than is left to refund on this payment.
+- **ar** — {amount} أكبر من المتبقي القابل للاسترداد في هذه العملية.
 
 ### `payments.refused`
 
@@ -811,6 +836,11 @@ The link works once and expires within a day. Nothing has been created yet, so i
 
 - **en** — The payment provider answered in a way this system did not understand, so nothing was recorded.
 - **ar** — ردّ مزوّد الدفع بصيغة لم يفهمها النظام، فلم يُسجَّل شيء.
+
+### `payments.wrong_amount`
+
+- **en** — The payment provider reported {found} against a payment started for {expected}, so nothing was recorded.
+- **ar** — أفاد مزوّد الدفع بمبلغ {found} لعملية بدأت بمبلغ {expected}، فلم يُسجَّل شيء.
 
 
 ## `payroll`

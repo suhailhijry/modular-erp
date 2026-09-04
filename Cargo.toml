@@ -34,6 +34,7 @@ booking = { path = "modules/booking" }
 branches = { path = "modules/branches" }
 hr = { path = "modules/hr" }
 payroll = { path = "modules/payroll" }
+payments = { path = "modules/payments" }
 hr_sa = { path = "modules/hr_sa" }
 reports = { path = "modules/reports" }
 messaging = { path = "modules/messaging" }

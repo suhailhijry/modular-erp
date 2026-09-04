@@ -219,6 +219,7 @@ pub async fn seed(
     let journal_entries = seed_opening_balances(&app, slug, &token).await?;
     let invoices = seed_invoices(&app, slug, &token).await?;
     let payments = seed_payments(&app, slug, &token).await?;
+    let payments = payments + seed_gateway_payment(&app, slug, &token).await?;
 
     // A mistake and its correction, because a demo of an accounting system in
     // which nothing was ever *wrong* is not a demo of an accounting system —
@@ -339,6 +340,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     advance::<tax_sa::TaxSa>(&db, &tax_sa::projections(), tax_sa::upcasters()).await?;
     advance::<reports::Reports>(&db, &reports::projections(), reports::upcasters()).await?;
     advance::<files::Files>(&db, &files::projections(), files::upcasters()).await?;
+    advance::<payments::Payments>(&db, &payments::projections(), payments::upcasters()).await?;
     Ok(())
 }
 
@@ -1327,6 +1329,42 @@ async fn seed_payments(app: &axum::Router, slug: &str, token: &str) -> Result<us
     }
 
     Ok(payments.len())
+}
+
+/// A card payment somebody started and has not finished.
+///
+/// **Deliberately left `pending`**, because that is the honest half. This
+/// system only ever marks a gateway payment settled from what the *gateway*
+/// says — there is no route that lets a caller assert it — and a demo has no
+/// gateway. So what it shows is the real state a tenant is in between sending
+/// a customer to a payment page and the callback arriving, which is exactly
+/// what somebody chasing an unpaid invoice sees.
+async fn seed_gateway_payment(
+    app: &axum::Router,
+    slug: &str,
+    token: &str,
+) -> Result<usize, DemoError> {
+    // The zero-rated invoice, which is half paid by bank transfer. The rest was
+    // sent to a card page.
+    create(
+        app,
+        slug,
+        "/v1/payments",
+        token,
+        "gateway-payment",
+        &serde_json::json!({
+            "provider": "moyasar",
+            "gateway_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "invoice": demo_id("crm-4502"),
+            "amount": 1_650_000,
+            "currency": "SAR",
+            "started_at": "2026-03-02T09:00:00Z",
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+
+    Ok(1)
 }
 
 /// One credited invoice and one reversed journal entry.

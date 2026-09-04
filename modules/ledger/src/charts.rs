@@ -107,6 +107,27 @@ static SERVICES: &[TemplateAccount] = &[
         AccountKind::Asset,
     ),
     account("1010", "Bank", "البنك", AccountKind::Asset),
+    // **Money a gateway has taken and not yet paid over.** A card settles to
+    // the bank days later and net of fees, so posting a card sale straight to
+    // `1010` says the bank holds money it does not. In every template because
+    // every business that takes a card has this gap.
+    account(
+        "1150",
+        "Payments in transit",
+        "مدفوعات قيد التحصيل",
+        AccountKind::Asset,
+    ),
+    // **Buy-now-pay-later is not a card.** The provider pays the merchant and
+    // collects from the buyer, so what is owed after a capture is owed by
+    // Tabby or Tamara — a different counterparty, a different credit risk, and
+    // a different line on the balance sheet. Netting it into `1150` would hide
+    // which of the two owes the money.
+    account(
+        "1160",
+        "Instalment provider receivable",
+        "ذمم مزودي التقسيط",
+        AccountKind::Asset,
+    ),
     account(
         "1100",
         "Accounts receivable",
@@ -202,6 +223,15 @@ static SERVICES: &[TemplateAccount] = &[
     account("5100", "Rent", "الإيجار", AccountKind::Expense),
     account("5200", "Utilities", "المرافق", AccountKind::Expense),
     account("5300", "Marketing", "التسويق", AccountKind::Expense),
+    // **A fee is an expense, never a smaller sale.** A tenant that nets the
+    // gateway's cut against revenue cannot answer what it actually sold, and
+    // the VAT return it files is wrong.
+    account(
+        "5400",
+        "Payment processing fees",
+        "رسوم معالجة المدفوعات",
+        AccountKind::Expense,
+    ),
     account(
         "5900",
         "Other expenses",
@@ -228,6 +258,27 @@ static RETAIL: &[TemplateAccount] = &[
         AccountKind::Asset,
     ),
     account("1010", "Bank", "البنك", AccountKind::Asset),
+    // **Money a gateway has taken and not yet paid over.** A card settles to
+    // the bank days later and net of fees, so posting a card sale straight to
+    // `1010` says the bank holds money it does not. In every template because
+    // every business that takes a card has this gap.
+    account(
+        "1150",
+        "Payments in transit",
+        "مدفوعات قيد التحصيل",
+        AccountKind::Asset,
+    ),
+    // **Buy-now-pay-later is not a card.** The provider pays the merchant and
+    // collects from the buyer, so what is owed after a capture is owed by
+    // Tabby or Tamara — a different counterparty, a different credit risk, and
+    // a different line on the balance sheet. Netting it into `1150` would hide
+    // which of the two owes the money.
+    account(
+        "1160",
+        "Instalment provider receivable",
+        "ذمم مزودي التقسيط",
+        AccountKind::Asset,
+    ),
     account(
         "1100",
         "Accounts receivable",
@@ -327,6 +378,15 @@ static RETAIL: &[TemplateAccount] = &[
     account("5100", "Rent", "الإيجار", AccountKind::Expense),
     account("5200", "Utilities", "المرافق", AccountKind::Expense),
     account("5300", "Marketing", "التسويق", AccountKind::Expense),
+    // **A fee is an expense, never a smaller sale.** A tenant that nets the
+    // gateway's cut against revenue cannot answer what it actually sold, and
+    // the VAT return it files is wrong.
+    account(
+        "5400",
+        "Payment processing fees",
+        "رسوم معالجة المدفوعات",
+        AccountKind::Expense,
+    ),
     account(
         "5900",
         "Other expenses",
@@ -448,6 +508,27 @@ mod tests {
                     a.code
                 );
             }
+        }
+    }
+
+    /// **Every chart can take a card and a Tabby order.**
+    ///
+    /// A business whose chart has no clearing account posts a card sale
+    /// straight to the bank, which says the bank holds money that is still at
+    /// the gateway; one with no fee account nets the gateway's cut against
+    /// revenue, and then cannot answer what it sold. Both are wrong in a way
+    /// that only shows up at a reconciliation.
+    #[test]
+    fn every_chart_can_settle_a_gateway_payment() {
+        for c in CHARTS {
+            let has = |code: &str| c.accounts.iter().any(|a| a.code == code);
+            assert!(has("1150"), "{} has nowhere for money in transit", c.id);
+            assert!(
+                has("1160"),
+                "{} has nowhere for an instalment provider",
+                c.id
+            );
+            assert!(has("5400"), "{} has nowhere to put a gateway fee", c.id);
         }
     }
 

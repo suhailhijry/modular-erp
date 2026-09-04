@@ -2374,6 +2374,93 @@
         ],
         "description": "One document, with the bytes."
       },
+      "GatewayPaymentRecorded": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "GatewayPaymentView": {
+        "properties": {
+          "amount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "failed_why": {
+            "description": "In the gateway's words, when it refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fee": {
+            "description": "What the gateway kept. Absent until it says, which for most providers is\nnot until the payout.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "gateway_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "invoice": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "refunded": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "settled_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "description": "`pending`, `settled`, `failed`, `refunded` or `voided`.",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "gateway_id",
+          "invoice",
+          "amount",
+          "currency",
+          "stage",
+          "refunded",
+          "started_at"
+        ],
+        "type": "object"
+      },
       "Health": {
         "properties": {
           "status": {
@@ -4158,6 +4245,75 @@
           "until",
           "currency",
           "filed_on"
+        ],
+        "type": "object"
+      },
+      "NewGatewayPayment": {
+        "description": "**Not `sales`' `NewPayment`.** That one is a customer handing over money;\nthis is a charge created at a gateway, which may never become one. The\n`OpenAPI` document keeps one schema per name, so the two have to be told\napart — see `no_two_modules_claim_the_same_schema_name`.",
+        "example": {
+          "amount": 10000,
+          "currency": "SAR",
+          "gateway_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+          "invoice": "INV-1",
+          "provider": "moyasar"
+        },
+        "properties": {
+          "amount": {
+            "description": "Minor units — halalas for SAR. Never a decimal.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "currency": {
+            "description": "ISO-4217, three letters.",
+            "type": "string"
+          },
+          "gateway_id": {
+            "description": "**The gateway's own id**, from the charge you created against it. Every\ncallback names this and nothing else, so a payment recorded without one\ncan never be settled.",
+            "type": "string"
+          },
+          "invoice": {
+            "description": "The invoice this is collecting against.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "`moyasar`, `tabby` or `tamara`.",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "When the charge was created. Defaults to now.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "gateway_id",
+          "invoice",
+          "amount",
+          "currency"
+        ],
+        "type": "object"
+      },
+      "NewGatewayRefund": {
+        "properties": {
+          "amount": {
+            "description": "Minor units. Omit to give back everything that is left.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reference": {
+            "description": "Your own reference for this refund. Sending it again is a retry, not a\nsecond refund.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference"
         ],
         "type": "object"
       },
@@ -23607,6 +23763,498 @@
           }
         }
       ]
+    },
+    "/v1/payments": {
+      "get": {
+        "operationId": "list_payments",
+        "parameters": [
+          {
+            "description": "The invoice to list attempts against.",
+            "in": "path",
+            "name": "invoice",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/GatewayPaymentView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was understood and asks for something impossible. `code` says which part."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "What has been tried against an invoice.",
+        "tags": [
+          "payments"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**Call this before sending the customer anywhere.** An attempt this system\ndoes not know about is one no callback can be matched to, and the customer\nwill still have been charged.\n\nIt records; it does not collect. What happens next comes from the gateway.",
+        "operationId": "start_payment",
+        "parameters": [
+          {
+            "description": "Sending it again is a retry.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewGatewayPayment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayPaymentRecorded"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not an id, not a currency, or not a positive amount"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That id is taken by a different payment"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Record a charge created at a gateway.",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/payments/{payment}": {
+      "get": {
+        "operationId": "get_payment",
+        "parameters": [
+          {
+            "description": "The gateway's id for it.",
+            "in": "path",
+            "name": "payment",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayPaymentView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such payment, or the projection has not caught up"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "One attempt.",
+        "tags": [
+          "payments"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/payments/{payment}/refunds": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**Records and posts; it does not ask the gateway.** Instruct the gateway\nfirst and record what it confirmed — a refund posted here that the gateway\nrefused is a set of books saying money went back when it did not.",
+        "operationId": "refund_gateway_payment",
+        "parameters": [
+          {
+            "description": "The gateway's id for it.",
+            "in": "path",
+            "name": "payment",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sending it again is a retry.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewGatewayRefund"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayPaymentRecorded"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "More than is left to refund, or a payment that never settled"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such payment"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Give money back.",
+        "tags": [
+          "payments"
+        ]
+      }
     },
     "/v1/payroll/posting-accounts": {
       "get": {

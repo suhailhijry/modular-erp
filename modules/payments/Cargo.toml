@@ -1,0 +1,46 @@
+[package]
+name = "payments"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Collecting money through a gateway: the attempt, what it cost, and what it did to the books."
+
+[dependencies]
+# `erp-payments` is the vendor half — three providers' HTTP APIs and nothing
+# about invoices. This module is the other half, and the split is the one
+# `modules/files` makes over `erp-storage`.
+erp-payments = { workspace = true }
+# `sales` because **a settled payment is a payment against an invoice**, and
+# `sales::pay_in` already knows what that means: it clears the receivable,
+# refuses an overpayment, and is idempotent on the reference. Re-implementing
+# that here would be a second opinion about the same money.
+sales = { workspace = true }
+# `ledger` for the one entry `sales` knows nothing about: the gateway's fee.
+ledger = { workspace = true }
+erp-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+crm = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

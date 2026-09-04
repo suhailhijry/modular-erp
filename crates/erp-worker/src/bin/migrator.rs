@@ -233,6 +233,12 @@ async fn rebuild(
                 owned.iter().map(AsRef::as_ref).collect();
             rebuild_swap::<crm::Crm>(&pool, sql, &refs, upcasters, 500).await?
         }
+        "payments" => {
+            let owned = payments::projections();
+            let refs: Vec<&dyn Projection<Group = payments::Payments>> =
+                owned.iter().map(AsRef::as_ref).collect();
+            rebuild_swap::<payments::Payments>(&pool, sql, &refs, upcasters, 500).await?
+        }
         "ledger" => {
             let owned = ledger::projections();
             let refs: Vec<&dyn Projection<Group = ledger::Ledger>> =
@@ -449,6 +455,7 @@ mod tests {
             "tax_sa",
             "reports",
             "files",
+            "payments",
         ];
 
         for (name, setup) in erp_api::modules() {

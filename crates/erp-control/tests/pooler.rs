@@ -50,6 +50,7 @@ fn no_session_scoped_set_outside_a_ddl_path() {
         "modules/tax_sa/src/lib.rs",
         "modules/reports/src/lib.rs",
         "modules/files/src/lib.rs",
+        "modules/payments/src/lib.rs",
     ];
 
     let mut offenders = Vec::new();

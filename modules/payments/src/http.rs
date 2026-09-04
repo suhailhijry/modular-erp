@@ -1,0 +1,466 @@
+//! The payments module's HTTP surface.
+//!
+//! Translation only, like every module's. See [`ledger::http`] for why these
+//! live in the module rather than in the composition root.
+//!
+//! # There is no route that settles a payment
+//!
+//! Deliberately. A settlement is decided by asking the gateway, not by anybody
+//! telling this system what happened — see the module docs. What a person can
+//! do here is start a collection, look at one, and give money back.
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use erp_eventlog::ExecuteError;
+use erp_i18n::{Locale, Localize};
+use erp_tenant::CommandError;
+use erp_types::{Money, Timestamp};
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
+
+use erp_web::AppState;
+use erp_web::Problem;
+use erp_web::{Allowed, IdempotencyKey, Language, PostEntries, Read};
+use erp_web::{Consistency, nudge};
+use erp_web::{Json, Query, bad_request, creating, parse_id, require_module};
+
+use crate::PaymentsError;
+
+pub fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(list_payments, start_payment))
+        .routes(routes!(get_payment))
+        .routes(routes!(refund_gateway_payment))
+}
+
+/// This module's own failures plus everything any route can produce.
+static CATALOG: erp_i18n::Composite = erp_i18n::Composite::new(&[
+    &crate::CATALOG,
+    &sales::CATALOG,
+    &ledger::CATALOG,
+    &erp_payments::CATALOG,
+    &erp_web::CATALOG,
+]);
+
+// ---------------------------------------------------------------------------
+// Wire shapes
+// ---------------------------------------------------------------------------
+
+/// **Not `sales`' `NewPayment`.** That one is a customer handing over money;
+/// this is a charge created at a gateway, which may never become one. The
+/// `OpenAPI` document keeps one schema per name, so the two have to be told
+/// apart — see `no_two_modules_claim_the_same_schema_name`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "provider": "moyasar",
+    "gateway_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "invoice": "INV-1",
+    "amount": 10000,
+    "currency": "SAR"
+}))]
+struct NewGatewayPayment {
+    /// `moyasar`, `tabby` or `tamara`.
+    provider: String,
+    /// **The gateway's own id**, from the charge you created against it. Every
+    /// callback names this and nothing else, so a payment recorded without one
+    /// can never be settled.
+    gateway_id: String,
+    /// The invoice this is collecting against.
+    invoice: String,
+    /// Minor units — halalas for SAR. Never a decimal.
+    amount: i64,
+    /// ISO-4217, three letters.
+    currency: String,
+    /// When the charge was created. Defaults to now.
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    started_at: Option<Timestamp>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+struct NewGatewayRefund {
+    /// Your own reference for this refund. Sending it again is a retry, not a
+    /// second refund.
+    reference: String,
+    /// Minor units. Omit to give back everything that is left.
+    #[serde(default)]
+    amount: Option<i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct GatewayPaymentRecorded {
+    id: String,
+    position: Option<i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct GatewayPaymentView {
+    id: String,
+    provider: String,
+    gateway_id: String,
+    invoice: String,
+    amount: i64,
+    currency: String,
+    /// `pending`, `settled`, `failed`, `refunded` or `voided`.
+    stage: String,
+    /// What the gateway kept. Absent until it says, which for most providers is
+    /// not until the payout.
+    fee: Option<i64>,
+    refunded: i64,
+    /// In the gateway's words, when it refused.
+    failed_why: Option<String>,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    started_at: Timestamp,
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    settled_at: Option<Timestamp>,
+}
+
+#[derive(Debug, Deserialize, ToSchema, utoipa::IntoParams)]
+struct Against {
+    /// The invoice to list attempts against.
+    invoice: String,
+}
+
+fn view(row: crate::PaymentRow) -> GatewayPaymentView {
+    GatewayPaymentView {
+        id: row.id,
+        provider: row.provider,
+        gateway_id: row.gateway_id,
+        invoice: row.invoice,
+        amount: row.amount.minor(),
+        currency: row.amount.currency().to_string(),
+        stage: row.stage,
+        fee: row.fee.map(Money::minor),
+        refunded: row.refunded.minor(),
+        failed_why: row.failed_why,
+        started_at: row.started_at,
+        settled_at: row.settled_at,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
+/// What has been tried against an invoice.
+#[utoipa::path(
+    get,
+    path = "/v1/payments",
+    tag = "payments",
+    params(Against),
+    responses(
+        (status = OK, body = Vec<GatewayPaymentView>),
+        (status = BAD_REQUEST, body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure, or the projection did not catch up in time. Retryable.", body = Problem),
+    ),
+)]
+async fn list_payments(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(against): Query<Against>,
+) -> Result<Json<Vec<GatewayPaymentView>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let rows = crate::against(&mut conn, &against.invoice, PAGE)
+        .await
+        .map_err(|e| database(&e, locale))?;
+
+    Ok(Json(rows.into_iter().map(view).collect()))
+}
+
+/// How many attempts one listing gives back.
+const PAGE: i64 = 100;
+
+/// Record a charge created at a gateway.
+///
+/// **Call this before sending the customer anywhere.** An attempt this system
+/// does not know about is one no callback can be matched to, and the customer
+/// will still have been charged.
+///
+/// It records; it does not collect. What happens next comes from the gateway.
+#[utoipa::path(
+    post,
+    path = "/v1/payments",
+    tag = "payments",
+    params(("Idempotency-Key" = String, Header, description = "Sending it again is a retry.")),
+    request_body = NewGatewayPayment,
+    responses(
+        (status = CREATED, body = GatewayPaymentRecorded),
+        (status = BAD_REQUEST, description = "Not an id, not a currency, or not a positive amount", body = Problem),
+        (status = CONFLICT, description = "That id is taken by a different payment", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn start_payment(
+    tenant: Allowed<PostEntries>,
+    Language(locale): Language,
+    State(state): State<AppState>,
+    key: IdempotencyKey,
+    Json(body): Json<NewGatewayPayment>,
+) -> Result<(StatusCode, Json<GatewayPaymentRecorded>), Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    let invoice = parse_id(&body.invoice, locale)?;
+    let currency = erp_types::CurrencyCode::new(&body.currency).map_err(|e| {
+        bad_request(
+            erp_web::messages::MALFORMED_BODY,
+            "reason",
+            &e.to_string(),
+            locale,
+        )
+    })?;
+    if !body.amount.is_positive() {
+        return Err(bad_request(
+            erp_web::messages::MALFORMED_BODY,
+            "reason",
+            "a payment must be for a positive amount",
+            locale,
+        ));
+    }
+
+    // **The gateway's id is this system's id too.** One key, so a callback can
+    // find the payment and a person reading two screens sees one number.
+    let id = parse_id(&body.gateway_id, locale)?;
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    let committed = crate::start_in(
+        &mut tx,
+        &id,
+        &crate::Attempt {
+            provider: body.provider.clone(),
+            gateway_id: body.gateway_id.clone(),
+            invoice,
+            amount: Money::from_minor(body.amount, currency),
+        },
+        body.started_at.unwrap_or_else(chrono::Utc::now),
+        &creating(&tenant, &key),
+    )
+    .await
+    .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(GatewayPaymentRecorded {
+            id: id.to_string(),
+            position: committed.at.map(erp_types::LogPosition::get),
+        }),
+    ))
+}
+
+/// One attempt.
+#[utoipa::path(
+    get,
+    path = "/v1/payments/{payment}",
+    tag = "payments",
+    params(("payment" = String, Path, description = "The gateway's id for it.")),
+    responses(
+        (status = OK, body = GatewayPaymentView),
+        (status = NOT_FOUND, description = "No such payment, or the projection has not caught up", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn get_payment(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Path(id): Path<String>,
+) -> Result<Json<GatewayPaymentView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let found = crate::payment(&mut conn, &id)
+        .await
+        .map_err(|e| database(&e, locale))?;
+
+    found.map(view).map(Json).ok_or_else(|| {
+        Problem::new(
+            StatusCode::NOT_FOUND,
+            &erp_i18n::Message::new(crate::messages::NOT_STARTED)
+                .with("id", erp_i18n::MessageArg::text(id.clone())),
+            locale,
+            &CATALOG,
+        )
+    })
+}
+
+/// Give money back.
+///
+/// **Records and posts; it does not ask the gateway.** Instruct the gateway
+/// first and record what it confirmed — a refund posted here that the gateway
+/// refused is a set of books saying money went back when it did not.
+#[utoipa::path(
+    post,
+    path = "/v1/payments/{payment}/refunds",
+    tag = "payments",
+    params(
+        ("payment" = String, Path, description = "The gateway's id for it."),
+        ("Idempotency-Key" = String, Header, description = "Sending it again is a retry."),
+    ),
+    request_body = NewGatewayRefund,
+    responses(
+        (status = OK, body = GatewayPaymentRecorded),
+        (status = BAD_REQUEST, description = "More than is left to refund, or a payment that never settled", body = Problem),
+        (status = NOT_FOUND, description = "No such payment", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn refund_gateway_payment(
+    tenant: Allowed<PostEntries>,
+    Language(locale): Language,
+    State(state): State<AppState>,
+    key: IdempotencyKey,
+    Path(id): Path<String>,
+    Json(body): Json<NewGatewayRefund>,
+) -> Result<Json<GatewayPaymentRecorded>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let id = parse_id(&id, locale)?;
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    let record = crate::payment(&mut tx, id.as_str())
+        .await
+        .map_err(|e| database(&e, locale))?
+        .ok_or_else(|| {
+            Problem::new(
+                StatusCode::NOT_FOUND,
+                &erp_i18n::Message::new(crate::messages::NOT_STARTED)
+                    .with("id", erp_i18n::MessageArg::text(id.to_string())),
+                locale,
+                &CATALOG,
+            )
+        })?;
+
+    // Everything left, when no amount is named. The refundable balance is the
+    // aggregate's to decide; this is only the wire default.
+    let amount = Money::from_minor(
+        body.amount
+            .unwrap_or(record.amount.minor() - record.refunded.minor()),
+        record.amount.currency(),
+    );
+
+    let committed = crate::refund_in(
+        &mut tx,
+        &id,
+        &body.reference,
+        amount,
+        chrono::Utc::now(),
+        &creating(&tenant, &key),
+    )
+    .await
+    .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
+
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+    nudge(&state, tenant.db.tenant()).await;
+
+    Ok(Json(GatewayPaymentRecorded {
+        id: id.to_string(),
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Failures
+// ---------------------------------------------------------------------------
+
+impl Localize for PaymentsError {
+    fn message(&self) -> erp_i18n::Message {
+        use erp_i18n::{Message, MessageArg};
+        match self {
+            Self::NotStarted(id) => {
+                Message::new(crate::messages::NOT_STARTED).with("id", MessageArg::text(id))
+            }
+            Self::AlreadyStarted(id) => {
+                Message::new(crate::messages::ALREADY_STARTED).with("id", MessageArg::text(id))
+            }
+            Self::WrongAmount { expected, found } => Message::new(crate::messages::WRONG_AMOUNT)
+                .with("expected", MessageArg::text(expected.to_string()))
+                .with("found", MessageArg::text(found.to_string())),
+            Self::NotCollectable { id, stage } => Message::new(crate::messages::NOT_COLLECTABLE)
+                .with("id", MessageArg::text(id))
+                .with("stage", MessageArg::text(*stage)),
+            Self::RefundTooLarge(amount) => Message::new(crate::messages::REFUND_TOO_LARGE)
+                .with("amount", MessageArg::text(amount.to_string())),
+            Self::Unbalanced(e) => e.message(),
+            Self::Config(e) => e.message(),
+            // The composed error already reads as a sentence, and it is the
+            // one `sales` or `ledger` wrote — better than anything this module
+            // could say about somebody else's rule.
+            Self::Sales(why) => Message::new(erp_web::messages::MALFORMED_BODY)
+                .with("reason", MessageArg::text(why)),
+        }
+    }
+}
+
+fn problem_for(error: &CommandError<PaymentsError>, locale: Locale) -> Problem {
+    let (status, message) = match error {
+        CommandError::Execute(ExecuteError::Rejected(rejection)) => (
+            match rejection {
+                // The payment is not there to settle or refund.
+                PaymentsError::NotStarted(_) => StatusCode::NOT_FOUND,
+                PaymentsError::AlreadyStarted(_) => StatusCode::CONFLICT,
+                // **Well-formed, and refused on what the gateway said.** A 422
+                // rather than a 400: nothing about the request was wrong.
+                PaymentsError::WrongAmount { .. } | PaymentsError::NotCollectable { .. } => {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                }
+                _ => StatusCode::BAD_REQUEST,
+            },
+            rejection.message(),
+        ),
+
+        CommandError::Pool(e @ erp_tenant::PoolError::Overloaded { .. }) => {
+            (StatusCode::SERVICE_UNAVAILABLE, e.message())
+        }
+
+        CommandError::Execute(ExecuteError::Contended { .. }) => (
+            StatusCode::CONFLICT,
+            erp_i18n::Message::new(erp_eventlog::messages::CONCURRENT_MODIFICATION),
+        ),
+
+        other => {
+            tracing::error!(error = %other, "a payments command failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
+            )
+        }
+    };
+    Problem::new(status, &message, locale, &CATALOG)
+}
+
+fn pool(error: &erp_tenant::PoolError, locale: Locale) -> Problem {
+    let status = match error {
+        erp_tenant::PoolError::Overloaded { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    Problem::new(status, &error.message(), locale, &CATALOG)
+}
+
+fn database(error: &sqlx::Error, locale: Locale) -> Problem {
+    tracing::error!(error = %error, "a payments read failed");
+    Problem::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        &erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
+        locale,
+        &CATALOG,
+    )
+}
