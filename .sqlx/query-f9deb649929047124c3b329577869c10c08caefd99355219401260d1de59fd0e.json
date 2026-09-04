@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", provider as \"provider!\", reference as \"reference!\",\n                  amount_minor as \"amount_minor!\", expected_minor as \"expected_minor!\",\n                  currency as \"currency!\", covered as \"covered!\",\n                  received_on as \"received_on!\"\n             FROM proj_payments.payout\n            ORDER BY received_on DESC LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payout",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "provider!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payout",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "reference!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payout",
+            "name": "reference"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "amount_minor!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payout",
+            "name": "amount_minor"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "expected_minor!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payout",
+            "name": "expected_minor"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payout",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "covered!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payout",
+            "name": "covered"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "received_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payout",
+            "name": "received_on"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f9deb649929047124c3b329577869c10c08caefd99355219401260d1de59fd0e"
+}

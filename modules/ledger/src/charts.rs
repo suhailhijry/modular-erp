@@ -232,6 +232,17 @@ static SERVICES: &[TemplateAccount] = &[
         "رسوم معالجة المدفوعات",
         AccountKind::Expense,
     ),
+    // **What a payout disagreed with the books by.** In every template for the
+    // reason `5910` is: a gateway that pays over less than the payments say —
+    // a chargeback, a fee nobody told us about, a rounding difference — has to
+    // be bookable, or the clearing account says the gateway is still holding
+    // money it has already sent, for ever.
+    account(
+        "5420",
+        "Settlement differences",
+        "فروقات التسويات",
+        AccountKind::Expense,
+    ),
     account(
         "5900",
         "Other expenses",
@@ -387,6 +398,17 @@ static RETAIL: &[TemplateAccount] = &[
         "رسوم معالجة المدفوعات",
         AccountKind::Expense,
     ),
+    // **What a payout disagreed with the books by.** In every template for the
+    // reason `5910` is: a gateway that pays over less than the payments say —
+    // a chargeback, a fee nobody told us about, a rounding difference — has to
+    // be bookable, or the clearing account says the gateway is still holding
+    // money it has already sent, for ever.
+    account(
+        "5420",
+        "Settlement differences",
+        "فروقات التسويات",
+        AccountKind::Expense,
+    ),
     account(
         "5900",
         "Other expenses",
@@ -529,6 +551,11 @@ mod tests {
                 c.id
             );
             assert!(has("5400"), "{} has nowhere to put a gateway fee", c.id);
+            assert!(
+                has("5420"),
+                "{} has nowhere to put a payout difference",
+                c.id
+            );
         }
     }
 

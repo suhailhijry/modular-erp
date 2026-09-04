@@ -648,6 +648,53 @@ the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
 
+### 29 · Settlement reconciles, and the source of a settlement report does not exist yet
+
+**What is built.** A payout is what a gateway actually sent; the payments it
+covers say what it should have. `POST /v1/payments/payouts` records the transfer
+and posts `Dr bank / Cr clearing`, and `GET /v1/payments/settlement` answers the
+question underneath it: per provider, what has been settled and not yet paid
+over. That number is what the clearing account should be holding, and a
+disagreement between the two means a payment posted and its payout did not, or
+the other way round.
+
+**The difference posts.** It will not always agree — a chargeback, a fee the
+settlement report explains and the payment did not, a rounding difference on a
+conversion. Booking it to its own account (`5420`, in every chart) rather than
+refusing the payout is the same call `pos` makes about a till that counts short:
+a payout that cannot be recorded leaves the books saying the gateway still holds
+money it has already sent, for ever, and the next reconciliation inherits that.
+Its own account rather than lumped into fees, because a chargeback and a
+processing fee are different facts about a business.
+
+**A payout naming a payment that never settled is refused**, not skipped. The
+arithmetic would otherwise run against a smaller set than the operator thinks,
+and the missing amount would look like the gateway paying short — a
+reconciliation failure invented by the reconciler.
+
+**A payout with no list is allowed and reconciles nothing.** Somebody typing
+from a bank statement has an amount and a date and no transaction list. It
+posts, `covered` is zero, and the payments it did not name stay in
+`awaiting_payout` — so the clearing account and the payouts now visibly
+disagree, which is the honest answer rather than a reconciliation that always
+agrees.
+
+**What is not built, and this is the gap worth naming.** The plan said this
+would be "the bank statement matching from Phase 8 pointed at a different
+source". There is no such machinery: §10a already records that nothing in this
+system has ever seen a bank statement, which is why `takings.paid_out` is named
+for what it is. So a payout gets here because a person records one — from the
+gateway's dashboard or their bank. Two ways to close that, neither guessed at
+here:
+
+- **A settlement-report import.** Every provider publishes one as a CSV, and
+  11d's importer already exists. This is the small one, and it needs one file
+  format per provider that somebody has actually downloaded.
+- **The gateways' own payout APIs.** The research behind §25 covered payments
+  and deliberately did not cover settlements, so what those endpoints are is
+  genuinely unknown here. Writing them from memory is the failure mode this
+  build keeps refusing.
+
 ### 28 · A webhook cannot settle a payment, so a sweep does
 
 The callback surface built in 12b promises `webhook.{provider}` and waits for a
@@ -2494,10 +2541,13 @@ research changed about 12b.
       payment
 - [ ] Refunds, partial refunds, and what a refund does to a cleared tax invoice.
       ZATCA has an opinion (`tax_sa`), and it is a credit note
-- [ ] **Settlement.** A gateway pays out in batches, net of fees, days later. The
+- [~] **Settlement.** A gateway pays out in batches, net of fees, days later. The
       reconciliation is: this payout equals these payments minus this fee — and
-      it posts to `ledger`. The bank statement matching from Phase 8 is the same
-      machinery pointed at a different source
+      it posts to `ledger`. **Built**, and it is *not* the Phase 8 bank-statement
+      machinery pointed at a different source, because that machinery does not
+      exist — nothing in this system has ever seen a bank statement (§10a says
+      so). What is built is the arithmetic and the accounts; where a settlement
+      report comes from is still a person or a spreadsheet. See §29
 - [ ] Fees are an expense, not a smaller revenue. A tenant that nets them cannot
       answer what it actually sold
 

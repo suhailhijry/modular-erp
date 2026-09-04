@@ -508,6 +508,40 @@
         },
         "type": "object"
       },
+      "AwaitingView": {
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "held": {
+            "description": "Settled amounts less the fees already booked. **This is what the\nclearing account should say**, and a disagreement is worth chasing.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "payments": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "since": {
+            "description": "The oldest one still waiting.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "held",
+          "currency",
+          "payments"
+        ],
+        "type": "object"
+      },
       "AwardView": {
         "properties": {
           "days": {
@@ -4761,6 +4795,62 @@
         ],
         "type": "object"
       },
+      "NewPayout": {
+        "example": {
+          "amount": 1118400,
+          "covers": [
+            "pay_1",
+            "pay_2"
+          ],
+          "currency": "SAR",
+          "into": "1010",
+          "provider": "moyasar",
+          "reference": "po_2026_03_04"
+        },
+        "properties": {
+          "amount": {
+            "description": "**What arrived.** Minor units — the number on the bank statement.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "covers": {
+            "description": "The gateway payment ids it covers.\n\n**Empty is allowed and reconciles nothing** — right for somebody typing\nfrom a bank statement, who has an amount and no transaction list. The\nanswer says `covered: 0` rather than pretending it agreed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "into": {
+            "description": "The bank account it landed in.",
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "received_on": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "description": "The gateway's own id for the transfer.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "reference",
+          "amount",
+          "currency",
+          "into"
+        ],
+        "type": "object"
+      },
       "NewPointsRedemption": {
         "properties": {
           "at": {
@@ -6851,6 +6941,85 @@
         ],
         "type": "object"
       },
+      "PayoutRecorded": {
+        "properties": {
+          "covered": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "difference": {
+            "description": "What arrived less what the covered payments said should have.\n**Negative is short.**",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "difference",
+          "covered"
+        ],
+        "type": "object"
+      },
+      "PayoutSummary": {
+        "properties": {
+          "amount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "covered": {
+            "description": "Zero reconciles nothing, which is not the same as agreeing.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "difference": {
+            "description": "**Negative is short.**",
+            "format": "int64",
+            "type": "integer"
+          },
+          "expected": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "received_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "reference",
+          "amount",
+          "expected",
+          "difference",
+          "currency",
+          "covered",
+          "received_on"
+        ],
+        "type": "object"
+      },
       "PayrollCash": {
         "properties": {
           "currency": {
@@ -8005,6 +8174,29 @@
         "required": [
           "business",
           "language"
+        ],
+        "type": "object"
+      },
+      "SettlementView": {
+        "properties": {
+          "awaiting": {
+            "description": "Per provider: what the gateway has settled and not yet paid over.",
+            "items": {
+              "$ref": "#/components/schemas/AwaitingView"
+            },
+            "type": "array"
+          },
+          "payouts": {
+            "description": "The transfers recorded, newest first.",
+            "items": {
+              "$ref": "#/components/schemas/PayoutSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "awaiting",
+          "payouts"
         ],
         "type": "object"
       },
@@ -24156,6 +24348,239 @@
           "payments"
         ]
       }
+    },
+    "/v1/payments/payouts": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The arithmetic is what arrived against what the covered payments say should\nhave. **A difference is booked, not refused** — a payout that cannot be\nrecorded leaves the books saying the gateway still holds money it has\nalready sent, and the next reconciliation inherits that.\n\nNaming no payments records the transfer and reconciles nothing, which is\nright for somebody working from a bank statement.",
+        "operationId": "record_payout",
+        "parameters": [
+          {
+            "description": "Sending it again is a retry.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPayout"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayoutRecorded"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a currency, or a payment that never settled"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That payout has already been recorded"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Record a transfer from a gateway, and reconcile it.",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/payments/settlement": {
+      "get": {
+        "description": "`awaiting` is the reconciliation surface: settled payments the gateway has\nnot paid over, which is what the clearing account should be holding. A\ndisagreement between the two means a payment posted and its payout did not,\nor the other way round.",
+        "operationId": "list_settlement",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettlementView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "**What the gateway still owes, and what it has sent.**",
+        "tags": [
+          "payments"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/payments/{payment}": {
       "get": {

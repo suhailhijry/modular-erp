@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS payment (
     -- In the gateway's words, when it refused. For a person to read.
     failed_why    TEXT,
 
+    -- **Which payout paid this over**, when one has. Null is the ordinary
+    -- state for a payment that settled today: the gateway batches, and the
+    -- transfer is days away. What is null here is what the clearing account
+    -- is still holding.
+    paid_out_in   TEXT,
+
     started_at    TIMESTAMPTZ NOT NULL,
     settled_at    TIMESTAMPTZ,
 
@@ -54,3 +60,38 @@ CREATE INDEX IF NOT EXISTS payment_by_invoice ON payment (invoice, started_at DE
 -- "What has not resolved", which is the list somebody actually chases.
 CREATE INDEX IF NOT EXISTS payment_pending
     ON payment (started_at DESC) WHERE stage = 'pending';
+
+-- "What has the gateway settled and not yet paid over" — the balance the
+-- clearing account should agree with, and the list a payout reconciles against.
+CREATE INDEX IF NOT EXISTS payment_awaiting_payout
+    ON payment (provider, settled_at) WHERE stage = 'settled' AND paid_out_in IS NULL;
+
+-- What a gateway actually sent, against what it owed.
+CREATE TABLE IF NOT EXISTS payout (
+    id             TEXT PRIMARY KEY,
+    provider       TEXT NOT NULL,
+    -- The gateway's own id for the transfer.
+    reference      TEXT NOT NULL,
+
+    -- What arrived. The number on the bank statement.
+    amount_minor   BIGINT NOT NULL,
+    -- What the covered payments say should have arrived. Equal to the amount
+    -- when nothing was named, so the difference is zero and honest rather than
+    -- invented.
+    expected_minor BIGINT NOT NULL,
+    currency       TEXT NOT NULL CHECK (length(currency) = 3),
+
+    -- How many payments it reconciles against. **Zero means it reconciles
+    -- nothing**, which is not the same as agreeing.
+    covered        INTEGER NOT NULL CHECK (covered >= 0),
+
+    into_account   TEXT NOT NULL,
+    received_on    TIMESTAMPTZ NOT NULL,
+    position       BIGINT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS payout_by_reference ON payout (provider, reference);
+
+-- "Which payouts did not add up" — the worklist somebody actually works.
+CREATE INDEX IF NOT EXISTS payout_disagreed
+    ON payout (received_on DESC) WHERE amount_minor <> expected_minor;

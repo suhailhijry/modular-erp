@@ -120,12 +120,14 @@ impl Fixture {
 
         // Everything a card payment touches, plus the invoice's own accounts.
         for (account, kind) in [
+            ("1010", AccountKind::Asset),
             ("1100", AccountKind::Asset),
             ("1150", AccountKind::Asset),
             ("1160", AccountKind::Asset),
             ("2100", AccountKind::Liability),
             ("4000", AccountKind::Revenue),
             ("5400", AccountKind::Expense),
+            ("5420", AccountKind::Expense),
         ] {
             open_account(
                 &fixture.db,
@@ -778,6 +780,281 @@ async fn one_payment_that_will_not_settle_does_not_strand_the_batch() {
             .stage,
         "settled"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Settlement — what the gateway sent, against what it owed
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// A settled payment, ready to be paid over.
+    async fn settled(&self, id: &str, provider: &str, invoice: &str, fee: Option<Money>) {
+        self.invoice(invoice).await;
+        self.start(id, provider, invoice, riyals(115)).await;
+        self.settle(id, &charged(id, Status::Paid, riyals(115), fee))
+            .await
+            .expect("settles");
+    }
+
+    async fn payout(
+        &self,
+        reference: &str,
+        provider: &str,
+        amount: Money,
+        covers: &[&str],
+    ) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::record_payout_in(
+            &mut tx,
+            &code(reference),
+            &payments::Transfer {
+                reference: reference.to_owned(),
+                provider: provider.to_owned(),
+                amount,
+                into: code("1010"),
+                covers: covers.iter().map(|s| (*s).to_owned()).collect(),
+            },
+            when(),
+            &Metadata::default(),
+        )
+        .await
+        .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+}
+
+/// **The reconciliation this module exists to make possible.** Two payments,
+/// one transfer, and the clearing account back to zero.
+#[tokio::test]
+async fn a_payout_that_adds_up_clears_what_the_gateway_was_holding() {
+    let fixture = Fixture::new("payout").await;
+    fixture
+        .settled("pay_1", "moyasar", "INV-1", Some(money(316)))
+        .await;
+    fixture
+        .settled("pay_2", "moyasar", "INV-2", Some(money(316)))
+        .await;
+    fixture.project().await;
+
+    // Two payments of 115.00 less 3.16 of fees each.
+    let net = money(2 * (11_500 - 316));
+    assert_eq!(fixture.balance("1150").await, net);
+
+    fixture
+        .payout("po_1", "moyasar", net, &["pay_1", "pay_2"])
+        .await
+        .expect("records");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1150").await, money(0), "nothing left held");
+    assert_eq!(fixture.balance("1010").await, net, "and it is in the bank");
+    assert_eq!(
+        fixture.balance("5420").await,
+        money(0),
+        "nothing to explain"
+    );
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let recorded = payments::payouts(&mut conn, 10).await.expect("reads");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].difference, money(0));
+    assert_eq!(recorded[0].covered, 2);
+    // And nothing is awaiting a payout any more.
+    assert!(
+        payments::awaiting_payout(&mut conn)
+            .await
+            .expect("reads")
+            .is_empty()
+    );
+}
+
+/// **A short payout is booked, not refused.** The same call `pos` makes about a
+/// till that counts short: a payout that cannot be recorded leaves the books
+/// saying the gateway still holds money it has already sent.
+#[tokio::test]
+async fn a_gateway_that_pays_short_books_the_difference_and_still_clears() {
+    let fixture = Fixture::new("payoutshort").await;
+    fixture
+        .settled("pay_1", "moyasar", "INV-1", Some(money(316)))
+        .await;
+    fixture.project().await;
+
+    let expected = money(11_500 - 316);
+    // A chargeback the settlement report explains and the payment did not.
+    let arrived = money(expected.minor() - 5_000);
+
+    fixture
+        .payout("po_1", "moyasar", arrived, &["pay_1"])
+        .await
+        .expect("records");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1010").await, arrived, "what arrived");
+    assert_eq!(
+        fixture.balance("1150").await,
+        money(0),
+        "the whole claim came off"
+    );
+    assert_eq!(
+        fixture.balance("5420").await,
+        money(5_000),
+        "and the shortfall"
+    );
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let recorded = payments::payouts(&mut conn, 10).await.expect("reads");
+    assert_eq!(recorded[0].difference, money(-5_000), "negative is short");
+
+    let balance = trial_balance(&mut conn).await.expect("reads");
+    assert!(
+        balance.iter().all(ledger::TrialBalance::balances),
+        "the books do not balance: {balance:?}"
+    );
+}
+
+/// Somebody typing from a bank statement has an amount and no transaction list.
+/// That posts and **reconciles nothing**, and the read model says so rather
+/// than reporting a payout that agreed.
+#[tokio::test]
+async fn a_payout_with_no_list_posts_and_reconciles_nothing() {
+    let fixture = Fixture::new("payoutbare").await;
+    fixture
+        .settled("pay_1", "moyasar", "INV-1", Some(money(316)))
+        .await;
+    fixture.project().await;
+
+    fixture
+        .payout("po_1", "moyasar", money(11_184), &[])
+        .await
+        .expect("records");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1010").await, money(11_184));
+    assert_eq!(
+        fixture.balance("5420").await,
+        money(0),
+        "nothing to disagree with"
+    );
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let recorded = payments::payouts(&mut conn, 10).await.expect("reads");
+    assert_eq!(recorded[0].covered, 0, "it reconciled nothing");
+    assert_eq!(recorded[0].difference, money(0));
+
+    // **And the payment is still awaiting one**, because nothing said it was
+    // covered. That is the honest answer: the clearing account and the payout
+    // now disagree, and this is where somebody sees it.
+    let awaiting = payments::awaiting_payout(&mut conn).await.expect("reads");
+    assert_eq!(awaiting.len(), 1);
+    assert_eq!(awaiting[0].held, money(11_184));
+}
+
+/// **Refused, not skipped.** A payout naming a payment this system never
+/// settled would reconcile against a smaller set than the operator thinks, and
+/// the missing amount would look like the gateway paying short.
+#[tokio::test]
+async fn a_payout_naming_a_payment_that_never_settled_is_refused() {
+    let fixture = Fixture::new("payoutghost").await;
+    fixture
+        .settled("pay_1", "moyasar", "INV-1", Some(money(316)))
+        .await;
+    fixture.project().await;
+
+    let refused = fixture
+        .payout("po_1", "moyasar", money(11_184), &["pay_1", "pay_ghost"])
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ExecuteError::Rejected(PaymentsError::NotSettled(_)))
+        ),
+        "{refused:?}"
+    );
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1010").await, money(0), "nothing posted");
+    assert_eq!(fixture.balance("1150").await, money(11_184), "still held");
+}
+
+/// A settlement report imported twice records one payout.
+#[tokio::test]
+async fn the_same_payout_recorded_twice_posts_once() {
+    let fixture = Fixture::new("payouttwice").await;
+    fixture
+        .settled("pay_1", "moyasar", "INV-1", Some(money(316)))
+        .await;
+    fixture.project().await;
+
+    for _ in 0..3 {
+        fixture
+            .payout("po_1", "moyasar", money(11_184), &["pay_1"])
+            .await
+            .expect("records");
+    }
+    fixture.project().await;
+
+    assert_eq!(
+        fixture.balance("1010").await,
+        money(11_184),
+        "once, not thrice"
+    );
+    assert_eq!(fixture.balance("1150").await, money(0));
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    assert_eq!(
+        payments::payouts(&mut conn, 10).await.expect("reads").len(),
+        1
+    );
+}
+
+/// **What the gateway still owes is per provider.** Tabby's balance is not
+/// Moyasar's, and a payout from one must not clear the other's.
+#[tokio::test]
+async fn what_is_awaiting_a_payout_is_counted_per_provider() {
+    let fixture = Fixture::new("payoutmix").await;
+    fixture
+        .settled("pay_1", "moyasar", "INV-1", Some(money(316)))
+        .await;
+    fixture
+        .settled("tab_1", "tabby", "INV-2", Some(riyals(7)))
+        .await;
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let awaiting = payments::awaiting_payout(&mut conn).await.expect("reads");
+    drop(conn);
+    assert_eq!(awaiting.len(), 2);
+    let held = |provider: &str| {
+        awaiting
+            .iter()
+            .find(|a| a.provider == provider)
+            .map(|a| a.held)
+    };
+    assert_eq!(held("moyasar"), Some(money(11_500 - 316)));
+    assert_eq!(held("tabby"), Some(money(11_500 - 700)));
+
+    // Moyasar pays over. Tabby still owes.
+    fixture
+        .payout("po_1", "moyasar", money(11_184), &["pay_1"])
+        .await
+        .expect("records");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let awaiting = payments::awaiting_payout(&mut conn).await.expect("reads");
+    assert_eq!(awaiting.len(), 1);
+    assert_eq!(awaiting[0].provider, "tabby");
+    assert_eq!(awaiting[0].held, money(11_500 - 700));
+
+    // And the two clearing accounts moved independently.
+    drop(conn);
+    assert_eq!(fixture.balance("1150").await, money(0));
+    assert_eq!(fixture.balance("1160").await, money(11_500 - 700));
 }
 
 /// The read model is a pure function of the log (L2): a rebuild from nothing

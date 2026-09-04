@@ -27,7 +27,8 @@ use erp_payments::{Charged, Status};
 use erp_types::{AggregateId, Money, Timestamp};
 
 use crate::payment::{Payment, PaymentEvent, Stage};
-use crate::posting::{PostingAccounts, Settlement, entry_for_fee};
+use crate::payout::{Payout, PayoutEvent};
+use crate::posting::{PostingAccounts, Settlement, entry_for_fee, entry_for_payout};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PaymentsError {
@@ -42,6 +43,18 @@ pub enum PaymentsError {
     NotCollectable { id: String, stage: &'static str },
     #[error("{0} is more than is left to refund")]
     RefundTooLarge(Money),
+    #[error("payout {0} has already been recorded")]
+    PayoutRecorded(String),
+    /// A payout naming payments this system has never settled. **Refused**: the
+    /// arithmetic would silently be against a smaller set than the operator
+    /// thinks, and the difference would look like a gateway shortfall.
+    #[error("{0} is not a settled payment this payout can cover")]
+    NotSettled(String),
+    #[error("a payout in {found} cannot cover payments in {expected}")]
+    PayoutCurrency {
+        expected: erp_types::CurrencyCode,
+        found: erp_types::CurrencyCode,
+    },
     #[error(transparent)]
     Unbalanced(#[from] ledger::Unbalanced),
     #[error(transparent)]
@@ -382,6 +395,131 @@ pub async fn refund_in(
     .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))?;
 
     Ok(committed)
+}
+
+/// What a gateway sent, and what it says it covers.
+///
+/// Named for the act rather than the record: [`crate::Payout`] is the aggregate
+/// this produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transfer {
+    /// The gateway's own id for the transfer.
+    pub reference: String,
+    pub provider: String,
+    /// What arrived. The number on the bank statement.
+    pub amount: Money,
+    /// The bank account it landed in.
+    pub into: AggregateId,
+    /// The gateway payment ids it covers. **Empty is allowed** and means no
+    /// reconciliation is possible — see [`crate::payout`].
+    pub covers: Vec<String>,
+}
+
+/// Records a transfer from a gateway, and reconciles it.
+///
+/// The arithmetic is: what arrived, against what the covered payments say
+/// should have. The difference is **booked rather than refused** — see
+/// [`crate::posting::entry_for_payout`] for why.
+///
+/// Reads the covered payments from the **projection**, not by loading each
+/// aggregate: that is a read, and reads are served by read models (L7).
+pub async fn record_payout_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    payout: &Transfer,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<Committed<PayoutEvent>, ExecuteError<PaymentsError>> {
+    let accounts = PostingAccounts::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Config(e)))?;
+    let out_of = accounts.holding(Settlement::of(&payout.provider));
+
+    // **What the covered payments say should have arrived.** Their amount less
+    // the fee already booked against each — which is exactly what the clearing
+    // account is holding for them.
+    let mut expected = Money::from_minor(0, payout.amount.currency());
+    for gateway_id in &payout.covers {
+        let row = crate::payment(&mut *conn, gateway_id)
+            .await
+            .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))?
+            .filter(|row| row.stage == "settled" || row.stage == "refunded")
+            .ok_or_else(|| ExecuteError::Rejected(PaymentsError::NotSettled(gateway_id.clone())))?;
+
+        if row.amount.currency() != payout.amount.currency() {
+            return Err(ExecuteError::Rejected(PaymentsError::PayoutCurrency {
+                expected: row.amount.currency(),
+                found: payout.amount.currency(),
+            }));
+        }
+        let net = row.amount.minor() - row.fee.map_or(0, Money::minor);
+        expected = Money::from_minor(expected.minor() + net, expected.currency());
+    }
+    // Nothing named is nothing to disagree with, so the difference is zero and
+    // honest rather than invented.
+    if payout.covers.is_empty() {
+        expected = payout.amount;
+    }
+
+    let committed = try_execute::<Payout, _, PaymentsError>(
+        &mut *conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if loaded.aggregate.received {
+                // A retried request. The stored payout wins.
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(PayoutEvent::Received {
+                provider: payout.provider.clone(),
+                reference: payout.reference.clone(),
+                amount: payout.amount,
+                expected,
+                covers: payout.covers.clone(),
+                into: payout.into.clone(),
+                out_of: out_of.clone(),
+                received_on: at,
+            }))
+        },
+    )
+    .await?;
+
+    let Some(PayoutEvent::Received {
+        amount,
+        expected,
+        into,
+        out_of,
+        reference,
+        ..
+    }) = committed.events.first()
+    else {
+        return Ok(committed);
+    };
+
+    let lines = entry_for_payout(*amount, *expected, into, out_of, &accounts)
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Unbalanced(e)))?;
+    ledger::post_entry_in(
+        &mut *conn,
+        &payout_entry(id),
+        at,
+        &format!("Payout · {reference}"),
+        &lines,
+        metadata,
+    )
+    .await
+    .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))?;
+
+    Ok(committed)
+}
+
+/// A journal entry id for a payout, derived from it.
+#[expect(
+    clippy::expect_used,
+    reason = "a derived id from an id that already parsed cannot fail to parse"
+)]
+fn payout_entry(payout: &AggregateId) -> AggregateId {
+    AggregateId::new(format!("po-{}", payout.as_str())).expect("a prefixed aggregate id is one")
 }
 
 /// A journal entry id for a fee, derived from the payment.

@@ -8,6 +8,9 @@ pub const WRONG_AMOUNT: MessageCode = MessageCode::new("payments.wrong_amount");
 pub const NOT_COLLECTABLE: MessageCode = MessageCode::new("payments.not_collectable");
 pub const REFUND_TOO_LARGE: MessageCode = MessageCode::new("payments.refund_too_large");
 pub const NO_GATEWAY: MessageCode = MessageCode::new("payments.no_gateway");
+pub const PAYOUT_RECORDED: MessageCode = MessageCode::new("payments.payout_recorded");
+pub const NOT_SETTLED: MessageCode = MessageCode::new("payments.not_settled");
+pub const PAYOUT_CURRENCY: MessageCode = MessageCode::new("payments.payout_currency");
 
 pub static CODES: &[MessageCode] = &[
     NOT_STARTED,
@@ -16,6 +19,9 @@ pub static CODES: &[MessageCode] = &[
     NOT_COLLECTABLE,
     REFUND_TOO_LARGE,
     NO_GATEWAY,
+    PAYOUT_RECORDED,
+    NOT_SETTLED,
+    PAYOUT_CURRENCY,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -87,5 +93,40 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_GATEWAY,
         Locale::Arabic,
         Template::Simple("لا يوجد مزوّد دفع مُهيّأ لهذا النشاط، فلم يُخصم أي مبلغ."),
+    ),
+    (
+        PAYOUT_RECORDED,
+        Locale::English,
+        Template::Simple("Payout {id} has already been recorded."),
+    ),
+    (
+        PAYOUT_RECORDED,
+        Locale::Arabic,
+        Template::Simple("التحويل {id} مسجَّل بالفعل."),
+    ),
+    // **Refused rather than skipped.** A payout naming a payment this system
+    // has not settled would reconcile against a smaller set than the operator
+    // thinks, and the missing amount would look like the gateway paying short.
+    (
+        NOT_SETTLED,
+        Locale::English,
+        Template::Simple(
+            "{payment} is not a settled payment, so this payout cannot be reconciled against it.",
+        ),
+    ),
+    (
+        NOT_SETTLED,
+        Locale::Arabic,
+        Template::Simple("{payment} ليست عملية دفع مسوّاة، فلا يمكن مطابقة هذا التحويل معها."),
+    ),
+    (
+        PAYOUT_CURRENCY,
+        Locale::English,
+        Template::Simple("A payout in {found} cannot cover payments in {expected}."),
+    ),
+    (
+        PAYOUT_CURRENCY,
+        Locale::Arabic,
+        Template::Simple("لا يمكن لتحويل بعملة {found} أن يغطي مدفوعات بعملة {expected}."),
     ),
 ];

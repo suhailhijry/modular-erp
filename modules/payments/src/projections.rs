@@ -6,6 +6,7 @@ use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 use sqlx::PgConnection;
 
 use crate::payment::PaymentEvent;
+use crate::payout::PayoutEvent;
 
 /// This module's projection group.
 ///
@@ -43,6 +44,9 @@ impl Projection for Collected {
         envelope: &Envelope,
         conn: &mut PgConnection,
     ) -> Result<(), ProjectionError> {
+        if PayoutEvent::NAMES.contains(&envelope.event_name.as_str()) {
+            return self.paid_out(ctx, envelope, conn).await;
+        }
         if !PaymentEvent::NAMES.contains(&envelope.event_name.as_str()) {
             return Ok(());
         }
@@ -140,6 +144,70 @@ impl Projection for Collected {
                     .await?;
             }
         }
+        Ok(())
+    }
+}
+
+impl Collected {
+    /// A payout: the transfer itself, and the payments it accounts for.
+    async fn paid_out(
+        &self,
+        ctx: &ProjectionCtx<'_>,
+        envelope: &Envelope,
+        conn: &mut PgConnection,
+    ) -> Result<(), ProjectionError> {
+        let PayoutEvent::Received {
+            provider,
+            reference,
+            amount,
+            expected,
+            covers,
+            into,
+            received_on,
+            ..
+        } = ctx
+            .decode::<PayoutEvent>(envelope)
+            .map_err(|source| ProjectionError::Decode {
+                event_name: envelope.event_name.as_str().to_owned(),
+                position: envelope.position,
+                source,
+            })?;
+        let id = envelope.stream.id.as_str().to_owned();
+
+        sqlx::query(
+            "INSERT INTO payout
+                (id, provider, reference, amount_minor, expected_minor, currency,
+                 covered, into_account, received_on, position)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&id)
+        .bind(&provider)
+        .bind(&reference)
+        .bind(amount.minor())
+        .bind(expected.minor())
+        .bind(amount.currency().to_string())
+        .bind(i32::try_from(covers.len()).unwrap_or(i32::MAX))
+        .bind(into.as_str())
+        .bind(received_on)
+        .bind(envelope.position)
+        .execute(&mut *conn)
+        .await?;
+
+        // **What the clearing account is no longer holding.** A payment with a
+        // payout against it drops out of `payment_awaiting_payout`, which is
+        // the list the next reconciliation works from.
+        sqlx::query(
+            "UPDATE payment SET paid_out_in = $1, position = $2
+              WHERE gateway_id = ANY($3) AND provider = $4",
+        )
+        .bind(&id)
+        .bind(envelope.position)
+        .bind(&covers)
+        .bind(&provider)
+        .execute(&mut *conn)
+        .await?;
+
         Ok(())
     }
 }
@@ -250,6 +318,105 @@ pub async fn against(
                 failed_why: r.failed_why,
                 started_at: r.started_at,
                 settled_at: r.settled_at,
+            })
+        })
+        .collect())
+}
+
+/// What a gateway has settled and not yet paid over.
+///
+/// **The balance the clearing account should agree with.** A number here that
+/// the ledger disagrees with means a payment posted and its payout did not, or
+/// the other way round — which is the whole reason both are recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Awaiting {
+    pub provider: String,
+    /// What the gateway still owes: settled amounts less the fees already
+    /// booked against them.
+    pub held: Money,
+    pub payments: i64,
+    /// The oldest one still waiting. What somebody chasing a late payout looks
+    /// at first.
+    pub since: Option<Timestamp>,
+}
+
+/// One transfer, as somebody reconciling sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutRow {
+    pub id: String,
+    pub provider: String,
+    pub reference: String,
+    pub amount: Money,
+    pub expected: Money,
+    /// What arrived less what was owed. **Negative is short.**
+    pub difference: Money,
+    /// How many payments it reconciles against. **Zero reconciles nothing.**
+    pub covered: i32,
+    pub received_on: Timestamp,
+}
+
+/// Per provider: what the gateway still owes.
+pub async fn awaiting_payout(conn: &mut sqlx::PgConnection) -> Result<Vec<Awaiting>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT provider as "provider!", currency as "currency!",
+                  -- Cast, because `SUM` of a bigint is NUMERIC in Postgres and
+                  -- a money total that needs a decimal library is a money total
+                  -- this build will not have.
+                  SUM(amount_minor - COALESCE(fee_minor, 0))::BIGINT as "held!",
+                  COUNT(*) as "payments!",
+                  MIN(settled_at) as "since"
+             FROM proj_payments.payment
+            WHERE stage = 'settled' AND paid_out_in IS NULL
+            GROUP BY provider, currency
+            ORDER BY provider"#
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let currency = CurrencyCode::new(&row.currency).ok()?;
+            Some(Awaiting {
+                provider: row.provider,
+                held: Money::from_minor(row.held, currency),
+                payments: row.payments,
+                since: row.since,
+            })
+        })
+        .collect())
+}
+
+/// The payouts recorded, newest first.
+pub async fn payouts(
+    conn: &mut sqlx::PgConnection,
+    limit: i64,
+) -> Result<Vec<PayoutRow>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id as "id!", provider as "provider!", reference as "reference!",
+                  amount_minor as "amount_minor!", expected_minor as "expected_minor!",
+                  currency as "currency!", covered as "covered!",
+                  received_on as "received_on!"
+             FROM proj_payments.payout
+            ORDER BY received_on DESC LIMIT $1"#,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let currency = CurrencyCode::new(&row.currency).ok()?;
+            Some(PayoutRow {
+                id: row.id,
+                provider: row.provider,
+                reference: row.reference,
+                amount: Money::from_minor(row.amount_minor, currency),
+                expected: Money::from_minor(row.expected_minor, currency),
+                difference: Money::from_minor(row.amount_minor - row.expected_minor, currency),
+                covered: row.covered,
+                received_on: row.received_on,
             })
         })
         .collect())

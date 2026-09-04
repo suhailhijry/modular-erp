@@ -34,6 +34,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get_payment))
         .routes(routes!(refund_gateway_payment))
         .routes(routes!(set_gateway))
+        .routes(routes!(list_settlement, record_payout))
 }
 
 /// This module's own failures plus everything any route can produce.
@@ -378,6 +379,83 @@ async fn refund_gateway_payment(
     }))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "provider": "moyasar",
+    "reference": "po_2026_03_04",
+    "amount": 1_118_400,
+    "currency": "SAR",
+    "into": "1010",
+    "covers": ["pay_1", "pay_2"]
+}))]
+struct NewPayout {
+    provider: String,
+    /// The gateway's own id for the transfer.
+    reference: String,
+    /// **What arrived.** Minor units — the number on the bank statement.
+    amount: i64,
+    currency: String,
+    /// The bank account it landed in.
+    into: String,
+    /// The gateway payment ids it covers.
+    ///
+    /// **Empty is allowed and reconciles nothing** — right for somebody typing
+    /// from a bank statement, who has an amount and no transaction list. The
+    /// answer says `covered: 0` rather than pretending it agreed.
+    #[serde(default)]
+    covers: Vec<String>,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    received_on: Option<Timestamp>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct PayoutRecorded {
+    id: String,
+    /// What arrived less what the covered payments said should have.
+    /// **Negative is short.**
+    difference: i64,
+    covered: usize,
+    position: Option<i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct SettlementView {
+    /// Per provider: what the gateway has settled and not yet paid over.
+    awaiting: Vec<AwaitingView>,
+    /// The transfers recorded, newest first.
+    payouts: Vec<PayoutSummary>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct AwaitingView {
+    provider: String,
+    /// Settled amounts less the fees already booked. **This is what the
+    /// clearing account should say**, and a disagreement is worth chasing.
+    held: i64,
+    currency: String,
+    payments: i64,
+    /// The oldest one still waiting.
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    since: Option<Timestamp>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct PayoutSummary {
+    id: String,
+    provider: String,
+    reference: String,
+    amount: i64,
+    expected: i64,
+    /// **Negative is short.**
+    difference: i64,
+    currency: String,
+    /// Zero reconciles nothing, which is not the same as agreeing.
+    covered: i32,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    received_on: Timestamp,
+}
+
 /// What a tenant hands over so this system can talk to their gateway.
 ///
 /// Shaped per provider, because the three need different things: Moyasar a
@@ -499,6 +577,153 @@ async fn set_gateway(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// **What the gateway still owes, and what it has sent.**
+///
+/// `awaiting` is the reconciliation surface: settled payments the gateway has
+/// not paid over, which is what the clearing account should be holding. A
+/// disagreement between the two means a payment posted and its payout did not,
+/// or the other way round.
+#[utoipa::path(
+    get,
+    path = "/v1/payments/settlement",
+    tag = "payments",
+    responses(
+        (status = OK, body = SettlementView),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn list_settlement(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+) -> Result<Json<SettlementView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let awaiting = crate::awaiting_payout(&mut conn)
+        .await
+        .map_err(|e| database(&e, locale))?;
+    let recorded = crate::payouts(&mut conn, PAGE)
+        .await
+        .map_err(|e| database(&e, locale))?;
+
+    Ok(Json(SettlementView {
+        awaiting: awaiting
+            .into_iter()
+            .map(|a| AwaitingView {
+                provider: a.provider,
+                held: a.held.minor(),
+                currency: a.held.currency().to_string(),
+                payments: a.payments,
+                since: a.since,
+            })
+            .collect(),
+        payouts: recorded
+            .into_iter()
+            .map(|p| PayoutSummary {
+                id: p.id,
+                provider: p.provider,
+                reference: p.reference,
+                amount: p.amount.minor(),
+                expected: p.expected.minor(),
+                difference: p.difference.minor(),
+                currency: p.amount.currency().to_string(),
+                covered: p.covered,
+                received_on: p.received_on,
+            })
+            .collect(),
+    }))
+}
+
+/// Record a transfer from a gateway, and reconcile it.
+///
+/// The arithmetic is what arrived against what the covered payments say should
+/// have. **A difference is booked, not refused** — a payout that cannot be
+/// recorded leaves the books saying the gateway still holds money it has
+/// already sent, and the next reconciliation inherits that.
+///
+/// Naming no payments records the transfer and reconciles nothing, which is
+/// right for somebody working from a bank statement.
+#[utoipa::path(
+    post,
+    path = "/v1/payments/payouts",
+    tag = "payments",
+    params(("Idempotency-Key" = String, Header, description = "Sending it again is a retry.")),
+    request_body = NewPayout,
+    responses(
+        (status = CREATED, body = PayoutRecorded),
+        (status = BAD_REQUEST, description = "Not a currency, or a payment that never settled", body = Problem),
+        (status = CONFLICT, description = "That payout has already been recorded", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn record_payout(
+    tenant: Allowed<PostEntries>,
+    Language(locale): Language,
+    State(state): State<AppState>,
+    key: IdempotencyKey,
+    Json(body): Json<NewPayout>,
+) -> Result<(StatusCode, Json<PayoutRecorded>), Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    let currency = erp_types::CurrencyCode::new(&body.currency).map_err(|e| {
+        bad_request(
+            erp_web::messages::MALFORMED_BODY,
+            "reason",
+            &e.to_string(),
+            locale,
+        )
+    })?;
+    let into = parse_id(&body.into, locale)?;
+    // **The gateway's payout id is this system's id too**, so a settlement
+    // report imported twice records one payout.
+    let id = parse_id(&body.reference, locale)?;
+    let covered = body.covers.len();
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    let committed = crate::record_payout_in(
+        &mut tx,
+        &id,
+        &crate::Transfer {
+            reference: body.reference.clone(),
+            provider: body.provider,
+            amount: Money::from_minor(body.amount, currency),
+            into,
+            covers: body.covers,
+        },
+        body.received_on.unwrap_or_else(chrono::Utc::now),
+        &creating(&tenant, &key),
+    )
+    .await
+    .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+
+    let difference = committed.events.first().map_or(
+        0,
+        |crate::PayoutEvent::Received {
+             amount, expected, ..
+         }| amount.minor() - expected.minor(),
+    );
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(PayoutRecorded {
+            id: id.to_string(),
+            difference,
+            covered,
+            position: committed.at.map(erp_types::LogPosition::get),
+        }),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Failures
 // ---------------------------------------------------------------------------
@@ -521,6 +746,16 @@ impl Localize for PaymentsError {
                 .with("stage", MessageArg::text(*stage)),
             Self::RefundTooLarge(amount) => Message::new(crate::messages::REFUND_TOO_LARGE)
                 .with("amount", MessageArg::text(amount.to_string())),
+            Self::PayoutRecorded(id) => {
+                Message::new(crate::messages::PAYOUT_RECORDED).with("id", MessageArg::text(id))
+            }
+            Self::NotSettled(payment) => Message::new(crate::messages::NOT_SETTLED)
+                .with("payment", MessageArg::text(payment)),
+            Self::PayoutCurrency { expected, found } => {
+                Message::new(crate::messages::PAYOUT_CURRENCY)
+                    .with("expected", MessageArg::text(expected.to_string()))
+                    .with("found", MessageArg::text(found.to_string()))
+            }
             Self::Unbalanced(e) => e.message(),
             Self::Config(e) => e.message(),
             // The composed error already reads as a sentence, and it is the
@@ -538,7 +773,9 @@ fn problem_for(error: &CommandError<PaymentsError>, locale: Locale) -> Problem {
             match rejection {
                 // The payment is not there to settle or refund.
                 PaymentsError::NotStarted(_) => StatusCode::NOT_FOUND,
-                PaymentsError::AlreadyStarted(_) => StatusCode::CONFLICT,
+                PaymentsError::AlreadyStarted(_) | PaymentsError::PayoutRecorded(_) => {
+                    StatusCode::CONFLICT
+                }
                 // **Well-formed, and refused on what the gateway said.** A 422
                 // rather than a 400: nothing about the request was wrong.
                 PaymentsError::WrongAmount { .. } | PaymentsError::NotCollectable { .. } => {

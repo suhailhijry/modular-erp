@@ -48,16 +48,22 @@ pub mod messages;
 mod commands;
 mod gateways;
 mod payment;
+mod payout;
 mod posting;
 mod projections;
 mod sweep;
 
-pub use commands::{Attempt, PaymentsError, fail_in, refund_in, settle_in, start_in, void_in};
+pub use commands::{
+    Attempt, PaymentsError, Transfer, fail_in, record_payout_in, refund_in, settle_in, start_in,
+    void_in,
+};
 pub use gateways::{Credentials, GatewayConfigError, PROVIDERS, configure, credentials};
 pub use payment::{Payment, PaymentEvent, Stage};
-pub use posting::{PostingAccounts, Settlement, entry_for_fee};
+pub use payout::{Payout, PayoutEvent};
+pub use posting::{PostingAccounts, Settlement, entry_for_fee, entry_for_payout};
 pub use projections::{
-    Collected, PaymentRow, Payments, against, by_gateway_id, payment, projections,
+    Awaiting, Collected, PaymentRow, Payments, PayoutRow, against, awaiting_payout, by_gateway_id,
+    payment, payouts, projections,
 };
 pub use sweep::{Doorbell, Swept, configured, doorbells, pending, settle_pending};
 
@@ -129,6 +135,7 @@ pub fn upcasters() -> &'static erp_eventlog::Upcasters {
     UPCASTERS.get_or_init(|| {
         PaymentEvent::NAMES
             .iter()
+            .chain(PayoutEvent::NAMES.iter())
             .fold(erp_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             })
@@ -157,10 +164,11 @@ mod tests {
 
     #[test]
     fn names_are_valid() {
-        for literal in PaymentEvent::NAMES {
+        for literal in PaymentEvent::NAMES.iter().chain(PayoutEvent::NAMES.iter()) {
             let _ = name(literal);
         }
         let _ = domain("payments_payment");
+        let _ = domain("payments_payout");
         let _ = module_id();
         let _ = upcasters();
     }

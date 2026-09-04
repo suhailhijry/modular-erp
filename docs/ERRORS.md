@@ -807,10 +807,25 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **en** — Payment {id} is {stage}, so there is nothing to give back.
 - **ar** — عملية الدفع {id} في حالة {stage}، فلا يوجد ما يُرد.
 
+### `payments.not_settled`
+
+- **en** — {payment} is not a settled payment, so this payout cannot be reconciled against it.
+- **ar** — {payment} ليست عملية دفع مسوّاة، فلا يمكن مطابقة هذا التحويل معها.
+
 ### `payments.not_started`
 
 - **en** — There is no payment {id} to settle.
 - **ar** — لا توجد عملية دفع {id} لتسويتها.
+
+### `payments.payout_currency`
+
+- **en** — A payout in {found} cannot cover payments in {expected}.
+- **ar** — لا يمكن لتحويل بعملة {found} أن يغطي مدفوعات بعملة {expected}.
+
+### `payments.payout_recorded`
+
+- **en** — Payout {id} has already been recorded.
+- **ar** — التحويل {id} مسجَّل بالفعل.
 
 ### `payments.refund_too_large`
 

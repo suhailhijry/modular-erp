@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT provider as \"provider!\", currency as \"currency!\",\n                  -- Cast, because `SUM` of a bigint is NUMERIC in Postgres and\n                  -- a money total that needs a decimal library is a money total\n                  -- this build will not have.\n                  SUM(amount_minor - COALESCE(fee_minor, 0))::BIGINT as \"held!\",\n                  COUNT(*) as \"payments!\",\n                  MIN(settled_at) as \"since\"\n             FROM proj_payments.payment\n            WHERE stage = 'settled' AND paid_out_in IS NULL\n            GROUP BY provider, currency\n            ORDER BY provider",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "provider!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "held!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "payments!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "since",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "9e649356ca7510d71958b1ec745084e8ee5009bf721cacaf153a8ad1a3eae5c5"
+}

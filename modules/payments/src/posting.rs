@@ -45,6 +45,12 @@ pub struct PostingAccounts {
     pub instalments: AggregateId,
     /// The gateway's cut.
     pub fees: AggregateId,
+    /// **What a payout disagreed with the books by.** A chargeback, a fee the
+    /// settlement report explains and the payment did not, a rounding
+    /// difference on a conversion. Its own account rather than lumped into
+    /// [`Self::fees`], because a chargeback and a processing fee are different
+    /// facts about a business.
+    pub differences: AggregateId,
 }
 
 impl PostingAccounts {
@@ -70,6 +76,7 @@ impl PostingAccounts {
             clearing: code("1150"),
             instalments: code("1160"),
             fees: code("5400"),
+            differences: code("5420"),
         }
     }
 
@@ -131,6 +138,48 @@ pub fn entry_for_fee(
     ])
 }
 
+/// The gateway sent the money on: `Dr bank / Cr where it was held`, and the
+/// difference wherever it went.
+///
+/// **The difference posts rather than blocking the payout.** The same call
+/// `pos` makes about a till that counts short: a payout that cannot be recorded
+/// leaves the books saying the gateway still holds money it has already sent,
+/// for ever, and the next reconciliation inherits the lie.
+///
+/// `expected` is what the covered payments say should have arrived. When
+/// nothing was named, it equals `amount` and the difference is zero — which is
+/// honest, because there was nothing to disagree with.
+pub fn entry_for_payout(
+    amount: Money,
+    expected: Money,
+    into: &AggregateId,
+    out_of: &AggregateId,
+    accounts: &PostingAccounts,
+) -> Result<BalancedLines, Unbalanced> {
+    let difference = Money::from_minor(amount.minor() - expected.minor(), amount.currency());
+
+    let mut lines = vec![
+        // What arrived.
+        Line::new(into.clone(), amount),
+        // What the gateway is no longer holding — the whole claim, not the
+        // part that turned up.
+        Line::new(
+            out_of.clone(),
+            expected.checked_neg().map_err(Unbalanced::Money)?,
+        ),
+    ];
+    if !difference.is_zero() {
+        // Short means the gateway kept more than the payments accounted for, so
+        // the difference is an expense: `Dr differences`. A negative difference
+        // negated is a positive debit, which is what this is.
+        lines.push(Line::new(
+            accounts.differences.clone(),
+            difference.checked_neg().map_err(Unbalanced::Money)?,
+        ));
+    }
+    BalancedLines::new(lines)
+}
+
 #[expect(
     clippy::expect_used,
     reason = "a malformed literal is a build bug, not a runtime condition"
@@ -149,6 +198,10 @@ mod tests {
             minor,
             CurrencyCode::new("SAR").unwrap_or_else(|_| unreachable!()),
         )
+    }
+
+    fn code(literal: &str) -> AggregateId {
+        AggregateId::new(literal).unwrap_or_else(|_| unreachable!())
     }
 
     fn amount_on(lines: &BalancedLines, account: &str) -> i64 {
@@ -186,6 +239,62 @@ mod tests {
         assert_eq!(amount_on(&lines, "1150"), 0);
     }
 
+    /// **The entry that lets a short payout be recorded.**
+    #[test]
+    fn a_payout_that_agrees_touches_only_the_bank_and_the_clearing_account() {
+        let accounts = PostingAccounts::conventional();
+        let lines = entry_for_payout(
+            sar(11_184),
+            sar(11_184),
+            &code("1010"),
+            &accounts.clearing,
+            &accounts,
+        )
+        .expect("balances");
+
+        assert_eq!(amount_on(&lines, "1010"), 11_184);
+        assert_eq!(amount_on(&lines, "1150"), -11_184);
+        assert_eq!(amount_on(&lines, "5420"), 0, "nothing to explain");
+    }
+
+    /// The gateway sent less than the payments said it owed. The clearing
+    /// account still has to come down by the whole claim.
+    #[test]
+    fn a_short_payout_books_the_difference_as_an_expense() {
+        let accounts = PostingAccounts::conventional();
+        let lines = entry_for_payout(
+            sar(11_000),
+            sar(11_184),
+            &code("1010"),
+            &accounts.clearing,
+            &accounts,
+        )
+        .expect("balances");
+
+        assert_eq!(amount_on(&lines, "1010"), 11_000, "what arrived");
+        assert_eq!(amount_on(&lines, "1150"), -11_184, "the whole claim");
+        assert_eq!(amount_on(&lines, "5420"), 184, "and the shortfall");
+    }
+
+    /// More than expected — an over-recovery, which is a credit to the same
+    /// account rather than a different one.
+    #[test]
+    fn a_payout_over_what_was_owed_credits_the_same_account() {
+        let accounts = PostingAccounts::conventional();
+        let lines = entry_for_payout(
+            sar(11_300),
+            sar(11_184),
+            &code("1010"),
+            &accounts.clearing,
+            &accounts,
+        )
+        .expect("balances");
+
+        assert_eq!(amount_on(&lines, "1010"), 11_300);
+        assert_eq!(amount_on(&lines, "1150"), -11_184);
+        assert_eq!(amount_on(&lines, "5420"), -116);
+    }
+
     #[test]
     fn a_provider_settles_where_the_money_will_come_from() {
         assert_eq!(Settlement::of("moyasar"), Settlement::Card);
@@ -207,7 +316,12 @@ mod tests {
     fn the_conventional_accounts_exist_in_every_chart() {
         let accounts = PostingAccounts::conventional();
         for chart in ledger::CHARTS {
-            for code in [&accounts.clearing, &accounts.instalments, &accounts.fees] {
+            for code in [
+                &accounts.clearing,
+                &accounts.instalments,
+                &accounts.fees,
+                &accounts.differences,
+            ] {
                 assert!(
                     chart.accounts.iter().any(|a| a.code == code.as_str()),
                     "{} has no {code}",
