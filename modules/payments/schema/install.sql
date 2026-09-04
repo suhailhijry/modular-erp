@@ -25,7 +25,17 @@ CREATE TABLE IF NOT EXISTS payment (
     currency      TEXT NOT NULL CHECK (length(currency) = 3),
 
     stage         TEXT NOT NULL
-                  CHECK (stage IN ('pending', 'settled', 'failed', 'refunded', 'voided')),
+                  CHECK (stage IN ('requested', 'pending', 'settled',
+                                   'failed', 'refunded', 'voided')),
+
+    -- **Which saved card this was asked against**, for the pass that charges
+    -- it. Null for every payment the client created at the gateway itself,
+    -- which is all of them until somebody saves a card.
+    card          TEXT,
+    -- Where the gateway sends the customer if it decides it needs them. Kept
+    -- because a saved-card charge that raises a 3-D Secure challenge has to
+    -- name somewhere for the customer to land.
+    callback_url  TEXT,
 
     -- What the gateway kept. Null until it says, which for most providers is
     -- not until the payout.
@@ -48,6 +58,12 @@ CREATE TABLE IF NOT EXISTS payment (
     -- Where in the log this row is true as of.
     position      BIGINT NOT NULL
 );
+
+-- **What the worker still has to send to the gateway.** The queue the
+-- saved-card charge pass works, oldest first — which is what makes it a queue
+-- rather than a lottery.
+CREATE INDEX IF NOT EXISTS payment_requested
+    ON payment (provider, started_at) WHERE stage = 'requested';
 
 -- **A gateway id is how a callback finds its payment**, and it is the only
 -- lookup on the hot path.
@@ -95,3 +111,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS payout_by_reference ON payout (provider, refer
 -- "Which payouts did not add up" — the worklist somebody actually works.
 CREATE INDEX IF NOT EXISTS payout_disagreed
     ON payout (received_on DESC) WHERE amount_minor <> expected_minor;
+
+
+-- A card a customer left behind, so they do not have to type it again.
+--
+-- **There is no token column, and there must never be one.** What charges the
+-- card is sealed in `module_secret` under `payments.card.{id}` — see
+-- `modules/payments/src/card.rs` for the argument, of which the short version
+-- is that "forget my card" has to be a delete, and nothing derived from an
+-- append-only log can be.
+CREATE TABLE IF NOT EXISTS card (
+    id            TEXT PRIMARY KEY,
+    -- The `crm` customer. A reference, never joined: `crm` is another
+    -- projection group and reading across is what L3 forbids.
+    customer      TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+
+    -- What a person recognises it by, and the most this system may keep.
+    brand         TEXT NOT NULL,
+    last4         TEXT NOT NULL CHECK (length(last4) = 4),
+    expiry_month  SMALLINT NOT NULL CHECK (expiry_month BETWEEN 1 AND 12),
+    expiry_year   SMALLINT NOT NULL,
+
+    -- **Kept as a row rather than deleted.** That a customer once had a card
+    -- on file, and asked for it to go, is history somebody may have to answer
+    -- for; the thing that could charge it is what actually goes away.
+    forgotten     BOOLEAN NOT NULL DEFAULT FALSE,
+
+    saved_at      TIMESTAMPTZ NOT NULL,
+    forgotten_at  TIMESTAMPTZ,
+    position      BIGINT NOT NULL
+);
+
+-- "Which cards may I offer this customer" — the only question the list answers.
+CREATE INDEX IF NOT EXISTS card_by_customer
+    ON card (customer, saved_at DESC) WHERE NOT forgotten;

@@ -5221,6 +5221,88 @@
         ],
         "type": "object"
       },
+      "NewSavedCard": {
+        "description": "A card a customer has agreed to leave on file.\n\n**The token is minted in the customer's browser**, against the publishable\nkey, and it is the only part of a card this system ever holds. There is no\nfield here for a card number and there will not be one — sending one to a\nmerchant backend is grounds for Moyasar terminating the agreement.",
+        "example": {
+          "brand": "visa",
+          "customer": "CUST-1",
+          "expiry_month": 5,
+          "expiry_year": 2028,
+          "last4": "4242",
+          "provider": "moyasar",
+          "token": "token_qbmmXzo97AESrZLS6KpWvof6uK2hAKcQGfEcKg"
+        },
+        "properties": {
+          "brand": {
+            "description": "`visa`, `mada`, `master` — whatever the gateway called it.",
+            "type": "string"
+          },
+          "customer": {
+            "description": "The `crm` customer it belongs to.",
+            "type": "string"
+          },
+          "expiry_month": {
+            "description": "1–12.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "expiry_year": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "last4": {
+            "description": "The last four digits, and only those.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "`moyasar`. Buy-now-pay-later providers have no card to keep.",
+            "type": "string"
+          },
+          "token": {
+            "description": "**The gateway's token**, from tokenizing the card in the browser. Stored\nsealed and never returned by any route.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "customer",
+          "provider",
+          "token",
+          "brand",
+          "last4",
+          "expiry_month",
+          "expiry_year"
+        ],
+        "type": "object"
+      },
+      "NewSavedCardCharge": {
+        "description": "What somebody wants taken off a card that is already on file.",
+        "properties": {
+          "amount": {
+            "description": "Minor units — halalas for SAR. Never a decimal.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "callback_url": {
+            "description": "**Where the customer lands if the gateway decides it needs them.** A\nsaved-card charge usually completes with nobody watching; one that\nraises a 3-D Secure challenge does not, and a charge with nowhere to\nsend them is one that can never finish.",
+            "type": "string"
+          },
+          "currency": {
+            "description": "ISO-4217, three letters.",
+            "type": "string"
+          },
+          "invoice": {
+            "description": "The invoice this is collecting against.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invoice",
+          "amount",
+          "currency",
+          "callback_url"
+        ],
+        "type": "object"
+      },
       "NewSchedule": {
         "description": "What to set the schedule to.\n\n**Its own type, without `configured`.** The answer says whether anybody has\nconfirmed the numbers; the request cannot, because sending it *is* the\nconfirmation. One type for both would accept a field it ignored, which is a\ncaller believing they said something.",
         "example": {
@@ -7991,6 +8073,48 @@
           "sale",
           "number",
           "total"
+        ],
+        "type": "object"
+      },
+      "SavedCardView": {
+        "properties": {
+          "brand": {
+            "type": "string"
+          },
+          "customer": {
+            "type": "string"
+          },
+          "expiry_month": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "expiry_year": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last4": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "saved_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "customer",
+          "provider",
+          "brand",
+          "last4",
+          "expiry_month",
+          "expiry_year",
+          "saved_at"
         ],
         "type": "object"
       },
@@ -24214,6 +24338,503 @@
           }
         },
         "summary": "Record a charge created at a gateway.",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/payments/cards": {
+      "get": {
+        "description": "Removed cards are not in it: the list exists to be picked from.",
+        "operationId": "list_saved_cards",
+        "parameters": [
+          {
+            "description": "Whose cards to list.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SavedCardView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was understood and asks for something impossible. `code` says which part."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "What this customer can be offered.",
+        "tags": [
+          "payments"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The `Idempotency-Key` becomes the card's id, so a retried request saves one\ncard rather than two.",
+        "operationId": "save_gateway_card",
+        "parameters": [
+          {
+            "description": "Sending it again is a retry.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSavedCard"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayPaymentRecorded"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a customer id, not four digits, not a month, or a provider that keeps no cards"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That card was removed and cannot be revived"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No sealing key, so there is nowhere safe to put the token"
+          }
+        },
+        "summary": "Keep a customer's card for next time.",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/payments/cards/{card}": {
+      "delete": {
+        "description": "**The token is deleted**, which is what makes this mean anything. The row\nstays, marked removed: that a customer had a card on file and asked for it\nto go is history somebody may have to answer for.",
+        "operationId": "forget_gateway_card",
+        "parameters": [
+          {
+            "description": "From `GET /v1/payments/cards`.",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed, or already was."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was understood and asks for something impossible. `code` says which part."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such card"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Remove a card.",
+        "tags": [
+          "payments"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/payments/cards/{card}/charges": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**`202`, and that is the honest answer.** Nothing has been charged when this\nreturns: charging is an outbound call to the gateway and the worker makes\nit, on its next pass. Poll `GET /v1/payments/{payment}` with the id this\ngives back — it goes `requested` → `pending` → `settled` or `failed`.\n\nThe `Idempotency-Key` becomes the payment's id **and the gateway's**: it is\npassed as Moyasar's `given_id`, so a retry cannot become a second charge at\nany layer. It must be a UUID, which is Moyasar's rule for that field.",
+        "operationId": "charge_saved_card",
+        "parameters": [
+          {
+            "description": "From `GET /v1/payments/cards`.",
+            "in": "path",
+            "name": "card",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A UUID. Becomes the payment's id and the gateway's.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSavedCardCharge"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayPaymentRecorded"
+                }
+              }
+            },
+            "description": "Recorded. The worker will charge it."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not an id, not a currency, not a positive amount, or a key that is not a UUID"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such card"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That card was removed"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Ask for a saved card to be charged.",
         "tags": [
           "payments"
         ]

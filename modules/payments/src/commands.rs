@@ -26,6 +26,7 @@ use erp_eventlog::{Committed, Decision, ExecuteError, Metadata, try_execute};
 use erp_payments::{Charged, Status};
 use erp_types::{AggregateId, Money, Timestamp};
 
+use crate::card::{Card, CardEvent, token_key};
 use crate::payment::{Payment, PaymentEvent, Stage};
 use crate::payout::{Payout, PayoutEvent};
 use crate::posting::{PostingAccounts, Settlement, entry_for_fee, entry_for_payout};
@@ -50,6 +51,24 @@ pub enum PaymentsError {
     /// thinks, and the difference would look like a gateway shortfall.
     #[error("{0} is not a settled payment this payout can cover")]
     NotSettled(String),
+    /// A provider with no card to save. **Refused rather than stored**: a row
+    /// that can never be charged is a saved card as far as a person picking
+    /// one is concerned, and they find out at the till.
+    #[error("{0} does not hold cards that can be charged later")]
+    NoSavedCards(String),
+    #[error("there is no saved card {0}")]
+    NoSuchCard(String),
+    /// **Forgetting is final.** Re-saving means the customer entering their
+    /// card again, which mints a new token under a new id.
+    #[error("card {0} was forgotten and cannot be used again")]
+    CardForgotten(String),
+    #[error("that is not a card this system can keep: {0}")]
+    NotACard(String),
+    /// Sealing or unsealing failed. **Never treated as "no card"** (L6):
+    /// a token this system cannot read is a broken deployment, not a customer
+    /// without a card on file.
+    #[error(transparent)]
+    Secret(#[from] erp_eventlog::SecretError),
     #[error("a payout in {found} cannot cover payments in {expected}")]
     PayoutCurrency {
         expected: erp_types::CurrencyCode,
@@ -275,10 +294,15 @@ pub async fn fail_in(
         crate::upcasters(),
         metadata,
         |loaded| {
-            if !loaded.aggregate.started {
+            // **A requested payment can fail too**, and it is the one case
+            // where nothing was ever sent to a gateway: the card it named was
+            // forgotten before the worker got to it. Leaving it `requested`
+            // would be a charge nobody ever collects and nobody can see is
+            // stuck.
+            if !loaded.aggregate.started && !loaded.aggregate.requested {
                 return Err(PaymentsError::NotStarted(id.as_str().to_owned()));
             }
-            if loaded.aggregate.stage != crate::payment::Stage::Pending {
+            if !matches!(loaded.aggregate.stage, Stage::Pending | Stage::Requested) {
                 return Ok(Decision::nothing());
             }
             Ok(Decision::one(PaymentEvent::Failed {
@@ -532,4 +556,226 @@ fn payout_entry(payout: &AggregateId) -> AggregateId {
 )]
 fn fee_entry(payment: &AggregateId) -> AggregateId {
     AggregateId::new(format!("pf-{}", payment.as_str())).expect("a prefixed aggregate id is one")
+}
+
+// ---------------------------------------------------------------------------
+// Saved cards
+// ---------------------------------------------------------------------------
+
+type CardOutcome = Result<Committed<CardEvent>, ExecuteError<PaymentsError>>;
+
+/// What a customer left behind, minus the part that charges it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedCard {
+    pub customer: AggregateId,
+    pub provider: String,
+    pub brand: String,
+    /// Exactly four digits, and the only digits of the card this system keeps.
+    pub last4: String,
+    pub expiry_month: i16,
+    pub expiry_year: i16,
+}
+
+impl SavedCard {
+    /// **Checked here rather than only at the edge**, because a card that
+    /// expires in month 13 is a row somebody has to explain later, and this is
+    /// the boundary every caller crosses.
+    fn check(&self, token: &str) -> Result<(), PaymentsError> {
+        if !crate::card::SAVES_CARDS.contains(&self.provider.as_str()) {
+            return Err(PaymentsError::NoSavedCards(self.provider.clone()));
+        }
+        if token.trim().is_empty() {
+            return Err(PaymentsError::NotACard("it has no token".to_owned()));
+        }
+        if self.last4.len() != 4 || !self.last4.chars().all(|c| c.is_ascii_digit()) {
+            return Err(PaymentsError::NotACard(format!(
+                "{} is not four digits",
+                self.last4
+            )));
+        }
+        if !(1..=12).contains(&self.expiry_month) {
+            return Err(PaymentsError::NotACard(format!(
+                "{} is not a month",
+                self.expiry_month
+            )));
+        }
+        // Not "in the future": a card that expired last week is still the card
+        // the customer has, and telling them so is the gateway's job, in the
+        // gateway's words, at the moment it matters.
+        if !(2000..=2100).contains(&self.expiry_year) {
+            return Err(PaymentsError::NotACard(format!(
+                "{} is not a year",
+                self.expiry_year
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Keeps a customer's card for next time.
+///
+/// # Two stores, one transaction
+///
+/// The display facts go in the log; the **token goes in `module_secret`**,
+/// sealed, and never into an event — see [`crate::card`] for why. Both happen
+/// on the connection handed in, so a caller that hands in a transaction gets
+/// one or neither. A card recorded whose token was not sealed is a card that
+/// looks chargeable and is not.
+///
+/// # What this trusts the caller for
+///
+/// The brand and the last four digits are **the caller's word**, because the
+/// token was minted in a browser this process never saw. They are display, and
+/// nothing decides anything from them — a wrong `last4` mislabels a row for
+/// whoever entered it. The token is what charges, and the gateway owns that.
+pub async fn save_card_in(
+    conn: &mut sqlx::PgConnection,
+    sealing: &erp_eventlog::SealingKey,
+    id: &AggregateId,
+    card: &SavedCard,
+    token: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> CardOutcome {
+    card.check(token).map_err(ExecuteError::Rejected)?;
+
+    let committed = try_execute::<Card, _, PaymentsError>(
+        &mut *conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if loaded.aggregate.forgotten {
+                return Err(PaymentsError::CardForgotten(id.as_str().to_owned()));
+            }
+            if loaded.aggregate.saved {
+                // A retried request. The stored card wins, and the token
+                // already beside it is the one that was sealed with it.
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(CardEvent::Saved {
+                customer: card.customer.clone(),
+                provider: card.provider.clone(),
+                brand: card.brand.clone(),
+                last4: card.last4.clone(),
+                expiry_month: card.expiry_month,
+                expiry_year: card.expiry_year,
+                saved_at: at,
+            }))
+        },
+    )
+    .await?;
+
+    if committed.events.is_empty() {
+        return Ok(committed);
+    }
+    erp_eventlog::secrets::put(&mut *conn, sealing, &token_key(id), token.as_bytes())
+        .await
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Secret(e)))?;
+    Ok(committed)
+}
+
+/// Removes a card, and **deletes the thing that could charge it**.
+///
+/// The event records that it happened, because a customer asking for their card
+/// to be removed is history somebody may have to answer for. The token is a
+/// delete, which is the half an append-only log cannot do and the reason it was
+/// never in one.
+pub async fn forget_card_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> CardOutcome {
+    let committed = try_execute::<Card, _, PaymentsError>(
+        &mut *conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if !loaded.aggregate.saved {
+                return Err(PaymentsError::NoSuchCard(id.as_str().to_owned()));
+            }
+            if loaded.aggregate.forgotten {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(CardEvent::Forgotten { forgotten_at: at }))
+        },
+    )
+    .await?;
+
+    // **Unconditionally**, and not only when this call is the one that wrote
+    // the event. A retry whose first attempt committed and then failed here
+    // would otherwise leave the token behind for ever, which is precisely the
+    // outcome the customer asked against.
+    erp_eventlog::secrets::forget(&mut *conn, &token_key(id))
+        .await
+        .map_err(|e| ExecuteError::Rejected(PaymentsError::Secret(e)))?;
+    Ok(committed)
+}
+
+/// What somebody wants taken off a saved card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Collection {
+    pub card: AggregateId,
+    pub provider: String,
+    pub invoice: AggregateId,
+    pub amount: Money,
+    /// Where the gateway sends the customer if it decides it needs them.
+    pub callback_url: String,
+}
+
+/// Records that a saved card should be charged. **Charges nothing.**
+///
+/// # Why this does not talk to the gateway
+///
+/// Because a request handler is the wrong place for an outbound call to a third
+/// party, and this system already decided that: ZATCA submissions and the
+/// settlement sweep are worker jobs for the same reason. A handler that waits
+/// on a gateway holds a database connection for as long as somebody else's
+/// server feels like taking, and a gateway having a slow morning becomes this
+/// tenant running out of connections.
+///
+/// So this writes the intent and answers, and [`crate::charge_requested`] is
+/// what sends it. What the caller gets back is the payment's id — which is the
+/// id the gateway will use too, because it is passed as Moyasar's `given_id`.
+///
+/// # The card is not checked here
+///
+/// Deliberately. The token is the only thing that actually decides whether this
+/// card can be charged, it lives in another store, and it can be deleted
+/// between this call and the charge whatever is checked now. So the authority
+/// is [`crate::charge_requested`], which fails the payment with a reason when
+/// the token has gone. The route ahead of this reads `proj_payments.card` for a
+/// friendly refusal on the common mistake, which is a typo rather than a race.
+pub async fn request_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    collection: &Collection,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    try_execute::<Payment, _, PaymentsError>(
+        &mut *conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if loaded.aggregate.requested || loaded.aggregate.started {
+                // A retried request. The stored one wins — and it matters more
+                // here than anywhere else in this module, because the
+                // alternative is charging somebody twice.
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(PaymentEvent::Requested {
+                card: collection.card.clone(),
+                provider: collection.provider.clone(),
+                invoice: collection.invoice.clone(),
+                amount: collection.amount,
+                callback_url: collection.callback_url.clone(),
+                requested_at: at,
+            }))
+        },
+    )
+    .await
 }

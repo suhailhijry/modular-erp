@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,148 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,164 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -650,6 +650,71 @@ before they will lend, so `Charge` carries an optional `Buyer` and `Basket` and
 the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
+
+### 30 · A saved card lives in `payments`, and its token is not in the log
+
+Three calls, all reversible, all made while building 12a's last piece.
+
+**The token is sealed in `module_secret`, not written to an event.** Everything
+else in this module is event-sourced and this half deliberately is not. The log
+holds what a person recognises the card by — whose it is, `visa`, `4242`, `05/28`
+— and the thing that charges it sits in the vault beside the gateway
+credentials, under `payments.card.{id}`.
+
+The weaker reason is that a token is a payment credential. It is much weaker
+than a card number — a gateway acts on one only alongside the secret key — but
+the credentials that build a client are already sealed for exactly this reason,
+and a payment credential in the clear in a table that is copied into every
+shadow schema, every rebuild and every demo is not where one belongs.
+
+The reason that actually decides it: **"forget my card" has to mean it.** An
+event log is append-only by design, so a token written into one is a token this
+system holds for ever, and projecting it away changes nothing about that. Sealed
+in a table, forgetting is a delete. `CardEvent::Forgotten` records *that* it
+happened — history somebody may have to answer for — while the thing that could
+charge it goes away. `forgetting_a_card_deletes_the_token_and_keeps_the_history`
+is the test, and it asserts both halves.
+
+The cost is that a rebuild does not restore tokens. That is correct rather than
+unfortunate: a rebuild is a function of the log, and if it could restore a token
+the delete would not have been one.
+
+**It is a `payments` aggregate, not the `crm` record the plan called for.** The
+plan said "a `crm` record pointing at a gateway token, and it belongs with the
+domain half", which are two different places. The domain half won, for a reason
+the plan could not have known when it was written: whatever holds the token is
+read by the thing that charges it, and if the record lived in `crm` then
+`payments` would be reading `crm`'s projection group to charge a card — the
+cross-group read L3 exists to forbid. So `Card` is keyed on a `crm` customer id
+and stores it as a reference nothing joins on, the same way a payment names an
+invoice without depending on `sales`.
+
+**Charging happens in the worker, and the route answers `202`.** A saved-card
+charge is an outbound call to a third party, and this system already decided
+where those go: ZATCA submissions and the settlement sweep are both worker jobs,
+because a handler that waits on somebody else's server holds a database
+connection for as long as that server feels like taking. So the route records
+`PaymentEvent::Requested` and answers; `payments.settle` grew a charge pass that
+runs before its settle pass, so a card charged on a tick settles on the same
+tick.
+
+Two consequences worth having written down. The `Idempotency-Key` **is** the
+payment id **and** the gateway's — it is passed as Moyasar's `given_id` — so a
+retry cannot become a second charge at any layer, and the route refuses a key
+that is not a UUID rather than letting the worker discover Moyasar's rule later.
+And the charge pass `fetch`es before it charges, so a pass that died between
+charging and recording picks the payment up instead of sending it again. That
+costs one extra call per saved-card payment, once. Moyasar's `given_id` is
+supposed to make the retry safe without it, and probably does; what a duplicate
+`given_id` actually answers is not something this build has verified, and a
+double charge is not the place to find out.
+
+**What this does not do.** A saved-card charge that raises a 3-D Secure
+challenge cannot complete — there is no customer watching. It stays `pending`
+with the gateway's challenge URL, which somebody can send to the customer, and
+it shows up on `payment_pending` like anything else that has not resolved. That
+is a property of charging a card with nobody present, not of this design, and
+the honest thing is that it is visible rather than silently retried.
 
 ### 29 · Settlement reconciles, and the source of a settlement report does not exist yet
 
@@ -2520,14 +2585,19 @@ list. **`crates/erp-payments` is the vendor half and Moyasar is built**; see
 §25 for what carries over to the other two, and §27 for what the webhook
 research changed about 12b.
 
-- [~] A card gateway, and **saved cards** — the token is the gateway's, never a
-      card number, and it belongs to a customer rather than to a session. **The
-      gateway half is built** (`crates/erp-payments`, Moyasar): charge, fetch,
-      capture, refund, void, and callback authentication. `Source` has one
-      variant and it holds a token, because Moyasar's terms make sending a card
-      number to the merchant backend grounds for termination. **A saved card
-      belonging to a customer is not built** — that is a `crm` record pointing
-      at a token, and it belongs with the domain half
+- [x] A card gateway, and **saved cards** — the token is the gateway's, never a
+      card number, and it belongs to a customer rather than to a session. The
+      gateway half is `crates/erp-payments` (Moyasar): charge, fetch, capture,
+      refund, void, and callback authentication. `Source` has one variant and it
+      holds a token, because Moyasar's terms make sending a card number to the
+      merchant backend grounds for termination.
+
+      **Saved cards are built**, as a `payments::Card` aggregate keyed on a
+      `crm` customer — not a `crm` record, and §30 says why. The token is sealed
+      in `module_secret` and **never written to the log**, so "forget my card"
+      is a delete rather than a projection that looks away. Charging one is a
+      worker pass, not a route: `POST /v1/payments/cards/{card}/charges` answers
+      `202` and `payments.settle` sends it
 - [~] Buy-now-pay-later, which is **not a card gateway wearing different
       branding**: the provider pays the merchant and collects from the buyer, so
       the receivable is settled by a third party and the entries differ. Getting
@@ -2551,8 +2621,12 @@ research changed about 12b.
       exist — nothing in this system has ever seen a bank statement (§10a says
       so). What is built is the arithmetic and the accounts; where a settlement
       report comes from is still a person or a spreadsheet. See §29
-- [ ] Fees are an expense, not a smaller revenue. A tenant that nets them cannot
-      answer what it actually sold
+- [x] Fees are an expense, not a smaller revenue. A tenant that nets them cannot
+      answer what it actually sold — and the VAT return it files is wrong, which
+      is the half that costs money. `5400 Payment processing fees` is an
+      `Expense` in **every** chart template, guarded by
+      `every_chart_can_settle_a_gateway_payment`, and `entry_for_fee` is what
+      posts to it when a payout settles
 
 ### 12b · Inbound webhooks
 
@@ -2567,10 +2641,13 @@ research changed about 12b.
 - [x] Accepted fast, processed as an effect. A provider that times out retries,
       and a retry storm is self-inflicted — `202` after the row and the promise
       commit together
-- [ ] Providers that go quiet: reconcile by polling what the provider says it
+- [x] Providers that go quiet: reconcile by polling what the provider says it
       sent. A payment confirmed by a webhook nobody received is money the tenant
-      cannot see — **needs a provider to poll**, which is 12a's decision. See
-      review §23
+      cannot see. **`payments.settle` is that poll**: it asks `Gateway::fetch`
+      about every payment still pending and records what comes back, so a
+      callback is a doorbell and never the mechanism — which is also the only
+      shape that works, since a webhook handler is handed no database
+      connection. See §28
 
 ### 12c · API keys, in pairs
 
@@ -2628,12 +2705,16 @@ still be served.
       `HttpOnly; SameSite=Strict; Secure`, and the bearer wins when both are
       sent
 
-**Exit:** a customer pays with a saved card, the webhook confirms it once however
-often it arrives, the payout reconciles to the ledger, and an outdated client is
-told what to build against. **Three of the four**: the webhook confirms once
-however often it arrives (12b), an outdated client is told what to build against
-(12d), and the keys and passwordless sign-in it all runs on are done (12c, 12e).
-The payment itself is 12a and is the one waiting on you — see review §15 and §23.
+**Exit: met.** A customer pays with a saved card — `a_saved_card_is_charged_by_the_worker_and_settles`
+runs the whole loop with no browser and no callback in it. The webhook confirms
+it once however often it arrives (12b). The payout reconciles to the ledger
+(§29). And an outdated client is told what to build against (12d), over the keys
+and passwordless sign-in it all runs on (12c, 12e).
+
+**What is left in the phase is not the mechanism.** A refund against a cleared
+tax invoice still owes ZATCA a credit note, and where a settlement report comes
+from is still a person with a spreadsheet (§29). Both are named above; neither
+is a gap in the money path.
 
 ---
 

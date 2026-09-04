@@ -30,21 +30,31 @@
 //! and it commits in the same transaction: a fee recorded without its payment
 //! is a set of books somebody has to fix by hand.
 //!
+//! # A saved card is charged from the worker, never from a handler
+//!
+//! A token belongs to a customer rather than to a payment, so [`Card`] is its
+//! own aggregate keyed on a `crm` customer — and the token itself is **sealed
+//! in `module_secret`, never written to the log**, because "forget my card" has
+//! to be a delete and nothing derived from an append-only log can be. See
+//! [`card`](crate::card) for the argument in full.
+//!
+//! Charging one is an outbound call to a third party, and this system makes
+//! those from the worker: `POST /v1/payments/cards/{card}/charges` records what
+//! was asked for and answers, and [`charge_requested`] sends it on the next
+//! tick. A handler that waited on a gateway would hold a database connection
+//! for as long as somebody else's server felt like taking.
+//!
 //! # What it deliberately does not do
 //!
-//! **Settlement.** A gateway pays out in batches, days later, net of fees. The
-//! reconciliation — this payout equals these payments minus this fee — is the
-//! bank-statement matching from Phase 8 pointed at a different source, and it
-//! is not built. What is built is the half that makes it possible: the fee is
-//! posted out of the clearing account, so the clearing account holds net, which
-//! is what a payout will actually be.
-//!
-//! **Saved cards.** A token belongs to a customer rather than to a payment, so
-//! it is a `crm` record pointing at a gateway token, and it is not here.
+//! **Find out where a settlement report comes from.** The arithmetic and the
+//! accounts are built — a payout reconciles against the payments it covers, and
+//! the difference posts. What is still a person with a spreadsheet is the step
+//! before that: nothing here has ever read a provider's payout file.
 
 pub mod http;
 pub mod messages;
 
+mod card;
 mod commands;
 mod gateways;
 mod payment;
@@ -53,19 +63,23 @@ mod posting;
 mod projections;
 mod sweep;
 
+pub use card::{Card, CardEvent, SAVES_CARDS, token_key};
 pub use commands::{
-    Attempt, PaymentsError, Transfer, fail_in, record_payout_in, refund_in, settle_in, start_in,
-    void_in,
+    Attempt, Collection, PaymentsError, SavedCard, Transfer, fail_in, forget_card_in,
+    record_payout_in, refund_in, request_in, save_card_in, settle_in, start_in, void_in,
 };
 pub use gateways::{Credentials, GatewayConfigError, PROVIDERS, configure, credentials};
 pub use payment::{Payment, PaymentEvent, Stage};
 pub use payout::{Payout, PayoutEvent};
 pub use posting::{PostingAccounts, Settlement, entry_for_fee, entry_for_payout};
 pub use projections::{
-    Awaiting, Collected, PaymentRow, Payments, PayoutRow, against, awaiting_payout, by_gateway_id,
-    payment, payouts, projections,
+    Awaiting, CardRow, Collected, Kept, PaymentRow, Payments, PayoutRow, against, awaiting_payout,
+    by_gateway_id, card, cards, payment, payouts, projections,
 };
-pub use sweep::{Doorbell, Swept, configured, doorbells, pending, settle_pending};
+pub use sweep::{
+    Attempted, Doorbell, Swept, Waiting, charge_requested, configured, doorbells, pending,
+    requested, settle_pending,
+};
 
 use erp_i18n::StaticCatalog;
 use erp_types::{DomainName, EventName, SchemaVersion};
@@ -136,6 +150,7 @@ pub fn upcasters() -> &'static erp_eventlog::Upcasters {
         PaymentEvent::NAMES
             .iter()
             .chain(PayoutEvent::NAMES.iter())
+            .chain(CardEvent::NAMES.iter())
             .fold(erp_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             })
@@ -164,11 +179,16 @@ mod tests {
 
     #[test]
     fn names_are_valid() {
-        for literal in PaymentEvent::NAMES.iter().chain(PayoutEvent::NAMES.iter()) {
+        for literal in PaymentEvent::NAMES
+            .iter()
+            .chain(PayoutEvent::NAMES.iter())
+            .chain(CardEvent::NAMES.iter())
+        {
             let _ = name(literal);
         }
         let _ = domain("payments_payment");
         let _ = domain("payments_payout");
+        let _ = domain("payments_card");
         let _ = module_id();
         let _ = upcasters();
     }

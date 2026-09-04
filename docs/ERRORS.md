@@ -792,15 +792,35 @@ The link works once and expires within a day. Nothing has been created yet, so i
 - **en** — Payment {id} has already been started.
 - **ar** — عملية الدفع {id} بدأت بالفعل.
 
+### `payments.card_forgotten`
+
+- **en** — Card {id} was removed, and the card has to be entered again to be used.
+- **ar** — تمت إزالة البطاقة {id}، ويلزم إدخالها من جديد لاستخدامها.
+
 ### `payments.no_gateway`
 
 - **en** — This business has no payment provider configured, so nothing was charged.
 - **ar** — لا يوجد مزوّد دفع مُهيّأ لهذا النشاط، فلم يُخصم أي مبلغ.
 
+### `payments.no_saved_cards`
+
+- **en** — {provider} does not keep cards that can be charged again later.
+- **ar** — {provider} لا يحتفظ ببطاقات يمكن خصمها لاحقًا.
+
+### `payments.no_such_card`
+
+- **en** — There is no saved card {id}.
+- **ar** — لا توجد بطاقة محفوظة {id}.
+
 ### `payments.no_such_payment`
 
 - **en** — The payment provider has no record of {id}.
 - **ar** — لا يوجد لدى مزوّد الدفع أي سجل لـ {id}.
+
+### `payments.not_a_card`
+
+- **en** — That cannot be saved as a card: {reason}.
+- **ar** — لا يمكن حفظ ذلك كبطاقة: {reason}.
 
 ### `payments.not_collectable`
 

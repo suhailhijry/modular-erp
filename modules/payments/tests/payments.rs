@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use erp_control::{Actor, ClusterRegistry, ControlPlane, PoolConfig, TenantDb, TenantPools};
 use erp_eventlog::{ExecuteError, Metadata};
-use erp_payments::{Charge, Gateway, GatewayError};
 use erp_payments::{Charged, Status};
+use erp_payments::{Gateway, GatewayError};
 use erp_projection::{Projection, ensure_group_schema, run_to_head};
 use erp_testkit::{Schema, TestDb};
 use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
@@ -49,6 +49,9 @@ struct Fixture {
     _control: Arc<ControlPlane>,
     _control_db: TestDb,
     tenant_database: String,
+    /// Where a saved card's token goes. One per fixture, because a key that
+    /// changed between calls would make every unseal fail for the wrong reason.
+    sealing: erp_eventlog::SealingKey,
 }
 
 impl Fixture {
@@ -116,6 +119,7 @@ impl Fixture {
             _control: control,
             _control_db: control_db,
             tenant_database: tenant.database_name,
+            sealing: erp_eventlog::SealingKey::generate("test").expect("a key is generated"),
         };
 
         // Everything a card payment touches, plus the invoice's own accounts.
@@ -227,6 +231,104 @@ impl Fixture {
         .await
         .expect("starts");
         tx.commit().await.expect("commits");
+    }
+
+    async fn save_card(
+        &self,
+        id: &str,
+        customer: &str,
+        provider: &str,
+        token: &str,
+    ) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::save_card_in(
+            &mut tx,
+            &self.sealing,
+            &code(id),
+            &payments::SavedCard {
+                customer: code(customer),
+                provider: provider.to_owned(),
+                brand: "visa".to_owned(),
+                last4: "4242".to_owned(),
+                expiry_month: 5,
+                expiry_year: 2028,
+            },
+            token,
+            when(),
+            &Metadata::default(),
+        )
+        .await
+        .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+
+    async fn forget_card(&self, id: &str) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::forget_card_in(&mut tx, &code(id), when(), &Metadata::default())
+            .await
+            .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+
+    /// The sealed token, straight out of the vault. **The only place any test
+    /// looks at one**, which is the point.
+    async fn token_of(&self, card: &str) -> Option<String> {
+        let mut conn = self.db.acquire().await.expect("connection");
+        erp_eventlog::secrets::get(&mut conn, &self.sealing, &payments::token_key(&code(card)))
+            .await
+            .expect("reads")
+            .map(|bytes| String::from_utf8(bytes).expect("utf-8"))
+    }
+
+    async fn request(&self, payment: &str, card: &str, invoice: &str, amount: Money) {
+        let mut tx = self.db.begin().await.expect("transaction");
+        payments::request_in(
+            &mut tx,
+            &code(payment),
+            &payments::Collection {
+                card: code(card),
+                provider: "moyasar".to_owned(),
+                invoice: code(invoice),
+                amount,
+                callback_url: "https://bassat.sa/paid".to_owned(),
+            },
+            when(),
+            &Metadata::default(),
+        )
+        .await
+        .expect("records the request");
+        tx.commit().await.expect("commits");
+    }
+
+    async fn charge_pass(&self, gateway: &dyn Gateway) -> payments::Attempted {
+        payments::charge_requested(
+            &self.db,
+            gateway,
+            &self.sealing,
+            when(),
+            25,
+            &Metadata::default(),
+        )
+        .await
+        .expect("the charge pass runs")
+    }
+
+    async fn stage_of(&self, payment: &str) -> String {
+        let mut conn = self.db.read().await.expect("connection");
+        payments::payment(&mut conn, payment)
+            .await
+            .expect("reads")
+            .map_or_else(|| "missing".to_owned(), |row| row.stage)
     }
 
     async fn settle(&self, id: &str, charged: &Charged) -> Result<(), ExecuteError<PaymentsError>> {
@@ -550,6 +652,11 @@ struct FakeGateway {
     provider: &'static str,
     answers: std::sync::Mutex<std::collections::HashMap<String, Result<Charged, GatewayError>>>,
     asked: std::sync::atomic::AtomicUsize,
+    /// What `charge` answers, and what it was sent — `(reference, token,
+    /// amount, callback)`, which is everything a saved-card charge has to get
+    /// right.
+    charging: std::sync::Mutex<Option<Result<Charged, GatewayError>>>,
+    charges: std::sync::Mutex<Vec<(String, String, Money, String)>>,
 }
 
 impl FakeGateway {
@@ -558,7 +665,18 @@ impl FakeGateway {
             provider,
             answers: std::sync::Mutex::new(std::collections::HashMap::new()),
             asked: std::sync::atomic::AtomicUsize::new(0),
+            charging: std::sync::Mutex::new(None),
+            charges: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    fn charging(self, answer: Result<Charged, GatewayError>) -> Self {
+        *self.charging.lock().expect("not poisoned") = Some(answer);
+        self
+    }
+
+    fn charged(&self) -> Vec<(String, String, Money, String)> {
+        self.charges.lock().expect("not poisoned").clone()
     }
 
     fn saying(self, id: &str, answer: Result<Charged, GatewayError>) -> Self {
@@ -590,8 +708,22 @@ impl Gateway for FakeGateway {
             .unwrap_or_else(|| Err(GatewayError::NoSuchPayment(id.to_owned())))
     }
 
-    async fn charge(&self, _charge: &Charge) -> Result<Charged, GatewayError> {
-        unreachable!("the sweep never charges")
+    async fn charge(&self, charge: &erp_payments::Charge) -> Result<Charged, GatewayError> {
+        let token = match &charge.source {
+            erp_payments::Source::Token { token } => token.clone(),
+            erp_payments::Source::Hosted => String::new(),
+        };
+        self.charges.lock().expect("not poisoned").push((
+            charge.reference.clone(),
+            token,
+            charge.amount,
+            charge.returns.success.clone(),
+        ));
+        self.charging
+            .lock()
+            .expect("not poisoned")
+            .clone()
+            .expect("this gateway was not expecting to be charged")
     }
     async fn capture(&self, _id: &str, _amount: Option<Money>) -> Result<Charged, GatewayError> {
         unreachable!("the sweep never captures")
@@ -1102,4 +1234,398 @@ async fn a_rebuild_reproduces_every_payment() {
             .expect("reads")
     };
     assert_eq!(before, after);
+}
+
+// ---------------------------------------------------------------------------
+// Saved cards
+// ---------------------------------------------------------------------------
+
+/// **The loop closing, with nobody watching.** A card saved at a previous
+/// visit, a charge asked for, the worker sending it, and the money in the
+/// books — no browser, no customer, no callback anywhere in it. That is the
+/// whole reason a saved card exists.
+#[tokio::test]
+async fn a_saved_card_is_charged_by_the_worker_and_settles() {
+    let fixture = Fixture::new("saved-card").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_abc")
+        .await
+        .expect("saves");
+    fixture
+        .request("pay_1", "card-1", "INV-1", riyals(115))
+        .await;
+    fixture.project().await;
+
+    assert_eq!(fixture.stage_of("pay_1").await, "requested");
+
+    let gateway = FakeGateway::new("moyasar").charging(Ok(charged(
+        "pay_1",
+        Status::Paid,
+        riyals(115),
+        Some(money(316)),
+    )));
+    let attempted = fixture.charge_pass(&gateway).await;
+    assert_eq!(attempted.started, 1);
+    assert_eq!(attempted.refused, 0);
+    assert_eq!(attempted.stopped, None);
+
+    // **The token went to the gateway and the payment's own id came with it.**
+    // The second is Moyasar's `given_id`, which is what makes a retried charge
+    // land on the same payment instead of on a second one.
+    let sent = gateway.charged();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "pay_1");
+    assert_eq!(sent[0].1, "token_abc");
+    assert_eq!(sent[0].2, riyals(115));
+    assert_eq!(sent[0].3, "https://bassat.sa/paid");
+
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "pending");
+
+    // The settle pass, which is what actually records money — the charge pass
+    // never does, however good the answer it got.
+    let gateway = FakeGateway::new("moyasar").saying(
+        "pay_1",
+        Ok(charged(
+            "pay_1",
+            Status::Paid,
+            riyals(115),
+            Some(money(316)),
+        )),
+    );
+    let swept = payments::settle_pending(&fixture.db, &gateway, when(), 25, &Metadata::default())
+        .await
+        .expect("sweeps");
+    assert_eq!(swept.resolved, 1);
+
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "settled");
+    assert_eq!(fixture.balance("1150").await, money(11_184));
+    assert_eq!(fixture.balance("5400").await, money(316));
+}
+
+/// **A pass that died between charging and recording must not charge again.**
+/// The gateway already knows the payment, so it is picked up rather than sent
+/// a second time — which is the whole reason the pass asks first.
+#[tokio::test]
+async fn a_charge_that_already_happened_is_not_sent_twice() {
+    let fixture = Fixture::new("charged-once").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_abc")
+        .await
+        .expect("saves");
+    fixture
+        .request("pay_1", "card-1", "INV-1", riyals(115))
+        .await;
+    fixture.project().await;
+
+    // The gateway has it already, and would panic if asked to charge.
+    let gateway = FakeGateway::new("moyasar").saying(
+        "pay_1",
+        Ok(charged("pay_1", Status::Paid, riyals(115), None)),
+    );
+
+    let attempted = fixture.charge_pass(&gateway).await;
+    assert_eq!(attempted.started, 1);
+    assert!(gateway.charged().is_empty(), "it charged a second time");
+
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "pending");
+}
+
+/// **"Forget my card" has to mean it**, and the token is the thing that means
+/// anything. A charge already in the queue when the customer asks fails with a
+/// reason rather than sitting there for ever.
+#[tokio::test]
+async fn a_card_removed_before_the_worker_gets_to_it_charges_nothing() {
+    let fixture = Fixture::new("forgotten-card").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_abc")
+        .await
+        .expect("saves");
+    fixture
+        .request("pay_1", "card-1", "INV-1", riyals(115))
+        .await;
+    fixture.forget_card("card-1").await.expect("forgets");
+    fixture.project().await;
+
+    assert_eq!(fixture.token_of("card-1").await, None, "the token survived");
+
+    let gateway = FakeGateway::new("moyasar");
+    let attempted = fixture.charge_pass(&gateway).await;
+    assert_eq!(attempted.refused, 1);
+    assert_eq!(attempted.started, 0);
+    assert!(gateway.charged().is_empty());
+
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "failed");
+    assert_eq!(fixture.balance("1150").await, money(0));
+}
+
+/// The row stays and says the card was removed; **what goes is the token.**
+/// That a customer had a card on file and asked for it to go is history
+/// somebody may have to answer for.
+#[tokio::test]
+async fn forgetting_a_card_deletes_the_token_and_keeps_the_history() {
+    let fixture = Fixture::new("forget-keeps").await;
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_abc")
+        .await
+        .expect("saves");
+    assert_eq!(
+        fixture.token_of("card-1").await,
+        Some("token_abc".to_owned())
+    );
+
+    fixture.forget_card("card-1").await.expect("forgets");
+    fixture.project().await;
+
+    assert_eq!(fixture.token_of("card-1").await, None);
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let row = payments::card(&mut conn, "card-1")
+        .await
+        .expect("reads")
+        .expect("the row is still there");
+    assert!(row.forgotten);
+    assert_eq!(row.last4, "4242");
+
+    // And it is not offered any more.
+    let offered = payments::cards(&mut conn, "CUST-1", 10)
+        .await
+        .expect("reads");
+    assert!(offered.is_empty(), "a removed card was still offered");
+}
+
+/// **Forgetting is final.** Saving again means the customer entering their card
+/// afresh, which mints a new token under a new id; reviving this one would
+/// charge a token they asked to be rid of.
+#[tokio::test]
+async fn a_forgotten_card_cannot_be_revived() {
+    let fixture = Fixture::new("no-revival").await;
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_abc")
+        .await
+        .expect("saves");
+    fixture.forget_card("card-1").await.expect("forgets");
+
+    let again = fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_new")
+        .await;
+    assert!(
+        matches!(
+            again,
+            Err(ExecuteError::Rejected(PaymentsError::CardForgotten(_)))
+        ),
+        "{again:?}"
+    );
+    assert_eq!(fixture.token_of("card-1").await, None);
+}
+
+/// **Nothing in the read model can charge a card.** The whole design rests on
+/// the token living in the vault and nowhere else, and a column added later
+/// would break it in a way no other test would notice.
+#[tokio::test]
+async fn the_read_model_holds_nothing_that_could_charge_a_card() {
+    let fixture = Fixture::new("no-token-column").await;
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_abc")
+        .await
+        .expect("saves");
+    fixture.project().await;
+
+    let pool = fixture.tenant_pool().await;
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name::TEXT FROM information_schema.columns
+          WHERE table_schema = 'proj_payments' AND table_name = 'card'",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("reads the schema");
+    assert!(!columns.is_empty(), "the card table was not found");
+    assert!(
+        !columns.iter().any(|c| c.contains("token")),
+        "there is a token column in the read model: {columns:?}"
+    );
+
+    // And no column holds the value either, whatever it is called.
+    let row: Vec<String> = sqlx::query_scalar(
+        "SELECT to_jsonb(card)::TEXT FROM proj_payments.card WHERE id = 'card-1'",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("reads the row");
+    assert_eq!(row.len(), 1);
+    assert!(!row[0].contains("token_abc"), "{}", row[0]);
+    pool.close().await;
+}
+
+/// **Buy-now-pay-later has no card to keep.** The provider lends to the
+/// customer and collects from them; there is no token on this side. A row
+/// naming one would be a saved card as far as anybody picking from a list is
+/// concerned, and they would find out at the till.
+#[tokio::test]
+async fn a_provider_that_keeps_no_cards_is_refused() {
+    let fixture = Fixture::new("no-bnpl-cards").await;
+    for provider in ["tabby", "tamara"] {
+        let outcome = fixture
+            .save_card("card-1", "CUST-1", provider, "token_abc")
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                Err(ExecuteError::Rejected(PaymentsError::NoSavedCards(_)))
+            ),
+            "{provider}: {outcome:?}"
+        );
+    }
+    assert_eq!(fixture.token_of("card-1").await, None);
+}
+
+/// A retry saves one card and asks for one charge. **The second matters more**:
+/// the alternative is charging somebody twice.
+#[tokio::test]
+async fn a_retried_save_and_a_retried_request_happen_once() {
+    let fixture = Fixture::new("retries").await;
+    fixture.invoice("INV-1").await;
+
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_abc")
+        .await
+        .expect("saves");
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_abc")
+        .await
+        .expect("is a retry");
+
+    fixture
+        .request("pay_1", "card-1", "INV-1", riyals(115))
+        .await;
+    fixture
+        .request("pay_1", "card-1", "INV-1", riyals(115))
+        .await;
+    fixture.project().await;
+
+    let gateway =
+        FakeGateway::new("moyasar").charging(Ok(charged("pay_1", Status::Paid, riyals(115), None)));
+    let attempted = fixture.charge_pass(&gateway).await;
+    assert_eq!(attempted.started, 1);
+    assert_eq!(gateway.charged().len(), 1, "the customer was charged twice");
+}
+
+/// A gateway that refuses the charge itself — a dead token, a declined card.
+/// **Recorded as failed with the reason**, because a charge nobody can collect
+/// must not sit in a queue looking like work.
+#[tokio::test]
+async fn a_refused_charge_is_recorded_and_not_retried_for_ever() {
+    let fixture = Fixture::new("refused-charge").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_dead")
+        .await
+        .expect("saves");
+    fixture
+        .request("pay_1", "card-1", "INV-1", riyals(115))
+        .await;
+    fixture.project().await;
+
+    let gateway = FakeGateway::new("moyasar").charging(Err(GatewayError::Refused(
+        "the token is invalid".to_owned(),
+    )));
+    let attempted = fixture.charge_pass(&gateway).await;
+    assert_eq!(attempted.refused, 1);
+
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "failed");
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let row = payments::payment(&mut conn, "pay_1")
+        .await
+        .expect("reads")
+        .expect("there");
+    assert_eq!(row.failed_why.as_deref(), Some("the token is invalid"));
+
+    // And a second pass finds nothing to do, rather than charging again.
+    drop(conn);
+    let attempted = fixture.charge_pass(&gateway).await;
+    assert_eq!(attempted.refused, 0);
+    assert_eq!(attempted.started, 0);
+}
+
+/// **An unreachable gateway is not a fact about anybody's card** (L6). The pass
+/// stops and says so; the charges stay requested and the next tick tries again.
+#[tokio::test]
+async fn an_unreachable_gateway_stops_the_pass_rather_than_failing_the_charges() {
+    let fixture = Fixture::new("unreachable-charge").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .save_card("card-1", "CUST-1", "moyasar", "token_abc")
+        .await
+        .expect("saves");
+    fixture
+        .request("pay_1", "card-1", "INV-1", riyals(115))
+        .await;
+    fixture.project().await;
+
+    let gateway = FakeGateway::new("moyasar")
+        .charging(Err(GatewayError::Unreachable("timed out".to_owned())));
+    let attempted = fixture.charge_pass(&gateway).await;
+    assert_eq!(attempted.started, 0);
+    assert_eq!(attempted.refused, 0);
+    assert!(attempted.stopped.is_some());
+
+    fixture.project().await;
+    assert_eq!(
+        fixture.stage_of("pay_1").await,
+        "requested",
+        "a timeout became a fact about the payment"
+    );
+}
+
+/// The card is display, and the display has to be a card. A month of 13 or
+/// five "last four" digits is a row somebody has to explain later.
+#[tokio::test]
+async fn what_cannot_be_a_card_is_refused_at_the_boundary() {
+    let fixture = Fixture::new("card-shape").await;
+
+    let bad = [
+        ("", "12345", 5, 2028),      // five digits
+        ("token", "abcd", 5, 2028),  // not digits
+        ("token", "4242", 13, 2028), // not a month
+        ("token", "4242", 0, 2028),
+        ("token", "4242", 5, 28), // not a year
+    ];
+    for (token, last4, month, year) in bad {
+        let mut tx = fixture.db.begin().await.expect("transaction");
+        let outcome = payments::save_card_in(
+            &mut tx,
+            &fixture.sealing,
+            &code("card-x"),
+            &payments::SavedCard {
+                customer: code("CUST-1"),
+                provider: "moyasar".to_owned(),
+                brand: "visa".to_owned(),
+                last4: last4.to_owned(),
+                expiry_month: month,
+                expiry_year: year,
+            },
+            token,
+            when(),
+            &Metadata::default(),
+        )
+        .await;
+        tx.rollback().await.expect("rolls back");
+        assert!(
+            matches!(
+                outcome,
+                Err(ExecuteError::Rejected(
+                    PaymentsError::NotACard(_) | PaymentsError::NoSavedCards(_)
+                ))
+            ),
+            "{last4}/{month}/{year} was accepted"
+        );
+    }
 }

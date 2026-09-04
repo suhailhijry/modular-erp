@@ -11,6 +11,10 @@ pub const NO_GATEWAY: MessageCode = MessageCode::new("payments.no_gateway");
 pub const PAYOUT_RECORDED: MessageCode = MessageCode::new("payments.payout_recorded");
 pub const NOT_SETTLED: MessageCode = MessageCode::new("payments.not_settled");
 pub const PAYOUT_CURRENCY: MessageCode = MessageCode::new("payments.payout_currency");
+pub const NO_SAVED_CARDS: MessageCode = MessageCode::new("payments.no_saved_cards");
+pub const NO_SUCH_CARD: MessageCode = MessageCode::new("payments.no_such_card");
+pub const CARD_FORGOTTEN: MessageCode = MessageCode::new("payments.card_forgotten");
+pub const NOT_A_CARD: MessageCode = MessageCode::new("payments.not_a_card");
 
 pub static CODES: &[MessageCode] = &[
     NOT_STARTED,
@@ -22,6 +26,10 @@ pub static CODES: &[MessageCode] = &[
     PAYOUT_RECORDED,
     NOT_SETTLED,
     PAYOUT_CURRENCY,
+    NO_SAVED_CARDS,
+    NO_SUCH_CARD,
+    CARD_FORGOTTEN,
+    NOT_A_CARD,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -128,5 +136,50 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         PAYOUT_CURRENCY,
         Locale::Arabic,
         Template::Simple("لا يمكن لتحويل بعملة {found} أن يغطي مدفوعات بعملة {expected}."),
+    ),
+    // **Buy-now-pay-later has no card to keep.** The provider lends to the
+    // customer and collects from them; there is no token on this side to charge
+    // again, so a saved card naming one would be a row nobody can use.
+    (
+        NO_SAVED_CARDS,
+        Locale::English,
+        Template::Simple("{provider} does not keep cards that can be charged again later."),
+    ),
+    (
+        NO_SAVED_CARDS,
+        Locale::Arabic,
+        Template::Simple("{provider} لا يحتفظ ببطاقات يمكن خصمها لاحقًا."),
+    ),
+    (
+        NO_SUCH_CARD,
+        Locale::English,
+        Template::Simple("There is no saved card {id}."),
+    ),
+    (
+        NO_SUCH_CARD,
+        Locale::Arabic,
+        Template::Simple("لا توجد بطاقة محفوظة {id}."),
+    ),
+    // Said as a fact rather than as an error: the customer asked for this, and
+    // saving the card again means entering it again.
+    (
+        CARD_FORGOTTEN,
+        Locale::English,
+        Template::Simple("Card {id} was removed, and the card has to be entered again to be used."),
+    ),
+    (
+        CARD_FORGOTTEN,
+        Locale::Arabic,
+        Template::Simple("تمت إزالة البطاقة {id}، ويلزم إدخالها من جديد لاستخدامها."),
+    ),
+    (
+        NOT_A_CARD,
+        Locale::English,
+        Template::Simple("That cannot be saved as a card: {reason}."),
+    ),
+    (
+        NOT_A_CARD,
+        Locale::Arabic,
+        Template::Simple("لا يمكن حفظ ذلك كبطاقة: {reason}."),
     ),
 ];

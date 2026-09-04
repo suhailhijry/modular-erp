@@ -1,0 +1,125 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", customer as \"customer!\", provider as \"provider!\",\n                  brand as \"brand!\", last4 as \"last4!\",\n                  expiry_month as \"expiry_month!\", expiry_year as \"expiry_year!\",\n                  forgotten as \"forgotten!\", saved_at as \"saved_at!\"\n             FROM proj_payments.card\n            WHERE customer = $1 AND NOT forgotten\n            ORDER BY saved_at DESC LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.card",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "customer!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.card",
+            "name": "customer"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "provider!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.card",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "brand!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.card",
+            "name": "brand"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "last4!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.card",
+            "name": "last4"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "expiry_month!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.card",
+            "name": "expiry_month"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "expiry_year!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.card",
+            "name": "expiry_year"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "forgotten!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.card",
+            "name": "forgotten"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "saved_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.card",
+            "name": "saved_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2f97a563fcd4d399cd1e95f59fcbf7cd16320ba216d04c4e01752bca3606e95e"
+}

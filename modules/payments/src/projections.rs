@@ -5,6 +5,7 @@ use erp_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup
 use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 use sqlx::PgConnection;
 
+use crate::card::CardEvent;
 use crate::payment::PaymentEvent;
 use crate::payout::PayoutEvent;
 
@@ -24,7 +25,90 @@ impl ProjectionGroup for Payments {
 /// Every projection this module runs.
 #[must_use]
 pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = Payments>>> {
-    vec![std::sync::Arc::new(Collected)]
+    vec![std::sync::Arc::new(Collected), std::sync::Arc::new(Kept)]
+}
+
+/// Cards a customer left behind.
+///
+/// **No token column, and there must never be one** — the table says so at
+/// length, and `card.rs` gives the argument. Every event this reads is display
+/// only, so there is nothing here that could grow one by accident.
+#[derive(Debug)]
+pub struct Kept;
+
+#[async_trait::async_trait]
+impl Projection for Kept {
+    type Group = Payments;
+
+    fn name(&self) -> &'static str {
+        "kept"
+    }
+
+    async fn apply(
+        &self,
+        ctx: &ProjectionCtx<'_>,
+        envelope: &Envelope,
+        conn: &mut PgConnection,
+    ) -> Result<(), ProjectionError> {
+        if !CardEvent::NAMES.contains(&envelope.event_name.as_str()) {
+            return Ok(());
+        }
+        let id = envelope.stream.id.as_str().to_owned();
+        let position = envelope.position;
+        let event: CardEvent = ctx
+            .decode(envelope)
+            .map_err(|source| ProjectionError::Decode {
+                event_name: envelope.event_name.as_str().to_owned(),
+                position: envelope.position,
+                source,
+            })?;
+
+        match event {
+            CardEvent::Saved {
+                customer,
+                provider,
+                brand,
+                last4,
+                expiry_month,
+                expiry_year,
+                saved_at,
+            } => {
+                sqlx::query(
+                    "INSERT INTO card
+                        (id, customer, provider, brand, last4,
+                         expiry_month, expiry_year, saved_at, position)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     ON CONFLICT (id) DO NOTHING",
+                )
+                .bind(&id)
+                .bind(customer.as_str())
+                .bind(&provider)
+                .bind(&brand)
+                .bind(&last4)
+                .bind(expiry_month)
+                .bind(expiry_year)
+                .bind(saved_at)
+                .bind(position)
+                .execute(&mut *conn)
+                .await?;
+            }
+            // **The row stays.** That a customer had a card and asked for it to
+            // go is history; what goes is the sealed token, which is not here.
+            CardEvent::Forgotten { forgotten_at } => {
+                sqlx::query(
+                    "UPDATE card
+                        SET forgotten = TRUE, forgotten_at = $2, position = $3
+                      WHERE id = $1",
+                )
+                .bind(&id)
+                .bind(forgotten_at)
+                .bind(position)
+                .execute(&mut *conn)
+                .await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -47,6 +131,12 @@ impl Projection for Collected {
         if PayoutEvent::NAMES.contains(&envelope.event_name.as_str()) {
             return self.paid_out(ctx, envelope, conn).await;
         }
+        if envelope.event_name.as_str() == PaymentEvent::NAMES[0] {
+            return self.requested(ctx, envelope, conn).await;
+        }
+        if envelope.event_name.as_str() == PaymentEvent::NAMES[1] {
+            return self.started(ctx, envelope, conn).await;
+        }
         if !PaymentEvent::NAMES.contains(&envelope.event_name.as_str()) {
             return Ok(());
         }
@@ -61,31 +151,8 @@ impl Projection for Collected {
                 })?;
 
         match event {
-            PaymentEvent::Started {
-                provider,
-                gateway_id,
-                invoice,
-                amount,
-                started_at,
-            } => {
-                sqlx::query(
-                    "INSERT INTO payment
-                        (id, provider, gateway_id, invoice, amount_minor, currency,
-                         stage, started_at, position)
-                     VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
-                     ON CONFLICT (id) DO NOTHING",
-                )
-                .bind(&id)
-                .bind(&provider)
-                .bind(&gateway_id)
-                .bind(invoice.as_str())
-                .bind(amount.minor())
-                .bind(amount.currency().to_string())
-                .bind(started_at)
-                .bind(position)
-                .execute(&mut *conn)
-                .await?;
-            }
+            // Answered above, each by its own method.
+            PaymentEvent::Requested { .. } | PaymentEvent::Started { .. } => {}
             PaymentEvent::Settled {
                 amount,
                 fee,
@@ -150,6 +217,112 @@ impl Projection for Collected {
 
 impl Collected {
     /// A payout: the transfer itself, and the payments it accounts for.
+    /// A saved-card charge somebody asked for and the worker has not sent.
+    ///
+    /// **`gateway_id` is the payment's own id**, before the gateway has been
+    /// told anything. That is not a placeholder: it is passed as Moyasar's
+    /// `given_id` and *becomes* the gateway's id, so a charge that succeeded
+    /// and whose `Started` was never recorded can still be found at the
+    /// provider by the id on this row. `Started` overwrites it with whatever
+    /// actually came back.
+    async fn requested(
+        &self,
+        ctx: &ProjectionCtx<'_>,
+        envelope: &Envelope,
+        conn: &mut PgConnection,
+    ) -> Result<(), ProjectionError> {
+        let PaymentEvent::Requested {
+            card,
+            provider,
+            invoice,
+            amount,
+            callback_url,
+            requested_at,
+        } = ctx
+            .decode(envelope)
+            .map_err(|source| ProjectionError::Decode {
+                event_name: envelope.event_name.as_str().to_owned(),
+                position: envelope.position,
+                source,
+            })?
+        else {
+            return Ok(());
+        };
+
+        sqlx::query(
+            "INSERT INTO payment
+                (id, provider, gateway_id, invoice, amount_minor, currency,
+                 stage, card, callback_url, started_at, position)
+             VALUES ($1, $2, $1, $3, $4, $5, 'requested', $6, $7, $8, $9)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(envelope.stream.id.as_str())
+        .bind(&provider)
+        .bind(invoice.as_str())
+        .bind(amount.minor())
+        .bind(amount.currency().to_string())
+        .bind(card.as_str())
+        .bind(&callback_url)
+        .bind(requested_at)
+        .bind(envelope.position)
+        .execute(&mut *conn)
+        .await?;
+        Ok(())
+    }
+
+    /// A charge that now exists at the gateway.
+    ///
+    /// **Upserts**, because this is either the first this system has heard of
+    /// the payment — a client that created the charge itself — or the moment a
+    /// saved-card charge the worker just sent stops being merely requested.
+    async fn started(
+        &self,
+        ctx: &ProjectionCtx<'_>,
+        envelope: &Envelope,
+        conn: &mut PgConnection,
+    ) -> Result<(), ProjectionError> {
+        let PaymentEvent::Started {
+            provider,
+            gateway_id,
+            invoice,
+            amount,
+            started_at,
+        } = ctx
+            .decode(envelope)
+            .map_err(|source| ProjectionError::Decode {
+                event_name: envelope.event_name.as_str().to_owned(),
+                position: envelope.position,
+                source,
+            })?
+        else {
+            return Ok(());
+        };
+
+        sqlx::query(
+            "INSERT INTO payment
+                (id, provider, gateway_id, invoice, amount_minor, currency,
+                 stage, started_at, position)
+             VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
+             ON CONFLICT (id) DO UPDATE
+                SET stage = 'pending',
+                    gateway_id = EXCLUDED.gateway_id,
+                    started_at = EXCLUDED.started_at,
+                    position = EXCLUDED.position
+              WHERE payment.stage = 'requested'",
+        )
+        .bind(envelope.stream.id.as_str())
+        .bind(&provider)
+        .bind(&gateway_id)
+        .bind(invoice.as_str())
+        .bind(amount.minor())
+        .bind(amount.currency().to_string())
+        .bind(started_at)
+        .bind(envelope.position)
+        .execute(&mut *conn)
+        .await?;
+        Ok(())
+    }
+
     async fn paid_out(
         &self,
         ctx: &ProjectionCtx<'_>,
@@ -445,4 +618,91 @@ mod tests {
             );
         }
     }
+}
+
+/// One saved card, as somebody picking from a list sees it.
+///
+/// **There is no token field**, here or anywhere a route can reach. What
+/// charges the card is sealed in `module_secret` and is read by exactly one
+/// caller, in the worker, at the moment it charges — see `crate::card`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardRow {
+    pub id: String,
+    pub customer: String,
+    pub provider: String,
+    pub brand: String,
+    pub last4: String,
+    pub expiry_month: i16,
+    pub expiry_year: i16,
+    pub forgotten: bool,
+    pub saved_at: Timestamp,
+}
+
+/// One card, forgotten or not.
+///
+/// Includes forgotten ones, because a route asking about a card by id is
+/// usually asking *why* it will not work, and "there is no such card" is a
+/// worse answer than "that one was removed".
+pub async fn card(conn: &mut sqlx::PgConnection, id: &str) -> Result<Option<CardRow>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"SELECT id as "id!", customer as "customer!", provider as "provider!",
+                  brand as "brand!", last4 as "last4!",
+                  expiry_month as "expiry_month!", expiry_year as "expiry_year!",
+                  forgotten as "forgotten!", saved_at as "saved_at!"
+             FROM proj_payments.card WHERE id = $1"#,
+        id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(row.map(|r| CardRow {
+        id: r.id,
+        customer: r.customer,
+        provider: r.provider,
+        brand: r.brand,
+        last4: r.last4,
+        expiry_month: r.expiry_month,
+        expiry_year: r.expiry_year,
+        forgotten: r.forgotten,
+        saved_at: r.saved_at,
+    }))
+}
+
+/// What this customer can be offered, newest first.
+///
+/// **Forgotten cards are not in it.** The list exists to be picked from, and a
+/// card that cannot be charged has no business being offered.
+pub async fn cards(
+    conn: &mut sqlx::PgConnection,
+    customer: &str,
+    limit: i64,
+) -> Result<Vec<CardRow>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id as "id!", customer as "customer!", provider as "provider!",
+                  brand as "brand!", last4 as "last4!",
+                  expiry_month as "expiry_month!", expiry_year as "expiry_year!",
+                  forgotten as "forgotten!", saved_at as "saved_at!"
+             FROM proj_payments.card
+            WHERE customer = $1 AND NOT forgotten
+            ORDER BY saved_at DESC LIMIT $2"#,
+        customer,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| CardRow {
+            id: r.id,
+            customer: r.customer,
+            provider: r.provider,
+            brand: r.brand,
+            last4: r.last4,
+            expiry_month: r.expiry_month,
+            expiry_year: r.expiry_year,
+            forgotten: r.forgotten,
+            saved_at: r.saved_at,
+        })
+        .collect())
 }

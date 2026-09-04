@@ -26,6 +26,24 @@
 //! authenticated connection, and [`crate::settle_in`] checks the amount against
 //! what was started before it posts anything.
 //!
+//! # The same job also sends what has only been asked for
+//!
+//! A saved-card charge is an outbound call to a third party, so it is here for
+//! the first reason above and not because of the second: a request handler
+//! must not hold a database connection while somebody else's server thinks
+//! about it. [`charge_requested`] is that pass, and it runs before
+//! [`settle_pending`] on each tick so a card charged this minute is settled
+//! this minute rather than next.
+//!
+//! **It asks before it charges.** Every requested payment is `fetch`ed first,
+//! and only a gateway that has never heard of it is sent a charge. That costs
+//! one extra call per saved-card payment, once, and it buys the one guarantee
+//! worth paying for: a pass that died between charging and recording does not
+//! charge the customer again. Moyasar's `given_id` is supposed to make the
+//! retry safe on its own, and it may well; what a duplicate `given_id` actually
+//! answers is not something this build has verified, and a double charge is not
+//! the place to find out.
+//!
 //! # It stops rather than degrading
 //!
 //! A gateway that is unreachable stops the sweep for that tenant and says so
@@ -33,8 +51,8 @@
 //! anything else would be inventing a fact about somebody's money.
 
 use erp_eventlog::Metadata;
-use erp_payments::Gateway;
-use erp_types::{AggregateId, Timestamp};
+use erp_payments::{Charge, Gateway, GatewayError, Returns, Source};
+use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 
 /// What one pass did.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -144,6 +162,197 @@ pub async fn settle_pending(
     }
 
     Ok(swept)
+}
+
+/// A saved-card charge that has been asked for and not yet sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waiting {
+    /// This system's id for the payment, which is also what the gateway will
+    /// use — it is passed as Moyasar's `given_id`.
+    pub id: AggregateId,
+    pub card: AggregateId,
+    pub invoice: AggregateId,
+    pub amount: Money,
+    pub callback_url: String,
+}
+
+/// What one charging pass did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Attempted {
+    /// Sent to the gateway, or found already there. Now `pending`, and the
+    /// settle pass is what decides whether anybody actually paid.
+    pub started: usize,
+    /// The gateway would not take it, or the card had been forgotten. Recorded
+    /// as failed with the reason, because a charge nobody can collect must not
+    /// sit in a queue looking like work.
+    pub refused: usize,
+    /// Why it stopped early, when it did.
+    pub stopped: Option<String>,
+}
+
+/// Everything asked for against one provider and not yet sent, oldest first.
+pub async fn requested(
+    conn: &mut sqlx::PgConnection,
+    provider: &str,
+    limit: i64,
+) -> Result<Vec<Waiting>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id as "id!", card as "card!", invoice as "invoice!",
+                  amount_minor as "amount_minor!", currency as "currency!",
+                  callback_url as "callback_url!"
+             FROM proj_payments.payment
+            WHERE stage = 'requested' AND provider = $1 AND card IS NOT NULL
+            ORDER BY started_at ASC LIMIT $2"#,
+        provider,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(Waiting {
+                id: AggregateId::new(&row.id).ok()?,
+                card: AggregateId::new(&row.card).ok()?,
+                invoice: AggregateId::new(&row.invoice).ok()?,
+                amount: Money::from_minor(row.amount_minor, CurrencyCode::new(&row.currency).ok()?),
+                callback_url: row.callback_url,
+            })
+        })
+        .collect())
+}
+
+/// Sends every saved-card charge that has been asked for.
+///
+/// # It asks before it charges
+///
+/// See the module docs. Every payment here is `fetch`ed first and charged only
+/// when the gateway has never heard of it, so a pass that died between charging
+/// and recording does not charge the customer twice.
+///
+/// # It records only that a charge exists
+///
+/// Never that it was paid — even though the answer in hand says so. Money is
+/// recorded in exactly one place, [`crate::settle_in`], where the amount and
+/// the currency are checked against what was asked for; a second path that
+/// posts from a `charge` response would be a second place for that check to be
+/// got wrong. The settle pass runs immediately after this one and picks it up.
+pub async fn charge_requested(
+    db: &erp_tenant::TenantDb,
+    gateway: &dyn Gateway,
+    sealing: &erp_eventlog::SealingKey,
+    now: Timestamp,
+    limit: i64,
+    metadata: &Metadata,
+) -> Result<Attempted, Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = db.read().await?;
+    let waiting = requested(&mut conn, gateway.provider(), limit).await?;
+    drop(conn);
+
+    let mut attempted = Attempted::default();
+    for want in waiting {
+        // **The token is the authority on whether this card can be charged.**
+        // It is also the only thing a `forget` actually deletes, so its absence
+        // is the answer — and it is checked here rather than at the request,
+        // because a card can be forgotten in between whatever was checked then.
+        let mut conn = db.acquire().await?;
+        let token =
+            erp_eventlog::secrets::get(&mut conn, sealing, &crate::card::token_key(&want.card))
+                .await?;
+        drop(conn);
+
+        let Some(token) = token else {
+            attempted.refused += 1;
+            fail(
+                db,
+                &want.id,
+                "the card was removed before this could be charged",
+                now,
+                metadata,
+            )
+            .await?;
+            continue;
+        };
+        let token = String::from_utf8(token).unwrap_or_default();
+
+        let charged = match gateway.fetch(want.id.as_str()).await {
+            // Already created on an earlier pass that did not get to record it.
+            Ok(charged) => charged,
+            Err(GatewayError::NoSuchPayment(_)) => {
+                let charge = Charge {
+                    reference: want.id.as_str().to_owned(),
+                    amount: want.amount,
+                    // **Moyasar takes one URL**, and the other two are here
+                    // because buy-now-pay-later providers distinguish three
+                    // endings. Neither of those can hold a saved card, so
+                    // there is nothing to distinguish.
+                    returns: Returns {
+                        success: want.callback_url.clone(),
+                        cancel: want.callback_url.clone(),
+                        failure: want.callback_url.clone(),
+                    },
+                    source: Source::Token { token },
+                    description: format!("Saved card · {}", want.invoice),
+                    buyer: None,
+                    basket: None,
+                };
+                match gateway.charge(&charge).await {
+                    Ok(charged) => charged,
+                    // **The gateway refused, and will refuse again.** A dead
+                    // token, a declined card, an amount below the floor. Not a
+                    // reason to stop the pass, and not a reason to try forever.
+                    Err(GatewayError::Refused(why)) => {
+                        attempted.refused += 1;
+                        fail(db, &want.id, &why, now, metadata).await?;
+                        continue;
+                    }
+                    Err(e) => {
+                        attempted.stopped = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                attempted.stopped = Some(e.to_string());
+                break;
+            }
+        };
+
+        let mut tx = db.begin().await?;
+        crate::start_in(
+            &mut tx,
+            &want.id,
+            &crate::Attempt {
+                provider: gateway.provider().to_owned(),
+                gateway_id: charged.id.clone(),
+                invoice: want.invoice.clone(),
+                amount: want.amount,
+            },
+            now,
+            metadata,
+        )
+        .await?;
+        tx.commit().await?;
+        attempted.started += 1;
+    }
+
+    Ok(attempted)
+}
+
+/// Records that a requested charge will never happen, and why.
+async fn fail(
+    db: &erp_tenant::TenantDb,
+    id: &AggregateId,
+    why: &str,
+    now: Timestamp,
+    metadata: &Metadata,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing::warn!(tenant = %db.tenant(), payment = %id, why, "a saved-card charge was refused");
+    let mut tx = db.begin().await?;
+    crate::fail_in(&mut tx, id, why, now, metadata).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Every provider this tenant has configured, as clients.

@@ -1868,6 +1868,17 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // `post_entries`.
     ("list_settlement", ALL_ROLES),
     ("record_payout", &["owner", "accountant", "clerk"]),
+    // Saved cards. Offering a customer the card they left last time is what a
+    // clerk at a counter does, so the list is ordinary. **Saving one and
+    // charging one are not**: a saved card is a standing permission to take
+    // money without the customer present, and charging it is a charge. Both
+    // sit with the rest of `post_entries`, and removing one does too — a card
+    // taken away without the customer asking is a charge that will fail at the
+    // worst moment.
+    ("list_saved_cards", ALL_ROLES),
+    ("save_gateway_card", &["owner", "accountant", "clerk"]),
+    ("forget_gateway_card", &["owner", "accountant", "clerk"]),
+    ("charge_saved_card", &["owner", "accountant", "clerk"]),
     // The org chart. Reading it is ordinary — a staff list is on the wall in
     // most businesses. Changing it is changing the authorization structure, and
     // granting a claim escalates every ancestor, so it is the owner's.
@@ -2079,8 +2090,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        187,
-        "expected a hundred and eighty-seven role-scoped operations"
+        191,
+        "expected a hundred and ninety-one role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

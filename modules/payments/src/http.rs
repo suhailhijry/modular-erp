@@ -8,6 +8,14 @@
 //! Deliberately. A settlement is decided by asking the gateway, not by anybody
 //! telling this system what happened — see the module docs. What a person can
 //! do here is start a collection, look at one, and give money back.
+//!
+//! # And no route that charges a saved card either
+//!
+//! `POST /v1/payments/cards/{card}/charges` answers `202`, not `201`. Charging
+//! is an outbound call to somebody else's server, and a handler that waits on
+//! one holds a database connection for as long as that server feels like
+//! taking. The worker sends it; this records what was asked for. Same shape as
+//! a ZATCA submission, for the same reason.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -35,6 +43,9 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(refund_gateway_payment))
         .routes(routes!(set_gateway))
         .routes(routes!(list_settlement, record_payout))
+        .routes(routes!(list_saved_cards, save_gateway_card))
+        .routes(routes!(forget_gateway_card))
+        .routes(routes!(charge_saved_card))
 }
 
 /// This module's own failures plus everything any route can produce.
@@ -729,6 +740,391 @@ async fn record_payout(
 // Failures
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Saved cards
+// ---------------------------------------------------------------------------
+
+/// A card a customer has agreed to leave on file.
+///
+/// **The token is minted in the customer's browser**, against the publishable
+/// key, and it is the only part of a card this system ever holds. There is no
+/// field here for a card number and there will not be one — sending one to a
+/// merchant backend is grounds for Moyasar terminating the agreement.
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "customer": "CUST-1",
+    "provider": "moyasar",
+    "token": "token_qbmmXzo97AESrZLS6KpWvof6uK2hAKcQGfEcKg",
+    "brand": "visa",
+    "last4": "4242",
+    "expiry_month": 5,
+    "expiry_year": 2028
+}))]
+struct NewSavedCard {
+    /// The `crm` customer it belongs to.
+    customer: String,
+    /// `moyasar`. Buy-now-pay-later providers have no card to keep.
+    provider: String,
+    /// **The gateway's token**, from tokenizing the card in the browser. Stored
+    /// sealed and never returned by any route.
+    token: String,
+    /// `visa`, `mada`, `master` — whatever the gateway called it.
+    brand: String,
+    /// The last four digits, and only those.
+    last4: String,
+    /// 1–12.
+    expiry_month: i16,
+    expiry_year: i16,
+}
+
+/// What somebody wants taken off a card that is already on file.
+#[derive(Debug, Deserialize, ToSchema)]
+struct NewSavedCardCharge {
+    /// The invoice this is collecting against.
+    invoice: String,
+    /// Minor units — halalas for SAR. Never a decimal.
+    amount: i64,
+    /// ISO-4217, three letters.
+    currency: String,
+    /// **Where the customer lands if the gateway decides it needs them.** A
+    /// saved-card charge usually completes with nobody watching; one that
+    /// raises a 3-D Secure challenge does not, and a charge with nowhere to
+    /// send them is one that can never finish.
+    callback_url: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct SavedCardView {
+    id: String,
+    customer: String,
+    provider: String,
+    brand: String,
+    last4: String,
+    expiry_month: i16,
+    expiry_year: i16,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    saved_at: Timestamp,
+}
+
+fn card_view(row: crate::CardRow) -> SavedCardView {
+    SavedCardView {
+        id: row.id,
+        customer: row.customer,
+        provider: row.provider,
+        brand: row.brand,
+        last4: row.last4,
+        expiry_month: row.expiry_month,
+        expiry_year: row.expiry_year,
+        saved_at: row.saved_at,
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema, utoipa::IntoParams)]
+struct WhoseCards {
+    /// Whose cards to list.
+    customer: String,
+}
+
+/// What this customer can be offered.
+///
+/// Removed cards are not in it: the list exists to be picked from.
+#[utoipa::path(
+    get,
+    path = "/v1/payments/cards",
+    tag = "payments",
+    params(WhoseCards),
+    responses(
+        (status = OK, body = Vec<SavedCardView>),
+        (status = BAD_REQUEST, body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure, or the projection did not catch up in time. Retryable.", body = Problem),
+    ),
+)]
+async fn list_saved_cards(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(whose): Query<WhoseCards>,
+) -> Result<Json<Vec<SavedCardView>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let rows = crate::cards(&mut conn, &whose.customer, PAGE)
+        .await
+        .map_err(|e| database(&e, locale))?;
+
+    Ok(Json(rows.into_iter().map(card_view).collect()))
+}
+
+/// Keep a customer's card for next time.
+///
+/// The `Idempotency-Key` becomes the card's id, so a retried request saves one
+/// card rather than two.
+#[utoipa::path(
+    post,
+    path = "/v1/payments/cards",
+    tag = "payments",
+    params(("Idempotency-Key" = String, Header, description = "Sending it again is a retry.")),
+    request_body = NewSavedCard,
+    responses(
+        (status = CREATED, body = GatewayPaymentRecorded),
+        (status = BAD_REQUEST, description = "Not a customer id, not four digits, not a month, or a provider that keeps no cards", body = Problem),
+        (status = CONFLICT, description = "That card was removed and cannot be revived", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "No sealing key, so there is nowhere safe to put the token", body = Problem),
+    ),
+)]
+async fn save_gateway_card(
+    tenant: Allowed<PostEntries>,
+    Language(locale): Language,
+    State(state): State<AppState>,
+    key: IdempotencyKey,
+    Json(body): Json<NewSavedCard>,
+) -> Result<(StatusCode, Json<GatewayPaymentRecorded>), Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    let customer = parse_id(&body.customer, locale)?;
+
+    // **Refuses rather than keeping a payment credential in the clear** (L6).
+    let Some(sealing) = state.sealing.clone() else {
+        return Err(Problem::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &erp_i18n::Message::new(erp_web::messages::NO_SEALING_KEY),
+            locale,
+            &CATALOG,
+        ));
+    };
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    let committed = crate::save_card_in(
+        &mut tx,
+        &sealing,
+        key.id(),
+        &crate::SavedCard {
+            customer,
+            provider: body.provider,
+            brand: body.brand,
+            last4: body.last4,
+            expiry_month: body.expiry_month,
+            expiry_year: body.expiry_year,
+        },
+        &body.token,
+        chrono::Utc::now(),
+        &creating(&tenant, &key),
+    )
+    .await
+    .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok((
+        StatusCode::CREATED,
+        Json(GatewayPaymentRecorded {
+            id: key.id().to_string(),
+            position: committed.at.map(erp_types::LogPosition::get),
+        }),
+    ))
+}
+
+/// Remove a card.
+///
+/// **The token is deleted**, which is what makes this mean anything. The row
+/// stays, marked removed: that a customer had a card on file and asked for it
+/// to go is history somebody may have to answer for.
+#[utoipa::path(
+    delete,
+    path = "/v1/payments/cards/{card}",
+    tag = "payments",
+    params(("card" = String, Path, description = "From `GET /v1/payments/cards`.")),
+    responses(
+        (status = NO_CONTENT, description = "Removed, or already was."),
+        (status = BAD_REQUEST, body = Problem),
+        (status = NOT_FOUND, description = "No such card", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn forget_gateway_card(
+    tenant: Allowed<PostEntries>,
+    Language(locale): Language,
+    State(state): State<AppState>,
+    Path(card): Path<String>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let id = parse_id(&card, locale)?;
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    crate::forget_card_in(
+        &mut tx,
+        &id,
+        chrono::Utc::now(),
+        &erp_web::metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ask for a saved card to be charged.
+///
+/// **`202`, and that is the honest answer.** Nothing has been charged when this
+/// returns: charging is an outbound call to the gateway and the worker makes
+/// it, on its next pass. Poll `GET /v1/payments/{payment}` with the id this
+/// gives back — it goes `requested` → `pending` → `settled` or `failed`.
+///
+/// The `Idempotency-Key` becomes the payment's id **and the gateway's**: it is
+/// passed as Moyasar's `given_id`, so a retry cannot become a second charge at
+/// any layer. It must be a UUID, which is Moyasar's rule for that field.
+#[utoipa::path(
+    post,
+    path = "/v1/payments/cards/{card}/charges",
+    tag = "payments",
+    params(
+        ("card" = String, Path, description = "From `GET /v1/payments/cards`."),
+        ("Idempotency-Key" = String, Header, description = "A UUID. Becomes the payment's id and the gateway's."),
+    ),
+    request_body = NewSavedCardCharge,
+    responses(
+        (status = ACCEPTED, description = "Recorded. The worker will charge it.", body = GatewayPaymentRecorded),
+        (status = BAD_REQUEST, description = "Not an id, not a currency, not a positive amount, or a key that is not a UUID", body = Problem),
+        (status = NOT_FOUND, description = "No such card", body = Problem),
+        (status = CONFLICT, description = "That card was removed", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn charge_saved_card(
+    tenant: Allowed<PostEntries>,
+    Language(locale): Language,
+    State(state): State<AppState>,
+    Path(card): Path<String>,
+    key: IdempotencyKey,
+    Json(body): Json<NewSavedCardCharge>,
+) -> Result<(StatusCode, Json<GatewayPaymentRecorded>), Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    let card = parse_id(&card, locale)?;
+    let invoice = parse_id(&body.invoice, locale)?;
+    let currency = erp_types::CurrencyCode::new(&body.currency).map_err(|e| {
+        bad_request(
+            erp_web::messages::MALFORMED_BODY,
+            "reason",
+            &e.to_string(),
+            locale,
+        )
+    })?;
+    if !body.amount.is_positive() {
+        return Err(bad_request(
+            erp_web::messages::MALFORMED_BODY,
+            "reason",
+            "a payment must be for a positive amount",
+            locale,
+        ));
+    }
+    if body.callback_url.trim().is_empty() {
+        return Err(bad_request(
+            erp_web::messages::MALFORMED_BODY,
+            "reason",
+            "a charge needs somewhere to send the customer if the gateway asks for them",
+            locale,
+        ));
+    }
+
+    // **Moyasar's rule, said here rather than discovered in the worker.** The
+    // key becomes `given_id`, which must be a UUID; a client that learns this
+    // from a payment stuck in `requested` learns it far too late.
+    if !is_uuid(key.id().as_str()) {
+        return Err(bad_request(
+            erp_web::messages::MALFORMED_BODY,
+            "reason",
+            "the Idempotency-Key for a saved-card charge must be a UUID: it becomes the \
+             gateway's own id for the payment",
+            locale,
+        ));
+    }
+
+    // The cheap check, against a read model that may be a moment behind. The
+    // authority is the worker, where the token either exists or does not — see
+    // `crate::request_in`.
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let on_file = crate::card(&mut conn, card.as_str())
+        .await
+        .map_err(|e| database(&e, locale))?;
+    drop(conn);
+
+    let on_file = match on_file {
+        Some(row) if !row.forgotten => row,
+        Some(_) => {
+            return Err(problem_for(
+                &CommandError::Execute(ExecuteError::Rejected(PaymentsError::CardForgotten(
+                    card.as_str().to_owned(),
+                ))),
+                locale,
+            ));
+        }
+        None => {
+            return Err(problem_for(
+                &CommandError::Execute(ExecuteError::Rejected(PaymentsError::NoSuchCard(
+                    card.as_str().to_owned(),
+                ))),
+                locale,
+            ));
+        }
+    };
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    let committed = crate::request_in(
+        &mut tx,
+        key.id(),
+        &crate::Collection {
+            card,
+            provider: on_file.provider,
+            invoice,
+            amount: Money::from_minor(body.amount, currency),
+            callback_url: body.callback_url,
+        },
+        chrono::Utc::now(),
+        &creating(&tenant, &key),
+    )
+    .await
+    .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(GatewayPaymentRecorded {
+            id: key.id().to_string(),
+            position: committed.at.map(erp_types::LogPosition::get),
+        }),
+    ))
+}
+
+/// The same shape `erp_payments::moyasar` refuses on, checked at the edge so a
+/// client is told before anything is written down.
+fn is_uuid(value: &str) -> bool {
+    let mut parts = value.split('-');
+    for width in [8, 4, 4, 4, 12] {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != width || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
 impl Localize for PaymentsError {
     fn message(&self) -> erp_i18n::Message {
         use erp_i18n::{Message, MessageArg};
@@ -757,8 +1153,20 @@ impl Localize for PaymentsError {
                     .with("expected", MessageArg::text(expected.to_string()))
                     .with("found", MessageArg::text(found.to_string()))
             }
+            Self::NoSavedCards(provider) => Message::new(crate::messages::NO_SAVED_CARDS)
+                .with("provider", MessageArg::text(provider)),
+            Self::NoSuchCard(id) => {
+                Message::new(crate::messages::NO_SUCH_CARD).with("id", MessageArg::text(id))
+            }
+            Self::CardForgotten(id) => {
+                Message::new(crate::messages::CARD_FORGOTTEN).with("id", MessageArg::text(id))
+            }
+            Self::NotACard(reason) => {
+                Message::new(crate::messages::NOT_A_CARD).with("reason", MessageArg::text(reason))
+            }
             Self::Unbalanced(e) => e.message(),
             Self::Config(e) => e.message(),
+            Self::Secret(e) => e.message(),
             // The composed error already reads as a sentence, and it is the
             // one `sales` or `ledger` wrote — better than anything this module
             // could say about somebody else's rule.
@@ -772,11 +1180,18 @@ fn problem_for(error: &CommandError<PaymentsError>, locale: Locale) -> Problem {
     let (status, message) = match error {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
-                // The payment is not there to settle or refund.
-                PaymentsError::NotStarted(_) => StatusCode::NOT_FOUND,
-                PaymentsError::AlreadyStarted(_) | PaymentsError::PayoutRecorded(_) => {
-                    StatusCode::CONFLICT
+                // The payment or the card is not there.
+                PaymentsError::NotStarted(_) | PaymentsError::NoSuchCard(_) => {
+                    StatusCode::NOT_FOUND
                 }
+                PaymentsError::AlreadyStarted(_)
+                | PaymentsError::PayoutRecorded(_)
+                // A removed card is a **conflict with what the customer
+                // asked for**, not a malformed request: the id was real.
+                | PaymentsError::CardForgotten(_) => StatusCode::CONFLICT,
+                // A deployment fault or an attack, never something a caller
+                // can fix by sending different fields.
+                PaymentsError::Secret(_) => StatusCode::SERVICE_UNAVAILABLE,
                 // **Well-formed, and refused on what the gateway said.** A 422
                 // rather than a 400: nothing about the request was wrong.
                 PaymentsError::WrongAmount { .. } | PaymentsError::NotCollectable { .. } => {

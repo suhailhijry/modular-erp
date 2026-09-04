@@ -27,6 +27,33 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum PaymentEvent {
+    /// Somebody asked for a saved card to be charged, and nothing has been
+    /// sent to the gateway yet.
+    ///
+    /// **The only event this module writes that names a card.** A saved-card
+    /// charge cannot happen in a request handler — it is an outbound call to a
+    /// third party, and this system makes those from the worker, the way it
+    /// submits to ZATCA. So the request records the intent, and
+    /// `crate::charge_requested` is what turns it into a [`Self::Started`].
+    ///
+    /// The `card` is here rather than looked up later for the same reason
+    /// [`Self::Settled`] carries its invoice: the job may not load an
+    /// aggregate to find out what to do (L7).
+    Requested {
+        /// The saved card to charge. **Whose** it is is the card's to say;
+        /// copying the customer here too would be a second place for the same
+        /// fact to be wrong.
+        card: AggregateId,
+        provider: String,
+        invoice: AggregateId,
+        amount: Money,
+        /// Where the gateway sends the customer **if it decides it needs
+        /// them**. A saved-card charge usually completes with nobody watching;
+        /// one that raises a 3-D Secure challenge does not, and this is where
+        /// that lands. See `crate::charge_requested`.
+        callback_url: String,
+        requested_at: Timestamp,
+    },
     /// A charge was created at the gateway. **Nobody has paid anything yet.**
     Started {
         /// `moyasar`, `tabby`, `tamara`, or whatever a tenant configures.
@@ -88,7 +115,8 @@ pub enum PaymentEvent {
 }
 
 impl PaymentEvent {
-    pub const NAMES: [&'static str; 5] = [
+    pub const NAMES: [&'static str; 6] = [
+        "payments.payment.requested",
         "payments.payment.started",
         "payments.payment.settled",
         "payments.payment.failed",
@@ -100,11 +128,12 @@ impl PaymentEvent {
 impl DomainEvent for PaymentEvent {
     fn event_name(&self) -> EventName {
         crate::name(match self {
-            Self::Started { .. } => Self::NAMES[0],
-            Self::Settled { .. } => Self::NAMES[1],
-            Self::Failed { .. } => Self::NAMES[2],
-            Self::Refunded { .. } => Self::NAMES[3],
-            Self::Voided { .. } => Self::NAMES[4],
+            Self::Requested { .. } => Self::NAMES[0],
+            Self::Started { .. } => Self::NAMES[1],
+            Self::Settled { .. } => Self::NAMES[2],
+            Self::Failed { .. } => Self::NAMES[3],
+            Self::Refunded { .. } => Self::NAMES[4],
+            Self::Voided { .. } => Self::NAMES[5],
         })
     }
 
@@ -117,6 +146,10 @@ impl DomainEvent for PaymentEvent {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
+    /// A saved-card charge somebody asked for, which the worker has not sent
+    /// to the gateway yet. **No money has been asked for**, so there is
+    /// nothing to chase at the provider and nothing to reconcile.
+    Requested,
     /// Created, and waiting on the customer or the gateway.
     #[default]
     Pending,
@@ -130,6 +163,7 @@ impl Stage {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Requested => "requested",
             Self::Pending => "pending",
             Self::Settled => "settled",
             Self::Failed => "failed",
@@ -152,6 +186,12 @@ impl Stage {
 /// One attempt, as the log describes it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Payment {
+    /// Asked for against a saved card, and not yet sent to the gateway.
+    pub requested: bool,
+    /// The card a request named, for the job that will charge it.
+    pub card: Option<AggregateId>,
+    /// Where the gateway sends a customer it decides it needs.
+    pub callback_url: String,
     pub started: bool,
     pub provider: String,
     pub gateway_id: String,
@@ -192,6 +232,22 @@ impl Aggregate for Payment {
 
     fn apply(&mut self, event: &Self::Event) {
         match event {
+            PaymentEvent::Requested {
+                card,
+                provider,
+                invoice,
+                amount,
+                callback_url,
+                ..
+            } => {
+                self.requested = true;
+                self.card = Some(card.clone());
+                self.provider.clone_from(provider);
+                self.invoice = Some(invoice.clone());
+                self.amount = Some(*amount);
+                self.callback_url.clone_from(callback_url);
+                self.stage = Stage::Requested;
+            }
             PaymentEvent::Started {
                 provider,
                 gateway_id,
@@ -327,6 +383,14 @@ mod tests {
     #[test]
     fn every_event_has_a_name_and_they_are_all_different() {
         let events = [
+            PaymentEvent::Requested {
+                card: id("card-1"),
+                provider: "moyasar".to_owned(),
+                invoice: id("INV-1"),
+                amount: sar(10_000),
+                callback_url: "https://bassat.sa/paid".to_owned(),
+                requested_at: Timestamp::from(chrono::Utc::now()),
+            },
             started(),
             settled(sar(1), None),
             PaymentEvent::Failed {

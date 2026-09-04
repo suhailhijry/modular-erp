@@ -1023,6 +1023,15 @@ const PAYMENT_BATCH: i64 = 25;
 /// the database and the dispatcher deliberately holds no connection — the same
 /// reason `messaging` retires a push token from a sweep rather than from its
 /// handler.
+///
+/// # It also sends the saved-card charges somebody asked for
+///
+/// Two passes, charge then settle, in that order — so a card charged on this
+/// tick is settled on this tick rather than the next. The charge pass is here
+/// for a different reason from the settle pass: charging is an outbound call to
+/// a third party, and a request handler that waited on one would hold a
+/// database connection for as long as somebody else's server took. Same
+/// argument as the ZATCA submission job.
 struct SettleGatewayPayments {
     sealing: erp_eventlog::SealingKey,
 }
@@ -1047,6 +1056,29 @@ impl erp_worker::Job for SettleGatewayPayments {
 
         let mut resolved = 0;
         for gateway in &gateways {
+            // **Charge first.** What this starts, the sweep below settles on
+            // the same tick.
+            let attempted = payments::charge_requested(
+                db,
+                gateway.as_ref(),
+                &self.sealing,
+                chrono::Utc::now(),
+                PAYMENT_BATCH,
+                &by_the_platform(),
+            )
+            .await?;
+            resolved += attempted.started + attempted.refused;
+
+            if let Some(stopped) = &attempted.stopped {
+                tracing::warn!(
+                    tenant = %db.tenant(),
+                    provider = gateway.provider(),
+                    error = %stopped,
+                    started = attempted.started,
+                    "the saved-card charge pass stopped early; the rest stay requested"
+                );
+            }
+
             let swept = payments::settle_pending(
                 db,
                 gateway.as_ref(),
