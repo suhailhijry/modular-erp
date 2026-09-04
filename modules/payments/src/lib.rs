@@ -46,16 +46,20 @@ pub mod http;
 pub mod messages;
 
 mod commands;
+mod gateways;
 mod payment;
 mod posting;
 mod projections;
+mod sweep;
 
 pub use commands::{Attempt, PaymentsError, fail_in, refund_in, settle_in, start_in, void_in};
+pub use gateways::{Credentials, GatewayConfigError, PROVIDERS, configure, credentials};
 pub use payment::{Payment, PaymentEvent, Stage};
 pub use posting::{PostingAccounts, Settlement, entry_for_fee};
 pub use projections::{
     Collected, PaymentRow, Payments, against, by_gateway_id, payment, projections,
 };
+pub use sweep::{Doorbell, Swept, configured, doorbells, pending, settle_pending};
 
 use erp_i18n::StaticCatalog;
 use erp_types::{DomainName, EventName, SchemaVersion};

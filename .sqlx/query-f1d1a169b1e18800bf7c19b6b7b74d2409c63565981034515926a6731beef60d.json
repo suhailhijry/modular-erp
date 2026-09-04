@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", gateway_id as \"gateway_id!\"\n             FROM proj_payments.payment\n            WHERE stage = 'pending' AND provider = $1\n            ORDER BY started_at ASC LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "gateway_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "gateway_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "f1d1a169b1e18800bf7c19b6b7b74d2409c63565981034515926a6731beef60d"
+}

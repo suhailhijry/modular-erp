@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,123 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,135 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -647,6 +647,49 @@ before they will lend, so `Charge` carries an optional `Buyer` and `Basket` and
 the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
+
+### 28 · A webhook cannot settle a payment, so a sweep does
+
+The callback surface built in 12b promises `webhook.{provider}` and waits for a
+handler. Writing that handler is the obvious way to close the loop, and it does
+not work: **`EffectHandler::deliver` is handed an effect and nothing else.** The
+dispatcher holds no connection — a documented property, and the reason a slow
+provider cannot exhaust a tenant's pool — so a handler cannot write a
+settlement. `messaging` retires a push token from a sweep for the same reason.
+
+That is the mechanical answer. The better reason is that **a callback is not a
+reliable trigger**. Moyasar retries six times over about four hours and then
+drops the message; Tamara documents no retry policy at all. A system that
+settled only on callback would lose payments quietly, in the direction of a
+customer who was charged and an invoice saying they were not.
+
+So the callback is a **doorbell**: authenticated, recorded, acknowledged —
+`payments::Doorbell` exists only so those effects do not pile up in the outbox
+waiting for a handler that should not exist. `payments.settle` answers the door,
+asking the gateway about everything still pending, whether or not the bell rang.
+
+Three properties it has, each tested:
+
+- **It stops rather than degrading.** An unreachable gateway ends that tenant's
+  sweep and says so; the payments stay pending and the next tick tries again.
+  Marking them anything else would be inventing a fact about somebody's money.
+- **One bad answer does not strand the batch.** A gateway reporting an amount
+  other than what was started is refused, logged loudly — that is exactly what
+  somebody needs to look at — and the sweep moves on.
+- **A sweep only asks its own provider's payments.** Asking Moyasar about a
+  Tabby id would be a `NoSuchPayment` on every tick, for ever.
+
+Credentials are sealed per provider under `payments.{provider}`, mirroring the
+`webhooks.{provider}` key the callback secret already uses — per provider so
+rotating one key does not rewrite the others, and so a sweep unseals only what
+it is about to use. Without a `SEALING_KEY` the job is **not registered at
+all**, which is louder than one that runs every tick and finds it can do
+nothing.
+
+**What this still does not do:** nothing abandons a payment. A checkout the
+customer walked away from stays pending until the gateway itself reports it
+expired or abandoned, which all three do. If that turns out not to be true for
+one of them, the `payment_pending` index is where it will show.
 
 ### 27 · No payment gateway signs its webhooks, and 12b assumed one did
 
@@ -2442,11 +2485,13 @@ research changed about 12b.
       built** (Tabby and Tamara) with their lifecycles read correctly — see §25
       for what `CLOSED` and `approved` actually mean. **The entries are not**;
       that is the domain half
-- [~] Capture is idempotent under retry (L8). A timeout is not a failure — it is
+- [x] Capture is idempotent under retry (L8). A timeout is not a failure — it is
       an unknown, and the resolution is a query against the gateway, never a
-      second capture. **`Gateway::fetch` is that query and it exists**; the
-      charge carries Moyasar's `given_id` so a retried *create* lands on the
-      same payment. What is not built is the caller that chooses between them
+      second capture. **`payments.settle` is that caller**: it asks
+      `Gateway::fetch` about everything still pending and records what comes
+      back, so an answer this system missed is one it goes and gets. The charge
+      carries Moyasar's `given_id` so a retried *create* lands on the same
+      payment
 - [ ] Refunds, partial refunds, and what a refund does to a cleared tax invoice.
       ZATCA has an opinion (`tax_sa`), and it is a credit note
 - [ ] **Settlement.** A gateway pays out in batches, net of fees, days later. The

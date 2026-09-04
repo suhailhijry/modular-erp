@@ -4248,6 +4248,39 @@
         ],
         "type": "object"
       },
+      "NewGateway": {
+        "description": "What a tenant hands over so this system can talk to their gateway.\n\nShaped per provider, because the three need different things: Moyasar a\nsecret key, Tabby a key **and** the merchant code its integration manager\nissued, Tamara a token and which host it belongs to.",
+        "example": {
+          "provider": "moyasar",
+          "secret": "sk_live_…"
+        },
+        "properties": {
+          "merchant_code": {
+            "description": "Tabby only, and required there.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "description": "`moyasar`, `tabby` or `tamara`.",
+            "type": "string"
+          },
+          "sandbox": {
+            "description": "Tamara only. Their sandbox is a different host rather than a different\ntoken.",
+            "type": "boolean"
+          },
+          "secret": {
+            "description": "The secret key, or Tamara's API token. **Stored sealed and never\nreadable again.**",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "secret"
+        ],
+        "type": "object"
+      },
       "NewGatewayPayment": {
         "description": "**Not `sales`' `NewPayment`.** That one is a customer handing over money;\nthis is a charge created at a gateway, which may never become one. The\n`OpenAPI` document keeps one schema per name, so the two have to be told\napart — see `no_two_modules_claim_the_same_schema_name`.",
         "example": {
@@ -23989,6 +24022,136 @@
           }
         },
         "summary": "Record a charge created at a gateway.",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/payments/gateways/{provider}": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "The key is **sealed** and cannot be read back — send a new one to rotate.\nA deployment with no sealing key refuses rather than storing it in the\nclear, which is the same call every other secret makes.\n\nThe key is checked here, not on the first customer's card: a publishable key\nin the secret slot can create a payment and cannot capture, refund or fetch\none, which would fail *after* the money moved.",
+        "operationId": "set_gateway",
+        "parameters": [
+          {
+            "description": "`moyasar`, `tabby` or `tamara`.",
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewGateway"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Stored, sealed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a provider this system integrates, or a key it cannot use"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No sealing key configured, so nothing is stored in the clear"
+          }
+        },
+        "summary": "Configure a payment provider.",
         "tags": [
           "payments"
         ]

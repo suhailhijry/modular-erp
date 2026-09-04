@@ -75,6 +75,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for handler in messaging::handlers(message_transports()) {
         dispatcher = dispatcher.register(handler);
     }
+    // **The tenant plane only.** A payment callback arrives on a tenant's
+    // subdomain and is recorded in that tenant's log; there is no control-plane
+    // equivalent. See `payments::Doorbell` for why acknowledging is all there
+    // is to do here — the settling is `payments.settle`'s, because it needs a
+    // database and a handler is given none.
+    for handler in payments::doorbells() {
+        dispatcher = dispatcher.register(handler);
+    }
     let dispatcher = Arc::new(dispatcher);
 
     // **The control plane's dispatcher**, which is a different queue in a
@@ -143,10 +151,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for job in zatca_jobs(&sealing) {
             worker = worker.with_job(job);
         }
+        // **Same call, for the same reason.** A gateway's API key is sealed, so
+        // without a sealing key there is nothing to unseal and the sweep is not
+        // registered at all — which is louder than a job that runs every tick
+        // and finds it can do nothing.
+        worker = worker.with_job(Arc::new(SettleGatewayPayments {
+            sealing: sealing.clone(),
+        }));
     } else {
         tracing::warn!(
             "SEALING_KEY is not set; invoices will be built and chained but never \
-             signed or sent to ZATCA"
+             signed or sent to ZATCA, and gateway payments will never be settled"
         );
     }
 
@@ -987,6 +1002,81 @@ fn zatca_jobs(sealing: &erp_eventlog::SealingKey) -> Vec<Arc<dyn erp_worker::Job
             sealing: sealing.clone(),
         }),
     ]
+}
+
+/// How many pending payments one sweep asks about, per provider, per tenant.
+///
+/// Each is a round trip to somebody else's API, so this is deliberately small:
+/// a tenant with a hundred abandoned checkouts should not spend a minute of the
+/// worker's tick on them, and the next tick takes the next batch.
+const PAYMENT_BATCH: i64 = 25;
+
+/// **Asks the gateway what happened, for everything still waiting.**
+///
+/// The other half of the inbound story. A callback is authenticated, recorded
+/// and acknowledged by the API; this is what acts on it — and, more to the
+/// point, what acts when no callback ever arrives. Moyasar drops a webhook
+/// after six failed attempts and Tamara documents no retry policy at all, so a
+/// system that only settled on callback would lose payments quietly.
+///
+/// It runs here rather than in an `EffectHandler` because settling writes to
+/// the database and the dispatcher deliberately holds no connection — the same
+/// reason `messaging` retires a push token from a sweep rather than from its
+/// handler.
+struct SettleGatewayPayments {
+    sealing: erp_eventlog::SealingKey,
+}
+
+#[async_trait::async_trait]
+impl erp_worker::Job for SettleGatewayPayments {
+    fn name(&self) -> &'static str {
+        "payments.settle"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(payments::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        // A tenant who has enabled the module and configured no provider is the
+        // ordinary case on day one, and is not a failure.
+        let gateways = payments::configured(db, &self.sealing).await?;
+        if gateways.is_empty() {
+            return Ok(Activity::Idle);
+        }
+
+        let mut resolved = 0;
+        for gateway in &gateways {
+            let swept = payments::settle_pending(
+                db,
+                gateway.as_ref(),
+                chrono::Utc::now(),
+                PAYMENT_BATCH,
+                &by_the_platform(),
+            )
+            .await?;
+            resolved += swept.resolved;
+
+            // **Loudly.** A tenant whose payments are not resolving has
+            // customers who have been charged and invoices that say otherwise,
+            // and nothing else in the system will say so.
+            if let Some(stopped) = &swept.stopped {
+                tracing::warn!(
+                    tenant = %db.tenant(),
+                    provider = gateway.provider(),
+                    error = %stopped,
+                    resolved = swept.resolved,
+                    "the payment sweep stopped early; the rest stay pending"
+                );
+            }
+        }
+
+        Ok(if resolved > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
 }
 
 /// Which ZATCA a tenant onboarded into.

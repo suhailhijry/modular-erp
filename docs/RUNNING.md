@@ -259,9 +259,10 @@ dead, any other `4xx` is permanent, `5xx` is retried. The contract is documented
 on `messaging::Relay`.
 
 **`SEALING_KEY` is what module secrets are sealed under.** Without it the API
-refuses to store a tenant's ZATCA private key (503, `request.no_sealing_key`)
-and the worker does not register the ZATCA sweeps at all — invoices are built
-and chained but never signed or sent. Generate one:
+refuses to store a tenant's ZATCA private key or a payment gateway's API key
+(503, `request.no_sealing_key`), and the worker registers neither the ZATCA
+sweeps nor `payments.settle` — invoices are built and chained but never signed
+or sent, and gateway payments are recorded but never settled. Generate one:
 
 ```bash
 echo "$(date +%Y-%m):$(openssl rand -hex 32)"

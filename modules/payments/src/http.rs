@@ -22,7 +22,7 @@ use utoipa_axum::routes;
 
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{Allowed, IdempotencyKey, Language, PostEntries, Read};
+use erp_web::{Allowed, IdempotencyKey, Language, ManageTenant, PostEntries, Read};
 use erp_web::{Consistency, nudge};
 use erp_web::{Json, Query, bad_request, creating, parse_id, require_module};
 
@@ -33,6 +33,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_payments, start_payment))
         .routes(routes!(get_payment))
         .routes(routes!(refund_gateway_payment))
+        .routes(routes!(set_gateway))
 }
 
 /// This module's own failures plus everything any route can produce.
@@ -375,6 +376,127 @@ async fn refund_gateway_payment(
         id: id.to_string(),
         position: committed.at.map(erp_types::LogPosition::get),
     }))
+}
+
+/// What a tenant hands over so this system can talk to their gateway.
+///
+/// Shaped per provider, because the three need different things: Moyasar a
+/// secret key, Tabby a key **and** the merchant code its integration manager
+/// issued, Tamara a token and which host it belongs to.
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "provider": "moyasar", "secret": "sk_live_…" }))]
+struct NewGateway {
+    /// `moyasar`, `tabby` or `tamara`.
+    provider: String,
+    /// The secret key, or Tamara's API token. **Stored sealed and never
+    /// readable again.**
+    secret: String,
+    /// Tabby only, and required there.
+    #[serde(default)]
+    merchant_code: Option<String>,
+    /// Tamara only. Their sandbox is a different host rather than a different
+    /// token.
+    #[serde(default)]
+    sandbox: bool,
+}
+
+/// Configure a payment provider.
+///
+/// The key is **sealed** and cannot be read back — send a new one to rotate.
+/// A deployment with no sealing key refuses rather than storing it in the
+/// clear, which is the same call every other secret makes.
+///
+/// The key is checked here, not on the first customer's card: a publishable key
+/// in the secret slot can create a payment and cannot capture, refund or fetch
+/// one, which would fail *after* the money moved.
+#[utoipa::path(
+    put,
+    path = "/v1/payments/gateways/{provider}",
+    tag = "payments",
+    params(("provider" = String, Path, description = "`moyasar`, `tabby` or `tamara`.")),
+    request_body = NewGateway,
+    responses(
+        (status = NO_CONTENT, description = "Stored, sealed"),
+        (status = BAD_REQUEST, description = "Not a provider this system integrates, or a key it cannot use", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "No sealing key configured, so nothing is stored in the clear", body = Problem),
+    ),
+)]
+async fn set_gateway(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(provider): Path<String>,
+    Json(body): Json<NewGateway>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    // The path and the body must agree, so a copy-pasted body cannot quietly
+    // overwrite a different provider's key.
+    if body.provider != provider {
+        return Err(bad_request(
+            erp_web::messages::MALFORMED_BODY,
+            "reason",
+            "the provider in the path and in the body disagree",
+            locale,
+        ));
+    }
+
+    let credentials = match provider.as_str() {
+        "moyasar" => crate::Credentials::Moyasar {
+            secret: body.secret,
+        },
+        "tabby" => crate::Credentials::Tabby {
+            secret: body.secret,
+            merchant_code: body.merchant_code.unwrap_or_default(),
+        },
+        "tamara" => crate::Credentials::Tamara {
+            token: body.secret,
+            sandbox: body.sandbox,
+        },
+        other => {
+            return Err(bad_request(
+                erp_web::messages::MALFORMED_BODY,
+                "reason",
+                &format!("{other} is not a payment provider this system integrates"),
+                locale,
+            ));
+        }
+    };
+
+    // **Refuses rather than storing it in the clear** (L6).
+    let Some(sealing) = state.sealing.clone() else {
+        return Err(Problem::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &erp_i18n::Message::new(erp_web::messages::NO_SEALING_KEY),
+            locale,
+            &CATALOG,
+        ));
+    };
+
+    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    crate::configure(&mut conn, &sealing, &credentials)
+        .await
+        .map_err(|e| match e {
+            crate::GatewayConfigError::Unusable(why) => bad_request(
+                erp_web::messages::MALFORMED_BODY,
+                "reason",
+                &why.to_string(),
+                locale,
+            ),
+            other => {
+                tracing::error!(error = %other, "a gateway credential could not be stored");
+                Problem::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
+                    locale,
+                    &CATALOG,
+                )
+            }
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------

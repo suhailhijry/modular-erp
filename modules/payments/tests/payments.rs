@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use erp_control::{Actor, ClusterRegistry, ControlPlane, PoolConfig, TenantDb, TenantPools};
 use erp_eventlog::{ExecuteError, Metadata};
+use erp_payments::{Charge, Gateway, GatewayError};
 use erp_payments::{Charged, Status};
 use erp_projection::{Projection, ensure_group_schema, run_to_head};
 use erp_testkit::{Schema, TestDb};
@@ -534,6 +535,248 @@ async fn a_gateway_id_this_system_never_issued_settles_nothing() {
             Err(ExecuteError::Rejected(PaymentsError::NotStarted(_)))
         ),
         "{refused:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The sweep — what actually settles a payment in production
+// ---------------------------------------------------------------------------
+
+/// A gateway that answers from a script, and counts what it was asked.
+#[derive(Debug)]
+struct FakeGateway {
+    provider: &'static str,
+    answers: std::sync::Mutex<std::collections::HashMap<String, Result<Charged, GatewayError>>>,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl FakeGateway {
+    fn new(provider: &'static str) -> Self {
+        Self {
+            provider,
+            answers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            asked: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn saying(self, id: &str, answer: Result<Charged, GatewayError>) -> Self {
+        self.answers
+            .lock()
+            .expect("not poisoned")
+            .insert(id.to_owned(), answer);
+        self
+    }
+
+    fn asked(&self) -> usize {
+        self.asked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl Gateway for FakeGateway {
+    fn provider(&self) -> &'static str {
+        self.provider
+    }
+
+    async fn fetch(&self, id: &str) -> Result<Charged, GatewayError> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.answers
+            .lock()
+            .expect("not poisoned")
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| Err(GatewayError::NoSuchPayment(id.to_owned())))
+    }
+
+    async fn charge(&self, _charge: &Charge) -> Result<Charged, GatewayError> {
+        unreachable!("the sweep never charges")
+    }
+    async fn capture(&self, _id: &str, _amount: Option<Money>) -> Result<Charged, GatewayError> {
+        unreachable!("the sweep never captures")
+    }
+    async fn refund(&self, _id: &str, _amount: Option<Money>) -> Result<Charged, GatewayError> {
+        unreachable!("the sweep never refunds")
+    }
+    async fn void(&self, _id: &str) -> Result<Charged, GatewayError> {
+        unreachable!("the sweep never voids")
+    }
+}
+
+/// **The loop closing.** A payment started, a sweep, and money in the books —
+/// with no callback anywhere in it, which is the point: Moyasar drops a webhook
+/// after six attempts and Tamara documents no retry policy at all.
+#[tokio::test]
+async fn the_sweep_settles_a_payment_the_gateway_says_was_paid() {
+    let fixture = Fixture::new("sweep").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture.project().await;
+
+    let gateway = FakeGateway::new("moyasar").saying(
+        "pay_1",
+        Ok(charged(
+            "pay_1",
+            Status::Paid,
+            riyals(115),
+            Some(money(316)),
+        )),
+    );
+
+    let swept = payments::settle_pending(&fixture.db, &gateway, when(), 25, &Metadata::default())
+        .await
+        .expect("sweeps");
+    assert_eq!(swept.resolved, 1);
+    assert_eq!(swept.still_pending, 0);
+    assert_eq!(swept.stopped, None);
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, money(0));
+    assert_eq!(fixture.balance("1150").await, money(11_500 - 316));
+    assert_eq!(fixture.balance("5400").await, money(316));
+}
+
+/// **A payment still waiting is asked about and left alone.** The next tick
+/// asks again, which is what makes this work when a callback never arrives.
+#[tokio::test]
+async fn the_sweep_leaves_a_payment_the_customer_has_not_finished() {
+    let fixture = Fixture::new("sweeppending").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture.project().await;
+
+    let gateway = FakeGateway::new("moyasar").saying(
+        "pay_1",
+        Ok(charged("pay_1", Status::Initiated, riyals(115), None)),
+    );
+
+    let swept = payments::settle_pending(&fixture.db, &gateway, when(), 25, &Metadata::default())
+        .await
+        .expect("sweeps");
+    assert_eq!(swept.resolved, 0);
+    assert_eq!(swept.still_pending, 1);
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, riyals(115));
+
+    // Asked again next tick, because it is still pending.
+    payments::settle_pending(&fixture.db, &gateway, when(), 25, &Metadata::default())
+        .await
+        .expect("sweeps");
+    assert_eq!(gateway.asked(), 2);
+}
+
+/// **An unreachable gateway stops the sweep** (L6). The payments stay pending
+/// and the next tick tries again; marking them anything else would be inventing
+/// a fact about somebody's money.
+#[tokio::test]
+async fn an_unreachable_gateway_stops_the_sweep_and_settles_nothing() {
+    let fixture = Fixture::new("sweepdown").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture.project().await;
+
+    let gateway = FakeGateway::new("moyasar").saying(
+        "pay_1",
+        Err(GatewayError::Unreachable("connection refused".to_owned())),
+    );
+
+    let swept = payments::settle_pending(&fixture.db, &gateway, when(), 25, &Metadata::default())
+        .await
+        .expect("sweeps");
+    assert_eq!(swept.resolved, 0);
+    assert!(swept.stopped.is_some(), "it should say why it stopped");
+
+    fixture.project().await;
+    assert_eq!(fixture.balance("1100").await, riyals(115), "still owed");
+    assert_eq!(fixture.balance("1150").await, money(0));
+}
+
+/// **A sweep only asks about its own provider's payments.** Asking Moyasar
+/// about a Tabby id would be a `NoSuchPayment` on every tick, for ever.
+#[tokio::test]
+async fn a_sweep_does_not_ask_one_gateway_about_anothers_payments() {
+    let fixture = Fixture::new("sweepmix").await;
+    fixture.invoice("INV-1").await;
+    fixture.invoice("INV-2").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture.start("tab_1", "tabby", "INV-2", riyals(115)).await;
+    fixture.project().await;
+
+    let moyasar = FakeGateway::new("moyasar").saying(
+        "pay_1",
+        Ok(charged("pay_1", Status::Paid, riyals(115), None)),
+    );
+    payments::settle_pending(&fixture.db, &moyasar, when(), 25, &Metadata::default())
+        .await
+        .expect("sweeps");
+
+    assert_eq!(moyasar.asked(), 1, "only its own");
+
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let tabby = payments::payment(&mut conn, "tab_1")
+        .await
+        .expect("reads")
+        .expect("a payment");
+    assert_eq!(tabby.stage, "pending", "untouched by Moyasar's sweep");
+}
+
+/// A gateway reporting a different amount is refused, and **the rest of the
+/// batch still settles**. One bad answer must not strand every payment behind
+/// it.
+#[tokio::test]
+async fn one_payment_that_will_not_settle_does_not_strand_the_batch() {
+    let fixture = Fixture::new("sweepbad").await;
+    fixture.invoice("INV-1").await;
+    fixture.invoice("INV-2").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture
+        .start("pay_2", "moyasar", "INV-2", riyals(115))
+        .await;
+    fixture.project().await;
+
+    let gateway = FakeGateway::new("moyasar")
+        // Reports one riyal against a payment started for a hundred and fifteen.
+        .saying("pay_1", Ok(charged("pay_1", Status::Paid, riyals(1), None)))
+        .saying(
+            "pay_2",
+            Ok(charged("pay_2", Status::Paid, riyals(115), None)),
+        );
+
+    let swept = payments::settle_pending(&fixture.db, &gateway, when(), 25, &Metadata::default())
+        .await
+        .expect("sweeps");
+    assert_eq!(swept.resolved, 1, "the good one settled");
+    assert_eq!(swept.still_pending, 1, "the bad one did not");
+    assert_eq!(swept.stopped, None, "and it did not stop the sweep");
+
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    assert_eq!(
+        payments::payment(&mut conn, "pay_1")
+            .await
+            .expect("reads")
+            .expect("a payment")
+            .stage,
+        "pending"
+    );
+    assert_eq!(
+        payments::payment(&mut conn, "pay_2")
+            .await
+            .expect("reads")
+            .expect("a payment")
+            .stage,
+        "settled"
     );
 }
 

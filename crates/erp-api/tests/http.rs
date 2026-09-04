@@ -1860,6 +1860,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("get_payment", ALL_ROLES),
     ("start_payment", &["owner", "accountant", "clerk"]),
     ("refund_gateway_payment", &["owner", "accountant", "clerk"]),
+    // A gateway's secret key charges cards. Handing one over is the same act as
+    // adding a member, so it is the owner's.
+    ("set_gateway", &["owner"]),
     // The org chart. Reading it is ordinary — a staff list is on the wall in
     // most businesses. Changing it is changing the authorization structure, and
     // granting a claim escalates every ancestor, so it is the owner's.
@@ -2071,8 +2074,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        184,
-        "expected a hundred and eighty-four role-scoped operations"
+        185,
+        "expected a hundred and eighty-five role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
