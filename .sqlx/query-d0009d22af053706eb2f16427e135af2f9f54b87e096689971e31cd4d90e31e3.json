@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT field as \"field!\" FROM customer_field WHERE superseded_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "field!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "customer_field",
+            "name": "field"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d0009d22af053706eb2f16427e135af2f9f54b87e096689971e31cd4d90e31e3"
+}

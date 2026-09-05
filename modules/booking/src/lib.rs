@@ -48,30 +48,34 @@
 pub mod http;
 pub mod messages;
 
+mod bars;
 mod commands;
 pub mod pricing;
 mod projections;
 mod reservation;
 mod resource;
 pub mod trades;
+pub mod verification;
 
 // **Re-exported, not owned.** The repeating calendar moved to
 // `erp-recurrence` when `hr` needed the same shape for a shift and could not
 // reach it here — `booking` already depends on `hr`, so the other direction
 // would close a cycle. These stay so nothing that names them had to change.
+pub use bars::{BarEvent, Bars};
 pub use commands::{
     Amendment, Booking as Draft, BookingError, CUSTOMER_PREFIX, Details, amend_resource, assign,
-    customer_resource, declare_resource, fit_out, move_to, reschedule, reserve, restore_resource,
-    schedule_resource, secure_in, withdraw_resource,
+    customer_resource, declare_resource, fit_out, lift_bar, move_to, raise_bar, reschedule,
+    reserve, restore_resource, schedule_resource, secure_in, withdraw_resource,
 };
 pub use erp_recurrence::{Availability, BadRule, Calendar, NotAnOffset, any_covers};
 pub use pricing::{
     Allowance, Applied, Band, Charge, Charged, PriceError, PublicBooking, Tariff, price,
 };
 pub use projections::{
-    Booking, Lapsed, Performed, ReservationDetail, ReservationLine, ReservationSummary,
-    Reservations, ResourceDetail, ResourceSummary, Resources, awaiting_deposit, lapsed_holds,
-    performed, projections, reservation, reservations, resource, resources, stages,
+    Bar, Barred, Booking, Lapsed, Performed, ReservationDetail, ReservationLine,
+    ReservationSummary, Reservations, ResourceDetail, ResourceSummary, Resources, awaiting_deposit,
+    bars, lapsed_holds, performed, projections, reservation, reservations, resource, resources,
+    stages,
 };
 pub use reservation::{
     Customer, Deposit, DraftLine, Held, Line, Reservation, ReservationEvent, Stage, UnknownStage,
@@ -154,6 +158,7 @@ pub fn upcasters() -> &'static erp_eventlog::Upcasters {
         ReservationEvent::NAMES
             .iter()
             .chain(ResourceEvent::NAMES.iter())
+            .chain(BarEvent::NAMES.iter())
             .fold(erp_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             })

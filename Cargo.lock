@@ -264,15 +264,18 @@ dependencies = [
  "erp-types",
  "erp-web",
  "futures-util",
+ "getrandom 0.4.3",
  "hr",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "thiserror",
  "tokio",
  "tracing",
  "utoipa",
  "utoipa-axum",
+ "uuid",
 ]
 
 [[package]]
@@ -472,6 +475,7 @@ dependencies = [
  "tracing",
  "utoipa",
  "utoipa-axum",
+ "uuid",
 ]
 
 [[package]]

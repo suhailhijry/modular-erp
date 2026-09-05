@@ -169,3 +169,24 @@ CREATE TABLE IF NOT EXISTS reservation_line (
 
 CREATE INDEX IF NOT EXISTS reservation_line_by_unit_idx
     ON reservation_line (unit) WHERE unit IS NOT NULL;
+
+-- Which resources a customer must not be booked with, as it is now.
+--
+-- **A list, not the rule.** The rule is enforced against the log in the command
+-- (see `src/bars.rs`); this is so a screen can show what is in force without
+-- replaying every customer's stream. A lifted bar leaves this table and stays
+-- in the log, which is where "was there ever one" is answered.
+CREATE TABLE IF NOT EXISTS bar (
+    -- The `crm` customer. Not a reservation and not a person's name: only
+    -- somebody the system can recognise next time can be barred.
+    customer_id TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+
+    -- For staff, and never shown to the customer the bar is against.
+    why         TEXT NOT NULL,
+    raised_at   TIMESTAMPTZ NOT NULL,
+
+    PRIMARY KEY (customer_id, resource_id)
+);
+
+CREATE INDEX IF NOT EXISTS bar_by_resource_idx ON bar (resource_id, customer_id);

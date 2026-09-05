@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT field as \"field!\", text_value, number_value, date_value, flag_value,\n                  set_at as \"set_at!\", set_by\n             FROM customer_field\n            WHERE customer = $1 AND superseded_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "field!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "customer_field",
+            "name": "field"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "text_value",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "customer_field",
+            "name": "text_value"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "number_value",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "customer_field",
+            "name": "number_value"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "date_value",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "customer_field",
+            "name": "date_value"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "flag_value",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "customer_field",
+            "name": "flag_value"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "set_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "customer_field",
+            "name": "set_at"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "set_by",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "customer_field",
+            "name": "set_by"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "4897d9ccf534a95568cd1496953219bd0b69961aa909e6d3c905a0023cdf0c15"
+}

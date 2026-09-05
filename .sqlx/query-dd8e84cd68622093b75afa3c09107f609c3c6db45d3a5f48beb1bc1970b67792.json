@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customer_field SET superseded_at = $3\n          WHERE customer = $1 AND field = $2 AND superseded_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dd8e84cd68622093b75afa3c09107f609c3c6db45d3a5f48beb1bc1970b67792"
+}

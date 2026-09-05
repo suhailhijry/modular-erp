@@ -624,3 +624,353 @@ async fn a_rebuild_reproduces_the_list() {
 fn the_catalog_is_complete() {
     erp_i18n::testing::assert_complete(&crm::CATALOG);
 }
+
+// ---------------------------------------------------------------------------
+// Fields a business adds to a customer
+// ---------------------------------------------------------------------------
+
+use crm::fields::{FieldDef, FieldKind, Fields, Held, Value};
+
+fn text_field(key: &str, max: u16, required: bool) -> FieldDef {
+    FieldDef {
+        key: key.to_owned(),
+        label: "ملاحظة".to_owned(),
+        label_latin: Some("Note".to_owned()),
+        kind: FieldKind::Text { max },
+        required,
+    }
+}
+
+impl Fixture {
+    async fn declare_fields(&self, fields: Vec<FieldDef>) {
+        let mut conn = self.db.acquire().await.expect("connection");
+        erp_eventlog::configuration::set(&mut conn, Fields::KEY, &Fields { fields }, None)
+            .await
+            .expect("stores the field set");
+    }
+}
+
+/// **Typed, so it can be checked and asked about.** A wellness centre's blood
+/// group is a choice from a list somebody agreed on, not nine spellings of four
+/// answers.
+#[tokio::test]
+async fn a_value_is_stored_under_a_declared_field_and_read_back_as_its_kind() {
+    let fixture = Fixture::new().await;
+    fixture
+        .declare_fields(vec![
+            text_field("note", 100, false),
+            FieldDef {
+                key: "blood_group".to_owned(),
+                label: "فصيلة الدم".to_owned(),
+                label_latin: Some("Blood group".to_owned()),
+                kind: FieldKind::Choice {
+                    options: vec!["A+".to_owned(), "O-".to_owned()],
+                },
+                required: false,
+            },
+            FieldDef {
+                key: "visits".to_owned(),
+                label: "زيارات".to_owned(),
+                label_latin: None,
+                kind: FieldKind::Number,
+                required: false,
+            },
+        ])
+        .await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    crm::fields::set(
+        &mut conn,
+        "CUST-1",
+        &[
+            Value {
+                key: "note".to_owned(),
+                held: Held::Text("حساسية اللاتكس".to_owned()),
+            },
+            Value {
+                key: "blood_group".to_owned(),
+                held: Held::Choice("O-".to_owned()),
+            },
+            Value {
+                key: "visits".to_owned(),
+                held: Held::Number(7),
+            },
+        ],
+        on("2026-03-04"),
+        Some("staff-1"),
+    )
+    .await
+    .expect("stores");
+
+    let held = crm::fields::held(&mut conn, "CUST-1").await.expect("reads");
+    assert_eq!(held.len(), 3);
+    // **In the tenant's declared order**, which is the order a form shows them.
+    assert_eq!(held[0].key, "note");
+    assert_eq!(held[1].key, "blood_group");
+    assert_eq!(held[2].key, "visits");
+    assert_eq!(held[2].held, Held::Number(7), "a number came back a number");
+    assert_eq!(held[0].set_by.as_deref(), Some("staff-1"));
+}
+
+/// **Nothing is stored if anything is wrong.** A form with one bad value keeps
+/// what it had rather than half of what was sent.
+#[tokio::test]
+async fn a_bad_value_stores_none_of_the_others() {
+    let fixture = Fixture::new().await;
+    fixture
+        .declare_fields(vec![
+            text_field("note", 100, false),
+            FieldDef {
+                key: "visits".to_owned(),
+                label: "زيارات".to_owned(),
+                label_latin: None,
+                kind: FieldKind::Number,
+                required: false,
+            },
+        ])
+        .await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let refused = crm::fields::set(
+        &mut conn,
+        "CUST-1",
+        &[
+            Value {
+                key: "note".to_owned(),
+                held: Held::Text("good".to_owned()),
+            },
+            // A number, for a field that holds text is fine; text for a number
+            // is not.
+            Value {
+                key: "visits".to_owned(),
+                held: Held::Text("seven".to_owned()),
+            },
+        ],
+        on("2026-03-04"),
+        None,
+    )
+    .await;
+    assert!(refused.is_err(), "a wrong kind was accepted");
+
+    let held = crm::fields::held(&mut conn, "CUST-1").await.expect("reads");
+    assert!(held.is_empty(), "half the form was stored: {held:?}");
+}
+
+/// **A change supersedes, it does not overwrite.** That is the audit trail these
+/// values get in place of an event log.
+#[tokio::test]
+async fn changing_a_value_keeps_what_it_said_before() {
+    let fixture = Fixture::new().await;
+    fixture
+        .declare_fields(vec![text_field("note", 100, false)])
+        .await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    for (text, who) in [("first", "staff-1"), ("second", "staff-2")] {
+        crm::fields::set(
+            &mut conn,
+            "CUST-1",
+            &[Value {
+                key: "note".to_owned(),
+                held: Held::Text(text.to_owned()),
+            }],
+            on("2026-03-04"),
+            Some(who),
+        )
+        .await
+        .expect("stores");
+    }
+
+    let held = crm::fields::held(&mut conn, "CUST-1").await.expect("reads");
+    assert_eq!(held.len(), 1, "two rows claimed to be current");
+    assert_eq!(held[0].held, Held::Text("second".to_owned()));
+    assert_eq!(held[0].set_by.as_deref(), Some("staff-2"));
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM customer_field WHERE customer = $1")
+        .bind("CUST-1")
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("counts");
+    assert_eq!(rows, 2, "the old value was overwritten rather than kept");
+}
+
+/// **This is the whole reason the values are not in the log.** A person asking
+/// for their data to be deleted gets it deleted, history and all.
+#[tokio::test]
+async fn erasing_a_customers_fields_takes_the_history_with_it() {
+    let fixture = Fixture::new().await;
+    fixture
+        .declare_fields(vec![text_field("note", 100, false)])
+        .await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    for text in ["first", "second"] {
+        crm::fields::set(
+            &mut conn,
+            "CUST-1",
+            &[Value {
+                key: "note".to_owned(),
+                held: Held::Text(text.to_owned()),
+            }],
+            on("2026-03-04"),
+            None,
+        )
+        .await
+        .expect("stores");
+    }
+
+    let erased = crm::fields::forget(&mut conn, "CUST-1")
+        .await
+        .expect("erases");
+    assert_eq!(erased, 2, "the superseded row was left behind");
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM customer_field WHERE customer = $1")
+        .bind("CUST-1")
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("counts");
+    assert_eq!(rows, 0, "something survived an erasure");
+}
+
+/// **A required field cannot be cleared**, though adding one does not refuse
+/// the customers who already lack it.
+#[tokio::test]
+async fn a_required_field_is_a_worklist_and_cannot_be_cleared() {
+    let fixture = Fixture::new().await;
+    fixture
+        .declare_fields(vec![
+            text_field("consent", 100, true),
+            text_field("note", 100, false),
+        ])
+        .await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    // A customer with nothing is not refused; they are reported.
+    let fields = Fields::resolve(&mut conn).await.expect("resolves");
+    let held = crm::fields::held(&mut conn, "CUST-1").await.expect("reads");
+    let missing = fields.missing_from(
+        &held
+            .iter()
+            .map(|h| Value {
+                key: h.key.clone(),
+                held: h.held.clone(),
+            })
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(missing, vec!["consent".to_owned()]);
+
+    crm::fields::set(
+        &mut conn,
+        "CUST-1",
+        &[Value {
+            key: "consent".to_owned(),
+            held: Held::Text("yes".to_owned()),
+        }],
+        on("2026-03-04"),
+        None,
+    )
+    .await
+    .expect("stores");
+
+    assert!(
+        crm::fields::clear(&mut conn, "CUST-1", "consent", on("2026-03-04"))
+            .await
+            .is_err(),
+        "a required field was cleared"
+    );
+    crm::fields::clear(&mut conn, "CUST-1", "note", on("2026-03-04"))
+        .await
+        .expect("an optional one clears");
+}
+
+/// **A value nothing declares any more is findable.** A field removed with its
+/// data still in the table is exactly how a business comes to hold health
+/// details it has forgotten about.
+#[tokio::test]
+async fn a_value_whose_field_was_removed_is_hidden_and_reported() {
+    let fixture = Fixture::new().await;
+    fixture
+        .declare_fields(vec![text_field("note", 100, false)])
+        .await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    crm::fields::set(
+        &mut conn,
+        "CUST-1",
+        &[Value {
+            key: "note".to_owned(),
+            held: Held::Text("something private".to_owned()),
+        }],
+        on("2026-03-04"),
+        None,
+    )
+    .await
+    .expect("stores");
+
+    // The business removes the field.
+    fixture.declare_fields(vec![]).await;
+
+    let held = crm::fields::held(&mut conn, "CUST-1").await.expect("reads");
+    assert!(held.is_empty(), "an undeclared value was shown");
+
+    let orphaned = crm::fields::orphaned(&mut conn).await.expect("reads");
+    assert_eq!(orphaned, vec!["note".to_owned()], "it was not reported");
+
+    // And it can be taken away.
+    let gone = crm::fields::forget_field(&mut conn, "note")
+        .await
+        .expect("erases");
+    assert_eq!(gone, 1);
+    assert!(
+        crm::fields::orphaned(&mut conn)
+            .await
+            .expect("reads")
+            .is_empty()
+    );
+}
+
+/// The guard the settings screen leans on: a field cannot be taken away or
+/// redefined while somebody's value depends on it.
+#[tokio::test]
+async fn a_field_with_values_is_known_to_have_them() {
+    let fixture = Fixture::new().await;
+    fixture
+        .declare_fields(vec![text_field("note", 100, false)])
+        .await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    assert!(
+        !crm::fields::anyone_holds(&mut conn, "note")
+            .await
+            .expect("reads")
+    );
+
+    crm::fields::set(
+        &mut conn,
+        "CUST-1",
+        &[Value {
+            key: "note".to_owned(),
+            held: Held::Text("x".to_owned()),
+        }],
+        on("2026-03-04"),
+        None,
+    )
+    .await
+    .expect("stores");
+    assert!(
+        crm::fields::anyone_holds(&mut conn, "note")
+            .await
+            .expect("reads")
+    );
+
+    // Clearing it means nobody holds one any more, so the field can go.
+    crm::fields::clear(&mut conn, "CUST-1", "note", on("2026-03-04"))
+        .await
+        .expect("clears");
+    assert!(
+        !crm::fields::anyone_holds(&mut conn, "note")
+            .await
+            .expect("reads")
+    );
+}

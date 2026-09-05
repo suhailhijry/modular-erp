@@ -247,6 +247,16 @@ fn only_the_deliberately_public_routes_are_public() {
             "post",
             "/v1/booking/public/reservations/{reservation}/deposit",
         ),
+        // **A code to a phone, and only when the business asks for one.**
+        //
+        // It says nothing about the number — the answer is the same for one
+        // this business knows and one nobody has ever used — because
+        // anything else turns a public form into a way to ask who a
+        // business's customers are. A cooldown per number bounds what it
+        // costs them in texts, and a code minted here **cannot sign anybody
+        // in**: it lives in the tenant's own table and nothing but a booking
+        // reads it.
+        ("post", "/v1/booking/public/verifications"),
         // **A short link, and the token in the path is the credential.**
         //
         // The person tapping it has never signed in and never will — it arrived

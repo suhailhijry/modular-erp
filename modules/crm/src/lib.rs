@@ -30,6 +30,8 @@
 pub mod http;
 pub mod messages;
 
+pub mod fields;
+
 mod commands;
 mod customer;
 mod projections;

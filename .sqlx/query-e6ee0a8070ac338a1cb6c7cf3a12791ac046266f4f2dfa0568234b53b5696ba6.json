@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM customer_field WHERE customer = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e6ee0a8070ac338a1cb6c7cf3a12791ac046266f4f2dfa0568234b53b5696ba6"
+}

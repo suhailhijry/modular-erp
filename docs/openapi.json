@@ -602,6 +602,35 @@
         ],
         "type": "object"
       },
+      "BarView": {
+        "description": "One resource a customer must not be booked with.",
+        "properties": {
+          "name": {
+            "description": "What it is called now, when it is still declared.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "raised_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "resource": {
+            "type": "string"
+          },
+          "why": {
+            "description": "**Staff only.** Written by one member of staff about a customer, and\nnever repeated back in the refusal a booking gets — a reader that shows\nthis on a customer-facing screen is a bug in that reader.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource",
+          "why",
+          "raised_at"
+        ],
+        "type": "object"
+      },
       "BillDetailView": {
         "allOf": [
           {
@@ -1648,6 +1677,20 @@
         ],
         "type": "object"
       },
+      "CustomerFields": {
+        "properties": {
+          "values": {
+            "items": {
+              "$ref": "#/components/schemas/ValueView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "values"
+        ],
+        "type": "object"
+      },
       "CustomerRecord": {
         "properties": {
           "archived": {
@@ -2235,6 +2278,20 @@
         ],
         "type": "object"
       },
+      "Erased": {
+        "properties": {
+          "erased": {
+            "description": "Rows removed, current and superseded together.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "erased"
+        ],
+        "type": "object"
+      },
       "EventRecord": {
         "properties": {
           "deliveries": {
@@ -2306,6 +2363,88 @@
           "number",
           "expires_on",
           "days_left"
+        ],
+        "type": "object"
+      },
+      "FieldSet": {
+        "description": "Every field a business has added.",
+        "example": {
+          "fields": [
+            {
+              "key": "blood_group",
+              "kind": "choice",
+              "label": "فصيلة الدم",
+              "label_latin": "Blood group",
+              "options": [
+                "A+",
+                "A-",
+                "O+",
+                "O-"
+              ],
+              "required": false
+            }
+          ]
+        },
+        "properties": {
+          "fields": {
+            "description": "**The order is yours**, and it is the order a form shows them in.",
+            "items": {
+              "$ref": "#/components/schemas/FieldView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "type": "object"
+      },
+      "FieldView": {
+        "description": "One field a business has added to its customers.",
+        "properties": {
+          "key": {
+            "description": "The stable machine name. Lowercase letters, digits and underscores.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`text`, `number`, `date`, `choice` or `flag`.",
+            "type": "string"
+          },
+          "label": {
+            "description": "What a person reads.",
+            "type": "string"
+          },
+          "label_latin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max": {
+            "description": "**Characters**, on a `text` field. Ignored on every other kind.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "options": {
+            "description": "What may be chosen, on a `choice` field.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required": {
+            "description": "Whether a customer is expected to have one. **Reported, not enforced** —\nsee `Fields::missing_from`.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "kind"
         ],
         "type": "object"
       },
@@ -5812,6 +5951,22 @@
         ],
         "type": "object"
       },
+      "NewVerification": {
+        "description": "A number to send a code to.",
+        "example": {
+          "phone": "+966500000000"
+        },
+        "properties": {
+          "phone": {
+            "description": "E.164, or something a person would write that reads as one — spaces,\ndashes and a leading `00` are all fine. A national number is refused\nrather than repaired: `0500000000` is a Saudi number to a Saudi reader\nand nothing at all to a message gateway.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phone"
+        ],
+        "type": "object"
+      },
       "OnboardingRequest": {
         "example": {
           "branch": "الفرع الرئيسي",
@@ -7653,6 +7808,13 @@
           ]
         },
         "properties": {
+          "code": {
+            "description": "**The code sent to `customer_phone`**, when the business asks for one.\n\nRequired only if this business has turned phone verification on. Ignored\nwhen they have not, so a site that never asks for a code keeps working.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "customer_name": {
             "description": "What the diary prints. **No `customer` id**, unlike the counter's\nversion: a stranger does not get to say which of a business's customer\nrecords they are, and accepting one would let anybody attach a booking\nto somebody else's file.",
             "type": "string"
@@ -7700,6 +7862,27 @@
           "id",
           "stage",
           "deposit_bp"
+        ],
+        "type": "object"
+      },
+      "RaiseBar": {
+        "example": {
+          "resource": "STYLIST-2",
+          "why": "Complaint, 3 March. Manager aware."
+        },
+        "properties": {
+          "resource": {
+            "description": "The stylist, room or table. It has to be declared.",
+            "type": "string"
+          },
+          "why": {
+            "description": "Why, for whoever has to refuse the booking. Required.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource",
+          "why"
         ],
         "type": "object"
       },
@@ -9579,6 +9762,59 @@
         ],
         "type": "object"
       },
+      "ValueView": {
+        "description": "A value on a customer.",
+        "properties": {
+          "date": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "flag": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "key": {
+            "type": "string"
+          },
+          "number": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "set_at": {
+            "description": "When it was last set, and by whom. Read only.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "set_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "Exactly one of the four below, matching what the field declared.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
       "Vocabulary": {
         "properties": {
           "audiences": {
@@ -9751,6 +9987,391 @@
         "summary": "Follow a short link.",
         "tags": [
           "service"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/booking/customers/{customer}/bars": {
+      "get": {
+        "operationId": "list_bars",
+        "parameters": [
+          {
+            "description": "The `crm` id they are registered under.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position. From a write's `position`.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BarView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "An empty list means there are none."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure, or the projection did not catch up in time. Retryable."
+          }
+        },
+        "summary": "Which resources this customer must not be booked with.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Raising one that is already in force changes nothing.",
+        "operationId": "raise_bar",
+        "parameters": [
+          {
+            "description": "The `crm` id they are registered under.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RaiseBar"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No reason given"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such customer, or no such resource"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Somebody wrote first. Retryable."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "**Bar this customer from this resource.** Every booking that would put the\ntwo together is refused from here on, and there is no override — see\n`booking::bars` for why.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/customers/{customer}/bars/{resource}": {
+      "delete": {
+        "operationId": "lift_bar",
+        "parameters": [
+          {
+            "description": "The `crm` id they are registered under.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The resource the bar was against.",
+            "in": "path",
+            "name": "resource",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingAccepted"
+                }
+              }
+            },
+            "description": "Lifting one that was not there is a no-op."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such customer, or no such resource"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Somebody wrote first. Retryable."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Lift one. Bookings can be made again from here on; the ones already refused\nstay refused, because they were never made.",
+        "tags": [
+          "booking"
         ]
       },
       "parameters": [
@@ -10410,6 +11031,146 @@
           }
         }
       ]
+    },
+    "/v1/booking/public/verifications": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "# Only when the business asks for one\n\nOff unless they turned it on, and a `404` when they have not — for the same\nreason the reservation route gives about \"forbidden\". What stops a booking\nform being spammed is the **deposit**, not a verified number; what verifying\nbuys is being able to *reach* whoever booked.\n\n# It says nothing about the number\n\nThe answer is the same whether the number is one this business has seen\nbefore or one nobody has ever used, because anything else would turn a public\nform into a way to ask who a business's customers are.\n\n# The text is promised in the same transaction as the code\n\nSo a code stored and never sent, or sent and never stored, is not a state\nthis can reach (D9). It goes out on the same effect kind everything else uses\n— one handler answers for a booking reminder and a verification alike.",
+        "operationId": "public_verification",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Sending it again is a retry, not a second text.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewVerification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "A code is on its way, if that number can receive one."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a phone number this can send to"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such business, or it does not ask for a verified number"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A code was sent a moment ago, or this surface is bounded per origin and per business."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "Send a code to a phone number, so a booking can prove it.",
+        "tags": [
+          "booking"
+        ]
+      }
     },
     "/v1/booking/reservations": {
       "get": {
@@ -14208,6 +14969,871 @@
           "crm"
         ]
       }
+    },
+    "/v1/crm/customers/{customer}/fields": {
+      "delete": {
+        "description": "This is the answer to somebody asking for their data to be deleted. It takes\nthe history with it, because a deletion that left the old value behind would\nnot be one.\n\n# What it does not do\n\nIt does not erase the customer. A customer record is what documents point\nat, and a tax invoice does not stop having been issued — see the `crm` module\ndocs on the copy a document freezes. What this removes is the fields a\nbusiness chose to keep on top of that, which is where health details and\nprivate notes live and where a right to erasure actually bites.\n\n# Whose decision this is\n\nThe owner's, deliberately. Erasing somebody's record is not an ordinary\nclerical act, and this system has already declined once to answer \"who may\nerase whom\" in passing.",
+        "operationId": "erase_held_fields",
+        "parameters": [
+          {
+            "description": "From `GET /v1/crm/customers`.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Erased"
+                }
+              }
+            },
+            "description": "How many rows went, history included."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was understood and asks for something impossible. `code` says which part."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "**Erase everything this business added about this person.**",
+        "tags": [
+          "crm"
+        ]
+      },
+      "get": {
+        "description": "In the order the fields were declared, which is the order a form shows them.\nA value under a field the business has since removed is **not** here — see\n`GET /v1/crm/fields/orphaned`, which is how one is found and erased.",
+        "operationId": "held_fields",
+        "parameters": [
+          {
+            "description": "From `GET /v1/crm/customers`.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomerFields"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was understood and asks for something impossible. `code` says which part."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "What this customer holds.",
+        "tags": [
+          "crm"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "# All of them or none\n\nEvery value is checked against the field set before any is written, so a\nform with one bad date stores nothing rather than half of itself.\n\n# It sets what you send and leaves the rest\n\nA field you do not mention keeps what it had. Emptying one is\n`DELETE /v1/crm/customers/{customer}/fields/{field}`, which is a different act\nand refused on a required field.\n\n**The old value is kept**, marked with the moment it stopped being true, so\n\"who changed this and when\" is answerable. Erasing takes that history with\nit.",
+        "operationId": "set_held_fields",
+        "parameters": [
+          {
+            "description": "From `GET /v1/crm/customers`.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomerFields"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Recorded."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A value that is not the kind its field declared, too long, or not one of the options"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such field"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Set what this customer holds.",
+        "tags": [
+          "crm"
+        ]
+      }
+    },
+    "/v1/crm/customers/{customer}/fields/{field}": {
+      "delete": {
+        "description": "Refused on a required field: adding one does not refuse the customers who\nalready lack it, but deliberately taking one away is a different act.\n\n**This is not erasure.** The old value is kept as history, the way every\nchange is. To remove it altogether, see\n`DELETE /v1/crm/customers/{customer}/fields`.",
+        "operationId": "clear_held_field",
+        "parameters": [
+          {
+            "description": "From `GET /v1/crm/customers`.",
+            "in": "path",
+            "name": "customer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `GET /v1/crm/fields`.",
+            "in": "path",
+            "name": "field",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Emptied, or already was."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The request was understood and asks for something impossible. `code` says which part."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such field"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The field is required"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Empty one field on one customer.",
+        "tags": [
+          "crm"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/crm/fields": {
+      "get": {
+        "operationId": "customer_fields",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FieldSet"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "The fields this business has added to its customers.",
+        "tags": [
+          "crm"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "# It replaces the whole set\n\nSend every field you want, in the order you want them shown. A field that is\nnot in the list is removed — which is refused while anybody still holds a\nvalue for it, because a field that vanished with its data still in the table\nis exactly how a business comes to hold health details it has forgotten\nabout. Erase them first: `DELETE /v1/crm/fields/{field}/values`.\n\n**Redefining a field under its own values is refused for the same reason.**\nTurning a text field into a date leaves every stored value unreadable, and a\nsettings screen that allowed it would be quietly discarding what somebody\ntyped.\n\n# Whose decision this is\n\nThe owner's. What a business records about a person — and especially that it\nrecords health details at all — is not a preference, and the fields decide\nwhat every customer page asks for from then on.",
+        "operationId": "set_customer_fields",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FieldSet"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Recorded."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a key, not a kind, a repeat, or a choice with nothing to choose from"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A field was removed or redefined while customers still hold values for it"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Decide what a business records about its customers.",
+        "tags": [
+          "crm"
+        ]
+      }
+    },
+    "/v1/crm/fields/orphaned": {
+      "get": {
+        "description": "A field removed from the set leaves its values in the table, shown to\nnobody — which is exactly the state that becomes \"we still hold health data\nwe forgot about\". This is how they are found; erasing them is\n`DELETE /v1/crm/fields/{field}/values`.",
+        "operationId": "orphaned_fields",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "**Values nothing declares any more.**",
+        "tags": [
+          "crm"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/crm/fields/{field}/values": {
+      "delete": {
+        "description": "What a business runs before removing a field they should never have\ncollected, and what makes removing one from the set possible at all.",
+        "operationId": "erase_field_values",
+        "parameters": [
+          {
+            "description": "The field's key.",
+            "in": "path",
+            "name": "field",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Erased"
+                }
+              }
+            },
+            "description": "How many rows went."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Erase one field's values across every customer, history included.",
+        "tags": [
+          "crm"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/domains": {
       "parameters": [

@@ -35,6 +35,12 @@ utoipa-axum = { workspace = true }
 erp-tenant = { workspace = true }
 erp-eventlog = { workspace = true }
 erp-i18n = { workspace = true }
+# **A code and its digest.** A booking verification is a secret with a
+# lifetime, and neither of these makes it a strong one — see
+# `src/verification.rs` for what six digits are and are not worth.
+sha2 = { workspace = true }
+getrandom = "0.4.3"
+uuid = { workspace = true }
 erp-projection = { workspace = true }
 erp-types = { workspace = true, features = ["sqlx"] }
 async-trait = { workspace = true }

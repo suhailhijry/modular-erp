@@ -122,6 +122,22 @@ pub struct PublicBooking {
     /// a deadline somebody was already given (L5).
     #[serde(default)]
     pub hold_minutes: u32,
+    /// **Whether a public booker has to prove their phone number first.**
+    ///
+    /// Off by default, and that is a judgement rather than a shrug: what stops
+    /// a booking form being spammed is the **deposit**, not a verified number —
+    /// a slot that cannot be held without paying for it cannot be spammed by
+    /// anybody. What verifying buys is being able to *reach* somebody: to send
+    /// the reminder, to ring when the stylist is ill, to tell a real customer
+    /// from a typo.
+    ///
+    /// So it is the business's call. A clinic that must reach patients turns it
+    /// on; a salon taking a deposit on every booking has what it needs already,
+    /// and a second step before a stranger can book costs them bookings.
+    ///
+    /// See `crate::verification` for what a code is and is not.
+    #[serde(default)]
+    pub verify_phone: bool,
 }
 
 impl PublicBooking {

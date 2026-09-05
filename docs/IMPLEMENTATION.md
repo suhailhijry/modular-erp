@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,207 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,228 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -650,6 +650,224 @@ before they will lend, so `Charge` carries an optional `Buyer` and `Basket` and
 the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
+
+### 42 · The specialist blacklist, as a constraint the command enforces
+
+§41 ended by saying this was the one worth building next, and by saying why it
+is not a custom field: *"never book this customer with that stylist"* written in
+a text box is a line a manager believes the system is holding and it has never
+looked at. So it is checked in the command, against the log, and a reservation
+that would break it is **refused**. There is no override — a bar a click can
+step past is a note again, and these are not set for the reasons notes are.
+
+**An aggregate rather than a row**, for the reason `branches` and
+`crm::accepts_documents` are: a bar raised a moment ago has to stop the very next
+booking, and a projection is another checkpoint that can lag. The window where
+the rule is set and not yet enforced is exactly the window somebody raising one
+in a hurry is standing in. The projection exists, and nothing reads it to decide
+anything — it is the screen.
+
+**One aggregate per customer, not per pair.** A reservation names several
+resources at once, so answering "may this be booked" has to be one load.
+
+#### Three doors, not one
+
+Checking `reserve` alone leaves two ways round it, and both are ordinary use:
+
+- **Reschedule.** Book on a stylist who is clear, then move the appointment onto
+  the barred one.
+- **Assign.** Book *"any stylist"* — a pool names nothing barred — and pick the
+  barred one out of it afterwards.
+
+Both are checked, against the reservation's **own** customer read from the log
+rather than one the caller passes, and each is falsified separately:
+removing the check from any one of the three makes a test fail.
+
+#### Only somebody the system can recognise
+
+Bars are keyed on a `crm` customer, so a walk-in booked under a typed-in name is
+barred from nothing. That is a real limit and there is a test named for it
+rather than a silence: barring somebody means recognising them next time, and a
+name in a box is not a recognition.
+
+**And that includes the public site**, where §39 sets `customer: None` on every
+booking on purpose — a stranger does not get to name which customer record they
+are, and the business matches it afterwards. So a barred customer can still book
+through the form. Saying it plainly is better than the alternative, which is a
+business finding out: what closes it is public bookings resolving to a record,
+which is the customer-account work §41 gestures at and not something a check in
+`reserve` can do.
+
+#### Two smaller decisions
+
+**The reason is required, and never reaches the customer.** Whoever is refusing
+a booking at the desk has to be able to explain it, so `why` is mandatory and
+refused when blank. The refusal a booking gets names the resource and nothing
+else — repeating the reason back would say to somebody's face what a colleague
+wrote about them.
+
+**Lifting carries no reason.** Who lifted it is the event's actor and when is
+`at`, which is what the question afterwards is about — and a field no screen can
+fill is a field that is always empty. The bar is lifted rather than deleted,
+because "was there ever one" is the question somebody asks later.
+
+**Both ends are checked before a bar is written.** A typo in either id would
+otherwise be accepted, written, and enforce nothing — and the person who typed it
+would go away believing a rule was in place. A **withdrawn** resource is still
+barrable on purpose: a stylist on leave is exactly who a complaint arrives
+about, and the bar has to be waiting when they come back.
+
+**A bar is about the next booking, not the ones already made.** Raising one does
+not cancel Tuesday's appointment. What to do about a booking that already exists
+is a conversation somebody has to have, and a system that quietly emptied the
+diary would be taking that decision off them — so there is a test named for it
+rather than a surprise discovered on Tuesday.
+
+**Not the other blacklist.** §39 leaves *"blacklisting a customer who
+repeatedly books and never pays"* still ahead. That one is automatic, counts
+something, and is about the whole business; this one is a person's decision
+about one pair and counts nothing. They share a word and no mechanism.
+
+**Raising and lifting are the owner's.** Not because reading a complaint is
+above a clerk, but because there is no override: this refuses every booking
+between the two and nobody can click past it, which is a heavier lever than
+taking a chair out of service — already the owner's. Reading the list is
+everybody's, because a receptionist has to know why the diary just refused them.
+
+### 41 · Custom fields on a customer, typed, and erasable by construction
+
+**Typed, not a blob, and the reasons are three concrete failures.** A blob
+cannot be *validated* — a date typed as `03/04` stores happily and is discovered
+a year later. It cannot be *filtered* — "everybody allergic to latex" is a scan
+and a guess about spelling. And it cannot be *shown properly*, because nothing
+knows whether a value is a date, a number or a choice from a list somebody
+agreed on. Declaring the field settles all three at the one moment a person is
+around to answer them.
+
+Five kinds — text, number, date, choice, flag — and each is a column and a
+check. A kind that could be neither validated on the way in nor filtered on the
+way out would be a blob wearing a name.
+
+**No decimals**, and that is the workspace rule rather than laziness: a height is
+centimetres and a weight is grams, and the unit belongs in the label where a
+person reads it.
+
+**The choice kind is the one that earns its keep.** "Blood group" as free text is
+nine spellings of four answers.
+
+#### Why the values are not in the event log
+
+Because an append-only log cannot forget, and this data has to be forgettable. A
+wellness centre's fields hold a person's health details; under the PDPL those
+carry a right to erasure, and this document has already had to fix one place
+where the answer was *"our schema will not let us"*.
+
+So the split is §30's, applied again: **the shape is declared and replayed —
+`crm.fields`, versioned configuration — and the values live in a table where a
+delete is a delete.** A rebuild does not reproduce them, which is correct rather
+than unfortunate: a rebuild is a function of the log, and if it could reproduce
+them the delete would not have been one.
+
+**What is not lost is the history.** A value is superseded rather than
+overwritten, so "what did this say in March, and who changed it" is answerable —
+and erasing takes the superseded rows with it, because a deletion that left the
+old value behind would not be one.
+
+#### The three ways this quietly loses data, and the guard for each
+
+- **A field removed with its values still in the table** is exactly how a
+  business comes to hold health details it has forgotten about. Removing one is
+  refused while anybody holds a value, `GET /v1/crm/fields/orphaned` finds any
+  that slipped through, and there is a route to erase them.
+- **A field redefined under its own values** — text to date — leaves every stored
+  value unreadable. Refused the same way, and `held` skips a value whose stored
+  shape and declared shape disagree rather than showing a date as a number.
+- **Half a form stored.** Every value is checked before any is written, so one
+  bad date keeps what was there rather than writing the rest.
+
+#### Required is a worklist, not a gate
+
+A tenant who adds a required field has a thousand customers missing it that
+instant, and refusing to amend any of them until somebody filled it in would
+make the field impossible to add. So it is reported — `Fields::missing_from` —
+and the one thing it does refuse is *deliberately clearing* one, which is a
+different act.
+
+#### Two of the three examples were not custom fields
+
+Asked for alongside this were private notes and a specialist blacklist. Notes
+are a notes feature — an author, a timestamp, and who may read it — and modelling
+them as a field loses all three. **A specialist blacklist is not a field at
+all**: "never book this customer with that stylist" is a constraint the booking
+command has to enforce, and as a text box nobody enforces it, which is worse than
+not having it — a manager reads it and believes the system is holding a line it
+has never looked at. Neither is built here, and the blacklist is the one worth
+building next — it is §42.
+
+#### And a guard caught the routes in the wrong place
+
+The first version mounted the value routes at `/v1/customers/{customer}/fields`,
+outside `crm`'s own name. `every_modules_routes_live_under_its_own_name` failed
+immediately, and the reason is the one that matters: `Allowed<C>` reads the
+module out of the path, so a route outside its module's namespace is judged on
+the **tenant-wide** role instead of the module-scoped one — the more permissive
+answer, arrived at silently. They are `/v1/crm/customers/...` now.
+
+Worth recording because nothing about writing the route suggests it. The
+attribute is in the module, the handler is in the module, the capability is
+named on the extractor, and the whole thing is wrong in a way only a test that
+knows how authorization resolves could see.
+
+#### Falsified rather than trusted
+
+Narrowing the erasure to current values leaves the superseded row behind and
+`erasing_a_customers_fields_takes_the_history_with_it` fails. Checking values one
+at a time instead of all first stores half the form and
+`a_bad_value_stores_none_of_the_others` fails. Both pass with the code restored.
+
+### 40 · Verifying a phone is a setting, and it is not the anti-abuse control
+
+**`PublicBooking.verify_phone`, off by default.** A business that must reach
+whoever booked — a clinic, anyone whose no-show costs a slot they cannot resell
+— turns it on; one taking a deposit on every booking already has what it needs,
+and a second step before a stranger can book costs them bookings.
+
+**The default is a judgement, not a shrug.** What stops a booking form being
+spammed is the **deposit**: a slot that cannot be held without paying for it
+cannot be spammed by anybody, verified or not. What a verified number buys is
+being able to *reach* somebody, which is a real need and a different one. Saying
+so is the whole reason this is a setting rather than a rule.
+
+**And a setting that gates nothing would be `deposit_bp` all over again**, which
+this document has now criticised three times. So the mechanism is built:
+`POST /v1/booking/public/verifications` sends a code, and the reservation route
+spends it — in the request that takes the booking, so one code cannot hold two
+slots.
+
+**It is deliberately not the control plane's `one_time_code`.** That one signs
+somebody in: verifying it mints a session and, for an unknown number, an
+identity. Wrong here in two ways. A customer is a `crm` record and not an
+account, so a booking form that created identities would fill the fleet's
+identity table with people who have no business in it. And worse — a public form
+that can request a **sign-in** code for any number is a way to make a staff
+member's phone buzz with a real code that a caller can then talk them into
+reading out. Codes here live in the tenant's own table, and nothing but a
+booking reads one.
+
+The rest is `erp_control::otp`'s shape because it earned it: two limiters
+because they fail differently — a cooldown per number against somebody using the
+form to send texts, attempts per code against guessing — six digits, five
+minutes, single use, and one answer for wrong, expired, used and never-issued,
+because telling them apart tells a guesser which half of the pair they got right.
+
+**Where each half lives.** `booking` owns issuing and claiming, which need no
+messaging; `erp-api` owns the route, because sending does. The code and its text
+are promised in one transaction (D9), so a code stored and never sent is not a
+state this can reach.
+
+**Falsified rather than trusted**: dropping `used_at IS NULL` from the claim
+lets one code hold two bookings, and `a_verification_code_holds_one_booking_and_no_more`
+fails. Restoring it passes.
 
 ### 39 · Deposits at booking, and the public surface that takes them
 
@@ -3500,10 +3718,10 @@ same-origin server-rendered site would never have needed.
       they have and tells the diary, and a hold nobody paid for lapses. The
       document is a **386 prepayment invoice** raised when the money is real.
 
-      What is not built is a **verified phone** for a public booker — a
-      customer-identity system, and not what stops abuse here: the deposit is.
-      The 388 with the advance deducted, when the service is finally delivered,
-      is still ahead.
+      A **verified phone** is a setting the business decides (§40), off by
+      default because the deposit is what stops abuse and a verified number is
+      about being able to reach somebody. The 388 with the advance deducted,
+      when the service is finally delivered, is still ahead.
 
       **Keeping one is built and is the business's call** — a sale by default,
       `payments.retention` to say otherwise. The tax is not what it decides:

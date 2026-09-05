@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE booking_verification\n            SET used_at = $4\n          WHERE id = (\n              SELECT id FROM booking_verification\n               WHERE handle = $1\n                 AND code_hash = $2\n                 AND used_at IS NULL\n                 AND expires_at > $4\n                 AND attempts < $3\n               ORDER BY created_at DESC\n               LIMIT 1\n               FOR UPDATE SKIP LOCKED\n          )\n      RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "booking_verification",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e2b671b73364b9eb9e2fa44394df1f8e663af16669a9f37ae62ab9ba709c3e5e"
+}

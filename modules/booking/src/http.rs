@@ -44,6 +44,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(move_reservation))
         .routes(routes!(reschedule_reservation))
         .routes(routes!(assign_unit))
+        .routes(routes!(list_bars, raise_bar))
+        .routes(routes!(lift_bar))
         // ------------------------------------------------------------------
         // The public surface — Phase 17. Mounted under this module's own name
         // so `module_of` still scopes it and `require_module` still applies: a
@@ -622,6 +624,12 @@ struct PublicReservation {
     /// to somebody else's file.
     customer_name: String,
     customer_phone: Option<String>,
+    /// **The code sent to `customer_phone`**, when the business asks for one.
+    ///
+    /// Required only if this business has turned phone verification on. Ignored
+    /// when they have not, so a site that never asks for a code keeps working.
+    #[serde(default)]
+    code: Option<String>,
     lines: Vec<PublicLine>,
     #[serde(default)]
     note: String,
@@ -721,6 +729,21 @@ async fn public_reserve(
             locale,
             &CATALOG,
         ));
+    }
+
+    // **Proved before anything is held.** A business that asks for this is
+    // asking to be able to reach whoever booked; what stops the form being
+    // spammed is the deposit, which is a separate setting.
+    //
+    // The code is spent here, in the request that takes the booking, so one
+    // code cannot hold two slots.
+    if settings.verify_phone {
+        let phone = body.customer_phone.as_deref().unwrap_or_default();
+        let code = body.code.as_deref().unwrap_or_default();
+        let mut conn = caller.db.acquire().await.map_err(|e| pool(&e, locale))?;
+        crate::verification::claim(&mut conn, phone, code, chrono::Utc::now())
+            .await
+            .map_err(|e| verification_problem(&e, locale))?;
     }
 
     let draft = Draft {
@@ -1440,6 +1463,175 @@ async fn assign_unit(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Routes — bars
+// ---------------------------------------------------------------------------
+
+/// One resource a customer must not be booked with.
+#[derive(Debug, Serialize, ToSchema)]
+struct BarView {
+    resource: String,
+    /// What it is called now, when it is still declared.
+    name: Option<String>,
+    /// **Staff only.** Written by one member of staff about a customer, and
+    /// never repeated back in the refusal a booking gets — a reader that shows
+    /// this on a customer-facing screen is a bug in that reader.
+    why: String,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    raised_at: Timestamp,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({"resource": "STYLIST-2", "why": "Complaint, 3 March. Manager aware."}))]
+struct RaiseBar {
+    /// The stylist, room or table. It has to be declared.
+    resource: String,
+    /// Why, for whoever has to refuse the booking. Required.
+    why: String,
+}
+
+/// Which resources this customer must not be booked with.
+#[utoipa::path(
+    get,
+    path = "/v1/booking/customers/{customer}/bars",
+    tag = "booking",
+    params(
+        ("customer" = String, Path, description = "The `crm` id they are registered under."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position. From a write's `position`."),
+    ),
+    responses(
+        (status = OK, description = "An empty list means there are none.", body = Vec<BarView>),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure, or the projection did not catch up in time. Retryable.", body = Problem),
+    ),
+)]
+async fn list_bars(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Path(customer): Path<String>,
+) -> Result<Json<Vec<BarView>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let found = crate::bars(&mut conn, &customer)
+        .await
+        .map_err(|e| database(&e, locale))?;
+
+    Ok(Json(
+        found
+            .into_iter()
+            .map(|bar| BarView {
+                resource: bar.resource,
+                name: bar.name,
+                why: bar.why,
+                raised_at: bar.raised_at,
+            })
+            .collect(),
+    ))
+}
+
+/// **Bar this customer from this resource.** Every booking that would put the
+/// two together is refused from here on, and there is no override — see
+/// `booking::bars` for why.
+///
+/// Raising one that is already in force changes nothing.
+#[utoipa::path(
+    post,
+    path = "/v1/booking/customers/{customer}/bars",
+    tag = "booking",
+    params(("customer" = String, Path, description = "The `crm` id they are registered under.")),
+    request_body = RaiseBar,
+    responses(
+        (status = OK, body = BookingAccepted),
+        (status = BAD_REQUEST, description = "No reason given", body = Problem),
+        (status = NOT_FOUND, description = "No such customer, or no such resource", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = CONFLICT, description = "Somebody wrote first. Retryable.", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn raise_bar(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(customer): Path<String>,
+    Json(body): Json<RaiseBar>,
+) -> Result<Json<BookingAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let who = parse_id(&customer, locale)?;
+    let resource = parse_id(&body.resource, locale)?;
+
+    let committed = crate::raise_bar(
+        &tenant.db,
+        &who,
+        &resource,
+        &body.why,
+        chrono::Utc::now(),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(BookingAccepted {
+        id: customer,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+/// Lift one. Bookings can be made again from here on; the ones already refused
+/// stay refused, because they were never made.
+#[utoipa::path(
+    delete,
+    path = "/v1/booking/customers/{customer}/bars/{resource}",
+    tag = "booking",
+    params(
+        ("customer" = String, Path, description = "The `crm` id they are registered under."),
+        ("resource" = String, Path, description = "The resource the bar was against."),
+    ),
+    responses(
+        (status = OK, description = "Lifting one that was not there is a no-op.", body = BookingAccepted),
+        (status = NOT_FOUND, description = "No such customer, or no such resource", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = CONFLICT, description = "Somebody wrote first. Retryable.", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn lift_bar(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path((customer, resource)): Path<(String, String)>,
+) -> Result<Json<BookingAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let who = parse_id(&customer, locale)?;
+    let against = parse_id(&resource, locale)?;
+
+    let committed = crate::lift_bar(
+        &tenant.db,
+        &who,
+        &against,
+        chrono::Utc::now(),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(BookingAccepted {
+        id: customer,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
 /// A price band on the wire.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[schema(example = json!({
@@ -1857,8 +2049,13 @@ fn problem_for(error: &CommandError<BookingError>, locale: Locale) -> Problem {
                 // where a double booking lands**, and it is the most common
                 // refusal this module makes: the request was fine, the chair
                 // was not free.
+                //
+                // A bar lands here for the same reason: nothing about the
+                // request is wrong, and there is no header or field that would
+                // make it go through.
                 BookingError::Occupancy(_)
                 | BookingError::NotOffered { .. }
+                | BookingError::Barred { .. }
                 | BookingError::Withdrawn(_)
                 | BookingError::Over { .. }
                 | BookingError::CannotMove { .. } => StatusCode::UNPROCESSABLE_ENTITY,
@@ -1895,6 +2092,27 @@ fn problem_for(error: &CommandError<BookingError>, locale: Locale) -> Problem {
     };
 
     Problem::new(status, &message, locale, &CATALOG)
+}
+
+/// **One answer for every way a code can fail**, except the two a caller can
+/// act on: a number this cannot read, and a resend asked for too soon.
+///
+/// Wrong, expired, used, never issued — telling them apart tells somebody
+/// guessing which half of the pair they got right.
+fn verification_problem(error: &crate::verification::VerificationError, locale: Locale) -> Problem {
+    use crate::verification::VerificationError;
+    let status = match error {
+        VerificationError::NotANumber(_) => StatusCode::BAD_REQUEST,
+        VerificationError::TooSoon => StatusCode::TOO_MANY_REQUESTS,
+        VerificationError::NotValid => StatusCode::UNPROCESSABLE_ENTITY,
+        VerificationError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    Problem::new(
+        status,
+        &erp_i18n::Message::new(crate::messages::code_for(error)),
+        locale,
+        &CATALOG,
+    )
 }
 
 fn pool(error: &erp_tenant::PoolError, locale: Locale) -> Problem {

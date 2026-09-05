@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE booking_verification\n            SET attempts = attempts + 1\n          WHERE handle = $1 AND used_at IS NULL AND expires_at > $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6e9fb387d001d58babf9b054036f49231aded67d1544343cc4243b7eff3c941f"
+}

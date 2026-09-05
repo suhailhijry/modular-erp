@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT b.resource_id as \"resource!\", r.name as \"name?\", b.why as \"why!\",\n                  b.raised_at as \"raised_at!\"\n             FROM proj_booking.bar b\n             LEFT JOIN proj_booking.resource r ON r.id = b.resource_id\n            WHERE b.customer_id = $1\n            ORDER BY b.raised_at DESC, b.resource_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "resource!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.bar",
+            "name": "resource_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "why!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.bar",
+            "name": "why"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "raised_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.bar",
+            "name": "raised_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2d9066e8e290d2fa719053483a76117b4ef073d6d410de74bc82212824284aba"
+}

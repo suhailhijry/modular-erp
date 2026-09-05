@@ -2023,12 +2023,40 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("set_opening_hours", OWNER),
     ("withdraw_bookable", OWNER),
     ("restore_bookable", OWNER),
+    // **Barring a customer from a resource is the owner's, and lifting one is
+    // too.** Not because reading a complaint is above a clerk, but because
+    // there is no override: a bar refuses every booking that would put the two
+    // together and nobody can click past it, which makes raising one a heavier
+    // lever than taking a chair out of service — and that is already the
+    // owner's. Reading the list is ordinary; a receptionist has to know why the
+    // diary just refused them.
+    ("list_bars", ALL_ROLES),
+    ("raise_bar", OWNER),
+    ("lift_bar", OWNER),
     ("open_branch", OWNER),
     ("amend_branch", OWNER),
     ("close_branch", OWNER),
     ("reopen_branch", OWNER),
     ("register_customer", OWNER),
     ("amend_customer", OWNER),
+    // **Fields a business adds to its customers.** Reading the shape is
+    // ordinary — a form has to know what to draw. Deciding it is the owner's:
+    // what a business records about a person, and especially *that* it records
+    // health details, is not a preference, and it changes what every customer
+    // page asks for from then on.
+    ("customer_fields", ALL_ROLES),
+    ("set_customer_fields", OWNER),
+    // Filling one in is clerical work at a counter. Emptying one is too — the
+    // old value is kept as history either way.
+    ("held_fields", ALL_ROLES),
+    ("set_held_fields", &["owner", "accountant", "clerk"]),
+    ("clear_held_field", &["owner", "accountant", "clerk"]),
+    // **Erasing is not.** This is the answer to somebody asking for their data
+    // to be deleted, it takes the history with it, and this system has already
+    // declined once to answer "who may erase whom" in passing. The owner's.
+    ("erase_held_fields", OWNER),
+    ("orphaned_fields", OWNER),
+    ("erase_field_values", OWNER),
     ("archive_customer", OWNER),
     ("restore_customer", OWNER),
     ("enable_module", OWNER),
@@ -2101,8 +2129,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        196,
-        "expected a hundred and ninety-six role-scoped operations"
+        207,
+        "expected two hundred and seven role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -6889,6 +6917,7 @@ async fn a_stranger_cannot_book_until_the_business_opens_the_diary() {
             &mut conn,
             booking::PublicBooking::KEY,
             &booking::PublicBooking {
+                verify_phone: false,
                 hold_minutes: 0,
                 open: true,
                 deposit_bp: 2_000,

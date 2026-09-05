@@ -12,6 +12,8 @@ pub const NO_SUCH_CUSTOMER: MessageCode = MessageCode::new("booking.no_such_cust
 pub const NO_SUCH_RESOURCE: MessageCode = MessageCode::new("booking.no_such_resource");
 pub const WITHDRAWN: MessageCode = MessageCode::new("booking.withdrawn");
 pub const NOT_OFFERED: MessageCode = MessageCode::new("booking.not_offered");
+pub const BARRED: MessageCode = MessageCode::new("booking.barred");
+pub const NO_REASON_TO_BAR: MessageCode = MessageCode::new("booking.no_reason_to_bar");
 pub const NO_SUCH_RESERVATION: MessageCode = MessageCode::new("booking.no_such_reservation");
 pub const OVER: MessageCode = MessageCode::new("booking.over");
 pub const CANNOT_MOVE: MessageCode = MessageCode::new("booking.cannot_move");
@@ -28,7 +30,25 @@ pub const ALLOWANCE_TOO_LARGE: MessageCode = MessageCode::new("booking.allowance
 pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("booking.mixed_currencies");
 pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("booking.amount_out_of_range");
 
+pub const NOT_A_PHONE: MessageCode = MessageCode::new("booking.not_a_phone");
+pub const CODE_TOO_SOON: MessageCode = MessageCode::new("booking.code_too_soon");
+pub const CODE_NOT_VALID: MessageCode = MessageCode::new("booking.code_not_valid");
+
+/// Which sentence a verification failure gets.
+#[must_use]
+pub fn code_for(error: &crate::verification::VerificationError) -> MessageCode {
+    use crate::verification::VerificationError;
+    match error {
+        VerificationError::NotANumber(_) => NOT_A_PHONE,
+        VerificationError::TooSoon => CODE_TOO_SOON,
+        VerificationError::NotValid | VerificationError::Database(_) => CODE_NOT_VALID,
+    }
+}
+
 pub static CODES: &[MessageCode] = &[
+    NOT_A_PHONE,
+    CODE_TOO_SOON,
+    CODE_NOT_VALID,
     NO_SUCH_BRANCH,
     NO_SUCH_EMPLOYEE_TO_ROSTER,
     MAY_NOT_WORK,
@@ -39,6 +59,8 @@ pub static CODES: &[MessageCode] = &[
     NO_SUCH_RESOURCE,
     WITHDRAWN,
     NOT_OFFERED,
+    BARRED,
+    NO_REASON_TO_BAR,
     NO_SUCH_RESERVATION,
     OVER,
     CANNOT_MOVE,
@@ -160,6 +182,29 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_OFFERED,
         Locale::Arabic,
         Template::Simple("{resource} غير متاح في ذلك الوقت."),
+    ),
+    // **Names the resource and not the reason.** The reason is written by one
+    // member of staff about a customer, and a refusal that read it back would
+    // say it to whoever is standing at the desk.
+    (
+        BARRED,
+        Locale::English,
+        Template::Simple("{resource} cannot be booked for this customer."),
+    ),
+    (
+        BARRED,
+        Locale::Arabic,
+        Template::Simple("لا يمكن حجز {resource} لهذا العميل."),
+    ),
+    (
+        NO_REASON_TO_BAR,
+        Locale::English,
+        Template::Simple("Say why, so whoever has to refuse a booking can explain it."),
+    ),
+    (
+        NO_REASON_TO_BAR,
+        Locale::Arabic,
+        Template::Simple("اذكر السبب، ليتمكن من يرفض الحجز من توضيحه."),
     ),
     (
         NO_SUCH_RESERVATION,
@@ -310,5 +355,38 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_TRADE,
         Locale::Arabic,
         Template::Simple("لا توجد قائمة موارد جاهزة باسم {trade}."),
+    ),
+    (
+        NOT_A_PHONE,
+        Locale::English,
+        Template::Simple("That is not a phone number we can send a code to."),
+    ),
+    (
+        NOT_A_PHONE,
+        Locale::Arabic,
+        Template::Simple("هذا ليس رقم جوال يمكن إرسال رمز إليه."),
+    ),
+    (
+        CODE_TOO_SOON,
+        Locale::English,
+        Template::Simple("A code was sent a moment ago. Wait before asking for another."),
+    ),
+    (
+        CODE_TOO_SOON,
+        Locale::Arabic,
+        Template::Simple("تم إرسال رمز قبل قليل. ي\u{64f}رجى الانتظار قبل طلب رمز آخر."),
+    ),
+    // **One sentence for every way a code can fail.** Wrong, expired, used,
+    // never issued — telling them apart tells somebody guessing which half of
+    // the pair they got right.
+    (
+        CODE_NOT_VALID,
+        Locale::English,
+        Template::Simple("That code is not valid. Ask for a new one."),
+    ),
+    (
+        CODE_NOT_VALID,
+        Locale::Arabic,
+        Template::Simple("الرمز غير صالح. ي\u{64f}رجى طلب رمز جديد."),
     ),
 ];

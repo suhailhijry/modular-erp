@@ -39,11 +39,14 @@ use erp_web::{AppState, IdempotencyKey, Json, Language, Problem, Public};
 use erp_web::{parse_id, publicly, require_module};
 
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(public_deposit))
+    OpenApiRouter::new()
+        .routes(routes!(public_deposit))
+        .routes(routes!(public_verification))
 }
 
 static CATALOG: erp_i18n::Composite = erp_i18n::Composite::new(&[
     &booking::CATALOG,
+    &messaging::CATALOG,
     &payments::CATALOG,
     &ledger::CATALOG,
     &erp_web::CATALOG,
@@ -284,4 +287,143 @@ fn is_uuid(value: &str) -> bool {
         }
     }
     parts.next().is_none()
+}
+
+// ---------------------------------------------------------------------------
+// Proving a phone number
+// ---------------------------------------------------------------------------
+
+/// A number to send a code to.
+#[derive(Debug, serde::Deserialize, ToSchema)]
+#[schema(example = json!({ "phone": "+966500000000" }))]
+struct NewVerification {
+    /// E.164, or something a person would write that reads as one — spaces,
+    /// dashes and a leading `00` are all fine. A national number is refused
+    /// rather than repaired: `0500000000` is a Saudi number to a Saudi reader
+    /// and nothing at all to a message gateway.
+    phone: String,
+}
+
+/// Send a code to a phone number, so a booking can prove it.
+///
+/// # Only when the business asks for one
+///
+/// Off unless they turned it on, and a `404` when they have not — for the same
+/// reason the reservation route gives about "forbidden". What stops a booking
+/// form being spammed is the **deposit**, not a verified number; what verifying
+/// buys is being able to *reach* whoever booked.
+///
+/// # It says nothing about the number
+///
+/// The answer is the same whether the number is one this business has seen
+/// before or one nobody has ever used, because anything else would turn a public
+/// form into a way to ask who a business's customers are.
+///
+/// # The text is promised in the same transaction as the code
+///
+/// So a code stored and never sent, or sent and never stored, is not a state
+/// this can reach (D9). It goes out on the same effect kind everything else uses
+/// — one handler answers for a booking reminder and a verification alike.
+#[utoipa::path(
+    post,
+    path = "/v1/booking/public/verifications",
+    tag = "booking",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — which is how a public request names the business."),
+        ("Idempotency-Key" = String, Header, description = "Sending it again is a retry, not a second text."),
+    ),
+    request_body = NewVerification,
+    security(),
+    responses(
+        (status = ACCEPTED, description = "A code is on its way, if that number can receive one."),
+        (status = BAD_REQUEST, description = "Not a phone number this can send to", body = Problem),
+        (status = NOT_FOUND, description = "No such business, or it does not ask for a verified number", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "A code was sent a moment ago, or this surface is bounded per origin and per business.", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn public_verification(
+    caller: Public,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    key: IdempotencyKey,
+    Json(body): Json<NewVerification>,
+) -> Result<StatusCode, Problem> {
+    require_module(&caller.db, &booking::module_id(), locale)?;
+
+    let settings = {
+        let mut conn = caller
+            .db
+            .read()
+            .await
+            .map_err(|e| unavailable(&e, locale))?;
+        booking::PublicBooking::resolve(&mut conn)
+            .await
+            .map_err(|e| {
+                Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG)
+            })?
+    };
+    if !settings.open || !settings.verify_phone {
+        return Err(nothing_here(locale));
+    }
+
+    let mut tx = caller
+        .db
+        .begin()
+        .await
+        .map_err(|e| unavailable(&e, locale))?;
+    let issued = booking::verification::issue(&mut tx, &body.phone, chrono::Utc::now())
+        .await
+        .map_err(|e| verification_problem(&e, locale))?;
+
+    // **In the same transaction as the code.** A row written whose text was
+    // never promised is a customer waiting for a message nobody will send.
+    let text = messaging::Outbound {
+        channel: messaging::Channel::Sms,
+        to: issued.handle.clone(),
+        subject: String::new(),
+        body: format!("{}: {}", code_word(locale), issued.code),
+        locale,
+        platform: None,
+    };
+    erp_eventlog::enqueue(&mut tx, None, &[text.promised(key.id().to_string())])
+        .await
+        .map_err(|e| unavailable(&e, locale))?;
+    tx.commit().await.map_err(|e| unavailable(&e, locale))?;
+
+    erp_web::nudge(&state, caller.db.tenant()).await;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// What the text calls the code.
+///
+/// **Not a template.** A tenant's own templates are `messaging`'s and a business
+/// may write whatever it likes in them; this one message has to go out before
+/// anybody has configured anything, or the first customer to try to book cannot.
+const fn code_word(locale: Locale) -> &'static str {
+    match locale {
+        Locale::Arabic => "رمز الحجز",
+        Locale::English => "Your booking code",
+    }
+}
+
+/// **One answer for every way a code can fail**, except the two a caller can act
+/// on: a number this cannot read, and a resend asked for too soon.
+fn verification_problem(
+    error: &booking::verification::VerificationError,
+    locale: Locale,
+) -> Problem {
+    use booking::verification::VerificationError;
+    let status = match error {
+        VerificationError::NotANumber(_) => StatusCode::BAD_REQUEST,
+        VerificationError::TooSoon => StatusCode::TOO_MANY_REQUESTS,
+        VerificationError::NotValid => StatusCode::UNPROCESSABLE_ENTITY,
+        VerificationError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    Problem::new(
+        status,
+        &erp_i18n::Message::new(booking::messages::code_for(error)),
+        locale,
+        &CATALOG,
+    )
 }

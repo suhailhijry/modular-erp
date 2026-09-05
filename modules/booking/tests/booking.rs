@@ -1519,6 +1519,7 @@ async fn a_booking_records_the_deposit_it_was_asked_for() {
     fixture.declare("stylist-1", &person("نورة")).await;
     fixture
         .set_public(booking::PublicBooking {
+            verify_phone: false,
             open: true,
             deposit_bp: 2_000,
             hold_minutes: 30,
@@ -1547,6 +1548,7 @@ async fn a_business_that_asks_for_no_deposit_records_none() {
     fixture.declare("stylist-1", &person("نورة")).await;
     fixture
         .set_public(booking::PublicBooking {
+            verify_phone: false,
             open: true,
             deposit_bp: 0,
             hold_minutes: 30,
@@ -1581,6 +1583,7 @@ async fn an_unpaid_hold_lapses_and_a_paid_one_does_not() {
     fixture.declare("stylist-1", &person("نورة")).await;
     fixture
         .set_public(booking::PublicBooking {
+            verify_phone: false,
             open: true,
             deposit_bp: 2_000,
             hold_minutes: 30,
@@ -1624,6 +1627,7 @@ async fn securing_a_booking_is_recorded_and_the_second_payment_changes_nothing()
     fixture.declare("stylist-1", &person("نورة")).await;
     fixture
         .set_public(booking::PublicBooking {
+            verify_phone: false,
             open: true,
             deposit_bp: 2_000,
             hold_minutes: 30,
@@ -1659,6 +1663,517 @@ async fn securing_a_booking_is_recorded_and_the_second_payment_changes_nothing()
             .await
             .expect("reads");
     assert_eq!(held.as_deref(), Some("pay-1"));
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Proving a phone number, when the business asks for one
+// ---------------------------------------------------------------------------
+
+/// **A code is spent once**, whatever races for it.
+#[tokio::test]
+async fn a_verification_code_holds_one_booking_and_no_more() {
+    let fixture = Fixture::new().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    let issued = booking::verification::issue(&mut conn, "+966 50 000 0000", at("08"))
+        .await
+        .expect("issues");
+    assert_eq!(issued.handle, "+966500000000", "the number was not tidied");
+
+    booking::verification::claim(&mut conn, "+966500000000", &issued.code, at("08"))
+        .await
+        .expect("the code is good");
+
+    let again =
+        booking::verification::claim(&mut conn, "+966500000000", &issued.code, at("08")).await;
+    assert!(again.is_err(), "one code held two bookings");
+
+    fixture.cleanup().await;
+}
+
+/// **Wrong, expired and never-issued are one answer.** Telling them apart tells
+/// somebody guessing which half of the pair they got right.
+#[tokio::test]
+async fn a_code_that_is_wrong_or_stale_is_refused_the_same_way() {
+    let fixture = Fixture::new().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    let issued = booking::verification::issue(&mut conn, "+966500000001", at("08"))
+        .await
+        .expect("issues");
+
+    // The wrong code.
+    assert!(
+        booking::verification::claim(&mut conn, "+966500000001", "000000", at("08"))
+            .await
+            .is_err()
+    );
+    // The right code, for a different number.
+    assert!(
+        booking::verification::claim(&mut conn, "+966500000002", &issued.code, at("08"))
+            .await
+            .is_err()
+    );
+    // Never issued at all.
+    assert!(
+        booking::verification::claim(&mut conn, "+966500000003", "123456", at("08"))
+            .await
+            .is_err()
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Guessing costs the code.** Twenty bits against unlimited attempts is
+/// minutes; against a handful it is one in two hundred thousand.
+#[tokio::test]
+async fn a_code_dies_after_a_handful_of_wrong_guesses() {
+    let fixture = Fixture::new().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    let issued = booking::verification::issue(&mut conn, "+966500000004", at("08"))
+        .await
+        .expect("issues");
+
+    for _ in 0..booking::verification::MAX_ATTEMPTS {
+        let _ = booking::verification::claim(&mut conn, "+966500000004", "000000", at("08")).await;
+    }
+
+    // **Even the right one**, because the code is dead and not merely wrong.
+    assert!(
+        booking::verification::claim(&mut conn, "+966500000004", &issued.code, at("08"))
+            .await
+            .is_err(),
+        "a code survived being guessed at"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A resend button that works instantly is one somebody holds down**, and
+/// every text costs the business money.
+#[tokio::test]
+async fn a_second_code_is_refused_until_the_cooldown_passes() {
+    let fixture = Fixture::new().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    booking::verification::issue(&mut conn, "+966500000005", at("08"))
+        .await
+        .expect("issues");
+    assert!(
+        booking::verification::issue(&mut conn, "+966500000005", at("08"))
+            .await
+            .is_err(),
+        "a second code went out immediately"
+    );
+
+    // And after the cooldown it is allowed again.
+    let later =
+        at("08") + chrono::Duration::seconds(booking::verification::REQUEST_INTERVAL_SECONDS + 1);
+    booking::verification::issue(&mut conn, "+966500000005", later)
+        .await
+        .expect("the cooldown passed");
+
+    fixture.cleanup().await;
+}
+
+/// A code past its lifetime is no code at all.
+#[tokio::test]
+async fn a_code_stops_working_when_it_expires() {
+    let fixture = Fixture::new().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    let issued = booking::verification::issue(&mut conn, "+966500000006", at("08"))
+        .await
+        .expect("issues");
+    let later =
+        at("08") + chrono::Duration::seconds(booking::verification::CODE_LIFETIME_SECONDS + 1);
+
+    assert!(
+        booking::verification::claim(&mut conn, "+966500000006", &issued.code, later)
+            .await
+            .is_err(),
+        "an expired code was accepted"
+    );
+
+    // And the sweep takes it away, because an expired code is evidence of
+    // nothing.
+    let gone = booking::verification::sweep(&mut conn, later)
+        .await
+        .expect("sweeps");
+    assert!(gone > 0);
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Bars — a specialist a customer must not be booked with
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    async fn bar(&self, customer: &str, resource: &str) {
+        booking::raise_bar(
+            &self.db,
+            &code(customer),
+            &code(resource),
+            "شكوى",
+            at("00"),
+            &Metadata::default(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{customer} should be barrable from {resource}: {e}"));
+    }
+
+    async fn bars(&self, customer: &str) -> Vec<booking::Bar> {
+        let mut conn = self.pool.acquire().await.expect("connection");
+        booking::bars(&mut conn, customer).await.expect("reads")
+    }
+}
+
+/// **The bar refuses the booking, and takes nothing.**
+///
+/// The second half is the one that would rot quietly: `erp_occupancy` writes as
+/// it goes, so a refusal that left a claim behind would hold a chair nobody
+/// could see or free.
+#[tokio::test]
+async fn a_barred_specialist_cannot_be_booked_and_the_refusal_holds_nothing() {
+    let fixture = Fixture::new().await;
+    fixture.bar("CUST-1", "noura").await;
+
+    let refused = reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(Some("CUST-1"), vec![line("قص", "10", "11", &["noura"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("a barred stylist was booked");
+
+    assert!(
+        matches!(
+            rejection(&refused),
+            Some(BookingError::Barred { resource }) if resource == "noura"
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fixture.free("noura", "10", "11").await,
+        1,
+        "the refused booking left a claim behind"
+    );
+    // Somebody else's booking with the same stylist is untouched: a bar is
+    // between two named things and not a withdrawal.
+    crm::register_customer(
+        &fixture.db,
+        &code("CUST-2"),
+        &crm::Details {
+            name: "هدى".to_owned(),
+            name_latin: None,
+            kind: crm::CustomerKind::Person,
+            contact: crm::Contact {
+                phone: Some("+966522222222".to_owned()),
+                email: None,
+            },
+            address: None,
+            tax: None,
+        },
+        at("00"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("on file");
+    reserve(
+        &fixture.db,
+        &code("BK-2"),
+        &booking_for(Some("CUST-2"), vec![line("قص", "10", "11", &["noura"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a bar against one customer refused another's booking");
+
+    fixture.cleanup().await;
+}
+
+/// **Both ways round it.** A booking taken on a clear stylist and *moved* onto
+/// a barred one, and a pool booked by the type with the barred unit named
+/// afterwards — each is a door the check in `reserve` alone leaves open.
+#[tokio::test]
+async fn a_bar_cannot_be_walked_round_by_rescheduling_or_by_assigning() {
+    let fixture = Fixture::new().await;
+    fixture.declare("noura-2", &person("نورة ٢")).await;
+    fixture.declare("stylists", &place("أي مصففة", 2)).await;
+
+    // In through the front door: booked on a stylist who is not barred.
+    reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(Some("CUST-1"), vec![line("قص", "10", "11", &["noura-2"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("noura-2 is clear");
+
+    fixture.bar("CUST-1", "noura").await;
+
+    let refused = reschedule(
+        &fixture.db,
+        &code("BK-1"),
+        &[line("قص", "12", "13", &["noura"])],
+        at("12"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("rescheduled onto a barred stylist");
+    assert!(
+        matches!(rejection(&refused), Some(BookingError::Barred { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fixture.free("noura-2", "10", "11").await,
+        0,
+        "the refused reschedule gave the old claim away"
+    );
+
+    // And out through the pool: "any stylist" names nothing barred.
+    reserve(
+        &fixture.db,
+        &code("BK-2"),
+        &booking_for(Some("CUST-1"), vec![line("صبغ", "14", "15", &["stylists"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the pool is not barred");
+
+    let refused = assign(
+        &fixture.db,
+        &code("BK-2"),
+        0,
+        &code("noura"),
+        at("14"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("the barred stylist was picked out of the pool");
+    assert!(
+        matches!(rejection(&refused), Some(BookingError::Barred { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fixture.free("noura", "14", "15").await,
+        1,
+        "the refused assignment took the unit anyway"
+    );
+
+    // The clear one out of the same pool goes through.
+    assign(
+        &fixture.db,
+        &code("BK-2"),
+        0,
+        &code("noura-2"),
+        at("14"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("noura-2 is clear");
+
+    fixture.cleanup().await;
+}
+
+/// **Raised twice is one bar, and one lift ends it.**
+///
+/// The projection is checked alongside, because a screen that still shows a
+/// lifted bar is how somebody comes to explain a refusal that is not happening.
+#[tokio::test]
+async fn a_bar_is_raised_once_however_often_it_is_asked_for_and_lifting_ends_it() {
+    let fixture = Fixture::new().await;
+
+    fixture.bar("CUST-1", "noura").await;
+    let again = booking::raise_bar(
+        &fixture.db,
+        &code("CUST-1"),
+        &code("noura"),
+        "شكوى أخرى",
+        at("01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the retry is quiet");
+    assert!(again.at.is_none(), "the second raise wrote an event");
+
+    fixture.project().await;
+    let listed = fixture.bars("CUST-1").await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].resource, "noura");
+    assert_eq!(listed[0].name.as_deref(), Some("نورة"));
+    assert_eq!(
+        listed[0].why, "شكوى",
+        "the second reason overwrote the first"
+    );
+
+    booking::lift_bar(
+        &fixture.db,
+        &code("CUST-1"),
+        &code("noura"),
+        at("02"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("lifts");
+
+    reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(Some("CUST-1"), vec![line("قص", "10", "11", &["noura"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the bar was lifted and the booking should go through");
+
+    fixture.project().await;
+    assert!(
+        fixture.bars("CUST-1").await.is_empty(),
+        "the lifted bar is still on the screen"
+    );
+
+    // Lifting one that is not there is a no-op, not a refusal.
+    let noop = booking::lift_bar(
+        &fixture.db,
+        &code("CUST-1"),
+        &code("noura"),
+        at("03"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("quiet");
+    assert!(noop.at.is_none());
+
+    fixture.cleanup().await;
+}
+
+/// **A bar needs two things the system can name, and a reason.**
+///
+/// A typo in either id would otherwise be written and enforce nothing, and
+/// whoever typed it would go away believing a rule was in place.
+#[tokio::test]
+async fn a_bar_against_nobody_or_nothing_is_refused() {
+    let fixture = Fixture::new().await;
+
+    let refused = booking::raise_bar(
+        &fixture.db,
+        &code("CUST-404"),
+        &code("noura"),
+        "شكوى",
+        at("00"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("barred a customer who does not exist");
+    assert!(
+        matches!(rejection(&refused), Some(BookingError::NoSuchCustomer(_))),
+        "{refused:?}"
+    );
+
+    let refused = booking::raise_bar(
+        &fixture.db,
+        &code("CUST-1"),
+        &code("nobody"),
+        "شكوى",
+        at("00"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("barred a resource that does not exist");
+    assert!(
+        matches!(rejection(&refused), Some(BookingError::NoSuchResource(_))),
+        "{refused:?}"
+    );
+
+    let refused = booking::raise_bar(
+        &fixture.db,
+        &code("CUST-1"),
+        &code("noura"),
+        "   ",
+        at("00"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("barred with no reason");
+    assert!(
+        matches!(rejection(&refused), Some(BookingError::NoReasonToBar)),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A walk-in cannot be barred, and this says so out loud.**
+///
+/// Bars are keyed on a `crm` record, so a booking that carries only a typed-in
+/// name goes through however many bars stand against the person it is probably
+/// for. That is the honest limit of recognising somebody, and it is written
+/// down here rather than discovered.
+#[tokio::test]
+async fn a_booking_with_no_customer_record_is_not_barred_from_anything() {
+    let fixture = Fixture::new().await;
+    fixture.bar("CUST-1", "noura").await;
+
+    reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(None, vec![line("قص", "10", "11", &["noura"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a walk-in is nobody the system can bar");
+
+    fixture.cleanup().await;
+}
+
+/// **A bar is about the next booking, not the ones already in the diary.**
+///
+/// Raising one does not cancel Tuesday's appointment, and it should not: what
+/// to do about a booking that already exists is a conversation somebody has to
+/// have, and a system that silently emptied the diary would be making that
+/// decision for them. Written down here because the surprise is otherwise
+/// discovered on Tuesday.
+#[tokio::test]
+async fn raising_a_bar_leaves_the_bookings_that_were_already_made() {
+    let fixture = Fixture::new().await;
+
+    reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(Some("CUST-1"), vec![line("قص", "10", "11", &["noura"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("nothing is barred yet");
+
+    fixture.bar("CUST-1", "noura").await;
+
+    fixture.project().await;
+    let detail = fixture.get("BK-1").await.expect("still in the diary");
+    assert_eq!(detail.summary.stage, Stage::Reserved.as_str());
+    assert_eq!(
+        fixture.free("noura", "10", "11").await,
+        0,
+        "raising a bar gave the chair back"
+    );
+
+    // Cancelling it is the ordinary command, and it still works.
+    move_to(
+        &fixture.db,
+        &code("BK-1"),
+        Stage::Cancelled,
+        "حاجز",
+        at("09"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a barred pair can still be cancelled");
+    assert_eq!(fixture.free("noura", "10", "11").await, 1);
 
     fixture.cleanup().await;
 }

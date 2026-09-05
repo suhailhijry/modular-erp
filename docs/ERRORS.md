@@ -76,10 +76,25 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — That amount is too large to record.
 - **ar** — هذا المبلغ أكبر من أن يُسجَّل.
 
+### `booking.barred`
+
+- **en** — {resource} cannot be booked for this customer.
+- **ar** — لا يمكن حجز {resource} لهذا العميل.
+
 ### `booking.cannot_move`
 
 - **en** — A booking cannot go from {from} to {to}.
 - **ar** — لا يمكن نقل الحجز من {from} إلى {to}.
+
+### `booking.code_not_valid`
+
+- **en** — That code is not valid. Ask for a new one.
+- **ar** — الرمز غير صالح. يُرجى طلب رمز جديد.
+
+### `booking.code_too_soon`
+
+- **en** — A code was sent a moment ago. Wait before asking for another.
+- **ar** — تم إرسال رمز قبل قليل. يُرجى الانتظار قبل طلب رمز آخر.
 
 ### `booking.invalid_reference`
 
@@ -100,6 +115,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — A booking needs a name to put in the diary.
 - **ar** — يحتاج الحجز إلى اسم يظهر في المفكرة.
+
+### `booking.no_reason_to_bar`
+
+- **en** — Say why, so whoever has to refuse a booking can explain it.
+- **ar** — اذكر السبب، ليتمكن من يرفض الحجز من توضيحه.
 
 ### `booking.no_such_branch`
 
@@ -135,6 +155,11 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — There is no ready-made rota called {trade}.
 - **ar** — لا توجد قائمة موارد جاهزة باسم {trade}.
+
+### `booking.not_a_phone`
+
+- **en** — That is not a phone number we can send a code to.
+- **ar** — هذا ليس رقم جوال يمكن إرسال رمز إليه.
 
 ### `booking.not_a_rate`
 
@@ -245,6 +270,31 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — Customer {customer} is archived. Restore them first.
 - **ar** — العميل {customer} مؤرشف. استعده أولًا.
 
+### `crm.field_declared_twice`
+
+- **en** — The field {field} is listed twice.
+- **ar** — الحقل {field} مذكور مرتين.
+
+### `crm.field_is_required`
+
+- **en** — The field {field} is required, or customers still hold values for it.
+- **ar** — الحقل {field} مطلوب، أو ما زال لدى عملاء قيم مخزّنة فيه.
+
+### `crm.field_needs_a_label`
+
+- **en** — The field {field} needs a label somebody can read.
+- **ar** — الحقل {field} يحتاج إلى تسمية يقرؤها الناس.
+
+### `crm.field_needs_a_length`
+
+- **en** — The field {field} needs a usable maximum length.
+- **ar** — الحقل {field} يحتاج إلى حد أقصى صالح للطول.
+
+### `crm.field_needs_options`
+
+- **en** — The field {field} is a choice and needs options that are not blank or repeated.
+- **ar** — الحقل {field} حقل اختيار ويحتاج إلى خيارات غير فارغة وغير مكررة.
+
 ### `crm.name_too_long`
 
 - **en** — A name may not be longer than {n} characters.
@@ -270,15 +320,35 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 - **en** — There is no customer {customer}.
 - **ar** — لا يوجد عميل {customer}.
 
+### `crm.no_such_field`
+
+- **en** — There is no field {field}.
+- **ar** — لا يوجد حقل {field}.
+
+### `crm.not_a_field_key`
+
+- **en** — {field} cannot be used as a field name. Use lowercase letters, digits and underscores.
+- **ar** — لا يمكن استخدام {field} كاسم حقل. استخدم أحرفاً صغيرة وأرقاماً وشرطات سفلية.
+
 ### `crm.not_a_vat_number`
 
 - **en** — {value} is not a Saudi VAT number. It is fifteen digits beginning and ending with 3.
 - **ar** — {value} ليس رقم تسجيل ضريبي سعودي. يتكون من خمسة عشر رقمًا يبدأ وينتهي بالرقم ٣.
 
+### `crm.not_one_of_the_options`
+
+- **en** — That is not one of the options for {field}.
+- **ar** — هذا ليس أحد الخيارات المتاحة لـ {field}.
+
 ### `crm.person_with_vat_number`
 
 - **en** — A person does not hold a VAT registration. Record them as a company.
 - **ar** — الفرد لا يملك تسجيلًا ضريبيًا. سجّله كمنشأة.
+
+### `crm.too_many_fields`
+
+- **en** — That is more fields than a customer can carry.
+- **ar** — هذا أكثر من عدد الحقول التي يمكن أن يحملها العميل.
 
 ### `crm.unknown_kind`
 
@@ -289,6 +359,16 @@ Run `just errors` after adding a code; CI fails if this drifts. -->
 
 - **en** — That is not a spreadsheet this system can read: {reason}
 - **ar** — هذا ليس جدولًا يستطيع النظام قراءته: {reason}
+
+### `crm.value_too_long`
+
+- **en** — That is longer than the field {field} allows.
+- **ar** — هذا أطول مما يسمح به الحقل {field}.
+
+### `crm.wrong_kind_of_value`
+
+- **en** — That is not the kind of value the field {field} holds.
+- **ar** — هذه ليست نوع القيمة التي يحملها الحقل {field}.
 
 
 ## `eventlog`

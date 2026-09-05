@@ -17,7 +17,7 @@ use utoipa_axum::routes;
 use erp_web::AppState;
 use erp_web::Problem;
 use erp_web::csv::{Imported, Rejected};
-use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, Read};
+use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Read};
 use erp_web::{Consistency, nudge};
 use erp_web::{Json, Query, bad_request, creating, importing, metadata, parse_id, require_module};
 
@@ -29,6 +29,11 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get_customer, amend_customer))
         .routes(routes!(archive_customer, restore_customer))
         .routes(routes!(import_customers))
+        .routes(routes!(customer_fields, set_customer_fields))
+        .routes(routes!(orphaned_fields))
+        .routes(routes!(erase_field_values))
+        .routes(routes!(held_fields, set_held_fields, erase_held_fields))
+        .routes(routes!(clear_held_field))
 }
 
 /// This module's own failures plus everything any route can produce.
@@ -729,4 +734,604 @@ fn database(error: &sqlx::Error, locale: Locale) -> Problem {
         locale,
         &CATALOG,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Fields a business adds to a customer
+// ---------------------------------------------------------------------------
+
+/// One field a business has added to its customers.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+struct FieldView {
+    /// The stable machine name. Lowercase letters, digits and underscores.
+    key: String,
+    /// What a person reads.
+    label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label_latin: Option<String>,
+    /// `text`, `number`, `date`, `choice` or `flag`.
+    kind: String,
+    /// **Characters**, on a `text` field. Ignored on every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max: Option<u16>,
+    /// What may be chosen, on a `choice` field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    options: Vec<String>,
+    /// Whether a customer is expected to have one. **Reported, not enforced** —
+    /// see `Fields::missing_from`.
+    #[serde(default)]
+    required: bool,
+}
+
+/// Every field a business has added.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({ "fields": [
+    { "key": "blood_group", "label": "فصيلة الدم", "label_latin": "Blood group",
+      "kind": "choice", "options": ["A+", "A-", "O+", "O-"], "required": false }
+]}))]
+struct FieldSet {
+    /// **The order is yours**, and it is the order a form shows them in.
+    fields: Vec<FieldView>,
+}
+
+/// A value on a customer.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+struct ValueView {
+    key: String,
+    /// Exactly one of the four below, matching what the field declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    number: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    date: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flag: Option<bool>,
+    /// When it was last set, and by whom. Read only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    set_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    set_by: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+struct CustomerFields {
+    values: Vec<ValueView>,
+}
+
+fn field_view(field: &crate::fields::FieldDef) -> FieldView {
+    use crate::fields::FieldKind;
+    FieldView {
+        key: field.key.clone(),
+        label: field.label.clone(),
+        label_latin: field.label_latin.clone(),
+        kind: field.kind.as_str().to_owned(),
+        max: match &field.kind {
+            FieldKind::Text { max } => Some(*max),
+            _ => None,
+        },
+        options: match &field.kind {
+            FieldKind::Choice { options } => options.clone(),
+            _ => Vec::new(),
+        },
+        required: field.required,
+    }
+}
+
+fn field_def(view: FieldView, locale: Locale) -> Result<crate::fields::FieldDef, Problem> {
+    use crate::fields::FieldKind;
+    let kind = match view.kind.as_str() {
+        "text" => FieldKind::Text {
+            // A text field with no stated length gets a sensible one rather
+            // than a refusal: "add a note field" is the commonest thing anybody
+            // does here, and asking them for a number first is friction.
+            max: view.max.unwrap_or(500),
+        },
+        "number" => FieldKind::Number,
+        "date" => FieldKind::Date,
+        "choice" => FieldKind::Choice {
+            options: view.options,
+        },
+        "flag" => FieldKind::Flag,
+        other => {
+            return Err(bad_request(
+                erp_web::messages::MALFORMED_BODY,
+                "reason",
+                &format!("{other} is not a kind of field"),
+                locale,
+            ));
+        }
+    };
+    Ok(crate::fields::FieldDef {
+        key: view.key,
+        label: view.label,
+        label_latin: view.label_latin,
+        kind,
+        required: view.required,
+    })
+}
+
+fn value_of(view: &ValueView, locale: Locale) -> Result<crate::fields::Value, Problem> {
+    use crate::fields::Held;
+    let held = match (view.text.as_ref(), view.number, view.date, view.flag) {
+        // **Text and choice are the same column and different fields**, so which
+        // one this is comes from the declaration rather than from the request —
+        // `crm::fields::check` refuses the pair that do not match.
+        (Some(text), None, None, None) => Held::Text(text.clone()),
+        (None, Some(number), None, None) => Held::Number(number),
+        (None, None, Some(date), None) => Held::Date(date),
+        (None, None, None, Some(flag)) => Held::Flag(flag),
+        _ => {
+            return Err(bad_request(
+                erp_web::messages::MALFORMED_BODY,
+                "reason",
+                "a value carries exactly one of text, number, date and flag",
+                locale,
+            ));
+        }
+    };
+    Ok(crate::fields::Value {
+        key: view.key.clone(),
+        held,
+    })
+}
+
+fn held_view(holding: &crate::fields::Holding) -> ValueView {
+    use crate::fields::Held;
+    let mut view = ValueView {
+        key: holding.key.clone(),
+        text: None,
+        number: None,
+        date: None,
+        flag: None,
+        set_at: Some(holding.set_at),
+        set_by: holding.set_by.clone(),
+    };
+    match &holding.held {
+        Held::Text(text) | Held::Choice(text) => view.text = Some(text.clone()),
+        Held::Number(n) => view.number = Some(*n),
+        Held::Date(d) => view.date = Some(*d),
+        Held::Flag(f) => view.flag = Some(*f),
+    }
+    view
+}
+
+/// The fields this business has added to its customers.
+#[utoipa::path(
+    get,
+    path = "/v1/crm/fields",
+    tag = "crm",
+    responses(
+        (status = OK, body = FieldSet),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn customer_fields(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<FieldSet>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let fields = crate::fields::Fields::resolve(&mut conn)
+        .await
+        .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+
+    Ok(Json(FieldSet {
+        fields: fields.fields.iter().map(field_view).collect(),
+    }))
+}
+
+/// Decide what a business records about its customers.
+///
+/// # It replaces the whole set
+///
+/// Send every field you want, in the order you want them shown. A field that is
+/// not in the list is removed — which is refused while anybody still holds a
+/// value for it, because a field that vanished with its data still in the table
+/// is exactly how a business comes to hold health details it has forgotten
+/// about. Erase them first: `DELETE /v1/crm/fields/{field}/values`.
+///
+/// **Redefining a field under its own values is refused for the same reason.**
+/// Turning a text field into a date leaves every stored value unreadable, and a
+/// settings screen that allowed it would be quietly discarding what somebody
+/// typed.
+///
+/// # Whose decision this is
+///
+/// The owner's. What a business records about a person — and especially that it
+/// records health details at all — is not a preference, and the fields decide
+/// what every customer page asks for from then on.
+#[utoipa::path(
+    put,
+    path = "/v1/crm/fields",
+    tag = "crm",
+    request_body = FieldSet,
+    responses(
+        (status = NO_CONTENT, description = "Recorded."),
+        (status = BAD_REQUEST, description = "Not a key, not a kind, a repeat, or a choice with nothing to choose from", body = Problem),
+        (status = CONFLICT, description = "A field was removed or redefined while customers still hold values for it", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn set_customer_fields(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+    Json(body): Json<FieldSet>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    let mut wanted = crate::fields::Fields {
+        fields: Vec::with_capacity(body.fields.len()),
+    };
+    for view in body.fields {
+        wanted.fields.push(field_def(view, locale)?);
+    }
+    wanted
+        .check()
+        .map_err(|e| field_problem(&e, StatusCode::BAD_REQUEST, locale))?;
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+
+    // **What is being taken away, and what is being changed underneath.** Both
+    // checked against what is actually stored rather than against what the
+    // previous setting said, because the values are what would be lost.
+    let before = crate::fields::Fields::resolve(&mut tx)
+        .await
+        .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+    for was in &before.fields {
+        let still = wanted.get(&was.key);
+        let changed = still.is_none_or(|now| now.kind.as_str() != was.kind.as_str());
+        if !changed {
+            continue;
+        }
+        let held = crate::fields::anyone_holds(&mut tx, &was.key)
+            .await
+            .map_err(|e| store_problem(&e, locale))?;
+        if held {
+            return Err(field_problem(
+                &crate::fields::FieldError::Required(was.key.clone()),
+                StatusCode::CONFLICT,
+                locale,
+            ));
+        }
+    }
+
+    erp_eventlog::configuration::set(
+        &mut tx,
+        crate::fields::Fields::KEY,
+        &wanted,
+        Some(&tenant.session.identity.to_string()),
+    )
+    .await
+    .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// What this customer holds.
+///
+/// In the order the fields were declared, which is the order a form shows them.
+/// A value under a field the business has since removed is **not** here — see
+/// `GET /v1/crm/fields/orphaned`, which is how one is found and erased.
+#[utoipa::path(
+    get,
+    path = "/v1/crm/customers/{customer}/fields",
+    tag = "crm",
+    params(("customer" = String, Path, description = "From `GET /v1/crm/customers`.")),
+    responses(
+        (status = OK, body = CustomerFields),
+        (status = BAD_REQUEST, body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn held_fields(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    Path(customer): Path<String>,
+) -> Result<Json<CustomerFields>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let customer = parse_id(&customer, locale)?;
+
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let holdings = crate::fields::held(&mut conn, customer.as_str())
+        .await
+        .map_err(|e| store_problem(&e, locale))?;
+
+    Ok(Json(CustomerFields {
+        values: holdings.iter().map(held_view).collect(),
+    }))
+}
+
+/// Set what this customer holds.
+///
+/// # All of them or none
+///
+/// Every value is checked against the field set before any is written, so a
+/// form with one bad date stores nothing rather than half of itself.
+///
+/// # It sets what you send and leaves the rest
+///
+/// A field you do not mention keeps what it had. Emptying one is
+/// `DELETE /v1/crm/customers/{customer}/fields/{field}`, which is a different act
+/// and refused on a required field.
+///
+/// **The old value is kept**, marked with the moment it stopped being true, so
+/// "who changed this and when" is answerable. Erasing takes that history with
+/// it.
+#[utoipa::path(
+    put,
+    path = "/v1/crm/customers/{customer}/fields",
+    tag = "crm",
+    params(("customer" = String, Path, description = "From `GET /v1/crm/customers`.")),
+    request_body = CustomerFields,
+    responses(
+        (status = NO_CONTENT, description = "Recorded."),
+        (status = BAD_REQUEST, description = "A value that is not the kind its field declared, too long, or not one of the options", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such field", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn set_held_fields(
+    tenant: Allowed<PostEntries>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(customer): Path<String>,
+    Json(body): Json<CustomerFields>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let customer = parse_id(&customer, locale)?;
+
+    let mut values = Vec::with_capacity(body.values.len());
+    for view in &body.values {
+        values.push(value_of(view, locale)?);
+    }
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    crate::fields::set(
+        &mut tx,
+        customer.as_str(),
+        &values,
+        chrono::Utc::now(),
+        Some(&tenant.session.identity.to_string()),
+    )
+    .await
+    .map_err(|e| store_problem(&e, locale))?;
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+
+    let _ = &state;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Empty one field on one customer.
+///
+/// Refused on a required field: adding one does not refuse the customers who
+/// already lack it, but deliberately taking one away is a different act.
+///
+/// **This is not erasure.** The old value is kept as history, the way every
+/// change is. To remove it altogether, see
+/// `DELETE /v1/crm/customers/{customer}/fields`.
+#[utoipa::path(
+    delete,
+    path = "/v1/crm/customers/{customer}/fields/{field}",
+    tag = "crm",
+    params(
+        ("customer" = String, Path, description = "From `GET /v1/crm/customers`."),
+        ("field" = String, Path, description = "From `GET /v1/crm/fields`."),
+    ),
+    responses(
+        (status = NO_CONTENT, description = "Emptied, or already was."),
+        (status = BAD_REQUEST, body = Problem),
+        (status = CONFLICT, description = "The field is required", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such field", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn clear_held_field(
+    tenant: Allowed<PostEntries>,
+    Language(locale): Language,
+    Path(params): Path<std::collections::HashMap<String, String>>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let customer = parse_id(params.get("customer").map_or("", String::as_str), locale)?;
+    let field = params.get("field").map_or("", String::as_str);
+
+    let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    crate::fields::clear(&mut tx, customer.as_str(), field, chrono::Utc::now())
+        .await
+        .map_err(|e| store_problem(&e, locale))?;
+    tx.commit().await.map_err(|e| database(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// **Erase everything this business added about this person.**
+///
+/// This is the answer to somebody asking for their data to be deleted. It takes
+/// the history with it, because a deletion that left the old value behind would
+/// not be one.
+///
+/// # What it does not do
+///
+/// It does not erase the customer. A customer record is what documents point
+/// at, and a tax invoice does not stop having been issued — see the `crm` module
+/// docs on the copy a document freezes. What this removes is the fields a
+/// business chose to keep on top of that, which is where health details and
+/// private notes live and where a right to erasure actually bites.
+///
+/// # Whose decision this is
+///
+/// The owner's, deliberately. Erasing somebody's record is not an ordinary
+/// clerical act, and this system has already declined once to answer "who may
+/// erase whom" in passing.
+#[utoipa::path(
+    delete,
+    path = "/v1/crm/customers/{customer}/fields",
+    tag = "crm",
+    params(("customer" = String, Path, description = "From `GET /v1/crm/customers`.")),
+    responses(
+        (status = OK, description = "How many rows went, history included.", body = Erased),
+        (status = BAD_REQUEST, body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn erase_held_fields(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+    Path(customer): Path<String>,
+) -> Result<Json<Erased>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let customer = parse_id(&customer, locale)?;
+
+    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    let erased = crate::fields::forget(&mut conn, customer.as_str())
+        .await
+        .map_err(|e| store_problem(&e, locale))?;
+
+    Ok(Json(Erased { erased }))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct Erased {
+    /// Rows removed, current and superseded together.
+    erased: u64,
+}
+
+/// **Values nothing declares any more.**
+///
+/// A field removed from the set leaves its values in the table, shown to
+/// nobody — which is exactly the state that becomes "we still hold health data
+/// we forgot about". This is how they are found; erasing them is
+/// `DELETE /v1/crm/fields/{field}/values`.
+#[utoipa::path(
+    get,
+    path = "/v1/crm/fields/orphaned",
+    tag = "crm",
+    responses(
+        (status = OK, body = Vec<String>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn orphaned_fields(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+) -> Result<Json<Vec<String>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+
+    Ok(Json(
+        crate::fields::orphaned(&mut conn)
+            .await
+            .map_err(|e| store_problem(&e, locale))?,
+    ))
+}
+
+/// Erase one field's values across every customer, history included.
+///
+/// What a business runs before removing a field they should never have
+/// collected, and what makes removing one from the set possible at all.
+#[utoipa::path(
+    delete,
+    path = "/v1/crm/fields/{field}/values",
+    tag = "crm",
+    params(("field" = String, Path, description = "The field's key.")),
+    responses(
+        (status = OK, description = "How many rows went.", body = Erased),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn erase_field_values(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+    Path(field): Path<String>,
+) -> Result<Json<Erased>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+
+    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    let erased = crate::fields::forget_field(&mut conn, &field)
+        .await
+        .map_err(|e| store_problem(&e, locale))?;
+
+    Ok(Json(Erased { erased }))
+}
+
+fn field_problem(error: &crate::fields::FieldError, status: StatusCode, locale: Locale) -> Problem {
+    Problem::new(
+        status,
+        &erp_i18n::Message::new(crate::messages::field_code(error))
+            .with("field", erp_i18n::MessageArg::text(field_named(error))),
+        locale,
+        &CATALOG,
+    )
+}
+
+/// Which field a refusal is about, for the sentence.
+fn field_named(error: &crate::fields::FieldError) -> String {
+    use crate::fields::FieldError;
+    match error {
+        FieldError::NotAKey(key)
+        | FieldError::DuplicateKey(key)
+        | FieldError::NoLabel(key)
+        | FieldError::NotALength(key)
+        | FieldError::NoOptions(key)
+        | FieldError::NotAnOption(key)
+        | FieldError::NoSuchField(key)
+        | FieldError::TooLong(key)
+        | FieldError::Required(key) => key.clone(),
+        FieldError::WrongKind { field, .. } | FieldError::NotOneOfTheOptions { field, .. } => {
+            field.clone()
+        }
+        FieldError::TooManyFields => String::new(),
+    }
+}
+
+fn store_problem(error: &crate::fields::StoreError, locale: Locale) -> Problem {
+    use crate::fields::{FieldError, StoreError};
+    match error {
+        StoreError::Field(field) => {
+            let status = match field {
+                // Well-formed, and refused on what the field declared.
+                FieldError::NoSuchField(_) => StatusCode::NOT_FOUND,
+                FieldError::Required(_) => StatusCode::CONFLICT,
+                _ => StatusCode::BAD_REQUEST,
+            };
+            field_problem(field, status, locale)
+        }
+        StoreError::Config(e) => {
+            Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, e, locale, &CATALOG)
+        }
+        StoreError::Database(e) => {
+            tracing::error!(error = %e, "a customer field could not be read or written");
+            Problem::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &erp_i18n::Message::new(erp_tenant::messages::INTERNAL),
+                locale,
+                &CATALOG,
+            )
+        }
+    }
 }

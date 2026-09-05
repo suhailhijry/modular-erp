@@ -12,6 +12,7 @@ use erp_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup
 use erp_types::{AggregateId, CurrencyCode, Cursor, Money, Page, Timestamp};
 use sqlx::PgConnection;
 
+use crate::bars::BarEvent;
 use crate::pricing::Charged;
 use crate::reservation::{Held, Line, ReservationEvent, Stage};
 use crate::resource::ResourceEvent;
@@ -338,12 +339,71 @@ fn none_if_blank(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+/// Which resources each customer must not be booked with.
+///
+/// **Nothing reads this to decide a booking.** The decision is made against the
+/// log in `commands::check_not_barred`, because a bar raised a minute ago has
+/// to stop the next booking and a projection lags. This is for the screen that
+/// lists them.
+///
+/// Named for the state rather than the events, because `Bars` is the aggregate
+/// the decision is actually made against and two things with one name is how
+/// somebody comes to query the wrong one.
+#[derive(Debug)]
+pub struct Barred;
+
+#[async_trait::async_trait]
+impl Projection for Barred {
+    type Group = Booking;
+
+    fn name(&self) -> &'static str {
+        "bars"
+    }
+
+    async fn apply(
+        &self,
+        ctx: &ProjectionCtx<'_>,
+        envelope: &Envelope,
+        conn: &mut PgConnection,
+    ) -> Result<(), ProjectionError> {
+        if !BarEvent::NAMES.contains(&envelope.event_name.as_str()) {
+            return Ok(());
+        }
+        let customer = envelope.stream.id.as_str();
+
+        match decode::<BarEvent>(ctx, envelope)? {
+            BarEvent::Raised { resource, why, at } => {
+                sqlx::query(
+                    "INSERT INTO bar (customer_id, resource_id, why, raised_at)
+                     VALUES ($1,$2,$3,$4)
+                     ON CONFLICT (customer_id, resource_id) DO NOTHING",
+                )
+                .bind(customer)
+                .bind(resource.as_str())
+                .bind(&why)
+                .bind(at)
+                .execute(&mut *conn)
+                .await?;
+            }
+            BarEvent::Lifted { resource, .. } => {
+                sqlx::query("DELETE FROM bar WHERE customer_id = $1 AND resource_id = $2")
+                    .bind(customer)
+                    .bind(resource.as_str())
+                    .execute(&mut *conn)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Every projection this module contributes.
 #[must_use]
 pub fn projections() -> Vec<std::sync::Arc<dyn Projection<Group = Booking>>> {
     vec![
         std::sync::Arc::new(Resources),
         std::sync::Arc::new(Reservations),
+        std::sync::Arc::new(Barred),
     ]
 }
 
@@ -785,4 +845,47 @@ pub async fn awaiting_deposit(
             due_by: row.deposit_due_by?,
         })
     }))
+}
+
+/// One bar, as a screen lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bar {
+    pub resource: String,
+    /// What the resource is called, when it is still declared. `None` for one
+    /// that has since been removed from the log's reach — the bar is still
+    /// real, and hiding it would be the wrong answer.
+    pub name: Option<String>,
+    /// **For staff.** Never put in front of the customer it is about, and never
+    /// in the refusal a booking gets — see `messages::BARRED`.
+    pub why: String,
+    pub raised_at: Timestamp,
+}
+
+/// Every resource one customer must not be booked with.
+///
+/// Not paged: this is a handful of rows for one person, and a bar list long
+/// enough to need paging is a conversation the business needs to have rather
+/// than a screen.
+pub async fn bars(conn: &mut sqlx::PgConnection, customer: &str) -> Result<Vec<Bar>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT b.resource_id as "resource!", r.name as "name?", b.why as "why!",
+                  b.raised_at as "raised_at!"
+             FROM proj_booking.bar b
+             LEFT JOIN proj_booking.resource r ON r.id = b.resource_id
+            WHERE b.customer_id = $1
+            ORDER BY b.raised_at DESC, b.resource_id"#,
+        customer,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| Bar {
+            resource: row.resource,
+            name: row.name,
+            why: row.why,
+            raised_at: row.raised_at,
+        })
+        .collect())
 }

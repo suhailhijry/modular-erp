@@ -26,6 +26,7 @@ use erp_occupancy::{BadSpan, Claim, OccupancyError, Span};
 use erp_tenant::{CommandError, TenantDb};
 use erp_types::{AggregateId, DomainName, StreamId, Timestamp};
 
+use crate::bars::{BarEvent, Bars};
 use crate::pricing::{PriceError, Tariff, price};
 use crate::reservation::{Customer, DraftLine, Line, Reservation, ReservationEvent, Stage};
 use crate::resource::{Kind, Resource, ResourceEvent};
@@ -64,6 +65,12 @@ pub enum BookingError {
     Withdrawn(String),
     #[error("{resource} is not offered at that time")]
     NotOffered { resource: String },
+    /// **No override.** See [`crate::bars`]: a rule a click can step past is a
+    /// note, and these are not set for the reasons notes are.
+    #[error("{resource} may not be booked for this customer")]
+    Barred { resource: String },
+    #[error("a bar needs a reason, for whoever has to explain the refusal")]
+    NoReasonToBar,
     #[error("reservation {0} does not exist")]
     NoSuchReservation(String),
     #[error("reservation {reservation} is {stage} and nothing more can happen to it")]
@@ -117,6 +124,10 @@ impl erp_i18n::Localize for BookingError {
             Self::NotOffered { resource } => {
                 Message::new(messages::NOT_OFFERED).with("resource", MessageArg::text(resource))
             }
+            Self::Barred { resource } => {
+                Message::new(messages::BARRED).with("resource", MessageArg::text(resource))
+            }
+            Self::NoReasonToBar => Message::new(messages::NO_REASON_TO_BAR),
             Self::NoSuchReservation(id) => Message::new(messages::NO_SUCH_RESERVATION)
                 .with("reservation", MessageArg::text(id)),
             Self::Over { stage, .. } => {
@@ -585,6 +596,12 @@ pub async fn reserve(
             check_customer(&mut *conn, booking.customer.id.as_ref()).await?;
             let lines = priced(&mut *conn, &booking.lines).await?;
             check_offered(&mut *conn, &lines).await?;
+            check_not_barred(
+                &mut *conn,
+                booking.customer.id.as_ref(),
+                &resources_of(&lines),
+            )
+            .await?;
             // **Resolved in this transaction and stamped on the booking**, for
             // the reason the rates are: a business that changes what it asks
             // for next month has not changed what this booking asked for (L5).
@@ -709,6 +726,11 @@ pub async fn reschedule(
             let conn = &mut *tx;
             let lines = priced(&mut *conn, lines).await?;
             check_offered(&mut *conn, &lines).await?;
+            // **Against the reservation's own customer, not one passed in.**
+            // Rescheduling onto a barred stylist is the obvious way past a bar
+            // if only `reserve` asks.
+            let customer = customer_of(&mut *conn, id).await?;
+            check_not_barred(&mut *conn, customer.as_ref(), &resources_of(&lines)).await?;
 
             let committed = try_execute::<Reservation, _, _>(
                 &mut *conn,
@@ -775,6 +797,11 @@ pub async fn assign(
         let outcome = async {
             let conn = &mut *tx;
             let resource = available(&mut *conn, unit).await?;
+
+            // **A pool is the other way past a bar.** "Any stylist" names
+            // nothing barred at `reserve`, and the barred one is picked here.
+            let customer = customer_of(&mut *conn, id).await?;
+            check_not_barred(&mut *conn, customer.as_ref(), std::slice::from_ref(unit)).await?;
 
             // **The escalation §9e asks for.** A document that lapsed is not a
             // warning somebody ignored; it is a person who may not legally be
@@ -861,6 +888,124 @@ pub async fn assign(
         }
     }
     contended(id, Reservation::domain())
+}
+
+// --------------------------------------------------------------------- bars
+
+/// **This customer must not be booked with this resource, from now on.**
+///
+/// Raising a bar that is already in force is a no-op, so a form submitted twice
+/// leaves one bar and one lift removes it.
+///
+/// The reason is required and is kept for staff. See [`crate::bars`] for why
+/// there is no way to book past one.
+pub async fn raise_bar(
+    db: &TenantDb,
+    customer: &AggregateId,
+    resource: &AggregateId,
+    why: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome<BarEvent> {
+    let why = why.trim();
+    if why.is_empty() {
+        return Err(rejected(BookingError::NoReasonToBar));
+    }
+    let why = why.to_owned();
+    with_bars(db, customer, resource, metadata, move |bars| {
+        if bars.against(resource) {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(BarEvent::Raised {
+            resource: resource.clone(),
+            why: why.clone(),
+            at,
+        }))
+    })
+    .await
+}
+
+/// Ends one.
+///
+/// A no-op when there was no bar, because the caller wanted there to be none
+/// and there is none.
+pub async fn lift_bar(
+    db: &TenantDb,
+    customer: &AggregateId,
+    resource: &AggregateId,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome<BarEvent> {
+    with_bars(db, customer, resource, metadata, move |bars| {
+        if !bars.against(resource) {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(BarEvent::Lifted {
+            resource: resource.clone(),
+            at,
+        }))
+    })
+    .await
+}
+
+/// One decision about one customer's bars, with both ends checked first.
+///
+/// **Both ends, because a bar nobody can see is worse than no bar.** A typo in
+/// either id would otherwise be accepted, written, and enforce nothing — and
+/// the person who typed it would go away believing a rule was in place. Checked
+/// against the log for the reason everything else here is: a customer added a
+/// minute ago can be barred.
+///
+/// A **withdrawn** resource is deliberately still barrable. A stylist on leave
+/// is exactly who a complaint arrives about, and the bar has to be waiting when
+/// they come back.
+async fn with_bars<F>(
+    db: &TenantDb,
+    customer: &AggregateId,
+    resource: &AggregateId,
+    metadata: &Metadata,
+    decide: F,
+) -> Outcome<BarEvent>
+where
+    F: Fn(&Bars) -> Result<Decision<BarEvent>, BookingError> + Send + Sync,
+{
+    let decide = &decide;
+    for _ in 1..=MAX_ATTEMPTS {
+        let mut tx = db.begin().await?;
+        let outcome = async {
+            let conn = &mut *tx;
+            if !crm::accepts_documents(&mut *conn, customer)
+                .await
+                .map_err(ExecuteError::Load)?
+            {
+                return Err(ExecuteError::Rejected(BookingError::NoSuchCustomer(
+                    customer.to_string(),
+                )));
+            }
+            let loaded = erp_eventlog::load::<Resource>(&mut *conn, resource, crate::upcasters())
+                .await
+                .map_err(ExecuteError::Load)?;
+            if !loaded.aggregate.declared {
+                return Err(ExecuteError::Rejected(BookingError::NoSuchResource(
+                    resource.to_string(),
+                )));
+            }
+
+            try_execute::<Bars, _, _>(
+                &mut *conn,
+                customer,
+                crate::upcasters(),
+                metadata,
+                |loaded: &Loaded<Bars>| decide(&loaded.aggregate),
+            )
+            .await
+        }
+        .await;
+        if let Some(done) = settle(tx, outcome).await? {
+            return Ok(done);
+        }
+    }
+    contended(customer, Bars::domain())
 }
 
 // ------------------------------------------------------------------ helpers
@@ -1129,7 +1274,54 @@ async fn check_offered(
     Ok(())
 }
 
-/// Loads a resource and refuses one that is missing or out of service.
+/// **Refuses a booking that would put a customer with a resource they are
+/// barred from.**
+///
+/// Silent for a walk-in, because a booking that carries only a typed-in name is
+/// not a recognition — see [`crate::bars`]. That is the honest limit of this,
+/// and it is the same one every other rule keyed on a customer record has.
+///
+/// One load per booking, not one per resource, which is why [`Bars`] is keyed
+/// on the customer.
+async fn check_not_barred(
+    conn: &mut sqlx::PgConnection,
+    customer: Option<&AggregateId>,
+    resources: &[AggregateId],
+) -> Result<(), ExecuteError<BookingError>> {
+    let Some(customer) = customer else {
+        return Ok(());
+    };
+    let loaded = erp_eventlog::load::<Bars>(&mut *conn, customer, crate::upcasters())
+        .await
+        .map_err(ExecuteError::Load)?;
+    match loaded.aggregate.first_barred(resources) {
+        Some(resource) => Err(ExecuteError::Rejected(BookingError::Barred {
+            resource: resource.to_string(),
+        })),
+        None => Ok(()),
+    }
+}
+
+/// Every resource a set of lines names, for [`check_not_barred`].
+fn resources_of(lines: &[Line]) -> Vec<AggregateId> {
+    lines
+        .iter()
+        .flat_map(|line| line.takes.iter().map(|held| held.resource.clone()))
+        .collect()
+}
+
+/// The `crm` record a reservation is for, from the log, or `None` for a
+/// walk-in.
+async fn customer_of(
+    conn: &mut sqlx::PgConnection,
+    reservation: &AggregateId,
+) -> Result<Option<AggregateId>, ExecuteError<BookingError>> {
+    let loaded = erp_eventlog::load::<Reservation>(&mut *conn, reservation, crate::upcasters())
+        .await
+        .map_err(ExecuteError::Load)?;
+    Ok(loaded.aggregate.customer.and_then(|customer| customer.id))
+}
+
 /// What a line books, which is what the person assigned to it has to be able to
 /// do.
 ///
@@ -1153,6 +1345,7 @@ async fn booked_services(
         .unwrap_or_default())
 }
 
+/// Loads a resource and refuses one that is missing or out of service.
 async fn available(
     conn: &mut sqlx::PgConnection,
     id: &AggregateId,
