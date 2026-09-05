@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", card as \"card!\", invoice, advance_for,\n                  advance_net_minor, advance_buyer, advance_buyer_vat,\n                  amount_minor as \"amount_minor!\", currency as \"currency!\",\n                  callback_url as \"callback_url!\"\n             FROM proj_payments.payment\n            WHERE stage = 'requested' AND provider = $1 AND card IS NOT NULL\n            ORDER BY started_at ASC LIMIT $2",
+  "query": "SELECT id as \"id!\", card, invoice, advance_for,\n                  advance_net_minor, advance_buyer, advance_buyer_vat,\n                  amount_minor as \"amount_minor!\", currency as \"currency!\",\n                  callback_url as \"callback_url!\"\n             FROM proj_payments.payment\n            WHERE stage = 'requested' AND provider = $1\n            ORDER BY started_at ASC LIMIT $2",
   "describe": {
     "columns": [
       {
@@ -16,7 +16,7 @@
       },
       {
         "ordinal": 1,
-        "name": "card!",
+        "name": "card",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -133,5 +133,5 @@
       true
     ]
   },
-  "hash": "2f403daa1e7468cd06ced906d8be697071b02661019f610d70d8d911b453c47a"
+  "hash": "f0bd5af62248a5e46a3c2f94495337f69cce598fa0904b3b35e8bf9d2165336c"
 }

@@ -1464,3 +1464,201 @@ async fn somebody_whose_iqama_has_lapsed_cannot_be_assigned() {
 
     fixture.cleanup().await;
 }
+
+// ---------------------------------------------------------------------------
+// Deposits at booking
+// ---------------------------------------------------------------------------
+
+use erp_types::Money;
+
+fn riyals(major: i64) -> Money {
+    Money::from_minor(major * 100, sar())
+}
+
+/// A line with a price on it, which is what a deposit is a fraction of.
+fn priced_line(what: &str, from: &str, until: &str, takes: &[&str], rate: Money) -> DraftLine {
+    DraftLine {
+        what: what.to_owned(),
+        span: span(from, until),
+        takes: takes.iter().map(|r| Held::one(code(r))).collect(),
+        charge: Some(booking::Charge {
+            rate,
+            quantity: 1,
+            allowances: Vec::new(),
+        }),
+    }
+}
+
+impl Fixture {
+    async fn set_public(&self, settings: booking::PublicBooking) {
+        let mut conn = self.db.acquire().await.expect("connection");
+        erp_eventlog::configuration::set(&mut conn, booking::PublicBooking::KEY, &settings, None)
+            .await
+            .expect("stores the setting");
+    }
+
+    async fn book_priced(&self, id: &str, rate: Money, from: &str, until: &str) -> AggregateId {
+        let draft = booking_for(
+            Some("CUST-1"),
+            vec![priced_line("قص", from, until, &["stylist-1"], rate)],
+        );
+        reserve(&self.db, &code(id), &draft, &Metadata::default())
+            .await
+            .unwrap_or_else(|e| panic!("{id} should book: {e}"));
+        code(id)
+    }
+}
+
+/// **What holding the slot costs, worked out when the slot is taken.** A
+/// fraction of what the booking was priced at, before tax — and stamped on the
+/// booking, so a business that changes what it asks for next month has not
+/// changed what this booking asked for.
+#[tokio::test]
+async fn a_booking_records_the_deposit_it_was_asked_for() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+    fixture
+        .set_public(booking::PublicBooking {
+            open: true,
+            deposit_bp: 2_000,
+            hold_minutes: 30,
+        })
+        .await;
+
+    let id = fixture.book_priced("RES-D1", riyals(200), "10", "11").await;
+    fixture.project().await;
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let owed = booking::awaiting_deposit(&mut conn, id.as_str())
+        .await
+        .expect("reads")
+        .expect("a deposit was asked for");
+    // Twenty per cent of 200, before tax.
+    assert_eq!(owed.deposit, riyals(40));
+    assert!(owed.due_by > at("08"), "the hold has a deadline");
+
+    fixture.cleanup().await;
+}
+
+/// A business that asks for nothing gets nothing, and no hold can lapse.
+#[tokio::test]
+async fn a_business_that_asks_for_no_deposit_records_none() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+    fixture
+        .set_public(booking::PublicBooking {
+            open: true,
+            deposit_bp: 0,
+            hold_minutes: 30,
+        })
+        .await;
+
+    let id = fixture.book_priced("RES-D2", riyals(200), "10", "11").await;
+    fixture.project().await;
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    assert!(
+        booking::awaiting_deposit(&mut conn, id.as_str())
+            .await
+            .expect("reads")
+            .is_none(),
+        "a deposit was invented"
+    );
+    let lapsed = booking::lapsed_holds(&mut conn, at("08") + chrono::Duration::days(3_650), 10)
+        .await
+        .expect("reads");
+    assert!(lapsed.is_empty(), "{lapsed:?}");
+    drop(conn);
+
+    fixture.cleanup().await;
+}
+
+/// **A slot nobody paid for is released; one that was paid for is not.** That
+/// is the whole point of asking: a held slot is one nobody else can take.
+#[tokio::test]
+async fn an_unpaid_hold_lapses_and_a_paid_one_does_not() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+    fixture
+        .set_public(booking::PublicBooking {
+            open: true,
+            deposit_bp: 2_000,
+            hold_minutes: 30,
+        })
+        .await;
+
+    let unpaid = fixture.book_priced("RES-D3", riyals(200), "10", "11").await;
+    let paid = fixture.book_priced("RES-D4", riyals(200), "12", "13").await;
+
+    let mut tx = fixture.db.begin().await.expect("transaction");
+    booking::secure_in(
+        &mut tx,
+        &paid,
+        &code("pay-1"),
+        at("09"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("secures");
+    tx.commit().await.expect("commits");
+    fixture.project().await;
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let lapsed = booking::lapsed_holds(&mut conn, at("08") + chrono::Duration::hours(2), 10)
+        .await
+        .expect("reads");
+    drop(conn);
+
+    assert_eq!(lapsed.len(), 1, "{lapsed:?}");
+    assert_eq!(lapsed[0].id, unpaid, "the paid one was released");
+
+    fixture.cleanup().await;
+}
+
+/// **Told, not read.** Whether the money arrived is a fact this module is
+/// given, which is what lets a diary answer "has this been paid for" without
+/// reading another projection group (L3).
+#[tokio::test]
+async fn securing_a_booking_is_recorded_and_the_second_payment_changes_nothing() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+    fixture
+        .set_public(booking::PublicBooking {
+            open: true,
+            deposit_bp: 2_000,
+            hold_minutes: 30,
+        })
+        .await;
+    let id = fixture.book_priced("RES-D5", riyals(200), "10", "11").await;
+
+    for payment in ["pay-1", "pay-2"] {
+        let mut tx = fixture.db.begin().await.expect("transaction");
+        booking::secure_in(&mut tx, &id, &code(payment), at("09"), &Metadata::default())
+            .await
+            .expect("secures");
+        tx.commit().await.expect("commits");
+    }
+    fixture.project().await;
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    assert!(
+        booking::awaiting_deposit(&mut conn, id.as_str())
+            .await
+            .expect("reads")
+            .is_none(),
+        "it still looks unpaid"
+    );
+    drop(conn);
+
+    // **The first payment holds it.** A second is money to give back, not a
+    // fact about this booking — so the id recorded is the first one.
+    let held: Option<String> =
+        sqlx::query_scalar("SELECT secured_by FROM proj_booking.reservation WHERE id = $1")
+            .bind(id.as_str())
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("reads");
+    assert_eq!(held.as_deref(), Some("pay-1"));
+
+    fixture.cleanup().await;
+}

@@ -86,11 +86,39 @@ CREATE TABLE IF NOT EXISTS reservation (
     ends_at        TIMESTAMPTZ NOT NULL,
     CONSTRAINT reservation_is_half_open CHECK (ends_at > starts_at),
 
+    -- **What was asked for to hold the slot**, and by when. Both null when the
+    -- business asks for nothing, which is the default.
+    --
+    -- Before tax: receiving the money is itself a tax point, and whoever raises
+    -- the document for it works the tax forward from a net.
+    deposit_net      BIGINT,
+    deposit_currency TEXT CHECK (length(deposit_currency) = 3),
+    deposit_due_by   TIMESTAMPTZ,
+    CONSTRAINT reservation_deposit_is_whole
+        CHECK ((deposit_net IS NULL) = (deposit_due_by IS NULL)
+           AND (deposit_net IS NULL) = (deposit_currency IS NULL)),
+
+    -- **What paid it.** Opaque here — this module does not know what a gateway
+    -- is — and null until something says the money arrived.
+    secured_by     TEXT,
+    secured_at     TIMESTAMPTZ,
+
     note           TEXT,
     reserved_on    TIMESTAMPTZ NOT NULL,
     recorded_at    TIMESTAMPTZ NOT NULL,
     position       BIGINT NOT NULL
 );
+
+-- **"Which held slots has nobody paid for?"** — the list the hold-expiry job
+-- works, and the only question it has to ask.
+--
+-- It is answerable inside this group alone, which is the point: whether the
+-- money arrived is a fact `booking` was *told*, not one it reads out of
+-- `proj_payments`. A diary that joined across two projection groups would be
+-- reading two checkpoints that can disagree (L3).
+CREATE INDEX IF NOT EXISTS reservation_unpaid_hold
+    ON reservation (deposit_due_by)
+    WHERE stage = 'reserved' AND deposit_due_by IS NOT NULL AND secured_by IS NULL;
 
 -- The diary, in the order a day is read. Ascending, because a calendar opens on
 -- what is coming rather than on what already happened.

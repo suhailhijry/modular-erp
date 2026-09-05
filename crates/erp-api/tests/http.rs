@@ -6889,6 +6889,7 @@ async fn a_stranger_cannot_book_until_the_business_opens_the_diary() {
             &mut conn,
             booking::PublicBooking::KEY,
             &booking::PublicBooking {
+                hold_minutes: 0,
                 open: true,
                 deposit_bp: 2_000,
             },

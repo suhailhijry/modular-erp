@@ -79,8 +79,8 @@ pub use projections::{
     by_gateway_id, card, cards, payment, payouts, projections,
 };
 pub use sweep::{
-    Attempted, Doorbell, Swept, Waiting, charge_requested, configured, doorbells, pending,
-    requested, settle_pending,
+    Attempted, Doorbell, Swept, Waiting, charge_requested, collect_awaited, configured, doorbells,
+    pending, requested, settle_pending,
 };
 
 use erp_i18n::StaticCatalog;

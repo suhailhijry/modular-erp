@@ -1827,6 +1827,47 @@
         ],
         "type": "object"
       },
+      "DepositDue": {
+        "description": "What the customer has to pay, and the charge to pay it against.",
+        "properties": {
+          "amount": {
+            "description": "Minor units, tax included. Worked out here; the caller sends no amount.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "currency": {
+            "description": "ISO-4217, three letters.",
+            "type": "string"
+          },
+          "due_by": {
+            "description": "**When the slot stops being held.** Nothing is reserved for somebody who\nhas not paid by then.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "net": {
+            "description": "What it comes to before tax, and the tax on it, so a page can show the\ncustomer the breakdown it is about to charge them.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "payment": {
+            "description": "**The charge to pay.** Give this to the gateway's form as its own id —\nMoyasar's `given_id` — so what the customer pays is this charge and not\none the browser chose.",
+            "type": "string"
+          },
+          "tax": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "payment",
+          "amount",
+          "currency",
+          "net",
+          "tax",
+          "due_by"
+        ],
+        "type": "object"
+      },
       "DepositPolicy": {
         "description": "Whether keeping a deposit is a sale.",
         "properties": {
@@ -10123,6 +10164,122 @@
         },
         "security": [],
         "summary": "Book a slot.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/public/reservations/{reservation}/deposit": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "# It takes no money and no amount\n\nIt creates a charge and answers with its id. What the customer pays is\nworked out from the booking — the fraction the business asked for, of what\nthe booking was priced at, with tax — so nothing in the request decides what\nanybody is charged.\n\nThe browser then pays that charge against the gateway's publishable key,\ngiving it this `payment` as its own id. This system finds out by asking the\ngateway, not by being told: a callback is a doorbell, and what a browser\nreports is not evidence.\n\n# It answers the same thing twice\n\nSending the same `Idempotency-Key` again returns the same charge rather than\nmaking a second one, which is what a customer who reloaded the page needs.",
+        "operationId": "public_deposit",
+        "parameters": [
+          {
+            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `POST /v1/booking/public/reservations`.",
+            "in": "path",
+            "name": "reservation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A UUID. Becomes the charge's id and the gateway's, so a reload pays the same charge.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositDue"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not an id, or a key that is not a UUID"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such business, it does not take bookings online, or that booking is not waiting to be paid"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This surface is bounded per origin and per business."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "Ask for the charge that holds a public booking.",
         "tags": [
           "booking"
         ]

@@ -2,10 +2,34 @@
 
 use erp_eventlog::{Aggregate, DomainEvent};
 use erp_occupancy::Span;
-use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
+use erp_types::{AggregateId, DomainName, EventName, Money, SchemaVersion, Timestamp};
 
 use crate::pricing::{Charge, Charged};
 use serde::{Deserialize, Serialize};
+
+/// **What a business asks for to hold a slot.**
+///
+/// # Why the net and not the total
+///
+/// Because tax is not this module's, and a deposit is money received — which is
+/// a tax point, so somebody has to raise a document for it. Whoever does that
+/// works the tax out from a net the way every other invoice does. Carrying a
+/// total here would mean either taxing it twice or working the net back out of
+/// it, and working a net back out of a gross does not always land.
+///
+/// # Why the deadline is on the booking
+///
+/// A slot held for somebody who never pays is a slot nobody else could take.
+/// The deadline is stamped when the booking is made, from the tenant's setting,
+/// so changing the setting next month does not move a deadline somebody was
+/// already given (L5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deposit {
+    /// **Before tax.** What the prepayment invoice will be raised for.
+    pub net: Money,
+    /// When the hold lapses if nothing has paid it.
+    pub due_by: Timestamp,
+}
 
 /// Where a reservation is in its life.
 ///
@@ -230,6 +254,14 @@ pub enum ReservationEvent {
         /// customer: it is the heavy variant, and `Box<T>` serialises as `T`.
         customer: Box<Customer>,
         lines: Vec<Line>,
+        /// **What holding this slot costs**, when the business asks for one.
+        ///
+        /// Computed here, at the moment of booking, from the tenant's setting
+        /// and what the booking was priced at — so a business that changes what
+        /// it asks for next month has not changed what this booking asked for
+        /// (L5). `None` when they ask for nothing, which is the default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deposit: Option<Deposit>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
         at: Timestamp,
@@ -250,6 +282,19 @@ pub enum ReservationEvent {
     /// the same operation to the engine underneath: give back what was held,
     /// then take what is wanted, in one transaction.
     Rescheduled { lines: Vec<Line>, at: Timestamp },
+    /// **The deposit arrived.** Recorded when something outside this module
+    /// says the money is real.
+    ///
+    /// The payment is an **opaque id**: this module does not know what a
+    /// gateway is, the same way `payments` does not know what a booking is.
+    /// What it knows is that the slot is paid for, which is the one fact a
+    /// diary needs — and it is why an unpaid hold can be released without
+    /// asking anybody.
+    Secured {
+        /// What paid it. Opaque, and kept so a person can follow the money.
+        payment: AggregateId,
+        at: Timestamp,
+    },
     /// A unit picked out of a pool. See `crate::commands::assign`.
     ///
     /// Assigning again **replaces**: a room reassigned from 302 to 305 is one
@@ -270,7 +315,8 @@ impl DomainEvent for ReservationEvent {
             Self::Reserved { .. } => Self::NAMES[0],
             Self::Moved { .. } => Self::NAMES[1],
             Self::Rescheduled { .. } => Self::NAMES[2],
-            Self::Assigned { .. } => Self::NAMES[3],
+            Self::Secured { .. } => Self::NAMES[3],
+            Self::Assigned { .. } => Self::NAMES[4],
         })
     }
 
@@ -280,10 +326,11 @@ impl DomainEvent for ReservationEvent {
 }
 
 impl ReservationEvent {
-    pub const NAMES: [&'static str; 4] = [
+    pub const NAMES: [&'static str; 5] = [
         "booking.reservation.reserved",
         "booking.reservation.moved",
         "booking.reservation.rescheduled",
+        "booking.reservation.secured",
         "booking.reservation.assigned",
     ];
 }
@@ -293,6 +340,10 @@ pub struct Reservation {
     /// `None` until it is reserved, which is how "does it exist" is answered.
     pub stage: Option<Stage>,
     pub customer: Option<Customer>,
+    /// What was asked for to hold this slot, and by when.
+    pub deposit: Option<Deposit>,
+    /// What paid it, once something has.
+    pub secured_by: Option<AggregateId>,
     pub lines: Vec<Line>,
     /// The unit picked for each line, by index. Sparse: most lines never have
     /// one, because most businesses book the thing itself.
@@ -309,12 +360,19 @@ impl Aggregate for Reservation {
     fn apply(&mut self, event: &Self::Event) {
         match event {
             ReservationEvent::Reserved {
-                customer, lines, ..
+                customer,
+                lines,
+                deposit,
+                ..
             } => {
                 self.stage = Some(Stage::Reserved);
                 self.customer = Some((**customer).clone());
+                self.deposit.clone_from(deposit);
                 self.lines.clone_from(lines);
                 self.units = vec![None; lines.len()];
+            }
+            ReservationEvent::Secured { payment, .. } => {
+                self.secured_by = Some(payment.clone());
             }
             ReservationEvent::Moved { to, .. } => self.stage = Some(*to),
             ReservationEvent::Rescheduled { lines, .. } => {

@@ -9,7 +9,7 @@
 
 use erp_eventlog::Envelope;
 use erp_projection::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
-use erp_types::{CurrencyCode, Cursor, Money, Page, Timestamp};
+use erp_types::{AggregateId, CurrencyCode, Cursor, Money, Page, Timestamp};
 use sqlx::PgConnection;
 
 use crate::pricing::Charged;
@@ -189,6 +189,7 @@ impl Projection for Reservations {
             ReservationEvent::Reserved {
                 customer,
                 lines,
+                deposit,
                 note,
                 at,
             } => {
@@ -196,8 +197,9 @@ impl Projection for Reservations {
                 sqlx::query(
                     "INSERT INTO reservation
                          (id, customer_id, customer_name, customer_phone, stage,
-                          starts_at, ends_at, note, reserved_on, recorded_at, position)
-                     VALUES ($1,$2,$3,$4,'reserved',$5,$6,$7,$8,$9,$10)",
+                          starts_at, ends_at, deposit_net, deposit_currency,
+                          deposit_due_by, note, reserved_on, recorded_at, position)
+                     VALUES ($1,$2,$3,$4,'reserved',$5,$6,$7,$8,$9,$10,$11,$12,$13)",
                 )
                 .bind(id)
                 .bind(customer.id.as_ref().map(erp_types::AggregateId::as_str))
@@ -205,6 +207,9 @@ impl Projection for Reservations {
                 .bind(&customer.phone)
                 .bind(starts_at)
                 .bind(ends_at)
+                .bind(deposit.as_ref().map(|d| d.net.minor()))
+                .bind(deposit.as_ref().map(|d| d.net.currency().to_string()))
+                .bind(deposit.as_ref().map(|d| d.due_by))
                 .bind(none_if_blank(&note))
                 .bind(at)
                 .bind(ctx.event_time())
@@ -212,6 +217,22 @@ impl Projection for Reservations {
                 .execute(&mut *conn)
                 .await?;
                 write_lines(conn, id, &lines).await?;
+            }
+            // **The slot is paid for.** What paid it is opaque here, and kept
+            // so a person can follow the money out of the diary.
+            ReservationEvent::Secured { payment, at } => {
+                sqlx::query(
+                    "UPDATE reservation
+                        SET secured_by = $2, secured_at = $3, recorded_at = $4, position = $5
+                      WHERE id = $1",
+                )
+                .bind(id)
+                .bind(payment.as_str())
+                .bind(at)
+                .bind(ctx.event_time())
+                .bind(ctx.position().get())
+                .execute(&mut *conn)
+                .await?;
             }
             ReservationEvent::Moved { to, why, .. } => {
                 sqlx::query(
@@ -682,4 +703,86 @@ pub async fn reservation(
 #[must_use]
 pub fn stages() -> Vec<&'static str> {
     Stage::ALL.into_iter().map(Stage::as_str).collect()
+}
+
+/// A held slot nobody has paid for, past the time it was to be paid by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lapsed {
+    pub id: AggregateId,
+    /// What was asked for, before tax. For a message, not for a decision.
+    pub deposit: Money,
+    pub due_by: Timestamp,
+}
+
+/// **Held slots nobody paid for.** The worklist the hold-expiry job works.
+///
+/// Oldest deadline first, so the slot that has been blocked longest is the one
+/// released first — and so the batch is a queue rather than a lottery.
+///
+/// **Answerable inside this group alone.** Whether the money arrived is a fact
+/// this module was *told* — `secured_by` — rather than one it reads out of
+/// `proj_payments`, which is another projection group on its own checkpoint
+/// (L3). That is what a `Secured` event is for.
+pub async fn lapsed_holds(
+    conn: &mut sqlx::PgConnection,
+    now: Timestamp,
+    limit: i64,
+) -> Result<Vec<Lapsed>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id as "id!", deposit_net as "deposit_net!",
+                  deposit_currency as "deposit_currency!", deposit_due_by as "deposit_due_by!"
+             FROM proj_booking.reservation
+            WHERE stage = 'reserved'
+              AND deposit_due_by IS NOT NULL
+              AND secured_by IS NULL
+              AND deposit_due_by < $1
+            ORDER BY deposit_due_by ASC LIMIT $2"#,
+        now,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(Lapsed {
+                id: AggregateId::new(&row.id).ok()?,
+                deposit: Money::from_minor(
+                    row.deposit_net,
+                    CurrencyCode::new(&row.deposit_currency).ok()?,
+                ),
+                due_by: row.deposit_due_by,
+            })
+        })
+        .collect())
+}
+
+/// What a booking is waiting to be paid, if anything.
+///
+/// **`None` once it is secured**, because the question this answers is "does
+/// somebody still owe for this slot" and the answer is then no.
+pub async fn awaiting_deposit(
+    conn: &mut sqlx::PgConnection,
+    reservation: &str,
+) -> Result<Option<Lapsed>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"SELECT id as "id!", deposit_net, deposit_currency, deposit_due_by
+             FROM proj_booking.reservation
+            WHERE id = $1 AND secured_by IS NULL AND stage = 'reserved'"#,
+        reservation,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(row.and_then(|row| {
+        Some(Lapsed {
+            id: AggregateId::new(&row.id).ok()?,
+            deposit: Money::from_minor(
+                row.deposit_net?,
+                CurrencyCode::new(&row.deposit_currency?).ok()?,
+            ),
+            due_by: row.deposit_due_by?,
+        })
+    }))
 }

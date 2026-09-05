@@ -1159,7 +1159,7 @@ async fn charge_saved_card(
         &mut tx,
         key.id(),
         &crate::Collection {
-            card,
+            card: Some(card),
             provider: on_file.provider,
             collects,
             amount: Money::from_minor(body.amount, currency),

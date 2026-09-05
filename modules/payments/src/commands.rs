@@ -127,7 +127,18 @@ pub async fn start_in(
                 // A retried request. The stored attempt wins.
                 return Ok(Decision::nothing());
             }
-            let (invoice, advance) = attempt.collects.split();
+            // **What a payment collects was settled when it was asked for.**
+            // A pass that comes along later — charging a saved card, or finding
+            // that the customer has paid — supplies the gateway's id and
+            // nothing else. Taking the target from the caller here would let
+            // the second half of a two-step payment quietly point somewhere
+            // the first half never did.
+            let (invoice, advance) = loaded
+                .aggregate
+                .collects
+                .clone()
+                .unwrap_or_else(|| attempt.collects.clone())
+                .split();
             Ok(Decision::one(PaymentEvent::Started {
                 provider: attempt.provider.clone(),
                 gateway_id: attempt.gateway_id.clone(),
@@ -1030,7 +1041,9 @@ pub async fn forget_card_in(
 /// What somebody wants taken off a saved card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Collection {
-    pub card: AggregateId,
+    /// The saved card to charge, or `None` when the customer pays it
+    /// themselves in their own browser.
+    pub card: Option<AggregateId>,
     pub provider: String,
     /// An invoice, or a deposit taken before there was one. See [`Collects`] —
     /// a saved card is exactly how a booking deposit gets charged.

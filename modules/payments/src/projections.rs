@@ -291,7 +291,7 @@ impl Collected {
         .bind(advance.as_ref().and_then(|a| a.buyer.vat_number.clone()))
         .bind(amount.minor())
         .bind(amount.currency().to_string())
-        .bind(card.as_str())
+        .bind(card.as_ref().map(AggregateId::as_str))
         .bind(&callback_url)
         .bind(requested_at)
         .bind(envelope.position)

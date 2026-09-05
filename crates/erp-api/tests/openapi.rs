@@ -228,10 +228,25 @@ fn only_the_deliberately_public_routes_are_public() {
         // its capacity; `availability` answers one number.
         ("get", "/v1/booking/public/services"),
         ("get", "/v1/booking/public/availability"),
-        // The one public **write**, and the only one in the build. It is off
-        // unless the business turned it on, it never confirms what it takes,
-        // and it never names a customer record on the caller's word.
+        // A public **write**. It is off unless the business turned it on, it
+        // never confirms what it takes, and it never names a customer record on
+        // the caller's word.
         ("post", "/v1/booking/public/reservations"),
+        // **The second public write, and the one that touches money.**
+        //
+        // What makes it safe is that it decides everything: the amount is
+        // worked out from the booking and the tenant's own settings, and the
+        // request carries none — so the worst a stranger can do is create a
+        // charge they would have to pay themselves. The charge's id is this
+        // system's too, passed to the gateway as its own, which is what stops
+        // anybody attaching a stranger's payment to their booking.
+        //
+        // It takes no money. The customer's browser pays the charge against the
+        // publishable key, and this system finds out by asking the gateway.
+        (
+            "post",
+            "/v1/booking/public/reservations/{reservation}/deposit",
+        ),
         // **A short link, and the token in the path is the credential.**
         //
         // The person tapping it has never signed in and never will — it arrived

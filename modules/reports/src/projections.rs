@@ -321,7 +321,12 @@ impl Projection for Diary {
             // Assigning a unit changes who does the work, not whether it
             // happened. `booking::performed` is where per-person revenue is
             // answered, and it is a different question from utilisation.
-            booking::ReservationEvent::Assigned { .. } => Ok(()),
+            //
+            // A deposit arriving changes neither: the slot was held from the
+            // moment it was booked, and utilisation is about the hours, not
+            // about who has paid for them.
+            booking::ReservationEvent::Assigned { .. }
+            | booking::ReservationEvent::Secured { .. } => Ok(()),
         }
     }
 }

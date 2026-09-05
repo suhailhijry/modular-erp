@@ -62,19 +62,19 @@ pub mod trades;
 pub use commands::{
     Amendment, Booking as Draft, BookingError, CUSTOMER_PREFIX, Details, amend_resource, assign,
     customer_resource, declare_resource, fit_out, move_to, reschedule, reserve, restore_resource,
-    schedule_resource, withdraw_resource,
+    schedule_resource, secure_in, withdraw_resource,
 };
 pub use erp_recurrence::{Availability, BadRule, Calendar, NotAnOffset, any_covers};
 pub use pricing::{
     Allowance, Applied, Band, Charge, Charged, PriceError, PublicBooking, Tariff, price,
 };
 pub use projections::{
-    Booking, Performed, ReservationDetail, ReservationLine, ReservationSummary, Reservations,
-    ResourceDetail, ResourceSummary, Resources, performed, projections, reservation, reservations,
-    resource, resources, stages,
+    Booking, Lapsed, Performed, ReservationDetail, ReservationLine, ReservationSummary,
+    Reservations, ResourceDetail, ResourceSummary, Resources, awaiting_deposit, lapsed_holds,
+    performed, projections, reservation, reservations, resource, resources, stages,
 };
 pub use reservation::{
-    Customer, DraftLine, Held, Line, Reservation, ReservationEvent, Stage, UnknownStage,
+    Customer, Deposit, DraftLine, Held, Line, Reservation, ReservationEvent, Stage, UnknownStage,
 };
 pub use resource::{Kind, Resource, ResourceEvent, UnknownKind};
 pub use trades::{FittedOut, TRADES, TemplateHours, TemplateResource, Trade, trade};

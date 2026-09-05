@@ -39,6 +39,7 @@
 
 mod catalog;
 mod codes;
+mod deposits;
 mod hooks;
 mod invitations;
 mod keys;

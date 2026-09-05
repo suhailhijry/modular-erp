@@ -92,18 +92,17 @@ pub struct Band {
 /// something a business did not agree to. So this is a tenant's own decision,
 /// stored where their other decisions are, and its default is no.
 ///
-/// # Why a deposit is not enforceable here yet
+/// # What a deposit does now
 ///
-/// A deposit is the honest answer to no-shows and `prepaid` already models one
-/// — an entitlement with no uses, held against the booking it secures. What is
-/// missing is the half that takes the money: card payments are Phase 12a, and
-/// there is no gateway.
+/// [`Self::deposit_bp`] is a fraction of what the booking was priced at, and it
+/// is **taken before the slot is held**: the reservation records what was asked
+/// for and by when, and the booking is not secured until something says the
+/// money arrived. An unpaid hold lapses at [`Self::hold_minutes`].
 ///
-/// So [`Self::deposit_bp`] is recorded and **not charged**. A tenant who sets it
-/// is describing what they will ask for; nothing in this build collects it, and
-/// pretending otherwise would be a public booking that claims to be secured and
-/// is not. It is here rather than added later because the shape is known and a
-/// setting that arrives with the gateway is a setting nobody had configured.
+/// The fraction applies to the booking's **net** — what it comes to before tax
+/// — because receiving the money is itself a tax point and whoever raises the
+/// document for it works the tax forward from a net. See
+/// `crate::Deposit`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicBooking {
     /// Off by default. **The absence of a setting is a no**, not a yes.
@@ -113,6 +112,16 @@ pub struct PublicBooking {
     /// Recorded, not charged — see above. Zero means none.
     #[serde(default)]
     pub deposit_bp: u32,
+    /// **How long a slot is held for somebody who has not paid.**
+    ///
+    /// Zero, the default, means indefinitely — which is right for a business
+    /// that asks for no deposit, and wrong for one that does: a slot held for
+    /// somebody who never pays is a slot nobody else could take.
+    ///
+    /// Stamped onto the booking when it is made, so changing this does not move
+    /// a deadline somebody was already given (L5).
+    #[serde(default)]
+    pub hold_minutes: u32,
 }
 
 impl PublicBooking {

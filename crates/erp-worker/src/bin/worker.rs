@@ -135,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     worker = worker
         .with_job(Arc::new(BookingReminders))
+        .with_job(Arc::new(ExpireUnpaidHolds))
         .with_job(Arc::new(RetirePushTokens))
         .with_platform_job(Arc::new(SweepOneTimeCodes));
 
@@ -693,6 +694,84 @@ const REMINDER_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(2);
 /// A tenant that has not written `booking.reminder` sends no reminders, and
 /// that is the correct default: this system does not get to decide what a
 /// business says to its customers, or that it says anything at all.
+/// How many lapsed holds one pass releases, per tenant.
+const HOLD_BATCH: i64 = 100;
+
+/// **Releases slots nobody paid for.**
+///
+/// A business that asks for a deposit is asking because a held slot is a slot
+/// nobody else can take. Somebody who books and never pays has taken one for
+/// free, and the whole point of the deposit is that they cannot — so the hold
+/// has to lapse on its own, without anybody watching for it.
+///
+/// # It asks one question, of one projection group
+///
+/// "Is this booking still `reserved`, was a deposit asked for, is it past its
+/// deadline, and has nothing paid it." All four are columns on
+/// `proj_booking.reservation`, because whether the money arrived is a fact this
+/// module was **told** — `Secured`, written by the settle job above — rather
+/// than one it reads out of `proj_payments`. A job that joined the two would be
+/// reading two checkpoints that can disagree, and the disagreement it would hit
+/// is the one that matters: a deposit that settled a moment ago and whose
+/// booking has not heard yet.
+///
+/// That ordering is deliberate and it only fails safe. `Secured` is written
+/// before this looks, so the worst case is a booking released a tick after its
+/// deadline rather than one released after it was paid for.
+struct ExpireUnpaidHolds;
+
+#[async_trait::async_trait]
+impl erp_worker::Job for ExpireUnpaidHolds {
+    fn name(&self) -> &'static str {
+        "booking.expire_unpaid_holds"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(booking::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        let now = chrono::Utc::now();
+        let lapsed = {
+            let mut conn = db.read().await?;
+            booking::lapsed_holds(&mut conn, now, HOLD_BATCH).await?
+        };
+        if lapsed.is_empty() {
+            return Ok(Activity::Idle);
+        }
+
+        let mut released = 0;
+        for hold in &lapsed {
+            // Each on its own, because one booking refusing to move must not
+            // roll back the ten before it that were fine.
+            match booking::move_to(
+                db,
+                &hold.id,
+                booking::Stage::Cancelled,
+                "the deposit was not paid in time",
+                now,
+                &by_the_platform(),
+            )
+            .await
+            {
+                Ok(_) => released += 1,
+                Err(e) => tracing::warn!(
+                    tenant = %db.tenant(),
+                    reservation = %hold.id,
+                    error = %e,
+                    "an unpaid hold could not be released"
+                ),
+            }
+        }
+
+        Ok(if released > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
+
 struct BookingReminders;
 
 #[async_trait::async_trait]
@@ -1079,6 +1158,20 @@ impl erp_worker::Job for SettleGatewayPayments {
                 );
             }
 
+            // **And the ones the customer pays themselves.** A deposit's
+            // payment is created in their browser, against the id this system
+            // already chose; nothing here charges it, and the only question is
+            // whether they have.
+            let awaited = payments::collect_awaited(
+                db,
+                gateway.as_ref(),
+                chrono::Utc::now(),
+                PAYMENT_BATCH,
+                &by_the_platform(),
+            )
+            .await?;
+            resolved += awaited.started;
+
             let swept = payments::settle_pending(
                 db,
                 gateway.as_ref(),
@@ -1100,6 +1193,47 @@ impl erp_worker::Job for SettleGatewayPayments {
                     resolved = swept.resolved,
                     "the payment sweep stopped early; the rest stay pending"
                 );
+            }
+
+            // **The join, and it lives here because neither module may make
+            // it.** `payments` cannot name `booking` and `booking` cannot name
+            // `payments`: `requires` is a hard AND, so one direction forces a
+            // diary on every shop that takes a card and the other forces a
+            // gateway on every salon. The worker depends on both, so it is
+            // where "this deposit settled, so that slot is paid for" belongs.
+            //
+            // **Not in the settling transaction**, and it cannot be — they are
+            // different modules' aggregates and the money must commit whatever
+            // the diary says. So this is a repair rather than a step: it runs
+            // for anything settled on this pass, and `secure_in` is a no-op on
+            // a booking already told. A failure here leaves a paid deposit on a
+            // booking that still looks unpaid, which the next tick fixes and
+            // the hold-expiry job is told to leave alone.
+            for (reservation, payment) in &swept.secured {
+                let mut tx = db.begin().await?;
+                match booking::secure_in(
+                    &mut tx,
+                    reservation,
+                    payment,
+                    chrono::Utc::now(),
+                    &by_the_platform(),
+                )
+                .await
+                {
+                    Ok(_) => tx.commit().await?,
+                    Err(e) => {
+                        tx.rollback().await?;
+                        // Loudly: somebody has paid for a slot the diary does
+                        // not know is paid for, and nothing else says so.
+                        tracing::error!(
+                            tenant = %db.tenant(),
+                            %reservation,
+                            %payment,
+                            error = %e,
+                            "a settled deposit could not be recorded against its booking"
+                        );
+                    }
+                }
             }
         }
 

@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,203 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,207 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -650,6 +650,71 @@ before they will lend, so `Charge` carries an optional `Buyer` and `Basket` and
 the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
+
+### 39 · Deposits at booking, and the public surface that takes them
+
+**The loop, end to end.** A public booking records what holding the slot costs;
+the customer pays that charge in their own browser; the worker asks the gateway
+whether they have; settling raises the prepayment invoice and tells the diary
+its slot is paid for; anything nobody paid for lapses on its own.
+
+**What a stranger cannot decide is the amount.** It is worked out from the
+booking — the fraction the business set, of what the booking was priced at, with
+tax at the rate the tenant configured — and the request carries no money at all.
+That is what makes an unauthenticated write that touches money safe to have: the
+worst it can do is create a charge the caller would have to pay themselves.
+
+**And they cannot choose which payment.** The `Idempotency-Key` becomes the
+charge's id and is passed to the gateway as its own, so the browser pays *this*
+charge rather than reporting back about one it picked. Without that, anybody who
+learned a payment id could attach a stranger's money to their own booking — and
+a gateway id is not a secret.
+
+**Neither module may name the other, so two seams carry it.**
+
+- *Into* `booking`: `Secured` takes an **opaque payment id** and asks nothing.
+  Whether money is real is not a question a diary can answer, so the caller that
+  knows both tells it. The same shape `prepaid` uses for what an entitlement is
+  held against.
+- *Out of* `payments`: `Swept::secured` **reports** which deposits settled and
+  what they were held against, and acts on none of it.
+
+The worker joins them, because it depends on both and neither may depend on the
+other — `requires` is a hard AND, so one direction forces a diary on every shop
+that takes a card and the other a gateway on every salon.
+
+**It is a repair, not a step, and that is deliberate.** The join cannot be in the
+settling transaction: they are different modules' aggregates, and the money must
+commit whatever the diary says. So `secure_in` runs for anything settled on the
+pass and is a no-op on a booking already told — a failure leaves a paid deposit
+on a booking that still looks unpaid, which the next tick fixes.
+
+**The expiry job asks one question of one group.** "Still reserved, a deposit was
+asked for, past its deadline, nothing paid it" — four columns on
+`proj_booking.reservation`, because whether the money arrived is a fact the
+module was *told*. A job joining `proj_booking` to `proj_payments` would be
+reading two checkpoints that can disagree, and the disagreement it would hit is
+exactly the one that matters: a deposit settled a moment ago whose booking has
+not heard yet. The ordering only fails safe — `Secured` is written first, so the
+worst case is a slot released a tick late rather than one released after it was
+paid for.
+
+**The route lives in `erp-api`**, which is the exception "modules ship their own
+routes" needed: it is about the seam rather than about a module, and `erp-api` is
+where everything is already assembled.
+
+**What is deliberately not here: verified phone numbers.** The plan called for
+public bookers to be registered with a verified phone before they can book, and
+that is a customer-identity system — the OTP machinery is control-plane and
+issues codes to *staff*. It is also not what stops abuse here: **the deposit is**.
+A booking that cannot be held without paying for it cannot be spammed, which is
+what deposits are for. Verifying a phone is about being able to *reach* somebody,
+which is a real need and a different one.
+
+Still ahead, and named: a public route that answers what a booking is waiting to
+be paid (the deposit route creates the charge but there is no read beside it),
+and blacklisting a customer who repeatedly books and never pays, which needs the
+`crm` additions §18 parks.
 
 ### 38 · Two of the credit-note tests asserted nothing, and falsification said so
 
@@ -3429,13 +3494,16 @@ same-origin server-rendered site would never have needed.
       receivable — see §33. A saved card can be charged for one, and giving one
       back clears the liability and issues no credit note.
 
-      **What is still missing is the booking-shaped half**, and it is larger
-      than this checkbox implied when it was written. A stranger paying at the
-      moment of booking needs a public surface they can pay on, a phone number
-      they have verified, and a hold that expires when they do not — and the
-      documents are a **386 prepayment invoice then a 388 with the advance
-      deducted**, not one invoice moved later, because receiving consideration
-      is itself a tax point.
+      **And the booking-shaped half is built** (§39): a public booking records
+      what holding the slot costs, a public route creates the charge the
+      customer pays in their own browser, the worker asks the gateway whether
+      they have and tells the diary, and a hold nobody paid for lapses. The
+      document is a **386 prepayment invoice** raised when the money is real.
+
+      What is not built is a **verified phone** for a public booker — a
+      customer-identity system, and not what stops abuse here: the deposit is.
+      The 388 with the advance deducted, when the service is finally delivered,
+      is still ahead.
 
       **Keeping one is built and is the business's call** — a sale by default,
       `payments.retention` to say otherwise. The tax is not what it decides:

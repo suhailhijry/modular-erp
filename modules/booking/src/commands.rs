@@ -585,6 +585,10 @@ pub async fn reserve(
             check_customer(&mut *conn, booking.customer.id.as_ref()).await?;
             let lines = priced(&mut *conn, &booking.lines).await?;
             check_offered(&mut *conn, &lines).await?;
+            // **Resolved in this transaction and stamped on the booking**, for
+            // the reason the rates are: a business that changes what it asks
+            // for next month has not changed what this booking asked for (L5).
+            let deposit = deposit_for(&mut *conn, &lines, booking.at).await?;
 
             let committed = try_create::<Reservation, _, _>(
                 &mut *conn,
@@ -593,6 +597,7 @@ pub async fn reserve(
                 metadata,
                 |_loaded: &Loaded<Reservation>| {
                     Ok::<_, BookingError>(Decision::one(ReservationEvent::Reserved {
+                        deposit: deposit.clone(),
                         customer: Box::new(booking.customer.clone()),
                         lines: lines.clone(),
                         note: booking.note.clone(),
@@ -973,6 +978,65 @@ pub fn customer_resource(customer: &AggregateId) -> Result<AggregateId, BookingE
 ///
 /// A line with no charge stays unpriced and costs nothing. That is a business
 /// that bills elsewhere, not an error.
+/// **What holding this slot costs**, or nothing when the business asks for
+/// nothing.
+///
+/// A fraction of what the booking was priced at, **before tax** — because
+/// receiving the money is itself a tax point, and whoever raises the document
+/// for it works the tax forward from a net. Handing on a total instead would
+/// mean working that net back out of it, which does not always land.
+///
+/// A booking with no priced line has nothing to take a fraction of, so it asks
+/// for nothing: an insurer-billed clinic appointment is not a slot somebody
+/// pays to hold.
+async fn deposit_for(
+    conn: &mut sqlx::PgConnection,
+    lines: &[Line],
+    at: Timestamp,
+) -> Result<Option<crate::Deposit>, ExecuteError<BookingError>> {
+    let settings = crate::PublicBooking::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(BookingError::Config(e)))?;
+    if settings.deposit_bp == 0 {
+        return Ok(None);
+    }
+
+    let mut priced = lines.iter().filter_map(|line| line.charge.as_ref());
+    let Some(first) = priced.next() else {
+        return Ok(None);
+    };
+    let total = priced.try_fold(first.net, |running, charge| running.checked_add(charge.net));
+    let Ok(total) = total else {
+        return Ok(None);
+    };
+
+    let basis_points = i32::try_from(settings.deposit_bp).unwrap_or(i32::MAX);
+    let Ok(net) = total.scaled_by(basis_points) else {
+        return Ok(None);
+    };
+    if !net.is_positive() {
+        return Ok(None);
+    }
+
+    Ok(Some(crate::Deposit {
+        net,
+        due_by: due_by(at, settings.hold_minutes),
+    }))
+}
+
+/// When an unpaid hold lapses.
+///
+/// A setting of zero means it does not, which is the default and is right for a
+/// business that asks for no deposit. One that does ask should set it, and the
+/// far future is the honest stand-in until they do — better than a hold that
+/// silently expires at a length nobody chose.
+fn due_by(at: Timestamp, minutes: u32) -> Timestamp {
+    if minutes == 0 {
+        return at + chrono::Duration::days(365 * 10);
+    }
+    at + chrono::Duration::minutes(i64::from(minutes))
+}
+
 async fn priced(
     conn: &mut sqlx::PgConnection,
     drafts: &[DraftLine],
@@ -1111,4 +1175,56 @@ async fn available(
 
 fn rejected(error: BookingError) -> Refusal {
     CommandError::Execute(ExecuteError::Rejected(error))
+}
+
+/// **Records that the deposit arrived.**
+///
+/// # Why this takes an opaque id and asks nothing
+///
+/// Because whether money is real is not a question a diary can answer, and
+/// `booking` cannot ask: `payments` and this module may not depend on each
+/// other — `requires` is a hard AND, so one direction forces a diary on every
+/// shop that takes a card and the other forces a gateway on every salon. So the
+/// caller that *does* know both tells this one, and what it hands over is a
+/// reference nothing here interprets.
+///
+/// The same shape `prepaid` uses for what an entitlement is held against, for
+/// the same reason.
+///
+/// # It does not confirm the booking
+///
+/// Paid and confirmed are different facts. A business may still want to look at
+/// a booking before promising it, and a deposit does not make that decision for
+/// them — what it does is stop the hold lapsing. Moving the stage is
+/// [`move_to`], and whoever secures a booking is free to do both.
+pub async fn secure_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    payment: &AggregateId,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<Committed<ReservationEvent>, ExecuteError<BookingError>> {
+    try_execute::<Reservation, _, BookingError>(
+        &mut *conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            let state = &loaded.aggregate;
+            if state.stage.is_none() {
+                return Err(BookingError::NoSuchReservation(id.to_string()));
+            }
+            // A retry, or a second payment against a slot already paid for. The
+            // first one holds it; a second is money to give back, not a fact
+            // about this booking.
+            if state.secured_by.is_some() {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(ReservationEvent::Secured {
+                payment: payment.clone(),
+                at,
+            }))
+        },
+    )
+    .await
 }

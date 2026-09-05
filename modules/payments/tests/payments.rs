@@ -369,7 +369,7 @@ impl Fixture {
             &mut tx,
             &code(payment),
             &payments::Collection {
-                card: code(card),
+                card: Some(code(card)),
                 provider: "moyasar".to_owned(),
                 collects: payments::Collects::Invoice(code(invoice)),
                 amount,

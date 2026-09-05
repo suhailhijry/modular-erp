@@ -59,6 +59,14 @@ use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 pub struct Swept {
     /// Payments that reached an ending — settled, failed or voided.
     pub resolved: usize,
+    /// **Deposits that settled on this pass, and what they were held against.**
+    ///
+    /// Reported rather than acted on, because acting on it means telling
+    /// `booking` its slot is paid for and this module may not name `booking` —
+    /// `requires` is a hard AND, and depending on it would force a diary on
+    /// every shop that takes a card. The worker composes the two; see
+    /// `SettleGatewayPayments`.
+    pub secured: Vec<(AggregateId, AggregateId)>,
     /// Asked about, and still waiting on the customer or a capture.
     pub still_pending: usize,
     /// Why it stopped early, when it did.
@@ -141,6 +149,14 @@ pub async fn settle_pending(
                     swept.still_pending += 1;
                 } else {
                     swept.resolved += 1;
+                    // A deposit, and whatever it was held against wants telling.
+                    if let Some(crate::PaymentEvent::Settled {
+                        advance: Some(advance),
+                        ..
+                    }) = committed.events.first()
+                    {
+                        swept.secured.push((advance.against.clone(), id.clone()));
+                    }
                 }
             }
             Err(e) => {
@@ -170,7 +186,12 @@ pub struct Waiting {
     /// This system's id for the payment, which is also what the gateway will
     /// use — it is passed as Moyasar's `given_id`.
     pub id: AggregateId,
-    pub card: AggregateId,
+    /// The saved card to charge, when there is one.
+    ///
+    /// **`None` is a deposit waiting for the customer**, created in their own
+    /// browser against the publishable key using the id this system already
+    /// chose. Nobody here charges it; the only question is whether they have.
+    pub card: Option<AggregateId>,
     /// An invoice, or the booking a deposit was taken for.
     pub collects: crate::Collects,
     pub amount: Money,
@@ -198,12 +219,12 @@ pub async fn requested(
     limit: i64,
 ) -> Result<Vec<Waiting>, sqlx::Error> {
     let rows = sqlx::query!(
-        r#"SELECT id as "id!", card as "card!", invoice, advance_for,
+        r#"SELECT id as "id!", card, invoice, advance_for,
                   advance_net_minor, advance_buyer, advance_buyer_vat,
                   amount_minor as "amount_minor!", currency as "currency!",
                   callback_url as "callback_url!"
              FROM proj_payments.payment
-            WHERE stage = 'requested' AND provider = $1 AND card IS NOT NULL
+            WHERE stage = 'requested' AND provider = $1
             ORDER BY started_at ASC LIMIT $2"#,
         provider,
         limit,
@@ -234,13 +255,86 @@ pub async fn requested(
             });
             Some(Waiting {
                 id: AggregateId::new(&row.id).ok()?,
-                card: AggregateId::new(&row.card).ok()?,
+                card: row.card.as_deref().and_then(|c| AggregateId::new(c).ok()),
                 collects: crate::Collects::of(invoice.as_ref(), advance.as_ref())?,
                 amount: Money::from_minor(row.amount_minor, currency),
                 callback_url: row.callback_url,
             })
         })
         .collect())
+}
+
+/// Asks the gateway whether the customer has paid yet.
+///
+/// # Why this is a poll and not a callback
+///
+/// The callback is a doorbell — it is authenticated, recorded and acknowledged,
+/// and the handler is handed no database connection, so it cannot record
+/// anything. And Moyasar drops a webhook after six attempts. A deposit that
+/// settled and was never recorded is a slot released out from under somebody
+/// who paid for it, so the answer has to come from asking.
+///
+/// # The gateway not knowing it is the ordinary case
+///
+/// This system names the payment before the customer pays it — the id is passed
+/// as `given_id`, which is what stops anybody attaching a stranger's payment to
+/// their own booking. Until the widget creates it, `fetch` says there is no such
+/// payment, and that is a customer who has not got round to it rather than
+/// anything to warn about. The hold expiring is what eventually answers for
+/// them.
+pub async fn collect_awaited(
+    db: &erp_tenant::TenantDb,
+    gateway: &dyn Gateway,
+    now: Timestamp,
+    limit: i64,
+    metadata: &Metadata,
+) -> Result<Attempted, Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = db.read().await?;
+    let waiting = requested(&mut conn, gateway.provider(), limit).await?;
+    drop(conn);
+
+    let mut attempted = Attempted::default();
+    for want in waiting {
+        // A saved card. `charge_requested` sends those.
+        if want.card.is_some() {
+            continue;
+        }
+        let id = want.id;
+        let charged = match gateway.fetch(id.as_str()).await {
+            Ok(charged) => charged,
+            // Not paid yet. Ordinary, and silent — see above.
+            Err(GatewayError::NoSuchPayment(_)) => continue,
+            Err(e) => {
+                attempted.stopped = Some(e.to_string());
+                break;
+            }
+        };
+
+        // **Only that it exists.** Whether anybody paid is `settle_in`'s to
+        // decide, on the same tick, where the amount and the currency are
+        // checked against what was asked for.
+        let mut tx = db.begin().await?;
+        crate::start_in(
+            &mut tx,
+            &id,
+            &crate::Attempt {
+                provider: gateway.provider().to_owned(),
+                gateway_id: charged.id.clone(),
+                // **Ignored, and it has to be.** What this collects was settled
+                // when the deposit was asked for, and `start_in` keeps the
+                // payment's own target over anything a later pass hands it.
+                collects: want.collects,
+                amount: charged.amount,
+            },
+            now,
+            metadata,
+        )
+        .await?;
+        tx.commit().await?;
+        attempted.started += 1;
+    }
+
+    Ok(attempted)
 }
 
 /// Sends every saved-card charge that has been asked for.
@@ -272,14 +366,18 @@ pub async fn charge_requested(
 
     let mut attempted = Attempted::default();
     for want in waiting {
+        // A deposit the customer pays themselves. `collect_awaited` asks about
+        // those; there is nothing to charge here.
+        let Some(card) = want.card.clone() else {
+            continue;
+        };
         // **The token is the authority on whether this card can be charged.**
         // It is also the only thing a `forget` actually deletes, so its absence
         // is the answer — and it is checked here rather than at the request,
         // because a card can be forgotten in between whatever was checked then.
         let mut conn = db.acquire().await?;
         let token =
-            erp_eventlog::secrets::get(&mut conn, sealing, &crate::card::token_key(&want.card))
-                .await?;
+            erp_eventlog::secrets::get(&mut conn, sealing, &crate::card::token_key(&card)).await?;
         drop(conn);
 
         let Some(token) = token else {

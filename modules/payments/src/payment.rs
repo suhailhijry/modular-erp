@@ -169,10 +169,15 @@ pub enum PaymentEvent {
     /// [`Self::Settled`] carries its invoice: the job may not load an
     /// aggregate to find out what to do (L7).
     Requested {
-        /// The saved card to charge. **Whose** it is is the card's to say;
+        /// The saved card to charge, when there is one.
+        ///
+        /// **`None` is a deposit the customer pays themselves**, in their own
+        /// browser, against the id named here. Nothing in this process charges
+        /// it; the only question is whether they have. **Whose** it is is the card's to say;
         /// copying the customer here too would be a second place for the same
         /// fact to be wrong.
-        card: AggregateId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        card: Option<AggregateId>,
         provider: String,
         /// See [`Collects`] for why this is a pair rather than an invoice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -365,7 +370,8 @@ impl Stage {
 pub struct Payment {
     /// Asked for against a saved card, and not yet sent to the gateway.
     pub requested: bool,
-    /// The card a request named, for the job that will charge it.
+    /// The card a request named, for the job that will charge it. `None` when
+    /// the customer pays it themselves.
     pub card: Option<AggregateId>,
     /// Where the gateway sends a customer it decides it needs.
     pub callback_url: String,
@@ -440,7 +446,7 @@ impl Aggregate for Payment {
                 ..
             } => {
                 self.requested = true;
-                self.card = Some(card.clone());
+                self.card.clone_from(card);
                 self.provider.clone_from(provider);
                 self.collects = Collects::of(invoice.as_ref(), advance.as_ref());
                 self.amount = Some(*amount);
@@ -601,7 +607,7 @@ mod tests {
     fn every_event_has_a_name_and_they_are_all_different() {
         let events = [
             PaymentEvent::Requested {
-                card: id("card-1"),
+                card: Some(id("card-1")),
                 provider: "moyasar".to_owned(),
                 invoice: Some(id("INV-1")),
                 advance: None,
