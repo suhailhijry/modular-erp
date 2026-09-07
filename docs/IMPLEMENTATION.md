@@ -2043,7 +2043,13 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       this customer owe*, which is the question an AR clerk asks every morning.
       Needed no schema change: `invoice_status` already carried `outstanding`,
       and its own comment already anticipated the report.
-- [ ] Customers as records, quantities and unit prices, partial credit notes
+- [x] Customers as records — `modules/crm` (§16, §41)
+- [x] Partial credit notes — `sales::credit_part_in`, and since §44 a partial
+      refund issues one (2026-09-07)
+- [ ] Quantities and unit prices on invoice lines. *Deliberately not stored:
+      `modules/sales/src/invoice.rs` keeps a line's net only, because a client
+      that shows "3 × 250.00" already computed the 750.00 it sends. They land
+      with ZATCA's line-level fields, as an upcaster.*
 
 ### 4b · The demo tenant
 
@@ -3246,11 +3252,12 @@ provider without an adapter.
       event — a person who changes their number should get the next message. An
       **audience** (`client`, `worker`, `branch_manager`, `operator`) resolved
       against the read model minutes before the send
-- [ ] Delivery receipts land back as inbound events (Phase 12), so "sent" and
-      "delivered" stay different words — **deferred to Phase 12 deliberately**:
-      a receipt is an inbound callback and there is no verified inbound surface
-      yet. Doing it first would mean accepting somebody else's word about what
-      happened to a message
+- [ ] Delivery receipts land back as inbound events, so "sent" and "delivered"
+      stay different words. *Was deferred to Phase 12 because there was no
+      verified inbound surface; Phase 12 built one (`crates/erp-api/src/hooks.rs`,
+      a signed callback per provider), and payments use it. Messaging does not
+      yet: `grep -rin delivered modules/messaging/src` finds only the send-side
+      verdicts. Open, and now buildable (2026-09-07).*
 - [x] **Metering.** SMS is billed per segment, and a message that silently
       becomes three costs three times. Segment counting is part of sending
       (GSM 03.38 against UCS-2, so Arabic is billed at 70 characters), and a
@@ -4231,6 +4238,15 @@ matters: it is the environment ZATCA requires a solution to pass before
 production, and its certificate template differs from sandbox's (found the hard
 way — see the running note).
 
+*Updated 2026-09-07 (§45):* the run is now one request. Register with an
+`industry`, `POST /v1/tax_sa/zatca/onboarding/activate` with `{environment:
+"simulation", otp}`, and watch `GET /v1/tax_sa/zatca/onboarding`: `state` goes
+`checking` while the worker submits the six samples and asks for the production
+certificate, then `live`. If ZATCA refuses a sample, `refusal` names the
+document and the rule, and the worker will not ask again until a new build —
+so a refused simulation run is a bug report, not a retry loop. The exact
+`curl`s are in `docs/RUNNING.md`.
+
 Renewal is a five-year deadline with a sixty-day warning and no automation
 possible, because it needs a human with an OTP. That is written down here so it
 is a known limitation rather than a surprise in 2031.
@@ -4354,6 +4370,31 @@ true when refunds landed — the rule is *still holding*, paid less refunded. A
 test's doc comment said the same. Prose that was true when written is the kind
 of stale that survives, because nothing compiles it.
 
+### 12. What is next (2026-09-07)
+
+Written after the ZATCA onboarding landed (§45) and the sixteen CI failures
+behind it were run down. In the order I would take them:
+
+1. **Prove it against the real world.** Item 6 — one simulation run with a real
+   OTP now exercises the whole onboarding, the worker's half included — and
+   Tabby's and Tamara's sandboxes, which §43 built for and nobody has called.
+   Everything below is guesswork about the hardest interfaces until this is done.
+2. **Phase 13, real time.** Fifteen open boxes and every piece they compose
+   already exists: the Redis channel `shared.rs` fans out on, `consistent_after`,
+   the audiences of 11b, the outbox for the durable record. The booking screens
+   are the first consumer, and it is the largest half-built phase.
+3. **Blueprints (4d).** Browse → parameterize → preview in a rolled-back
+   transaction → install, and the chart-of-accounts templates. Still the nearest
+   customer-visible payoff, as the closing paragraph says.
+4. **The singles.** The WPS salary file (Phase 9, the same shape as the ZATCA
+   submission); large exports as outbox effects (Phase 11); messaging delivery
+   receipts through `hooks.rs`, now that the inbound surface exists (Phase 11);
+   MFA and OIDC as more rows in `authenticator` (Phase 3).
+5. **Item 4's other half.** Deployment beyond compose and Postgres failover —
+   rehearsed as tests, the way restore was, before either is claimed.
+6. **Then, and only then** — below, unchanged: 5b and 6 wait for a second
+   consumer; 18 and 19 are new modules and come after.
+
 ### Then, and only then
 
 Phase 5b (the rules engine) and Phase 6 (configured domain) are still correctly
@@ -4361,9 +4402,10 @@ sequenced: both wait for a second real consumer to describe them, and neither ha
 one yet. Blueprints (4d) are the nearest thing with a customer-visible payoff.
 
 The smaller deferrals — snapshots, `Idempotency-Key`, `ETag`, `ModuleEnabled<M>`,
-partial credit notes, customers as records, an entry-level read model — each name
-the condition that should trigger them, and none of those conditions has been
-met. They are fine where they are.
+an entry-level read model, quantities and unit prices on a line — each name the
+condition that should trigger them, and none of those conditions has been met.
+They are fine where they are. (Partial credit notes and customers as records used
+to be on this list; both are built — §32, §44, §16.)
 
 
 ## Running notes

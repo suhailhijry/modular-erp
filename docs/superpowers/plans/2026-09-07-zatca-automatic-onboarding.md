@@ -53,7 +53,7 @@
 **Interfaces:**
 - Produces: `Registration.industry: Option<String>`; `InvalidRegistration::Missing { field: "industry" }` for an empty one; `RegistrationBody.industry: String` (required on PUT).
 
-- [ ] **Step 1: Write the failing unit test** in `modules/tax_sa/src/taxpayer.rs`, inside `mod tests`, after the existing `registration()` helper:
+- [x] **Step 1: Write the failing unit test** in `modules/tax_sa/src/taxpayer.rs`, inside `mod tests`, after the existing `registration()` helper:
 
 ```rust
     /// **An industry, once given, cannot be blank.** It goes in the certificate
@@ -74,13 +74,13 @@
     }
 ```
 
-- [ ] **Step 2: Run it, expect a compile error** (`no field industry`):
+- [x] **Step 2: Run it, expect a compile error** (`no field industry`):
 
 ```bash
 cargo nextest run -p tax_sa --lib an_industry_given_empty_is_refused
 ```
 
-- [ ] **Step 3: Add the field and the check.** In `Registration` after `pub address: Address,`:
+- [x] **Step 3: Add the field and the check.** In `Registration` after `pub address: Address,`:
 
 ```rust
     /// The business's industry, as ZATCA's certificate request names it in
@@ -106,9 +106,9 @@ In `check()`, before `self.address.check()`:
 
 In the tests' `registration()` helper (~line 304) add `industry: Some("Consulting".to_owned()),` after `address`.
 
-- [ ] **Step 4: Add the field to every other `Registration` literal** (each fails to compile otherwise): `modules/tax_sa/tests/tax_sa.rs:555`, `modules/tax_sa/tests/high_volume.rs:74`, `modules/tax_sa/tests/sandbox.rs:96`, `crates/erp-api/tests/http.rs:7398` — add `industry: Some("Consulting".to_owned()),` as the last field of each.
+- [x] **Step 4: Add the field to every other `Registration` literal** (each fails to compile otherwise): `modules/tax_sa/tests/tax_sa.rs:555`, `modules/tax_sa/tests/high_volume.rs:74`, `modules/tax_sa/tests/sandbox.rs:96`, `crates/erp-api/tests/http.rs:7398` — add `industry: Some("Consulting".to_owned()),` as the last field of each.
 
-- [ ] **Step 5: The HTTP body.** In `RegistrationBody` after `address: AddressBody,`:
+- [x] **Step 5: The HTTP body.** In `RegistrationBody` after `address: AddressBody,`:
 
 ```rust
     /// The business's industry — `Consulting`, `Retail`, `Beauty`. It goes in
@@ -131,7 +131,7 @@ In the `registration` GET handler's `Ok(Json(RegistrationBody { … }))` add aft
 
 In `crates/erp-api/tests/http.rs` `register_with_zatca` JSON add `"industry": "Consulting",` after `"identifier": "1010101010",`.
 
-- [ ] **Step 6: Run the guards**
+- [x] **Step 6: Run the guards**
 
 ```bash
 cargo nextest run -p tax_sa --lib an_industry_given_empty_is_refused
@@ -140,7 +140,7 @@ cargo nextest run -p erp-api --test http register
 ```
 Expected: all pass.
 
-- [ ] **Step 7: Falsify.** Comment out the six-line `industry` check in `check()`; run the unit test → FAIL (`Ok(())` where `Err` expected). Restore; run → PASS.
+- [x] **Step 7: Falsify.** Comment out the six-line `industry` check in `check()`; run the unit test → FAIL (`Ok(())` where `Err` expected). Restore; run → PASS.
 
 ---
 
@@ -156,7 +156,7 @@ The samples read nothing from the unit but which document kinds it declares. The
 **Interfaces:**
 - Produces: `pub fn compliance_documents(registration: &Registration, issues: Issues, at: Timestamp) -> Vec<Document>`; `pub fn compliance_submissions(registration, issues: Issues, signer, at)`; `Onboarder::pass_compliance_checks(&self, registration: &Registration, issues: Issues, environment: Environment, at: Timestamp)`.
 
-- [ ] **Step 1: Change the signatures.** `samples.rs`:
+- [x] **Step 1: Change the signatures.** `samples.rs`:
 
 ```rust
 use super::csr::Issues;
@@ -180,7 +180,7 @@ pub fn compliance_documents(
 
 `onboarding.rs`: `pass_compliance_checks(&self, registration: &crate::taxpayer::Registration, issues: Issues, environment: Environment, at: Timestamp)` and inside it `compliance_submissions(registration, issues, &signer, at)`; `compliance_submissions(registration: &crate::taxpayer::Registration, issues: Issues, signer: &super::signing::Signer, at: Timestamp)` and inside it `super::samples::compliance_documents(registration, issues, at)`. Add `Issues` to the `use super::csr::{…}` line.
 
-- [ ] **Step 2: Fix the callers.** In `samples.rs` tests: delete the `fn unit(issues: Issues) -> Unit` helper and run
+- [x] **Step 2: Fix the callers.** In `samples.rs` tests: delete the `fn unit(issues: Issues) -> Unit` helper and run
 
 ```bash
 python3 - <<'EOF'
@@ -193,7 +193,7 @@ EOF
 ```
 Expected: `replaced 6`. In `modules/tax_sa/tests/tax_sa.rs`, in each of the three `.pass_compliance_checks(` calls replace the argument line `&unit(),` with `Issues::both(),`. In `modules/tax_sa/tests/sandbox.rs:376` replace `&unit,` with `unit.issues,`. In `modules/tax_sa/src/http.rs` `activate`, replace `.pass_compliance_checks(&registration, &unit, environment, now)` with `.pass_compliance_checks(&registration, unit.issues, environment, now)`.
 
-- [ ] **Step 3: Build and run the existing guards**
+- [x] **Step 3: Build and run the existing guards**
 
 ```bash
 cargo clippy -p tax_sa --all-targets -- -D warnings
@@ -225,7 +225,7 @@ Expected: clean; every `compliance` test passes (the samples unit tests, the thr
   - `Onboarded` gains `checks_serial: Option<String>, checks_submitted: Option<i32>, checks_passed_at: Option<Timestamp>, refused_step: Option<String>, refused_detail: Option<String>, refused_version: Option<String>, refused_at: Option<Timestamp>`
   - `tax_sa::{Refusal, Step}` exported.
 
-- [ ] **Step 1: Write the failing aggregate tests** in `modules/tax_sa/src/onboarded.rs` `mod tests`. Replace the `issued` helper with one that takes the environment, keep the old name as a shorthand:
+- [x] **Step 1: Write the failing aggregate tests** in `modules/tax_sa/src/onboarded.rs` `mod tests`. Replace the `issued` helper with one that takes the environment, keep the old name as a shorthand:
 
 ```rust
     fn issued_in(environment: Environment, stage: Stage, serial: &str) -> OnboardingEvent {
@@ -289,13 +289,13 @@ Expected: clean; every `compliance` test passes (the samples unit tests, the thr
     }
 ```
 
-- [ ] **Step 2: Run, expect compile errors**
+- [x] **Step 2: Run, expect compile errors**
 
 ```bash
 cargo nextest run -p tax_sa --lib onboarded
 ```
 
-- [ ] **Step 3: The events and the aggregate.** In `onboarded.rs`, after the `CsidIssued` variant inside `OnboardingEvent`:
+- [x] **Step 3: The events and the aggregate.** In `onboarded.rs`, after the `CsidIssued` variant inside `OnboardingEvent`:
 
 ```rust
     /// Every compliance sample ZATCA was shown was accepted — what the
@@ -436,14 +436,14 @@ pub struct Refusal {
 
 Export in `lib.rs:69`: `pub use onboarded::{Onboarding, OnboardingEvent, Refusal, Step, onboarding_id};`
 
-- [ ] **Step 4: Run the aggregate tests**
+- [x] **Step 4: Run the aggregate tests**
 
 ```bash
 cargo nextest run -p tax_sa --lib onboarded
 ```
 Expected: the two new tests and the two existing ones pass.
 
-- [ ] **Step 5: The commands.** In `modules/tax_sa/src/commands.rs` after `record_csid`:
+- [x] **Step 5: The commands.** In `modules/tax_sa/src/commands.rs` after `record_csid`:
 
 ```rust
 /// Records that every compliance sample signed with this certificate passed.
@@ -510,7 +510,7 @@ pub(crate) async fn record_refusal(
 }
 ```
 
-- [ ] **Step 6: The read model.** `modules/tax_sa/schema/install.sql`, inside `CREATE TABLE IF NOT EXISTS onboarding (…)` after `recorded_at TIMESTAMPTZ NOT NULL`:
+- [x] **Step 6: The read model.** `modules/tax_sa/schema/install.sql`, inside `CREATE TABLE IF NOT EXISTS onboarding (…)` after `recorded_at TIMESTAMPTZ NOT NULL`:
 
 ```sql
     recorded_at TIMESTAMPTZ NOT NULL,
@@ -675,14 +675,14 @@ and `onboarding()` selects them:
     }))
 ```
 
-- [ ] **Step 7: Build**
+- [x] **Step 7: Build**
 
 ```bash
 cargo clippy -p tax_sa --all-targets -- -D warnings
 ```
 Expected: clean. (`record_checks_passed`/`record_refusal` are `pub(crate)` and unused until Task 5; if clippy reports dead code, add `#[allow(dead_code)]` **temporarily** and remove it in Task 5.)
 
-- [ ] **Step 8: Falsify the aggregate guards.** In `apply`, change `if moved || *stage == Stage::Production || self.stage.is_none()` to `if *stage == Stage::Production || self.stage.is_none()` → `a_certificate_for_another_environment_starts_over` FAILS. Restore. Delete the `self.checks_passed_for = None;` line → `checks_and_refusals_belong_to_the_certificate_they_were_for` FAILS. Restore; both PASS. (The projection's own reset is falsified by Task 4's module test.)
+- [x] **Step 8: Falsify the aggregate guards.** In `apply`, change `if moved || *stage == Stage::Production || self.stage.is_none()` to `if *stage == Stage::Production || self.stage.is_none()` → `a_certificate_for_another_environment_starts_over` FAILS. Restore. Delete the `self.checks_passed_for = None;` line → `checks_and_refusals_belong_to_the_certificate_they_were_for` FAILS. Restore; both PASS. (The projection's own reset is falsified by Task 4's module test.)
 
 ---
 
@@ -695,7 +695,7 @@ Expected: clean. (`record_checks_passed`/`record_refusal` are `pub(crate)` and u
 **Interfaces:**
 - Consumes: `tax_sa::onboarding(&mut conn) -> Result<Option<Onboarded>, sqlx::Error>` (Task 3), `erp_eventlog::secrets::forget(conn, key)`.
 
-- [ ] **Step 1: Write the failing module test** in `modules/tax_sa/tests/tax_sa.rs`:
+- [x] **Step 1: Write the failing module test** in `modules/tax_sa/tests/tax_sa.rs`:
 
 ```rust
 /// **Onboarding into another environment starts from compliance.** Live in
@@ -761,13 +761,13 @@ async fn onboarding_into_another_environment_starts_from_compliance() {
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL** on the `reached` assertion (production still there):
+- [x] **Step 2: Run, expect FAIL** on the `reached` assertion (production still there):
 
 ```bash
 cargo nextest run -p tax_sa --test tax_sa onboarding_into_another_environment
 ```
 
-- [ ] **Step 3: Forget before storing.** In `accept_certificate`, after `let issued = accept(csid, &key, stage, environment)?;` and before `store(…)`:
+- [x] **Step 3: Forget before storing.** In `accept_certificate`, after `let issued = accept(csid, &key, stage, environment)?;` and before `store(…)`:
 
 ```rust
     if stage == Stage::Compliance {
@@ -805,9 +805,9 @@ async fn forget_another_environments_production(
 }
 ```
 
-- [ ] **Step 4: Run → PASS.** Same command.
+- [x] **Step 4: Run → PASS.** Same command.
 
-- [ ] **Step 5: Falsify twice.** (a) Comment out the two-line `if stage == Stage::Compliance {…}` call → FAIL on `reached`. Restore. (b) In `projections.rs`, change the `CASE` back to `GREATEST(onboarding.stage, EXCLUDED.stage)` for `stage` → FAIL on `("compliance", "production")`. Restore. Run → PASS.
+- [x] **Step 5: Falsify twice.** (a) Comment out the two-line `if stage == Stage::Compliance {…}` call → FAIL on `reached`. Restore. (b) In `projections.rs`, change the `CASE` back to `GREATEST(onboarding.stage, EXCLUDED.stage)` for `stage` → FAIL on `("compliance", "production")`. Restore. Run → PASS.
 
 ---
 
@@ -827,7 +827,7 @@ async fn forget_another_environments_production(
   - `pub struct Finished { pub checks: Option<ComplianceChecks>, pub production: Option<Issued>, pub refused: Option<Step> }` with `did_something()`
   - `pub async fn finish(db: &TenantDb, sealing: &SealingKey, registrar: &dyn Registrar, now: Timestamp, metadata: &Metadata) -> Result<Finished, OnboardError>`
 
-- [ ] **Step 1: Extend the fake.** In `FakeZatcaCa` add a field and accessor:
+- [x] **Step 1: Extend the fake.** In `FakeZatcaCa` add a field and accessor:
 
 ```rust
     /// How many production requests to leave unanswered before issuing —
@@ -856,7 +856,7 @@ and at the top of `production_csid` (before the two `assert!`s):
         }
 ```
 
-- [ ] **Step 2: Write the three failing module tests** (add `use tax_sa::zatca::finish::{Finished, finish};` and `use tax_sa::Step;` to the onboarding `use` block):
+- [x] **Step 2: Write the three failing module tests** (add `use tax_sa::zatca::finish::{Finished, finish};` and `use tax_sa::Step;` to the onboarding `use` block):
 
 ```rust
 /// **One OTP, and the worker does the rest.** The route stops at the
@@ -1072,13 +1072,13 @@ async fn passed_checks_are_not_resent_when_going_live_fails() {
 
 `Finished` needs `Debug` for the `{again:?}` assertions.
 
-- [ ] **Step 3: Run, expect compile errors** (`finish` does not exist):
+- [x] **Step 3: Run, expect compile errors** (`finish` does not exist):
 
 ```bash
 cargo nextest run -p tax_sa --test tax_sa finish
 ```
 
-- [ ] **Step 4: Write `modules/tax_sa/src/zatca/finish.rs`:**
+- [x] **Step 4: Write `modules/tax_sa/src/zatca/finish.rs`:**
 
 ```rust
 //! What the worker does once a tenant holds a compliance certificate.
@@ -1333,7 +1333,7 @@ Add to `OnboardError` in `onboarding.rs`, after `NotYet`:
 
 `modules/tax_sa/src/zatca/mod.rs`: add `pub mod finish;` after `pub mod csr;`. Remove any temporary `#[allow(dead_code)]` from Task 3.
 
-- [ ] **Step 5: Run the guards**
+- [x] **Step 5: Run the guards**
 
 ```bash
 cargo clippy -p tax_sa --all-targets -- -D warnings
@@ -1342,7 +1342,7 @@ cargo nextest run -p tax_sa --lib finish
 ```
 Expected: clippy clean; three module tests and the unit test pass.
 
-- [ ] **Step 6: Falsify three ways, restoring after each.** (a) In `due`, delete the `refused_version` check → `a_refused_sample_is_recorded_and_waits_for_a_new_build` FAILS (twelve checks) and the unit test FAILS. (b) In `due`, replace the `checks_serial` branch with `Some(Due::Checks)` → `passed_checks_are_not_resent_when_going_live_fails` FAILS. (c) Delete the `record_checks_passed` call → the same test FAILS. Restore; all PASS.
+- [x] **Step 6: Falsify three ways, restoring after each.** (a) In `due`, delete the `refused_version` check → `a_refused_sample_is_recorded_and_waits_for_a_new_build` FAILS (twelve checks) and the unit test FAILS. (b) In `due`, replace the `checks_serial` branch with `Some(Due::Checks)` → `passed_checks_are_not_resent_when_going_live_fails` FAILS. (c) Delete the `record_checks_passed` call → the same test FAILS. Restore; all PASS.
 
 ---
 
@@ -1355,7 +1355,7 @@ Expected: clippy clean; three module tests and the unit test pass.
 - Consumes: `tax_sa::onboarding`, `tax_sa::zatca::finish::{due, finish}`, `tax_sa::zatca::http::Fatoora::new`, `by_the_platform()` (exists in this file).
 - Produces: job named `tax_sa.onboard`.
 
-- [ ] **Step 1: Extend the names test** (`a_deployment_with_a_sealing_key_both_signs_and_submits`):
+- [x] **Step 1: Extend the names test** (`a_deployment_with_a_sealing_key_both_signs_and_submits`):
 
 ```rust
         assert!(names.contains(&"tax_sa.onboard"), "{names:?}");
@@ -1366,7 +1366,7 @@ after the `tax_sa.submit` assertion. Run → FAIL:
 cargo nextest run -p erp-worker --bin worker a_deployment_with_a_sealing_key
 ```
 
-- [ ] **Step 2: The job.** After the `SubmitToZatca` impl:
+- [x] **Step 2: The job.** After the `SubmitToZatca` impl:
 
 ```rust
 /// **Finishes an onboarding the route started.** A tenant holding a compliance
@@ -1442,14 +1442,14 @@ In `zatca_jobs`, add after the `SubmitToZatca` entry:
         }),
 ```
 
-- [ ] **Step 3: Run → PASS**
+- [x] **Step 3: Run → PASS**
 
 ```bash
 cargo clippy -p erp-worker --all-targets -- -D warnings
 cargo nextest run -p erp-worker --bin worker a_deployment_with_a_sealing_key
 ```
 
-- [ ] **Step 4: Falsify.** Remove the `FinishOnboarding` entry from `zatca_jobs` → FAIL. Restore → PASS.
+- [x] **Step 4: Falsify.** Remove the `FinishOnboarding` entry from `zatca_jobs` → FAIL. Restore → PASS.
 
 ---
 
@@ -1464,7 +1464,7 @@ cargo nextest run -p erp-worker --bin worker a_deployment_with_a_sealing_key
 - Consumes: `Registration.industry` (Task 1), `Onboarded` fields (Task 3), `finish` (Task 5, from the HTTP test).
 - Produces: request bodies `OnboardingRequest { environment, branch? }`, `ActivationRequest { environment, otp, branch? }`; response `ActivationView { compliance, state, checks_expected }` with **202**; `OnboardingView` gains `state`, `checks`, `refusal`; message codes `tax_sa.no_industry` (400), `tax_sa.already_live` (409).
 
-- [ ] **Step 1: Messages.** In `messages.rs` add the constants after `NO_SUCH_DOCUMENT`, add both to `CODES`, and append to `ENTRIES` before the closing `];`:
+- [x] **Step 1: Messages.** In `messages.rs` add the constants after `NO_SUCH_DOCUMENT`, add both to `CODES`, and append to `ENTRIES` before the closing `];`:
 
 ```rust
 pub const NO_INDUSTRY: MessageCode = MessageCode::new("tax_sa.no_industry");
@@ -1501,7 +1501,7 @@ pub const ALREADY_LIVE: MessageCode = MessageCode::new("tax_sa.already_live");
     ),
 ```
 
-- [ ] **Step 2: Write the failing HTTP test** in `crates/erp-api/tests/http.rs` after `a_certificate_is_checked_against_the_key_it_is_meant_for`. It needs a registrar that issues; put it after `sign_certificate`:
+- [x] **Step 2: Write the failing HTTP test** in `crates/erp-api/tests/http.rs` after `a_certificate_is_checked_against_the_key_it_is_meant_for`. It needs a registrar that issues; put it after `sign_certificate`:
 
 ```rust
 /// A ZATCA that issues whatever it is shown, for driving the worker's half of
@@ -1770,13 +1770,13 @@ async fn a_tenant_goes_live_from_one_otp_and_the_status_says_so() {
 
 (The fixture's sealing key is `SealingKey::new("test", &[5u8; 32])` at `crates/erp-api/tests/http.rs:125`; `finish` must unseal with the same one.)
 
-- [ ] **Step 3: Run, expect FAIL** (first on `tax_sa.no_industry`: the manual route still takes the old body):
+- [x] **Step 3: Run, expect FAIL** (first on `tax_sa.no_industry`: the manual route still takes the old body):
 
 ```bash
 cargo nextest run -p erp-api --test http a_tenant_goes_live_from_one_otp
 ```
 
-- [ ] **Step 4: Slim the request bodies.** Replace `OnboardingRequest` and its example with:
+- [x] **Step 4: Slim the request bodies.** Replace `OnboardingRequest` and its example with:
 
 ```rust
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1832,7 +1832,7 @@ struct ActivationView {
 }
 ```
 
-- [ ] **Step 5: One way to build the unit.** Delete the old `async fn unit_for(tenant, body, locale)` (~line 1233–1275) and `fn unit_from(registration)` (~line 1583–1601). Add, near `registered_unit`:
+- [x] **Step 5: One way to build the unit.** Delete the old `async fn unit_for(tenant, body, locale)` (~line 1233–1275) and `fn unit_from(registration)` (~line 1583–1601). Add, near `registered_unit`:
 
 ```rust
 /// The unit, from the registration and at most a branch.
@@ -1896,7 +1896,7 @@ In `begin_onboarding`, replace `let unit = unit_for(&tenant, &body, locale).awai
     let unit = unit_for(&registration, body.branch.as_deref(), locale)?;
 ```
 
-- [ ] **Step 6: The onboarding read, shared.** Extract from `onboarding_status` the read of the row into a helper (used by the status and the guard):
+- [x] **Step 6: The onboarding read, shared.** Extract from `onboarding_status` the read of the row into a helper (used by the status and the guard):
 
 ```rust
 /// The onboarding row, or a 500 that is ours: a read model this module owns
@@ -1955,7 +1955,7 @@ async fn refuse_if_live(
 }
 ```
 
-- [ ] **Step 7: `activate`.** Replace the handler, its doc comment and its `utoipa::path` with:
+- [x] **Step 7: `activate`.** Replace the handler, its doc comment and its `utoipa::path` with:
 
 ```rust
 /// Start taking this business live with ZATCA, from a Fatoora OTP.
@@ -2039,7 +2039,7 @@ async fn activate(
 
 `erp_web::messages::COMPLIANCE_REFUSED` is no longer used here; leave the constant in `erp-web`.
 
-- [ ] **Step 8: The status.** `OnboardingView` gains, after `issued_at`:
+- [x] **Step 8: The status.** `OnboardingView` gains, after `issued_at`:
 
 ```rust
     /// `none`, `checking` (the worker is submitting samples or asking for the
@@ -2099,7 +2099,7 @@ and add `state, checks, refusal,` to the `OnboardingView { … }` literal. (If c
 
 Update the `onboarding_status` doc comment to mention `state`.
 
-- [ ] **Step 9: Run**
+- [x] **Step 9: Run**
 
 ```bash
 cargo clippy -p tax_sa -p erp-api --all-targets -- -D warnings
@@ -2108,7 +2108,7 @@ cargo nextest run -p tax_sa --test tax_sa onboard
 ```
 Expected: clean and passing. The two older HTTP tests still send `common_name`/`serial`/`industry` in the body; `serde` ignores unknown fields, and their `compliance_documents == 6` assertion still holds.
 
-- [ ] **Step 10: Falsify.** (a) In `refuse_if_live`, change `if live_here` to `if false` → FAIL on `CONFLICT`. Restore. (b) In `unit_for`, replace the `ok_or_else(…)?` on `industry` with `.unwrap_or("Services")` → FAIL on `tax_sa.no_industry`. Restore. (c) In `onboarding_status`, hard-code `state: "checking"` → FAIL on `"live"`. Restore; run → PASS.
+- [x] **Step 10: Falsify.** (a) In `refuse_if_live`, change `if live_here` to `if false` → FAIL on `CONFLICT`. Restore. (b) In `unit_for`, replace the `ok_or_else(…)?` on `industry` with `.unwrap_or("Services")` → FAIL on `tax_sa.no_industry`. Restore. (c) In `onboarding_status`, hard-code `state: "checking"` → FAIL on `"live"`. Restore; run → PASS.
 
 ---
 
@@ -2120,7 +2120,7 @@ Expected: clean and passing. The two older HTTP tests still send `common_name`/`
 - Modify: `modules/tax_sa/src/zatca/onboarding.rs` header (lines 19–24)
 - Regenerate: `docs/openapi.json`, `docs/openapi.baseline.json`, `.sqlx/`
 
-- [ ] **Step 1: `onboarding.rs` header.** Replace the paragraph beginning `**Steps 2 and 4 are separate calls here, and separate on purpose.**` (through `would hide that.`) with:
+- [x] **Step 1: `onboarding.rs` header.** Replace the paragraph beginning `**Steps 2 and 4 are separate calls here, and separate on purpose.**` (through `would hide that.`) with:
 
 ```text
 //! **Step 2 is the route's and steps 3 and 4 are the worker's.** The OTP is the
@@ -2132,7 +2132,7 @@ Expected: clean and passing. The two older HTTP tests still send `common_name`/`
 //! manual path and the tests drive them one at a time.
 ```
 
-- [ ] **Step 2: `docs/RUNNING.md`.** In the registration `curl`, add `"industry":"Consulting",` after `"identifier":"1010101010",`. Replace step 2's comment and body with:
+- [x] **Step 2: `docs/RUNNING.md`.** In the registration `curl`, add `"industry":"Consulting",` after `"identifier":"1010101010",`. Replace step 2's comment and body with:
 
 ```bash
 # 2. The OTP. This request generates the key, buys the compliance certificate
@@ -2143,7 +2143,7 @@ curl -s -X POST $API/v1/tax_sa/zatca/onboarding/activate -H "$H" -H "$A" -H 'con
 ```
 and after step 3's first `curl` add a line: `# `state` goes checking → live; `refusal` says what ZATCA refused, if anything.`
 
-- [ ] **Step 3: `docs/IMPLEMENTATION.md`.** Status row (line ~2077) becomes:
+- [x] **Step 3: `docs/IMPLEMENTATION.md`.** Status row (line ~2077) becomes:
 
 ```markdown
 - [x] Onboarding: key pair, CSR, OTP, compliance checks, production certificate.
@@ -2207,7 +2207,7 @@ activate response no longer carries the production certificate and the check
 counts, and the registration body requires `industry`.
 ```
 
-- [ ] **Step 4: Generated files and gates.** In this order:
+- [x] **Step 4: Generated files and gates.** In this order:
 
 ```bash
 just openapi
@@ -2226,7 +2226,7 @@ SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings
 ```
 Expected: all clean; the role matrix still counts 216.
 
-- [ ] **Step 5: Stop and summarize.** List what was built, every falsification with the line reverted, the two baseline breaks, and hand over `just check`. Do not commit.
+- [x] **Step 5: Stop and summarize.** List what was built, every falsification with the line reverted, the two baseline breaks, and hand over `just check`. Do not commit.
 
 ---
 
