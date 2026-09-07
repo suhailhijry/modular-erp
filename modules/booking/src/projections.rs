@@ -44,6 +44,91 @@ fn decode<E: serde::de::DeserializeOwned>(
         })
 }
 
+/// A resource as it was declared, for [`declared`].
+struct Declared<'a> {
+    name: &'a str,
+    name_latin: Option<&'a str>,
+    kind: crate::Kind,
+    capacity: u16,
+    rate: Option<Money>,
+    branch: Option<&'a str>,
+    employee: Option<&'a str>,
+    at: Timestamp,
+}
+
+/// The row a declaration writes.
+async fn declared(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    row: Declared<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO resource
+             (id, name, name_latin, kind, capacity, branch, employee,
+              declared_on, recorded_at, position, rate_minor, rate_currency)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+    )
+    .bind(id)
+    .bind(row.name)
+    .bind(row.name_latin)
+    .bind(row.kind.as_str())
+    .bind(i32::from(row.capacity))
+    .bind(row.branch)
+    .bind(row.employee)
+    .bind(row.at)
+    .bind(ctx.event_time())
+    .bind(ctx.position().get())
+    .bind(row.rate.map(Money::minor))
+    .bind(row.rate.map(|r| r.currency().to_string()))
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The two facts a reservation is *told* by another module, each an opaque id
+/// and the moment it arrived.
+#[derive(Debug, Clone, Copy)]
+enum Stamp {
+    /// A deposit settled: `secured_by`, `secured_at`.
+    Secured,
+    /// The work was billed: `billed_by`, `billed_at`.
+    Billed,
+}
+
+/// Writes one of them. Two statements rather than one interpolation, because
+/// the column is a literal from this file and never a caller's string.
+async fn stamped(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    stamp: Stamp,
+    by: &str,
+    at: Timestamp,
+) -> Result<(), sqlx::Error> {
+    let sql = match stamp {
+        Stamp::Secured => {
+            "UPDATE reservation
+                SET secured_by = $2, secured_at = $3, recorded_at = $4, position = $5
+              WHERE id = $1"
+        }
+        Stamp::Billed => {
+            "UPDATE reservation
+                SET billed_by = $2, billed_at = $3, recorded_at = $4, position = $5
+              WHERE id = $1"
+        }
+    };
+    sqlx::query(sql)
+        .bind(id)
+        .bind(by)
+        .bind(at)
+        .bind(ctx.event_time())
+        .bind(ctx.position().get())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 /// Everything that can be booked, as it is now.
 #[derive(Debug)]
 pub struct Resources;
@@ -73,39 +158,40 @@ impl Projection for Resources {
                 name_latin,
                 kind,
                 capacity,
+                rate,
                 branch,
                 employee,
                 at,
             } => {
-                sqlx::query(
-                    "INSERT INTO resource
-                         (id, name, name_latin, kind, capacity, branch, employee,
-                          declared_on, recorded_at, position)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                declared(
+                    ctx,
+                    conn,
+                    id,
+                    Declared {
+                        name: &name,
+                        name_latin: name_latin.as_deref(),
+                        kind,
+                        capacity,
+                        rate,
+                        branch: branch.as_ref().map(erp_types::AggregateId::as_str),
+                        employee: employee.as_ref().map(erp_types::AggregateId::as_str),
+                        at,
+                    },
                 )
-                .bind(id)
-                .bind(&name)
-                .bind(&name_latin)
-                .bind(kind.as_str())
-                .bind(i32::from(capacity))
-                .bind(branch.as_ref().map(erp_types::AggregateId::as_str))
-                .bind(employee.as_ref().map(erp_types::AggregateId::as_str))
-                .bind(at)
-                .bind(ctx.event_time())
-                .bind(ctx.position().get())
-                .execute(&mut *conn)
                 .await?;
             }
             ResourceEvent::Amended {
                 name,
                 name_latin,
                 capacity,
+                rate,
                 ..
             } => {
                 sqlx::query(
                     "UPDATE resource
                         SET name = $2, name_latin = $3, capacity = $4,
-                            recorded_at = $5, position = $6
+                            recorded_at = $5, position = $6,
+                            rate_minor = $7, rate_currency = $8
                       WHERE id = $1",
                 )
                 .bind(id)
@@ -114,6 +200,8 @@ impl Projection for Resources {
                 .bind(i32::from(capacity))
                 .bind(ctx.event_time())
                 .bind(ctx.position().get())
+                .bind(rate.map(Money::minor))
+                .bind(rate.map(|r| r.currency().to_string()))
                 .execute(&mut *conn)
                 .await?;
             }
@@ -222,18 +310,10 @@ impl Projection for Reservations {
             // **The slot is paid for.** What paid it is opaque here, and kept
             // so a person can follow the money out of the diary.
             ReservationEvent::Secured { payment, at } => {
-                sqlx::query(
-                    "UPDATE reservation
-                        SET secured_by = $2, secured_at = $3, recorded_at = $4, position = $5
-                      WHERE id = $1",
-                )
-                .bind(id)
-                .bind(payment.as_str())
-                .bind(at)
-                .bind(ctx.event_time())
-                .bind(ctx.position().get())
-                .execute(&mut *conn)
-                .await?;
+                stamped(ctx, conn, id, Stamp::Secured, payment.as_str(), at).await?;
+            }
+            ReservationEvent::Billed { invoice, at } => {
+                stamped(ctx, conn, id, Stamp::Billed, invoice.as_str(), at).await?;
             }
             ReservationEvent::Moved { to, why, .. } => {
                 sqlx::query(
@@ -421,6 +501,8 @@ pub struct ResourceSummary {
     pub name_latin: Option<String>,
     pub kind: String,
     pub capacity: u16,
+    /// The published price, before tax, when there is one.
+    pub rate: Option<Money>,
     pub withdrawn: bool,
     pub withdrawn_why: Option<String>,
 }
@@ -456,7 +538,7 @@ pub async fn resources(
     let rows = sqlx::query!(
         r#"SELECT id as "id!", name as "name!", name_latin, kind as "kind!",
                   capacity as "capacity!",
-                  branch, employee,
+                  branch, employee, rate_minor, rate_currency,
                   (withdrawn_at IS NOT NULL) as "withdrawn!", withdrawn_why
              FROM proj_booking.resource
             WHERE ($5 OR withdrawn_at IS NULL)
@@ -484,6 +566,7 @@ pub async fn resources(
                 capacity: u16::try_from(r.capacity).unwrap_or(u16::MAX),
                 branch: r.branch,
                 employee: r.employee,
+                rate: rate_of(r.rate_minor, r.rate_currency.as_deref()),
                 withdrawn: r.withdrawn,
                 withdrawn_why: r.withdrawn_why,
             })
@@ -494,6 +577,14 @@ pub async fn resources(
 }
 
 /// One resource, with the timetable it is offered on.
+/// The two rate columns as one price, or none.
+fn rate_of(minor: Option<i64>, currency: Option<&str>) -> Option<Money> {
+    Some(Money::from_minor(
+        minor?,
+        CurrencyCode::new(currency?).ok()?,
+    ))
+}
+
 pub async fn resource(
     conn: &mut PgConnection,
     id: &str,
@@ -501,7 +592,7 @@ pub async fn resource(
     let Some(row) = sqlx::query!(
         r#"SELECT id as "id!", name as "name!", name_latin, kind as "kind!",
                   capacity as "capacity!", availability as "availability!",
-                  branch, employee,
+                  branch, employee, rate_minor, rate_currency,
                   (withdrawn_at IS NOT NULL) as "withdrawn!", withdrawn_why,
                   declared_on as "declared_on!"
              FROM proj_booking.resource WHERE id = $1"#,
@@ -522,6 +613,7 @@ pub async fn resource(
             capacity: u16::try_from(row.capacity).unwrap_or(u16::MAX),
             branch: row.branch,
             employee: row.employee,
+            rate: rate_of(row.rate_minor, row.rate_currency.as_deref()),
             withdrawn: row.withdrawn,
             withdrawn_why: row.withdrawn_why,
         },
@@ -546,6 +638,10 @@ pub struct ReservationSummary {
     pub starts_at: Timestamp,
     pub ends_at: Timestamp,
     pub note: Option<String>,
+    /// The payment that secured the slot, when a deposit was paid.
+    pub secured_by: Option<String>,
+    /// The invoice raised for the work, once one has been.
+    pub billed_by: Option<String>,
 }
 
 /// One line of one.
@@ -661,7 +757,8 @@ pub async fn reservations(
     let rows = sqlx::query!(
         r#"SELECT id as "id!", customer_id, customer_name as "customer_name!",
                   customer_phone, stage as "stage!", stage_why,
-                  starts_at as "starts_at!", ends_at as "ends_at!", note
+                  starts_at as "starts_at!", ends_at as "ends_at!", note,
+                  secured_by, billed_by
              FROM proj_booking.reservation
             WHERE ($2::timestamptz IS NULL OR ends_at > $2)
               AND ($3::timestamptz IS NULL OR starts_at < $3)
@@ -691,6 +788,8 @@ pub async fn reservations(
                 starts_at: r.starts_at,
                 ends_at: r.ends_at,
                 note: r.note,
+                secured_by: r.secured_by,
+                billed_by: r.billed_by,
             })
             .collect(),
         limit,
@@ -706,7 +805,8 @@ pub async fn reservation(
     let Some(row) = sqlx::query!(
         r#"SELECT id as "id!", customer_id, customer_name as "customer_name!",
                   customer_phone, stage as "stage!", stage_why,
-                  starts_at as "starts_at!", ends_at as "ends_at!", note
+                  starts_at as "starts_at!", ends_at as "ends_at!", note,
+                  secured_by, billed_by
              FROM proj_booking.reservation WHERE id = $1"#,
         id
     )
@@ -739,6 +839,8 @@ pub async fn reservation(
             starts_at: row.starts_at,
             ends_at: row.ends_at,
             note: row.note,
+            secured_by: row.secured_by,
+            billed_by: row.billed_by,
         },
         lines: lines
             .into_iter()
@@ -815,6 +917,54 @@ pub async fn lapsed_holds(
                 due_by: row.deposit_due_by,
             })
         })
+        .collect())
+}
+
+/// **Which of these bookings have not been told their deposit arrived.**
+///
+/// The other half of `payments::settled_advances`: the worker asks `payments`
+/// what settled and asks this which of those the diary has not heard about,
+/// and tells it. Reads the projection, because the question is asked for a
+/// hundred bookings at a time and `secure_in` re-checks the log before it
+/// writes anyway — a stale answer here costs one idempotent no-op.
+/// **Completed bookings nobody has billed**, oldest first — the worklist of
+/// the pass that raises invoices when the business asks for that on
+/// completion. Only bookings with a priced line: one with none is a business
+/// that bills elsewhere, and there is nothing to raise a document from.
+pub async fn unbilled_completions(
+    conn: &mut sqlx::PgConnection,
+    limit: i64,
+) -> Result<Vec<AggregateId>, sqlx::Error> {
+    let rows = sqlx::query_scalar!(
+        r#"SELECT r.id as "id!" FROM proj_booking.reservation r
+            WHERE r.stage = 'completed' AND r.billed_by IS NULL
+              AND EXISTS (SELECT 1 FROM proj_booking.reservation_line l
+                           WHERE l.reservation_id = r.id AND l.net IS NOT NULL)
+            ORDER BY r.ends_at ASC LIMIT $1"#,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|id| AggregateId::new(&id).ok())
+        .collect())
+}
+
+pub async fn unsecured_among(
+    conn: &mut sqlx::PgConnection,
+    reservations: &[String],
+) -> Result<Vec<AggregateId>, sqlx::Error> {
+    let rows = sqlx::query_scalar!(
+        r#"SELECT id as "id!" FROM proj_booking.reservation
+            WHERE id = ANY($1) AND secured_by IS NULL"#,
+        reservations,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|id| AggregateId::new(&id).ok())
         .collect())
 }
 

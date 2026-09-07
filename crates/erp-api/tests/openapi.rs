@@ -247,6 +247,14 @@ fn only_the_deliberately_public_routes_are_public() {
             "post",
             "/v1/booking/public/reservations/{reservation}/deposit",
         ),
+        // **The read beside it.** Where the deposit has got to and where to
+        // pay it — what a customer waiting on a lender's page polls, and what a
+        // reload finds again. It says nothing a stranger could not learn by
+        // asking to pay: the amount, and where.
+        (
+            "get",
+            "/v1/booking/public/reservations/{reservation}/deposit",
+        ),
         // **A code to a phone, and only when the business asks for one.**
         //
         // It says nothing about the number — the answer is the same for one

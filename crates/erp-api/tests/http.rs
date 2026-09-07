@@ -25,6 +25,48 @@ struct Fixture {
     app: Router,
     control: Arc<ControlPlane>,
     db: TestDb,
+    /// The DNS these tests publish to. `prove` puts the record a claim asked
+    /// for where `verify_domain` will look.
+    prover: Arc<FakeProver>,
+}
+
+/// TXT records the tests choose to publish, standing in for the world's DNS.
+#[derive(Debug, Default)]
+struct FakeProver {
+    records: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+}
+
+impl FakeProver {
+    fn publish(&self, name: &str, value: &str) {
+        self.records
+            .lock()
+            .expect("not poisoned")
+            .entry(name.to_owned())
+            .or_default()
+            .push(value.to_owned());
+    }
+}
+
+impl erp_control::DomainProver for FakeProver {
+    fn txt_records<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<String>, erp_control::ProofError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let found = self
+            .records
+            .lock()
+            .expect("not poisoned")
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        Box::pin(async move { Ok(found) })
+    }
 }
 /// The id a create is stored under, from a name that reads in the test.
 ///
@@ -49,10 +91,14 @@ impl Fixture {
             .with_url("primary", &erp_testkit::database_url())
             .expect("the test database URL parses");
 
-        let control = Arc::new(ControlPlane::new(
-            db.pool().clone(),
-            TenantPools::new(clusters, PoolConfig::default()),
-        ));
+        let prover = Arc::new(FakeProver::default());
+        let control = Arc::new(
+            ControlPlane::new(
+                db.pool().clone(),
+                TenantPools::new(clusters, PoolConfig::default()),
+            )
+            .with_prover(Arc::clone(&prover) as Arc<dyn erp_control::DomainProver>),
+        );
         control
             .register_cluster(
                 "primary",
@@ -66,11 +112,16 @@ impl Fixture {
             .expect("cluster registers");
 
         Self {
+            prover,
             // With a sealing key, because a deployment that stores tenant
             // secrets has one — and `no_sealing_key_refuses_rather_than_storing`
             // covers the deployment that does not.
             app: router(
                 AppState::new(Arc::clone(&control))
+                    // The router is driven with `oneshot`, so there is no socket
+                    // and no peer address; the tests that need a caller to be
+                    // somebody send `X-Forwarded-For`, the way a proxy would.
+                    .trusting_forwarded_for(true)
                     .sealing_with(
                         erp_eventlog::SealingKey::new("test", &[5u8; 32]).expect("32 bytes"),
                     )
@@ -193,6 +244,15 @@ impl Fixture {
     /// call sites from repeating `acme.localhost`; a test that means a
     /// different tenant sets `Host` itself, and those are precisely the tests
     /// about reaching a tenant you are not a member of.
+    /// Publishes the record a claim asked for, the way a tenant would at their
+    /// DNS provider.
+    fn prove(&self, domain: &str, token: &str) {
+        self.prover.publish(
+            &erp_control::record_name(domain),
+            &erp_control::record_value(token),
+        );
+    }
+
     async fn send(&self, request: Request<Body>) -> (StatusCode, serde_json::Value, Vec<u8>) {
         let mut request = request;
         if !request.headers().contains_key(header::HOST) {
@@ -365,6 +425,7 @@ impl Fixture {
                             "name": "أكمي للتجارة",
                             "scheme": "crn",
                             "identifier": "1010101010",
+                            "industry": "Consulting",
                             "address": {
                                 "street": "طريق الملك فهد",
                                 "building": "2322",
@@ -1741,6 +1802,7 @@ fn role_scoped_operations() -> Vec<(String, String, bool)> {
 const PERMISSIONS: &[(&str, &[&str])] = &[
     // Reading is what a viewer is for.
     ("tenant", ALL_ROLES),
+    ("tenant_calendar", ALL_ROLES),
     ("list_members", ALL_ROLES),
     ("list_modules", ALL_ROLES),
     ("list_customers", ALL_ROLES),
@@ -1784,6 +1846,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // What the hours cost. A viewer may read the tariff for the same reason
     // they may read the VAT rate: it is on every quote they give a customer.
     ("tariff", ALL_ROLES),
+    ("public_booking_settings", ALL_ROLES),
+    ("billing_settings", ALL_ROLES),
     ("get_bookable", ALL_ROLES),
     ("list_reservations", ALL_ROLES),
     ("get_reservation", ALL_ROLES),
@@ -1799,6 +1863,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("post_entry", &["owner", "accountant", "clerk"]),
     ("reverse_entry", &["owner", "accountant", "clerk"]),
     ("issue_invoice", &["owner", "accountant", "clerk"]),
+    // Billing a booking is issuing an invoice, so the same hands.
+    ("bill_reservation_route", &["owner", "accountant", "clerk"]),
     ("refund_payment", &["owner", "accountant", "clerk"]),
     ("unmatched_customers", ALL_ROLES),
     // The dashboard. A viewer may read what the business sold, how the diary
@@ -1825,7 +1891,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("messaging_spend", ALL_ROLES),
     // A device registering itself. A viewer's app may do it, because the app is
     // whatever the person signed in is holding.
-    ("register_device", ALL_ROLES),
+    // A token bound to somebody else's id is somebody else's notifications.
+    ("register_device", OWNER),
     ("put_template", &["owner"]),
     ("delete_template", &["owner"]),
     ("set_messaging_settings", &["owner"]),
@@ -1848,6 +1915,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("set_webhook_secret", &["owner"]),
     ("list_keys", &["owner"]),
     ("issue_key", &["owner"]),
+    ("list_dead_letters", OWNER),
+    ("requeue_dead_letter", OWNER),
     ("rotate_key", &["owner"]),
     ("revoke_key", &["owner"]),
     ("upload_file", &["owner", "accountant", "clerk"]),
@@ -1936,6 +2005,7 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("allow_origin", OWNER),
     ("revoke_origin", OWNER),
     ("claim_domain", OWNER),
+    ("set_tenant_calendar", OWNER),
     ("verify_domain", OWNER),
     ("attach_customer", OWNER),
     ("record_payment", &["owner", "accountant", "clerk"]),
@@ -2018,6 +2088,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Which hours cost more is the shape of the business, and it is the half a
     // client must not be able to decide for itself.
     ("set_tariff", OWNER),
+    ("set_public_booking_settings", OWNER),
+    ("set_billing_settings", OWNER),
     ("declare_bookable", OWNER),
     ("amend_bookable", OWNER),
     ("set_opening_hours", OWNER),
@@ -2129,8 +2201,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        207,
-        "expected two hundred and seven role-scoped operations"
+        216,
+        "expected two hundred and sixteen role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -4829,7 +4901,7 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     fixture.project_sales(tenant).await;
 
-    let period = "from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR";
+    let period = "from=2026-01-01&until=2026-04-01&currency=SAR";
     let (status, filed, _) = fixture
         .send(
             bearer(Request::get(format!("/v1/tax_sa/vat-return?{period}")))
@@ -4859,7 +4931,7 @@ async fn a_tenant_can_read_the_vat_it_has_charged() {
         .send(
             bearer(Request::get(
                 "/v1/tax_sa/vat-return\
-                 ?from=2026-04-01T00:00:00Z&until=2026-01-01T00:00:00Z&currency=SAR",
+                 ?from=2026-04-01&until=2026-01-01&currency=SAR",
             ))
             .body(Body::empty())
             .unwrap(),
@@ -5465,7 +5537,7 @@ async fn a_tenant_files_output_tax_less_input_tax() {
         .send(
             bearer(Request::get(
                 "/v1/tax_sa/vat-return\
-                 ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
+                 ?from=2026-01-01&until=2026-04-01&currency=SAR",
             ))
             .body(Body::empty())
             .unwrap(),
@@ -5549,7 +5621,7 @@ async fn a_return_for_a_tenant_with_one_side_reports_the_other_as_nothing() {
         .send(
             bearer(Request::get(
                 "/v1/tax_sa/vat-return\
-                 ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
+                 ?from=2026-01-01&until=2026-04-01&currency=SAR",
             ))
             .body(Body::empty())
             .unwrap(),
@@ -6086,10 +6158,12 @@ async fn a_certificate_is_checked_against_the_key_it_is_meant_for() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["stage"], "compliance");
+    // The common name is minted from the unit's serial, not the caller's — the
+    // subject carries `CN=EGS-<serial>`.
     assert!(
         body["subject"]
             .as_str()
-            .is_some_and(|s| s.contains("EGS1-886431145")),
+            .is_some_and(|s| s.contains("CN=EGS-")),
         "{body}"
     );
 
@@ -6184,6 +6258,282 @@ fn sign_certificate(
         .sign(&ca, openssl::hash::MessageDigest::sha256())
         .expect("signs");
     certificate.build().to_pem().expect("pem")
+}
+
+/// A ZATCA that issues whatever it is shown, for driving the worker's half of
+/// onboarding without a network. The route's half makes one real call and is
+/// covered by the module tests with the same kind of fake.
+#[derive(Debug, Default)]
+struct IssuingZatca {
+    checked: std::sync::Mutex<usize>,
+}
+
+fn issued_over(
+    subject: &openssl::x509::X509NameRef,
+    key: &openssl::pkey::PKey<openssl::pkey::Public>,
+    request_id: &str,
+) -> tax_sa::zatca::onboarding::CsidResponse {
+    tax_sa::zatca::onboarding::CsidResponse {
+        request_id: Some(serde_json::json!(request_id)),
+        disposition: Some("ISSUED".to_owned()),
+        token: Some(base64_encode(&sign_certificate(subject, key))),
+        secret: Some("the-csid-secret".to_owned()),
+        errors: None,
+    }
+}
+
+#[async_trait::async_trait]
+impl tax_sa::zatca::onboarding::Registrar for IssuingZatca {
+    async fn compliance_csid(
+        &self,
+        _environment: tax_sa::zatca::csr::Environment,
+        _otp: &tax_sa::zatca::onboarding::Otp,
+        request: &tax_sa::zatca::onboarding::ComplianceRequest,
+    ) -> Result<tax_sa::zatca::onboarding::CsidResponse, tax_sa::zatca::wire::Unanswered> {
+        let csr = openssl::x509::X509Req::from_pem(&base64_decode(&request.csr)).expect("a CSR");
+        Ok(issued_over(
+            csr.subject_name(),
+            &csr.public_key().expect("a key"),
+            "compliance-1",
+        ))
+    }
+
+    async fn check_compliance(
+        &self,
+        _environment: tax_sa::zatca::csr::Environment,
+        _compliance: &tax_sa::zatca::onboarding::Csid,
+        _submission: &tax_sa::zatca::wire::Submission,
+    ) -> Result<tax_sa::zatca::wire::Verdict, tax_sa::zatca::wire::Unanswered> {
+        *self.checked.lock().expect("not poisoned") += 1;
+        Ok(tax_sa::zatca::wire::Verdict::Accepted {
+            warnings: vec![],
+            stamped: None,
+        })
+    }
+
+    async fn production_csid(
+        &self,
+        _environment: tax_sa::zatca::csr::Environment,
+        compliance: &tax_sa::zatca::onboarding::Csid,
+        _request: &tax_sa::zatca::onboarding::ProductionRequest,
+    ) -> Result<tax_sa::zatca::onboarding::CsidResponse, tax_sa::zatca::wire::Unanswered> {
+        // Over the same key: the production certificate replaces the compliance
+        // one for the unit that earned it.
+        let certificate = compliance.certificate().expect("a certificate");
+        Ok(issued_over(
+            certificate.subject_name(),
+            &certificate.public_key().expect("a key"),
+            "production-1",
+        ))
+    }
+
+    async fn renew_csid(
+        &self,
+        _environment: tax_sa::zatca::csr::Environment,
+        _production: &tax_sa::zatca::onboarding::Csid,
+        _otp: &tax_sa::zatca::onboarding::Otp,
+        _request: &tax_sa::zatca::onboarding::ComplianceRequest,
+    ) -> Result<tax_sa::zatca::onboarding::CsidResponse, tax_sa::zatca::wire::Unanswered> {
+        unreachable!("nothing is renewed in these tests")
+    }
+}
+
+/// **One OTP, over HTTP, and the status says where it stands.** The
+/// registration carries the industry; the route derives the unit and stops at
+/// the compliance certificate; the worker finishes; asking again is refused
+/// before a key is touched.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one story, told once, from registration to live"
+)]
+#[tokio::test]
+async fn a_tenant_goes_live_from_one_otp_and_the_status_says_so() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+
+    // A registration from before the industry existed: no certificate can be
+    // asked for until it is added, and the answer says so.
+    tax_sa::register_taxpayer(
+        &db,
+        tax_sa::Registration {
+            vat_number: "310122393500003".to_owned(),
+            name: "أكمي للتجارة".to_owned(),
+            name_latin: None,
+            scheme: tax_sa::IdScheme::Crn,
+            identifier: "1010101010".to_owned(),
+            address: tax_sa::Address {
+                street: "طريق الملك فهد".to_owned(),
+                building: "2322".to_owned(),
+                additional: None,
+                district: "العليا".to_owned(),
+                city: "الرياض".to_owned(),
+                postal_code: "12211".to_owned(),
+                country: "SA".to_owned(),
+            },
+            industry: None,
+        },
+        chrono::Utc::now(),
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .expect("registers");
+    fixture.project_tax(tenant).await;
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tax_sa/zatca/onboarding"))
+                .body(Body::from(r#"{"environment":"simulation"}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "tax_sa.no_industry");
+
+    // With the industry, and six digits or nothing before anything is generated.
+    fixture.register_with_zatca(&token).await;
+    fixture.project_tax(tenant).await;
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tax_sa/zatca/onboarding/activate"))
+                .body(Body::from(r#"{"environment":"simulation","otp":"12"}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.not_an_otp");
+
+    // The route's half, by hand — its one network call is a fake's job in the
+    // module tests. The unit is derived: the registered name is the O and, with
+    // no branch given, the OU; the common name is minted.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tax_sa/zatca/onboarding"))
+                .body(Body::from(r#"{"environment":"simulation"}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["compliance_documents"], 6);
+    let request =
+        openssl::x509::X509Req::from_pem(&base64_decode(body["csr"].as_str().expect("a CSR")))
+            .expect("a certificate request");
+    let subject: Vec<String> = request
+        .subject_name()
+        .entries()
+        .map(|e| {
+            format!(
+                "{}={}",
+                e.object().nid().short_name().expect("a name"),
+                e.data().to_string().expect("utf8")
+            )
+        })
+        .collect();
+    assert!(
+        subject.contains(&"O=أكمي للتجارة".to_owned()),
+        "{subject:?}"
+    );
+    assert!(
+        subject.contains(&"OU=أكمي للتجارة".to_owned()),
+        "{subject:?}"
+    );
+    assert!(
+        subject.iter().any(|e| e.starts_with("CN=EGS-")),
+        "{subject:?}"
+    );
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::put("/v1/tax_sa/zatca/onboarding/certificate"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "stage": "compliance",
+                        "environment": "simulation",
+                        "token": certificate_over(&request),
+                        "secret": "the-csid-secret",
+                        "request_id": "compliance-1"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    fixture.project_tax(tenant).await;
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/zatca/onboarding"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "checking");
+    assert_eq!(body["live"], false);
+    assert!(body["checks"].is_null());
+    assert!(body["refusal"].is_null());
+
+    // The worker's half.
+    let zatca = IssuingZatca::default();
+    let finished = tax_sa::zatca::finish::finish(
+        &db,
+        &erp_eventlog::SealingKey::new("test", &[5u8; 32]).expect("32 bytes"),
+        &zatca,
+        chrono::Utc::now(),
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .expect("finishes");
+    assert_eq!(
+        finished.checks.as_ref().map(|c| (c.submitted, c.passed)),
+        Some((6, 6))
+    );
+    assert!(finished.production.is_some());
+    fixture.project_tax(tenant).await;
+
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get("/v1/tax_sa/zatca/onboarding"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "live");
+    assert_eq!(body["live"], true);
+    assert_eq!(body["checks"]["submitted"], 6);
+    assert!(!body["checks"]["passed_at"].is_null());
+    assert!(body["refusal"].is_null());
+    assert_eq!(
+        body["reached"],
+        serde_json::json!(["compliance", "production"])
+    );
+
+    // Live: asking again is refused before any key is touched — and before
+    // ZATCA is called, which is why this test can ask.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/tax_sa/zatca/onboarding/activate"))
+                .body(Body::from(r#"{"environment":"simulation","otp":"123456"}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "tax_sa.already_live");
+
+    fixture.cleanup().await;
 }
 
 /// **A deployment with no sealing key refuses rather than storing a key in the
@@ -6571,11 +6921,18 @@ async fn a_verified_origin_is_answered_and_a_lookalike_is_not() {
     fixture.enable_module(tenant, crm::setup()).await;
     fixture.enable_module(tenant, booking::setup()).await;
 
-    fixture
+    let token = fixture
         .control
         .claim_domain(tenant, "salon.example", Actor::system())
         .await
         .expect("claims");
+    fixture.prove("salon.example", &token);
+    // Proof first: an origin is licensed under a proved domain and not before.
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("verifies");
     fixture
         .control
         .allow_origin(
@@ -6586,29 +6943,6 @@ async fn a_verified_origin_is_answered_and_a_lookalike_is_not() {
         )
         .await
         .expect("licenses");
-
-    // **Unverified licenses nothing.** The row exists and the origin is still
-    // refused, which is what makes claiming and licensing safe to do in one go.
-    let (_, _, _) = fixture
-        .send(
-            get("/v1/booking/public/services")
-                .header(header::ORIGIN, "https://salon.example")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-    let allowed = fixture
-        .control
-        .allows_origin(tenant, "https://salon.example")
-        .await
-        .expect("asks");
-    assert!(!allowed, "an unproved domain licensed an origin");
-
-    fixture
-        .control
-        .verify_domain(tenant, "salon.example", Actor::system())
-        .await
-        .expect("verifies");
 
     // Now the real request carries the header back.
     let response = fixture
@@ -6631,12 +6965,13 @@ async fn a_verified_origin_is_answered_and_a_lookalike_is_not() {
         Some("Origin"),
         "a shared cache could serve one origin's response to another"
     );
-    assert!(
+    assert_eq!(
         response
             .headers()
             .get("access-control-allow-credentials")
-            .is_none(),
-        "credentials would let a cookie ride along on a public surface"
+            .and_then(|v| v.to_str().ok()),
+        Some("true"),
+        "the tenant's own app, on a proved origin, calls the API with its session"
     );
 
     // The lookalike, and a bare different origin.
@@ -6673,11 +7008,18 @@ async fn a_preflight_is_answered_at_the_edge() {
     let tenant = fixture.provision("acme").await;
     fixture.enable_module(tenant, crm::setup()).await;
     fixture.enable_module(tenant, booking::setup()).await;
-    fixture
+    let token = fixture
         .control
         .claim_domain(tenant, "salon.example", Actor::system())
         .await
         .expect("claims");
+    fixture.prove("salon.example", &token);
+    // Proof first: an origin is licensed under a proved domain and not before.
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("verifies");
     fixture
         .control
         .allow_origin(
@@ -6688,11 +7030,6 @@ async fn a_preflight_is_answered_at_the_edge() {
         )
         .await
         .expect("licenses");
-    fixture
-        .control
-        .verify_domain(tenant, "salon.example", Actor::system())
-        .await
-        .expect("verifies");
 
     let preflight = |origin: &str| {
         Request::options("/v1/booking/public/services")
@@ -6718,8 +7055,15 @@ async fn a_preflight_is_answered_at_the_edge() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     assert!(
-        !allowed_headers.contains("authorization"),
-        "the public surface has no session, and this offered to carry one"
+        allowed_headers.contains("authorization") && allowed_headers.contains("if-match"),
+        "a proved origin is the tenant's own app, and it carries a session: {allowed_headers}"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-methods")
+            .and_then(|v| v.to_str().ok()),
+        Some("GET, POST, PUT, PATCH, DELETE"),
     );
 
     // Refused: still a 204, still no explanation.
@@ -6743,11 +7087,18 @@ async fn revoking_an_origin_takes_effect_at_once() {
     let mut fixture = Fixture::new().await;
     let tenant = fixture.provision("acme").await;
 
-    fixture
+    let token = fixture
         .control
         .claim_domain(tenant, "salon.example", Actor::system())
         .await
         .expect("claims");
+    fixture.prove("salon.example", &token);
+    // Proof first: an origin is licensed under a proved domain and not before.
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("verifies");
     fixture
         .control
         .allow_origin(
@@ -6758,11 +7109,6 @@ async fn revoking_an_origin_takes_effect_at_once() {
         )
         .await
         .expect("licenses");
-    fixture
-        .control
-        .verify_domain(tenant, "salon.example", Actor::system())
-        .await
-        .expect("verifies");
     assert!(
         fixture
             .control
@@ -6923,6 +7269,7 @@ async fn a_stranger_cannot_book_until_the_business_opens_the_diary() {
                 deposit_bp: 2_000,
             },
             None,
+            None,
         )
         .await
         .expect("stores the setting");
@@ -6956,6 +7303,711 @@ async fn a_stranger_cannot_book_until_the_business_opens_the_diary() {
     assert_eq!(free["free"], 0, "the booking did not hold the slot");
 
     fixture.cleanup().await;
+}
+
+/// **A stranger pays a deposit through a lender, end to end over HTTP.**
+///
+/// The service carries a published price, so the public booking is priced and
+/// a deposit is asked for; the deposit is requested through Tabby with what a
+/// lender needs; the worker opens the checkout; and the read beside the route
+/// hands the waiting customer the page to go to. Every way the request can
+/// fall short of what the lender needs is refused by name, and a landing page
+/// off the business's own site is refused as such.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one deposit's whole life through a lender — published, booked, refused four \
+              ways, requested, opened, read back — and splitting it would mean five fixtures \
+              for one story"
+)]
+#[tokio::test]
+async fn a_public_deposit_is_paid_through_a_lender_at_the_published_price() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    fixture.enable_module(tenant, sales::setup()).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    fixture.enable_module(tenant, payments::setup()).await;
+    fixture.enable_module(tenant, branches::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let post = |path: &str, key: &str, body: serde_json::Value| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("Idempotency-Key", idem(key))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    // The business takes Tabby, has a branch with an address, and publishes
+    // what the chair costs to book.
+    let (status, body, _) = fixture
+        .send(
+            Request::put("/v1/payments/gateways/tabby")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "provider": "tabby", "secret": "sk_test_x",
+                                        "merchant_code": "bassat" })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, branch, _) = fixture
+        .send(post(
+            "/v1/branches",
+            "OLAYA",
+            serde_json::json!({
+                "name": "العليا",
+                "address": { "street": "King Fahd Road", "building": "12",
+                             "city": "Riyadh", "postal_code": "12211", "country": "SA" }
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{branch}");
+    let branch = branch["id"].as_str().expect("a branch id").to_owned();
+    let (status, body, _) = fixture
+        .send(post(
+            "/v1/booking/resources",
+            "CHAIR-1",
+            serde_json::json!({
+                "id": "CHAIR-1", "name": "كرسي", "kind": "person", "capacity": 1,
+                "branch": branch,
+                "rate": { "amount": 20_000, "currency": "SAR" }
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // Online booking is on, with a fifth down and half an hour to pay it.
+    {
+        let db = fixture
+            .control
+            .enter_for_maintenance(tenant)
+            .await
+            .expect("maintenance entry");
+        let mut conn = db.acquire().await.expect("connection");
+        erp_eventlog::configuration::set(
+            &mut conn,
+            booking::PublicBooking::KEY,
+            &booking::PublicBooking {
+                verify_phone: false,
+                hold_minutes: 30,
+                open: true,
+                deposit_bp: 2_000,
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("stores the setting");
+    }
+
+    // The business's own site is where a lender may send the customer back.
+    let claim = fixture
+        .control
+        .claim_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("claims");
+    fixture.prove("salon.example", &claim);
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("proved");
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/origins")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "domain": "salon.example", "origin": "https://salon.example" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    fixture
+        .project::<booking::Booking>(tenant, &booking::projections(), booking::upcasters())
+        .await;
+    // The branch's address is read from its own read model.
+    fixture
+        .project::<branches::Branches>(tenant, &branches::projections(), branches::upcasters())
+        .await;
+
+    // **The public page shows the price**, and a booking is priced at it.
+    let (status, services, _) = fixture
+        .send(
+            get("/v1/booking/public/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{services}");
+    assert_eq!(services["items"][0]["rate"]["amount"], 20_000, "{services}");
+
+    let (status, booked, _) = fixture
+        .send(
+            Request::post("/v1/booking/public/reservations")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", idem("PUBLIC-BOOKING-1"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "customer_name": "سارة",
+                        "customer_phone": "+966500000000",
+                        "lines": [{
+                            "resource": "CHAIR-1", "what": "قص",
+                            "from": "2026-05-01T09:00:00Z",
+                            "until": "2026-05-01T10:00:00Z"
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{booked}");
+    let reservation = booked["id"].as_str().expect("an id").to_owned();
+    fixture
+        .project::<booking::Booking>(tenant, &booking::projections(), booking::upcasters())
+        .await;
+
+    let deposit = |key: &str, body: Option<serde_json::Value>| {
+        let mut request = Request::post(format!(
+            "/v1/booking/public/reservations/{reservation}/deposit"
+        ))
+        .header("Idempotency-Key", key.to_owned());
+        if body.is_some() {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
+        request
+            .body(Body::from(body.map(|b| b.to_string()).unwrap_or_default()))
+            .unwrap()
+    };
+    let key = "5d1d2f1e-6b3f-4b7e-9a1e-0c1d2e3f4a5b";
+    let return_to = serde_json::json!({
+        "success": "https://salon.example/booked",
+        "cancel": "https://salon.example/cancelled",
+        "failure": "https://salon.example/declined"
+    });
+
+    // **Every way the request falls short is refused by name.**
+    for (body, code) in [
+        (
+            serde_json::json!({ "provider": "stripe" }),
+            "payments.provider_not_offered",
+        ),
+        // Known, and not configured by this business.
+        (
+            serde_json::json!({ "provider": "tamara" }),
+            "payments.provider_not_offered",
+        ),
+        (
+            serde_json::json!({ "provider": "tabby", "return_to": return_to }),
+            "payments.lender_needs",
+        ),
+        (
+            serde_json::json!({ "provider": "tabby", "email": "sara@example.com",
+                                "return_to": { "success": "https://evil.example/booked",
+                                               "cancel": "https://salon.example/c",
+                                               "failure": "https://salon.example/f" } }),
+            "payments.landing_not_allowed",
+        ),
+    ] {
+        let (status, answer, _) = fixture.send(deposit(key, Some(body.clone()))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {answer}");
+        assert_eq!(answer["code"], code, "{body}: {answer}");
+    }
+
+    // **The charge, at a fifth of the published price plus tax.**
+    let (status, due, _) = fixture
+        .send(deposit(
+            key,
+            Some(serde_json::json!({
+                "provider": "tabby", "email": "sara@example.com", "return_to": return_to
+            })),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{due}");
+    assert_eq!(due["payment"], key);
+    assert_eq!(due["provider"], "tabby");
+    assert_eq!(due["net"], 4_000, "a fifth of 200.00: {due}");
+    assert_eq!(due["tax"], 600, "at fifteen per cent: {due}");
+    assert_eq!(due["amount"], 4_600);
+    assert!(
+        due["pay_at"].is_null(),
+        "nowhere to go until the worker has opened it"
+    );
+
+    fixture
+        .project::<payments::Payments>(tenant, &payments::projections(), payments::upcasters())
+        .await;
+    let status_of = || {
+        get(&format!(
+            "/v1/booking/public/reservations/{reservation}/deposit"
+        ))
+        .body(Body::empty())
+        .unwrap()
+    };
+    let (status, waiting, _) = fixture.send(status_of()).await;
+    assert_eq!(status, StatusCode::OK, "{waiting}");
+    assert_eq!(waiting["stage"], "requested");
+    assert!(waiting["pay_at"].is_null());
+    assert_eq!(waiting["paid"], false);
+    assert!(
+        !waiting["due_by"].is_null(),
+        "the hold has a deadline: {waiting}"
+    );
+
+    // **The worker opens the checkout, and the lender is told the truth.**
+    let lender = RecordingLender::default();
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let opened = payments::open_checkouts(
+        &db,
+        &lender,
+        chrono::Utc::now(),
+        25,
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .expect("the checkout pass runs");
+    assert_eq!(opened.started, 1, "{opened:?}");
+    let told = lender.told.lock().expect("not poisoned").clone();
+    assert_eq!(told.len(), 1);
+    let charge = &told[0];
+    assert_eq!(charge.reference, key);
+    assert_eq!(charge.amount.minor(), 4_600);
+    assert_eq!(charge.returns.success, "https://salon.example/booked");
+    assert_eq!(
+        charge.returns.notification.as_deref(),
+        Some("https://acme.localhost/v1/hooks/tabby"),
+        "the hook, on the business's own host"
+    );
+    let buyer = charge.buyer.as_ref().expect("a buyer");
+    assert_eq!(buyer.email, "sara@example.com");
+    assert_eq!(buyer.phone, "+966500000000", "the booking's own number");
+    let basket = charge.basket.as_ref().expect("a basket");
+    assert_eq!(basket.deliver_to.city, "Riyadh", "the branch's address");
+    assert_eq!(basket.deliver_to.line, "King Fahd Road 12");
+    assert_eq!(basket.tax.minor(), 600);
+    assert_eq!(basket.items[0].category, "Services");
+
+    fixture
+        .project::<payments::Payments>(tenant, &payments::projections(), payments::upcasters())
+        .await;
+    let (status, ready, _) = fixture.send(status_of()).await;
+    assert_eq!(status, StatusCode::OK, "{ready}");
+    assert_eq!(ready["stage"], "pending");
+    assert_eq!(ready["pay_at"], "https://checkout.tabby.ai/s/1");
+    assert_eq!(ready["provider"], "tabby");
+
+    // A reload asks with a fresh key and is told the same charge, page and all.
+    let (status, again, _) = fixture
+        .send(deposit(
+            "0f0e0d0c-0b0a-4c9d-8e7f-6a5b4c3d2e1f",
+            Some(serde_json::json!({
+                "provider": "tabby", "email": "sara@example.com", "return_to": return_to
+            })),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_eq!(again["payment"], key, "a second tab got a second charge");
+    assert_eq!(again["pay_at"], "https://checkout.tabby.ai/s/1");
+
+    fixture.cleanup().await;
+}
+
+/// **A completed booking is billed with its deposit deducted, end to end.**
+///
+/// The deposit settled and raised its prepayment invoice; the service is
+/// delivered; the desk asks for the invoice and gets a final invoice that
+/// charges the rest, names the prepayment invoice, and — as ZATCA wants it —
+/// shows the whole supply with the prepayment deducted. Asking again gets the
+/// same invoice. And a business that asks for it on completion gets it from
+/// the worker's pass without asking at all.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one booking's whole life through to its final invoice, and the automatic \
+              path beside it; splitting it would mean two fixtures for one story"
+)]
+#[tokio::test]
+async fn a_completed_booking_is_billed_with_its_deposit_deducted() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_sales(tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    fixture.enable_module(tenant, payments::setup()).await;
+    fixture.enable_module(tenant, tax_sa::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&token, "acme", "services").await;
+
+    let post = |path: String, key: &str, body: serde_json::Value| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("Idempotency-Key", idem(key))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let at = |day: &str| -> erp_types::Timestamp {
+        format!("{day}T09:00:00Z").parse().expect("an instant")
+    };
+
+    // Registered with ZATCA, so the documents render.
+    tax_sa::register_taxpayer(
+        &db,
+        tax_sa::Registration {
+            vat_number: "310122393500003".to_owned(),
+            name: "صالون الأمل".to_owned(),
+            name_latin: None,
+            scheme: tax_sa::IdScheme::Crn,
+            identifier: "1010101010".to_owned(),
+            address: tax_sa::Address {
+                street: "طريق الملك فهد".to_owned(),
+                building: "1234".to_owned(),
+                additional: None,
+                district: "العليا".to_owned(),
+                city: "الرياض".to_owned(),
+                postal_code: "12211".to_owned(),
+                country: "SA".to_owned(),
+            },
+            industry: Some("Beauty".to_owned()),
+        },
+        at("2026-01-01"),
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .expect("registers");
+
+    let (status, body, _) = fixture
+        .send(post(
+            "/v1/booking/resources".to_owned(),
+            "CHAIR-1",
+            serde_json::json!({ "id": "CHAIR-1", "name": "كرسي", "kind": "person", "capacity": 1 }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // A booking priced at 200, taken at the desk.
+    let book = |key: &str, day: &str| {
+        post(
+            "/v1/booking/reservations".to_owned(),
+            key,
+            serde_json::json!({
+                "customer_name": "سارة", "customer_phone": "+966500000000",
+                "lines": [{
+                    "what": "صبغة", "from": format!("{day}T09:00:00Z"), "until": format!("{day}T10:00:00Z"),
+                    "takes": [{ "resource": "CHAIR-1" }],
+                    "charge": { "rate": 20_000, "currency": "SAR", "quantity": 1 }
+                }]
+            }),
+        )
+    };
+    let (status, booked, _) = fixture.send(book("BOOKING-1", "2026-05-01")).await;
+    assert_eq!(status, StatusCode::CREATED, "{booked}");
+    let reservation =
+        erp_types::AggregateId::new(booked["id"].as_str().expect("an id")).expect("an id");
+
+    // A fifth down, paid: the worker's join, done here by hand.
+    let payment =
+        erp_types::AggregateId::new("5d1d2f1e-6b3f-4b7e-9a1e-0c1d2e3f4a5b").expect("an id");
+    {
+        let sar = erp_types::CurrencyCode::new("SAR").expect("a currency");
+        let mut tx = db.begin().await.expect("transaction");
+        payments::start_in(
+            &mut tx,
+            &payment,
+            &payments::Attempt {
+                pay_at: None,
+                provider: "moyasar".to_owned(),
+                gateway_id: payment.to_string(),
+                collects: payments::Collects::Advance(payments::Advance {
+                    against: reservation.clone(),
+                    net: erp_types::Money::from_minor(4_000, sar),
+                    buyer: payments::Buyer {
+                        name: "سارة".to_owned(),
+                        vat_number: None,
+                    },
+                }),
+                amount: erp_types::Money::from_minor(4_600, sar),
+            },
+            at("2026-04-20"),
+            &erp_eventlog::Metadata::default(),
+        )
+        .await
+        .expect("starts");
+        payments::settle_in(
+            &mut tx,
+            &payment,
+            &erp_payments::Charged {
+                id: payment.to_string(),
+                status: erp_payments::Status::Paid,
+                amount: erp_types::Money::from_minor(4_600, sar),
+                refunded: erp_types::Money::from_minor(0, sar),
+                fee: None,
+                challenge: None,
+                message: None,
+            },
+            at("2026-04-20"),
+            &erp_eventlog::Metadata::default(),
+        )
+        .await
+        .expect("settles, raising the prepayment invoice");
+        booking::secure_in(
+            &mut tx,
+            &reservation,
+            &payment,
+            at("2026-04-20"),
+            &erp_eventlog::Metadata::default(),
+        )
+        .await
+        .expect("secures");
+        tx.commit().await.expect("commits");
+    }
+
+    // The service is delivered.
+    for stage in ["confirmed", "arrived", "in_service", "completed"] {
+        let (status, body, _) = fixture
+            .send(
+                Request::post(format!("/v1/booking/reservations/{reservation}/stage"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "stage": stage }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{stage}: {body}");
+    }
+    fixture
+        .project::<booking::Booking>(tenant, &booking::projections(), booking::upcasters())
+        .await;
+    fixture
+        .project::<sales::Sales>(tenant, &sales::projections(), sales::upcasters())
+        .await;
+
+    // **The desk asks for the invoice.**
+    let bill = || {
+        Request::post(format!("/v1/booking/reservations/{reservation}/invoice"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, billed, _) = fixture.send(bill()).await;
+    assert_eq!(status, StatusCode::CREATED, "{billed}");
+    assert_eq!(billed["invoice"], format!("bk-{reservation}"));
+    let number = billed["number"].as_str().expect("a number").to_owned();
+    let deducted = billed["deducted"]
+        .as_str()
+        .expect("the prepayment invoice")
+        .to_owned();
+
+    // Asked again: the same invoice, not a second one.
+    let (status, again, _) = fixture.send(bill()).await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    assert_eq!(again["number"], number, "a second invoice was raised");
+
+    fixture
+        .project::<sales::Sales>(tenant, &sales::projections(), sales::upcasters())
+        .await;
+    fixture
+        .project::<booking::Booking>(tenant, &booking::projections(), booking::upcasters())
+        .await;
+    fixture
+        .project::<tax_sa::TaxSa>(tenant, &tax_sa::projections(), tax_sa::upcasters())
+        .await;
+    let mut conn = db.acquire().await.expect("connection");
+
+    // The final invoice charges the rest: 200 less the 40 deposit, plus tax.
+    let invoice = sales::invoice(&mut conn, &format!("bk-{reservation}"))
+        .await
+        .expect("reads")
+        .expect("the final invoice");
+    assert_eq!(invoice.summary.number, number);
+    assert_eq!(
+        invoice.summary.gross.minor(),
+        18_400,
+        "{:?}",
+        invoice.summary
+    );
+    assert_eq!(invoice.summary.tax.minor(), 2_400);
+    assert_eq!(
+        invoice.summary.prepaid_number.as_deref(),
+        Some(deducted.as_str())
+    );
+    let booking_row = booking::reservation(&mut conn, reservation.as_str())
+        .await
+        .expect("reads")
+        .expect("there");
+    assert_eq!(
+        booking_row.summary.billed_by.as_deref(),
+        Some(format!("bk-{reservation}").as_str())
+    );
+
+    // **And ZATCA sees the whole supply with the prepayment deducted.**
+    let document = tax_sa::document(&mut conn, &number)
+        .await
+        .expect("reads")
+        .expect("a document");
+    let xml = document.xml.expect("rendered");
+    assert!(
+        xml.contains(r#"<cbc:TaxInclusiveAmount currencyID="SAR">230.00</cbc:TaxInclusiveAmount>"#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"<cbc:PrepaidAmount currencyID="SAR">46.00</cbc:PrepaidAmount>"#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"<cbc:PayableAmount currencyID="SAR">184.00</cbc:PayableAmount>"#),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<cbc:DocumentTypeCode>386</cbc:DocumentTypeCode>"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(&format!("<cbc:ID>{deducted}</cbc:ID>")),
+        "{xml}"
+    );
+    drop(conn);
+
+    // **Automatically, when the business asks for it.** A second booking, no
+    // deposit, completed — and the worker's pass bills it once the setting
+    // is on, and not before.
+    let (status, booked, _) = fixture.send(book("BOOKING-2", "2026-05-02")).await;
+    assert_eq!(status, StatusCode::CREATED, "{booked}");
+    let second = erp_types::AggregateId::new(booked["id"].as_str().expect("an id")).expect("an id");
+    for stage in ["confirmed", "arrived", "in_service", "completed"] {
+        let (status, body, _) = fixture
+            .send(
+                Request::post(format!("/v1/booking/reservations/{second}/stage"))
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "stage": stage }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{stage}: {body}");
+    }
+    fixture
+        .project::<booking::Booking>(tenant, &booking::projections(), booking::upcasters())
+        .await;
+
+    let by_the_worker = erp_eventlog::Metadata::default();
+    let pass = || erp_api::billing::bill_completions(&db, at("2026-05-03"), &by_the_worker);
+    assert_eq!(
+        pass().await.expect("runs"),
+        0,
+        "billed without being asked to"
+    );
+
+    let (status, body, _) = fixture
+        .send(
+            Request::put("/v1/booking/billing")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "on_completion": true }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        pass().await.expect("runs"),
+        1,
+        "the completed booking was billed"
+    );
+    assert_eq!(pass().await.expect("runs"), 0, "and not again");
+
+    fixture
+        .project::<sales::Sales>(tenant, &sales::projections(), sales::upcasters())
+        .await;
+    let mut conn = db.acquire().await.expect("connection");
+    let invoice = sales::invoice(&mut conn, &format!("bk-{second}"))
+        .await
+        .expect("reads")
+        .expect("the worker's invoice");
+    assert_eq!(
+        invoice.summary.gross.minor(),
+        23_000,
+        "no deposit: the whole supply"
+    );
+    assert_eq!(invoice.summary.prepaid_number, None);
+
+    fixture.cleanup().await;
+}
+
+/// A lender that records what it was told and answers with a page.
+#[derive(Debug, Default)]
+struct RecordingLender {
+    told: std::sync::Mutex<Vec<erp_payments::Charge>>,
+}
+
+#[async_trait::async_trait]
+impl erp_payments::Gateway for RecordingLender {
+    fn provider(&self) -> &'static str {
+        "tabby"
+    }
+    async fn charge(
+        &self,
+        charge: &erp_payments::Charge,
+    ) -> Result<erp_payments::Charged, erp_payments::GatewayError> {
+        self.told.lock().expect("not poisoned").push(charge.clone());
+        Ok(erp_payments::Charged {
+            id: "tabby_1".to_owned(),
+            status: erp_payments::Status::Initiated,
+            amount: charge.amount,
+            refunded: erp_types::Money::from_minor(0, charge.amount.currency()),
+            fee: None,
+            challenge: Some("https://checkout.tabby.ai/s/1".to_owned()),
+            message: None,
+        })
+    }
+    async fn fetch(&self, id: &str) -> Result<erp_payments::Charged, erp_payments::GatewayError> {
+        Err(erp_payments::GatewayError::NoSuchPayment(id.to_owned()))
+    }
+    async fn capture(
+        &self,
+        _id: &str,
+        _reference: &str,
+        _amount: Option<erp_types::Money>,
+    ) -> Result<erp_payments::Charged, erp_payments::GatewayError> {
+        unreachable!("nothing here captures")
+    }
+    async fn refund(
+        &self,
+        _id: &str,
+        _reference: &str,
+        _amount: Option<erp_types::Money>,
+    ) -> Result<erp_payments::Charged, erp_payments::GatewayError> {
+        unreachable!("nothing here refunds")
+    }
+    async fn void(&self, _id: &str) -> Result<erp_payments::Charged, erp_payments::GatewayError> {
+        unreachable!("nothing here voids")
+    }
 }
 
 /// **A stranger follows a link from a text message.**
@@ -7077,9 +8129,26 @@ async fn a_document_is_uploaded_and_comes_back_as_an_attachment() {
     let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
 
     let pdf = b"%PDF-1.7 a signed contract".to_vec();
+
+    // **A document goes on a record that exists.** There is no invoice INV-1
+    // on this tenant, so the upload is refused before any bytes are stored.
     let (status, body, _) = fixture
         .send(
             Request::post("/v1/files/DOC-1/content?owner_kind=invoice&owner_id=INV-1&name=%D8%B9%D9%82%D8%AF.pdf")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("Idempotency-Key", idem("DOC-1"))
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .body(Body::from(pdf.clone()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "files.no_such_owner");
+
+    // The business itself always exists.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/files/DOC-1/content?owner_kind=tenant&owner_id=SELF&name=%D8%B9%D9%82%D8%AF.pdf")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header("Idempotency-Key", idem("DOC-1"))
                 .header(header::CONTENT_TYPE, "application/pdf")
@@ -7107,7 +8176,7 @@ async fn a_document_is_uploaded_and_comes_back_as_an_attachment() {
     // It is listed against the invoice.
     let (status, body, _) = fixture
         .send(
-            Request::get("/v1/files?owner_kind=invoice&owner_id=INV-1")
+            Request::get("/v1/files?owner_kind=tenant&owner_id=SELF")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -7747,6 +8816,132 @@ async fn a_client_outside_the_version_range_is_refused_and_told_what_to_build_ag
     assert_eq!(body["code"], "request.api_version_too_new");
 }
 
+/// **Tamara's callback reaches the door it was built for.** Tamara posts two
+/// bodies — a registered webhook's `event_type` and a checkout notification's
+/// `order_status` — neither with an `id`, both under the same HS256
+/// `tamaraToken`. Both are accepted, each names its own delivery, and a resend
+/// of either is a duplicate.
+#[tokio::test]
+async fn a_tamara_callback_of_either_shape_is_accepted_and_told_apart() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::put("/v1/hooks/tamara/secret")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "secret": "notify-secret" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let post = |payload: &str, bearer: &str| {
+        Request::post("/v1/hooks/tamara")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .body(Body::from(payload.to_owned()))
+            .unwrap()
+    };
+    let good = tamara_token(b"notify-secret");
+
+    // The webhook shape, as Tamara documents it.
+    let webhook = serde_json::json!({
+        "order_id": "4fdb781f-5e13-4ae2-9dc6-3ee49e3878a3",
+        "order_reference_id": "INV-1", "order_number": "90001860",
+        "event_type": "order_approved", "data": []
+    })
+    .to_string();
+    let (status, body, _) = fixture.send(post(&webhook, &good)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(
+        body["event_id"],
+        "4fdb781f-5e13-4ae2-9dc6-3ee49e3878a3.order_approved"
+    );
+    assert_eq!(body["duplicate"], false);
+
+    // The notification shape — what the checkout's notification URL gets.
+    let notification = serde_json::json!({
+        "order_id": "4fdb781f-5e13-4ae2-9dc6-3ee49e3878a3",
+        "order_reference_id": "INV-1", "order_number": "90001860",
+        "order_status": "approved"
+    })
+    .to_string();
+    let (status, body, _) = fixture.send(post(&notification, &good)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(
+        body["event_id"],
+        "4fdb781f-5e13-4ae2-9dc6-3ee49e3878a3.status.approved"
+    );
+    assert_eq!(
+        body["duplicate"], false,
+        "a notification is not the webhook"
+    );
+
+    // Sent again, the way Tamara retries: a duplicate, still accepted.
+    let (status, body, _) = fixture.send(post(&webhook, &good)).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["duplicate"], true, "{body}");
+
+    // Somebody else's token is nobody.
+    let (status, body, _) = fixture
+        .send(post(&webhook, &tamara_token(b"other-secret")))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    // Authentic and still not a Tamara body: said precisely, because the
+    // sender has been proved to be Tamara.
+    let (status, body, _) = fixture
+        .send(post(r#"{"order_id":"4fdb781f"}"#, &good))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Two deliveries recorded, with the retry counted on the first.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/hooks/tamara/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let events = body.as_array().expect("a list");
+    assert_eq!(events.len(), 2, "{body}");
+    let approved = events
+        .iter()
+        .find(|e| e["event_id"] == "4fdb781f-5e13-4ae2-9dc6-3ee49e3878a3.order_approved")
+        .expect("the webhook");
+    assert_eq!(approved["kind"], "order_approved");
+    assert_eq!(approved["deliveries"], 2, "{body}");
+}
+
+/// A `tamaraToken` the way Tamara mints one: HS256 over `{iss, iat, exp}`.
+fn tamara_token(secret: &[u8]) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let now = chrono::Utc::now().timestamp();
+    let head = b64.encode(br#"{"typ":"JWT","alg":"HS256"}"#);
+    let claims = b64.encode(format!(
+        r#"{{"iss":"Tamara","iat":{now},"exp":{}}}"#,
+        now + 600
+    ));
+    let key = openssl::pkey::PKey::hmac(secret).expect("a key");
+    let mut signer =
+        openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &key).expect("signs");
+    signer
+        .update(format!("{head}.{claims}").as_bytes())
+        .expect("signs");
+    let signature = signer.sign_to_vec().expect("signs");
+    format!("{head}.{claims}.{}", b64.encode(signature))
+}
+
 /// **A callback is verified before its body means anything, and arriving twice
 /// does nothing twice.**
 ///
@@ -8106,4 +9301,759 @@ async fn promised_code(fixture: &Fixture, phone: &str) -> String {
         Some(code) => code.to_owned(),
         None => panic!("no code in {payload}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiting — every surface that has nobody to blame
+// ---------------------------------------------------------------------------
+
+/// Every operation the document marks unauthenticated, as
+/// `(method, path, operation_id)`.
+fn public_operations() -> Vec<(String, String, String)> {
+    let document = serde_json::to_value(erp_api::openapi()).expect("the document serializes");
+    let mut found = Vec::new();
+    for (path, item) in document["paths"].as_object().expect("there are paths") {
+        for (method, operation) in item.as_object().expect("a path item") {
+            let Some(id) = operation["operationId"].as_str() else {
+                continue;
+            };
+            let public = operation["security"]
+                .as_array()
+                .is_some_and(std::vec::Vec::is_empty);
+            if public {
+                found.push((method.clone(), path.clone(), id.to_owned()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The two public routes that read no database and hash nothing: a load
+/// balancer polls the first, and the second is this document. Bounding them
+/// would make a health check the thing that takes the node out of rotation.
+const UNBOUNDED_BY_DESIGN: &[&str] = &["/v1/health", "/v1/openapi.json"];
+
+/// A path template with something in every placeholder.
+fn with_params(path: &str) -> String {
+    let mut out = String::new();
+    let mut rest = path;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        let name = &rest[open + 1..open + close];
+        out.push_str(match name {
+            "token" => "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+            "provider" => "moyasar",
+            _ => "x",
+        });
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// **Every unauthenticated route is bounded, and this is the build failing if
+/// one is not.**
+///
+/// The bound is not a property of a route; it is a property of the extractor
+/// the route takes — [`erp_web::Anonymous`] or [`erp_web::Public`] — and a
+/// handler can be written without either. So this hammers each public
+/// operation from one address until it sees a 429, and a route that answers
+/// seven hundred times is one that took neither. The list comes from the
+/// document, so a route added tomorrow is on it without anybody remembering.
+///
+/// Why this exists: the first version of this API bounded the booking page and
+/// nothing else. Login, signup, invitation acceptance and one-time codes all
+/// ran unbounded — every one a password oracle with Argon2 attached, and the
+/// last a phone bill.
+#[tokio::test]
+async fn every_public_route_is_rate_limited() {
+    let mut fixture = Fixture::new().await;
+    // A real tenant, so the tenant-scoped routes reach the limiter rather
+    // than stopping at "no such business".
+    fixture.provision("acme").await;
+
+    let operations = public_operations();
+    assert!(
+        operations.len() > 10,
+        "the document lists {} public operations; the router has more than that",
+        operations.len()
+    );
+
+    let mut bounded = Vec::new();
+    for (n, (method, path, id)) in operations.iter().enumerate() {
+        if UNBOUNDED_BY_DESIGN.contains(&path.as_str()) {
+            continue;
+        }
+        // One address per operation, so what is measured is this route's own
+        // bound and not the budget an earlier route used up.
+        let address = format!("203.0.113.{}", n + 1);
+        let uri = with_params(path);
+        let mut refused = None;
+        for _ in 0..700 {
+            let request = Request::builder()
+                .method(method.to_uppercase().as_str())
+                .uri(&uri)
+                .header(header::HOST, "acme.localhost")
+                .header(erp_web::FORWARDED_FOR, &address)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", uuid::Uuid::now_v7().to_string())
+                .body(Body::from("{}"))
+                .expect("request builds");
+            let (status, body, content_type) = fixture.send(request).await;
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                refused = Some((body, content_type));
+                break;
+            }
+        }
+        let (body, content_type) = refused.unwrap_or_else(|| {
+            panic!(
+                "{id} ({method} {path}) answered 700 requests from one address and never said \
+                 no. It takes neither `Anonymous` nor `Public`, so nothing bounds it — an \
+                 unauthenticated route that hashes a password or sends a text is an oracle \
+                 or a phone bill."
+            )
+        });
+        assert_eq!(body["code"], "request.too_many_requests", "{id}: {body}");
+        assert!(
+            body["args"]["seconds"]["value"].as_i64().unwrap_or(0) > 0,
+            "{id} refused without saying when to come back: {body}"
+        );
+        assert!(
+            content_type.starts_with(b"application/problem+json"),
+            "{id}: a 429 that is not problem+json"
+        );
+        bounded.push(id.clone());
+    }
+    assert!(
+        bounded.len() >= 10,
+        "only {} public operations were checked: {bounded:?}",
+        bounded.len()
+    );
+}
+
+/// **One account cannot be guessed at from many addresses.** The per-caller
+/// bound stops one address guessing at everybody; this is the other half — a
+/// distributed guess at one person's password runs out of attempts on the
+/// account, whatever it comes from.
+#[tokio::test]
+async fn one_account_cannot_be_guessed_at_from_many_addresses() {
+    let fixture = Fixture::new().await;
+    fixture
+        .user("target@acme.test", "correct horse battery staple")
+        .await;
+
+    let attempt = |address: String| {
+        Request::post("/v1/sessions")
+            .header(erp_web::FORWARDED_FOR, address)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "handle": "Target@acme.test", "password": "wrong" })
+                    .to_string(),
+            ))
+            .expect("request builds")
+    };
+
+    for n in 0..erp_web::rate::AUTH_PER_HANDLE.count {
+        let (status, body, _) = fixture.send(attempt(format!("198.51.100.{n}"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "attempt {n}: {body}");
+    }
+
+    // The next guess comes from yet another address and is refused anyway:
+    // the budget followed the account, not the caller. (Mixed case in the
+    // handle above is deliberate — one account, one budget.)
+    let (status, body, _) = fixture.send(attempt("198.51.100.250".to_owned())).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["code"], "request.too_many_requests");
+
+    // And the right password is refused too while the window lasts. That is
+    // the cost of the bound, and it is the correct one: a lockout that let the
+    // right password through would tell a guesser when they had it.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/sessions")
+                .header(erp_web::FORWARDED_FOR, "198.51.100.251")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "handle": "target@acme.test",
+                        "password": "correct horse battery staple"
+                    })
+                    .to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // Another account from the same addresses is untouched.
+    fixture
+        .user("other@acme.test", "correct horse battery staple")
+        .await;
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/sessions")
+                .header(erp_web::FORWARDED_FOR, "198.51.100.1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "handle": "other@acme.test",
+                        "password": "correct horse battery staple"
+                    })
+                    .to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+/// **One address cannot cause texts to many numbers.** The per-number cooldown
+/// bounds how often one phone is texted; it says nothing about how many phones.
+/// An attacker whose own premium numbers receive the codes is bounded here, and
+/// by the platform-wide breaker behind it.
+#[tokio::test]
+async fn one_address_cannot_cause_texts_to_many_numbers() {
+    let fixture = Fixture::new().await;
+
+    let ask = |number: String| {
+        Request::post("/v1/codes")
+            .header(erp_web::FORWARDED_FOR, "203.0.113.77")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "phone": number }).to_string(),
+            ))
+            .expect("request builds")
+    };
+
+    for n in 0..erp_web::rate::CODES_PER_CALLER.count {
+        let (status, body, _) = fixture.send(ask(format!("+96650000010{n}"))).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "number {n}: {body}");
+    }
+
+    // A sixth, different number from the same address: no text.
+    let (status, body, _) = fixture.send(ask("+966500000199".to_owned())).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    let sent: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE kind = 'sms.send' AND payload ->> 'to' = '+966500000199'",
+    )
+    .fetch_one(fixture.control.pool())
+    .await
+    .expect("counts");
+    assert_eq!(sent, 0, "a refused request still promised a text");
+}
+
+/// The limiter keys on an address the caller did not write. With a trusted
+/// proxy in front, that is the **last** hop of `X-Forwarded-For` — the one the
+/// proxy appended — and earlier hops are ignored, so a caller who prepends
+/// addresses of their own choosing is still one caller.
+#[tokio::test]
+async fn a_caller_cannot_mint_addresses_by_prepending_to_the_forwarded_chain() {
+    let fixture = Fixture::new().await;
+    let mut refused = false;
+    for n in 0..=erp_web::rate::AUTH_PER_CALLER.count {
+        let (status, _, _) = fixture
+            .send(
+                Request::post("/v1/sessions")
+                    // A fresh fake client per request, then the proxy's own entry.
+                    .header(
+                        erp_web::FORWARDED_FOR,
+                        format!("10.0.0.{n}, 192.0.2.44"),
+                    )
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "handle": format!("u{n}@x.test"), "password": "wrong" })
+                            .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            refused = true;
+            break;
+        }
+    }
+    assert!(
+        refused,
+        "rotating the first entry of X-Forwarded-For bought a fresh budget each time"
+    );
+}
+
+/// **A held value needs a customer to be about.** Written under an id that
+/// parses but names nobody, it would be shown on no page, found by no erasure
+/// request and reported by nothing — health data the business does not know it
+/// holds. The first version wrote it.
+#[tokio::test]
+async fn a_held_field_cannot_be_set_on_a_customer_that_does_not_exist() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let (status, body, _) = fixture
+        .send(
+            Request::put("/v1/crm/customers/CUST-404/fields")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({ "values": [] }).to_string()))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "crm.no_such_customer");
+    fixture.cleanup().await;
+}
+
+/// **Every answer is problem+json, including the two axum used to give away.**
+/// A bare 404 or 405 with no body is what a client reading `code` from every
+/// refusal cannot read.
+#[tokio::test]
+async fn an_unknown_route_and_a_wrong_method_answer_in_problem_json() {
+    let fixture = Fixture::new().await;
+
+    let response = fixture
+        .raw(
+            Request::get("/v1/nothing/here")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("reads"),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "request.no_such_route");
+
+    let response = fixture
+        .raw(Request::delete("/v1/health").body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("reads"),
+    )
+    .expect("json");
+    assert_eq!(body["code"], "request.method_not_allowed");
+
+    fixture.cleanup().await;
+}
+
+/// **The second of two people editing a setting is told so.** A settings `GET`
+/// carries the version as `ETag`; a `PUT` that sends it back as `If-Match`
+/// lands only if nobody wrote in between. The first version had no such
+/// header and every settings screen was last-write-wins.
+#[tokio::test]
+async fn a_stale_settings_write_is_refused_and_a_fresh_one_lands() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let read = |token: String| {
+        Request::get("/v1/ledger/vat-rates")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let write = |token: String, if_match: Option<&str>, rate: u32| {
+        let mut request = Request::put("/v1/ledger/vat-rates")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(version) = if_match {
+            request = request.header(header::IF_MATCH, version);
+        }
+        request
+            .body(Body::from(
+                serde_json::json!({ "standard": rate }).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let response = fixture.raw(read(token.clone())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let etag = response.headers()[header::ETAG]
+        .to_str()
+        .expect("ascii")
+        .to_owned();
+    assert!(
+        etag.starts_with('"') && etag.ends_with('"'),
+        "an ETag is quoted: {etag}"
+    );
+
+    // With the version it read: lands.
+    let (status, body, _) = fixture.send(write(token.clone(), Some(&etag), 1_500)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // The same version again is somebody who did not see that write.
+    let (status, body, _) = fixture.send(write(token.clone(), Some(&etag), 500)).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(body["code"], "eventlog.configuration_conflict");
+
+    let response = fixture.raw(read(token.clone())).await;
+    let fresh = response.headers()[header::ETAG]
+        .to_str()
+        .expect("ascii")
+        .to_owned();
+    assert_ne!(fresh, etag, "a write moves the version");
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("reads"),
+    )
+    .expect("json");
+    assert_eq!(body["standard"], 1_500, "the refused write changed nothing");
+
+    // Something that is not a version is a client bug, not a condition.
+    let (status, body, _) = fixture
+        .send(write(token.clone(), Some("yesterday"), 500))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.not_a_version");
+
+    // No header: unconditional, which a script that owns the setting wants.
+    let (status, body, _) = fixture.send(write(token.clone(), None, 500)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    fixture.cleanup().await;
+}
+
+/// **The public site has a switch, and the deposit is a fraction.** The first
+/// build read `booking.public` everywhere and wrote it nowhere.
+#[tokio::test]
+async fn public_booking_settings_can_be_set_and_a_deposit_over_the_price_cannot() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let write = |deposit_bp: u32| {
+        Request::put("/v1/booking/public-settings")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "open": true,
+                    "deposit_bp": deposit_bp,
+                    "hold_minutes": 30,
+                    "verify_phone": false
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture.send(write(10_001)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "booking.not_a_fraction");
+
+    let (status, body, _) = fixture.send(write(2_500)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/booking/public-settings")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["open"], true);
+    assert_eq!(body["deposit_bp"], 2_500);
+    assert_eq!(body["hold_minutes"], 30);
+    assert_eq!(body["verify_phone"], false);
+
+    fixture.cleanup().await;
+}
+
+/// **A domain is proved by the record the tenant was told to publish**, and by
+/// nothing else. The first version marked a domain verified on request.
+#[tokio::test]
+async fn a_domain_is_proved_only_by_its_published_record() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, claimed, _) = fixture
+        .send(
+            Request::post("/v1/domains")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "domain": "salon.example" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{claimed}");
+    assert_eq!(claimed["record_name"], "_erp-challenge.salon.example");
+    let value = claimed["record_value"]
+        .as_str()
+        .expect("a value")
+        .to_owned();
+    assert!(value.starts_with("erp-verification="), "{value}");
+
+    let verify = || {
+        Request::post("/v1/domains/salon.example/verification")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    // Nothing published: refused, and told what to publish.
+    let (status, body, _) = fixture.send(verify()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "domains.not_proved");
+    assert_eq!(
+        body["args"]["record"]["value"],
+        "_erp-challenge.salon.example"
+    );
+
+    // The wrong thing published: still refused.
+    fixture.prover.publish(
+        "_erp-challenge.salon.example",
+        "erp-verification=somebody-elses-token",
+    );
+    let (status, body, _) = fixture.send(verify()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    // The right record: proved, and proved again is the same answer.
+    fixture
+        .prover
+        .publish("_erp-challenge.salon.example", &value);
+    let (status, body, _) = fixture.send(verify()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, _, _) = fixture.send(verify()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // A domain nobody claimed is not found.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/domains/other.example/verification")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "domains.not_claimed");
+
+    fixture.cleanup().await;
+}
+
+/// **An origin is `https://<host>[:port]` under a proved domain.** Once CORS
+/// serves the whole API, an entry here is the whole tenant, so the shape and
+/// the domain are both checked; the first version stored whatever it was sent.
+#[tokio::test]
+async fn an_origin_must_be_https_under_a_proved_domain() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let claim = fixture
+        .control
+        .claim_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("claims");
+
+    let allow = |domain: &str, origin: &str| {
+        Request::post("/v1/origins")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "domain": domain, "origin": origin }).to_string(),
+            ))
+            .unwrap()
+    };
+
+    // Unproved: refused with what to do about it.
+    let (status, body, _) = fixture
+        .send(allow("salon.example", "https://salon.example"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "domains.not_proved");
+
+    fixture.prove("salon.example", &claim);
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("proved");
+
+    for (origin, code) in [
+        ("http://salon.example", "origins.not_an_origin"),
+        ("https://salon.example/booking", "origins.not_an_origin"),
+        ("https://user@salon.example", "origins.not_an_origin"),
+        (
+            "https://salon.example.attacker.test",
+            "origins.outside_domain",
+        ),
+        ("https://attacker.test", "origins.outside_domain"),
+    ] {
+        let (status, body, _) = fixture.send(allow("salon.example", origin)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{origin}: {body}");
+        assert_eq!(body["code"], code, "{origin}");
+    }
+    for origin in ["https://salon.example", "https://App.Salon.Example:8443"] {
+        let (status, body, _) = fixture.send(allow("salon.example", origin)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{origin}: {body}");
+    }
+    let origins = fixture.control.origins(tenant).await.expect("lists");
+    assert_eq!(
+        origins,
+        ["https://app.salon.example:8443", "https://salon.example"],
+        "stored lowercased, as sent otherwise"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A proved domain serves the API on any host under it**, public and
+/// authenticated alike; a lookalike, or the same host before the proof, reaches
+/// nobody.
+#[tokio::test]
+async fn a_proved_domain_serves_the_api_on_every_host_under_it() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let on = |host: &str, path: &str| {
+        Request::get(path)
+            .header(header::HOST, host)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture.send(on("api.salon.example", "/v1/tenant")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an unproved host reaches nobody: {body}"
+    );
+
+    let claim = fixture
+        .control
+        .claim_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("claims");
+    fixture.prove("salon.example", &claim);
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("proved");
+
+    for host in [
+        "salon.example",
+        "api.salon.example",
+        "Book.Salon.Example:443",
+    ] {
+        let (status, body, _) = fixture.send(on(host, "/v1/tenant")).await;
+        assert_eq!(status, StatusCode::OK, "{host}: {body}");
+        assert_eq!(body["id"], tenant.to_string(), "{host}");
+        // And the public surface, on the same host.
+        let (status, body, _) = fixture.send(on(host, "/v1/booking/public/services")).await;
+        assert_eq!(status, StatusCode::OK, "{host}: {body}");
+    }
+    for host in [
+        "salon.example.attacker.test",
+        "notsalon.example",
+        "attacker.test",
+    ] {
+        let (status, body, _) = fixture.send(on(host, "/v1/tenant")).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{host} reached a tenant: {body}"
+        );
+    }
+    // The subdomain of the platform keeps working beside the custom domain.
+    let (status, _, _) = fixture.send(on("acme.localhost", "/v1/tenant")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    fixture.cleanup().await;
+}
+
+/// **The tenant's clock is a setting**: an IANA zone, refused when it is not
+/// one, and versioned like every other setting.
+#[tokio::test]
+async fn the_tenant_calendar_is_a_named_zone() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let read = || {
+        Request::get("/v1/tenant/calendar")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let write = |zone: &str| {
+        Request::put("/v1/tenant/calendar")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::json!({ "zone": zone }).to_string()))
+            .unwrap()
+    };
+
+    let (status, body, _) = fixture.send(read()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["zone"], "Asia/Riyadh",
+        "Riyadh until somebody says otherwise"
+    );
+
+    let (status, body, _) = fixture.send(write("Mars/Olympus")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.not_a_zone");
+
+    let (status, body, _) = fixture.send(write("Europe/Berlin")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let response = fixture.raw(read()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().contains_key(header::ETAG),
+        "versioned like every setting"
+    );
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("reads"),
+    )
+    .expect("json");
+    assert_eq!(body["zone"], "Europe/Berlin");
+
+    fixture.cleanup().await;
 }

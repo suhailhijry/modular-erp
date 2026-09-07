@@ -25,6 +25,7 @@ use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use erp_web::Anonymous;
 use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Language;
@@ -115,14 +116,19 @@ struct SignedUp {
         (status = BAD_REQUEST, description = "A password under 12 characters, or a module that does not exist", body = Problem),
         (status = UNAUTHORIZED, description = "The address already has an account and the password did not match it", body = Problem),
         (status = CONFLICT, description = "The slug is taken", body = Problem),
-        (status = TOO_MANY_REQUESTS, description = "A confirmation went to this address moments ago. Retryable, and the message says when.", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "A confirmation went to this address moments ago, or too many attempts came from this address. Retryable, and the message says when.", body = Problem),
     ),
 )]
 async fn sign_up(
+    anonymous: Anonymous,
     State(state): State<AppState>,
     Language(locale): Language,
     Json(body): Json<Signup>,
 ) -> Result<(StatusCode, Json<SignupRequested>), Problem> {
+    // An address that already has an account is asked for its password below,
+    // which makes this route a login in disguise. Same per-account bound as
+    // the real one, for the same reason.
+    anonymous.charge_for_handle(&state, &body.email).await?;
     if body.password.chars().count() < MIN_PASSWORD {
         return Err(short_password(locale));
     }
@@ -185,9 +191,11 @@ async fn sign_up(
         (status = CREATED, body = SignedUp),
         (status = NOT_FOUND, description = "No such token, or a spent or expired one — the same answer for all three", body = Problem),
         (status = CONFLICT, description = "The slug was taken while the link sat in a mailbox. The link still works; ask for another name.", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
     ),
 )]
 async fn confirm_signup(
+    _anonymous: Anonymous,
     State(state): State<AppState>,
     Language(locale): Language,
     Path(token): Path<String>,

@@ -1,0 +1,149 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", card, invoice, advance_for,\n                  advance_net_minor, advance_buyer, advance_buyer_vat,\n                  amount_minor as \"amount_minor!\", currency as \"currency!\",\n                  callback_url as \"callback_url!\", checkout\n             FROM proj_payments.payment\n            WHERE stage = 'requested' AND provider = $1\n            ORDER BY started_at ASC LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "card",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "card"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "invoice",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "invoice"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "advance_for",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "advance_for"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "advance_net_minor",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "advance_net_minor"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "advance_buyer",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "advance_buyer"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "advance_buyer_vat",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "advance_buyer_vat"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "amount_minor!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "amount_minor"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "callback_url!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "callback_url"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "checkout",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "checkout"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "d1da5b3dc33566135d6856a137f50b6e9a45fdebbadeda1345e904e9e639acd9"
+}

@@ -12,7 +12,8 @@
 use std::sync::Arc;
 
 use erp_occupancy::{
-    BadSpan, Claim, OccupancyError, Span, declare, free, release, reschedule, take,
+    BadSpan, Claim, OccupancyError, Span, declare, free, release, reschedule, sweep_ended_before,
+    take,
 };
 use erp_testkit::{Schema, Template, TestDb};
 use erp_types::{AggregateId, Timestamp};
@@ -747,4 +748,65 @@ fn a_span_refuses_what_would_make_an_overlap_check_meaningless() {
         Span::new(day("2026-03-01", "10"), day("2028-03-01", "10")).expect_err("two years"),
         BadSpan::TooLong
     );
+}
+
+/// **A claim in the past is forgotten; one still to come is not.** Once a
+/// span has ended nothing can ask whether it fits, and what happened is in the
+/// owner's log. The first version kept every claim for the life of the tenant.
+#[tokio::test]
+async fn claims_that_ended_before_the_cut_off_are_swept() {
+    let db = tenant_db().await;
+    let mut conn = db.pool().acquire().await.expect("connection");
+
+    declare(&mut conn, &id("chair-1"), 1)
+        .await
+        .expect("declares");
+    take(
+        &mut conn,
+        &id("res-past"),
+        &[Claim::one(id("chair-1"), span("10", "11"))],
+    )
+    .await
+    .expect("fits");
+    take(
+        &mut conn,
+        &id("res-later"),
+        &[Claim::one(id("chair-1"), span("14", "15"))],
+    )
+    .await
+    .expect("fits");
+
+    assert_eq!(
+        sweep_ended_before(&mut conn, at("10"))
+            .await
+            .expect("sweeps"),
+        0,
+        "nothing had ended"
+    );
+    assert_eq!(
+        sweep_ended_before(&mut conn, at("12"))
+            .await
+            .expect("sweeps"),
+        1,
+        "the morning claim"
+    );
+
+    // The afternoon claim still holds the chair.
+    let refused = take(
+        &mut conn,
+        &id("res-clash"),
+        &[Claim::one(id("chair-1"), span("14", "15"))],
+    )
+    .await
+    .expect_err("the afternoon is still taken");
+    assert!(matches!(refused, OccupancyError::Overbooked { .. }));
+    // And the morning is free again — which it would have been anyway, being
+    // in the past; the point is that nothing else broke.
+    take(
+        &mut conn,
+        &id("res-again"),
+        &[Claim::one(id("chair-1"), span("10", "11"))],
+    )
+    .await
+    .expect("fits");
 }

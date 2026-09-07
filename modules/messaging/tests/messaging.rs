@@ -135,7 +135,7 @@ impl Fixture {
 
     async fn configure<T: serde::Serialize>(&self, key: &str, value: &T) {
         let mut conn = self.db.acquire().await.expect("connection");
-        erp_eventlog::configuration::set(&mut conn, key, value, None)
+        erp_eventlog::configuration::set(&mut conn, key, value, None, None)
             .await
             .expect("configures");
     }
@@ -207,6 +207,7 @@ impl Fixture {
                 name_latin: None,
                 kind: booking::Kind::Place,
                 capacity: 1,
+                rate: None,
                 branch: None,
                 employee: None,
             },
@@ -354,9 +355,10 @@ async fn a_reminder_says_what_is_true_now_and_reaches_where_somebody_is_now() {
         "the template asked the read model: {}",
         message.body
     );
+    // 10:00Z is 13:00 in Riyadh, and the customer reads their own clock.
     assert!(
-        message.body.contains("2026-05-04 10:00"),
-        "the time is the booking's: {}",
+        message.body.contains("2026-05-04 13:00"),
+        "the time is the booking's, on the tenant's clock: {}",
         message.body
     );
     assert!(message.body.contains("/l/abc123"), "{}", message.body);
@@ -412,7 +414,7 @@ async fn a_reminder_says_what_is_true_now_and_reaches_where_somebody_is_now() {
         "a number that changed this morning gets this afternoon's message"
     );
     assert!(
-        second.body.contains("2026-05-04 14:00"),
+        second.body.contains("2026-05-04 17:00"),
         "a reminder for a booking that moved says the new time: {}",
         second.body
     );
@@ -577,5 +579,45 @@ async fn a_customer_with_no_number_is_a_refusal_and_not_a_quiet_nothing() {
     );
     assert!(fixture.outbox().await.is_empty());
 
+    fixture.cleanup().await;
+}
+
+/// **A device belongs to somebody on the books.** A token bound to an id that
+/// names nobody receives nothing, silently — and, before this route was the
+/// owner's, a token bound to an id the caller typed received somebody else's
+/// notifications.
+#[tokio::test]
+async fn a_device_can_only_belong_to_an_employee_or_a_customer() {
+    let fixture = Fixture::new("devices").await;
+    crm::register_customer(
+        &fixture.db,
+        &code("CUST-1"),
+        &customer(Some("+966500000001"), None),
+        at("2026-01-01", "09"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("registers");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    assert!(
+        messaging::audience::recipient_exists(&mut conn, "CUST-1")
+            .await
+            .expect("reads"),
+        "a customer registered a moment ago is somebody, without waiting for a projection"
+    );
+    assert!(
+        !messaging::audience::recipient_exists(&mut conn, "CUST-404")
+            .await
+            .expect("reads"),
+        "an id that names nobody is nobody"
+    );
+    assert!(
+        !messaging::audience::recipient_exists(&mut conn, "not an id!")
+            .await
+            .expect("reads"),
+        "an id that does not parse is nobody rather than an error"
+    );
+    drop(conn);
     fixture.cleanup().await;
 }

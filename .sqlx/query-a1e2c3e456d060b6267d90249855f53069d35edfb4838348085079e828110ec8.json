@@ -1,0 +1,148 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, kind as \"kind!\",\n                  capacity as \"capacity!\",\n                  branch, employee, rate_minor, rate_currency,\n                  (withdrawn_at IS NOT NULL) as \"withdrawn!\", withdrawn_why\n             FROM proj_booking.resource\n            WHERE ($5 OR withdrawn_at IS NULL)\n              AND ($6::text IS NULL OR branch = $6)\n              AND ($2::text IS NULL OR (kind, name, id) > ($2, $3, $4))\n            ORDER BY kind, name, id\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name_latin",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "name_latin"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "capacity!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "capacity"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "employee",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "employee"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "rate_minor",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "rate_minor"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "rate_currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "rate_currency"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "withdrawn!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "withdrawn_why",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "withdrawn_why"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      null,
+      true
+    ]
+  },
+  "hash": "a1e2c3e456d060b6267d90249855f53069d35edfb4838348085079e828110ec8"
+}

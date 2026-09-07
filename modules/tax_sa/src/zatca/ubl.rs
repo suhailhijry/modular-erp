@@ -131,14 +131,18 @@ fn render_with(
         &mut out,
         1,
         "cbc:IssueDate",
-        &document.issued_at.format("%Y-%m-%d").to_string(),
+        &document.calendar.day(document.issued_at).to_string(),
         "issued_at",
     )?;
     text(
         &mut out,
         1,
         "cbc:IssueTime",
-        &document.issued_at.format("%H:%M:%S").to_string(),
+        &document
+            .calendar
+            .local(document.issued_at)
+            .format("%H:%M:%S")
+            .to_string(),
         "issued_at",
     )?;
 
@@ -175,7 +179,7 @@ fn render_with(
             &mut out,
             3,
             "cbc:IssueDate",
-            &reference.issued_at.format("%Y-%m-%d").to_string(),
+            &document.calendar.day(reference.issued_at).to_string(),
             "reference",
         )?;
         out.push_str("    </cac:InvoiceDocumentReference>\n");
@@ -201,7 +205,7 @@ fn render_with(
         &mut out,
         2,
         "cbc:ActualDeliveryDate",
-        &document.issued_at.format("%Y-%m-%d").to_string(),
+        &document.calendar.day(document.issued_at).to_string(),
         "issued_at",
     )?;
     out.push_str("  </cac:Delivery>\n");
@@ -221,6 +225,9 @@ fn render_with(
 
     for (index, line) in document.lines.iter().enumerate() {
         invoice_line(&mut out, document, index, line)?;
+    }
+    if let Some(prepaid) = &document.prepaid {
+        prepayment_line(&mut out, document, document.lines.len(), prepaid)?;
     }
 
     let _ = write!(out, "</{element}>");
@@ -596,10 +603,19 @@ fn monetary_total(out: &mut String, document: &Document) {
     // **Three different numbers when there is a discount.** What the lines came
     // to, what is taxed, and what was taken off in between — and they have to
     // agree, because ZATCA checks that they do.
-    let lines_came_to = amount(document.totals.lines_came_to());
-    let taxable = amount(document.totals.net);
+    //
+    // **And a fourth after a deposit.** The lines and the tax-inclusive total
+    // are the whole supply; `PrepaidAmount` is what the prepayment invoice
+    // already billed; `PayableAmount` is the difference, which is what this
+    // document charges. A payment against an ordinary invoice is recorded
+    // separately and changes none of these, so `PrepaidAmount` is zero there.
+    let lines_came_to = amount(document.lines_came_to());
+    let taxable = amount(document.supply_net());
     let discounted = amount(document.totals.discount());
-    let zero = amount(erp_types::Money::zero(document.currency));
+    let prepaid = amount(document.prepaid.as_ref().map_or_else(
+        || erp_types::Money::zero(document.currency),
+        |p| p.gross(document.currency),
+    ));
 
     out.push_str("  <cac:LegalMonetaryTotal>\n");
     money(out, 2, "cbc:LineExtensionAmount", &lines_came_to, currency);
@@ -608,14 +624,11 @@ fn monetary_total(out: &mut String, document: &Document) {
         out,
         2,
         "cbc:TaxInclusiveAmount",
-        &amount(document.totals.gross),
+        &amount(document.supply_gross()),
         currency,
     );
-    // The sum of the allowances above. Nothing prepaid: a payment against an
-    // invoice is recorded separately and does not change what the invoice was
-    // for.
     money(out, 2, "cbc:AllowanceTotalAmount", &discounted, currency);
-    money(out, 2, "cbc:PrepaidAmount", &zero, currency);
+    money(out, 2, "cbc:PrepaidAmount", &prepaid, currency);
     money(
         out,
         2,
@@ -718,6 +731,81 @@ fn invoice_line(
     Ok(())
 }
 
+/// **The prepayment line**, on a final invoice after a deposit.
+///
+/// ZATCA's shape for it: a line for nothing — quantity zero, extension zero,
+/// price zero — that names the prepayment invoice and carries, in its tax
+/// subtotals, what that document declared. What is deducted is read from
+/// here; what is still owed is read from the totals.
+fn prepayment_line(
+    out: &mut String,
+    document: &Document,
+    index: usize,
+    prepaid: &super::PrepaidRef,
+) -> Result<(), NotRenderable> {
+    let currency = document.currency.as_str();
+    let zero = amount(erp_types::Money::zero(document.currency));
+
+    out.push_str("  <cac:InvoiceLine>\n");
+    let _ = writeln!(out, "    <cbc:ID>{}</cbc:ID>", index + 1);
+    out.push_str("    <cbc:InvoicedQuantity unitCode=\"PCE\">0</cbc:InvoicedQuantity>\n");
+    money(out, 2, "cbc:LineExtensionAmount", &zero, currency);
+    out.push_str("    <cac:DocumentReference>\n");
+    text(out, 3, "cbc:ID", &prepaid.number, "prepayment")?;
+    let _ = writeln!(
+        out,
+        "      <cbc:IssueDate>{}</cbc:IssueDate>",
+        document.calendar.day(prepaid.issued_at).format("%Y-%m-%d")
+    );
+    let _ = writeln!(
+        out,
+        "      <cbc:IssueTime>{}</cbc:IssueTime>",
+        document
+            .calendar
+            .local(prepaid.issued_at)
+            .format("%H:%M:%S")
+    );
+    out.push_str("      <cbc:DocumentTypeCode>386</cbc:DocumentTypeCode>\n");
+    out.push_str("    </cac:DocumentReference>\n");
+
+    out.push_str("    <cac:TaxTotal>\n");
+    money(out, 3, "cbc:TaxAmount", &zero, currency);
+    money(out, 3, "cbc:RoundingAmount", &zero, currency);
+    for band in &prepaid.bands {
+        out.push_str("      <cac:TaxSubtotal>\n");
+        money(out, 4, "cbc:TaxableAmount", &amount(band.net), currency);
+        money(out, 4, "cbc:TaxAmount", &amount(band.tax), currency);
+        out.push_str("        <cac:TaxCategory>\n");
+        let _ = writeln!(
+            out,
+            "          <cbc:ID schemeAgencyID=\"6\" schemeID=\"UN/ECE 5305\">{}</cbc:ID>",
+            category_code(band.category)
+        );
+        let _ = writeln!(
+            out,
+            "          <cbc:Percent>{}</cbc:Percent>",
+            percent(band.rate_bp)
+        );
+        out.push_str("          <cac:TaxScheme>\n");
+        out.push_str(
+            "            <cbc:ID schemeAgencyID=\"6\" schemeID=\"UN/ECE 5153\">VAT</cbc:ID>\n",
+        );
+        out.push_str("          </cac:TaxScheme>\n");
+        out.push_str("        </cac:TaxCategory>\n");
+        out.push_str("      </cac:TaxSubtotal>\n");
+    }
+    out.push_str("    </cac:TaxTotal>\n");
+
+    out.push_str("    <cac:Item>\n");
+    text(out, 3, "cbc:Name", "Prepayment adjustment", "description")?;
+    out.push_str("    </cac:Item>\n");
+    out.push_str("    <cac:Price>\n");
+    money(out, 3, "cbc:PriceAmount", &zero, currency);
+    out.push_str("    </cac:Price>\n");
+    out.push_str("  </cac:InvoiceLine>\n");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // The bytes
 // ---------------------------------------------------------------------------
@@ -798,6 +886,7 @@ pub(crate) mod tests {
             number: "INV-00001".to_owned(),
             uuid: document_uuid("310122393500003", "INV-00001"),
             issued_at: at("2026-03-01T10:00:00Z"),
+            calendar: erp_types::Calendar::default(),
             currency,
             seller: crate::taxpayer::tests::registration(),
             buyer: Some(Buyer {
@@ -835,11 +924,115 @@ pub(crate) mod tests {
             },
             link: super::super::Link::first(),
             reference: None,
+            prepaid: None,
             note: String::new(),
         }
     }
 
     /// The same invoice at a till: no buyer, and the other obligation.
+    /// **A final invoice after a deposit.** The lines are the whole supply and
+    /// so is the tax-inclusive total; the prepayment invoice is named on a
+    /// line of its own with what it declared; `PrepaidAmount` is what was paid
+    /// up front; the tax totals and the payable amount are what is left.
+    pub(crate) fn after_a_deposit() -> Document {
+        let currency = sar();
+        let mut document = document();
+        // The deposit declared 20.00 net and 3.00 tax; the supply is 100.00.
+        document.prepaid = Some(super::super::PrepaidRef {
+            number: "INV-00000".to_owned(),
+            issued_at: at("2026-02-01T09:00:00Z"),
+            bands: vec![Band {
+                category: VatCategory::Standard,
+                rate_bp: 1_500,
+                net: Money::from_minor(2_000, currency),
+                tax: Money::from_minor(300, currency),
+            }],
+        });
+        document.totals = Totals {
+            net: Money::from_minor(8_000, currency),
+            tax: Money::from_minor(1_200, currency),
+            gross: Money::from_minor(9_200, currency),
+            before_discount: None,
+            bands: vec![Band {
+                category: VatCategory::Standard,
+                rate_bp: 1_500,
+                net: Money::from_minor(8_000, currency),
+                tax: Money::from_minor(1_200, currency),
+            }],
+        };
+        document
+    }
+
+    #[test]
+    fn a_final_invoice_after_a_deposit_shows_the_supply_and_deducts_the_prepayment() {
+        let xml = render(&after_a_deposit()).expect("renders");
+
+        // The whole supply, on the lines and in the inclusive total.
+        assert!(
+            xml.contains(
+                r#"<cbc:LineExtensionAmount currencyID="SAR">100.00</cbc:LineExtensionAmount>"#
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(
+                r#"<cbc:TaxExclusiveAmount currencyID="SAR">100.00</cbc:TaxExclusiveAmount>"#
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(
+                r#"<cbc:TaxInclusiveAmount currencyID="SAR">115.00</cbc:TaxInclusiveAmount>"#
+            ),
+            "{xml}"
+        );
+        // What was paid up front, and what is left to pay.
+        assert!(
+            xml.contains(r#"<cbc:PrepaidAmount currencyID="SAR">23.00</cbc:PrepaidAmount>"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(r#"<cbc:PayableAmount currencyID="SAR">92.00</cbc:PayableAmount>"#),
+            "{xml}"
+        );
+        // The tax still to declare is the remainder's.
+        assert!(
+            xml.contains(r#"<cbc:TaxAmount currencyID="SAR">12.00</cbc:TaxAmount>"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(r#"<cbc:TaxableAmount currencyID="SAR">80.00</cbc:TaxableAmount>"#),
+            "{xml}"
+        );
+        // The prepayment line: nothing supplied, the earlier document named,
+        // what it declared carried.
+        assert!(
+            xml.contains(r#"<cbc:InvoicedQuantity unitCode="PCE">0</cbc:InvoicedQuantity>"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<cbc:DocumentTypeCode>386</cbc:DocumentTypeCode>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<cbc:ID>INV-00000</cbc:ID>"), "{xml}");
+        assert!(
+            xml.contains(r#"<cbc:TaxableAmount currencyID="SAR">20.00</cbc:TaxableAmount>"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(r#"<cbc:TaxAmount currencyID="SAR">3.00</cbc:TaxAmount>"#),
+            "{xml}"
+        );
+
+        // And an ordinary invoice still prepays nothing.
+        let plain = render(&document()).expect("renders");
+        assert!(
+            plain.contains(r#"<cbc:PrepaidAmount currencyID="SAR">0.00</cbc:PrepaidAmount>"#),
+            "{plain}"
+        );
+        assert!(!plain.contains("386"), "{plain}");
+    }
+
     pub(crate) fn simplified() -> Document {
         Document {
             kind: crate::zatca::Kind::Simplified,
@@ -870,7 +1063,8 @@ pub(crate) mod tests {
         assert!(xml.contains("<cbc:ID>INV-00001</cbc:ID>"));
         assert!(xml.contains("<cbc:InvoiceTypeCode name=\"0100000\">388</cbc:InvoiceTypeCode>"));
         assert!(xml.contains("<cbc:IssueDate>2026-03-01</cbc:IssueDate>"));
-        assert!(xml.contains("<cbc:IssueTime>10:00:00</cbc:IssueTime>"));
+        // 10:00Z, read by the seller's clock: ZATCA sees Riyadh time.
+        assert!(xml.contains("<cbc:IssueTime>13:00:00</cbc:IssueTime>"));
         // The seller, in Arabic.
         assert!(xml.contains("<cbc:RegistrationName>روابي للاستشارات</cbc:RegistrationName>"));
         assert!(xml.contains("<cbc:CompanyID>310122393500003</cbc:CompanyID>"));

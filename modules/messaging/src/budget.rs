@@ -124,8 +124,8 @@ impl Localize for OverBudget {
 /// booking on the 1st is metered in the month it was sent, and a replayed or
 /// backdated send lands where it belongs.
 #[must_use]
-pub fn period(at: Timestamp) -> String {
-    at.format("%Y-%m").to_string()
+pub fn period(calendar: erp_types::Calendar, at: Timestamp) -> String {
+    calendar.month(at)
 }
 
 /// Adds to the meter and refuses if that takes the month over its budget.
@@ -143,7 +143,15 @@ pub async fn charge(
     units: i32,
     at: Timestamp,
 ) -> Result<Spent, SpendError> {
-    let period = period(at);
+    // The meter's month is the tenant's month: a text sent at 01:00 on the
+    // first is this month's, not last month's.
+    let calendar = erp_eventlog::configuration::calendar(&mut *conn)
+        .await
+        .map_err(|e| match e {
+            erp_eventlog::ConfigError::Database(e) => SpendError::Database(e),
+            other => SpendError::Database(sqlx::Error::Protocol(other.to_string())),
+        })?;
+    let period = period(calendar, at);
 
     let row = sqlx::query!(
         r#"INSERT INTO message_meter (period, channel, messages, segments, first_at, last_at)

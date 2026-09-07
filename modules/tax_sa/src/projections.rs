@@ -194,7 +194,9 @@ impl Projection for Outcomes {
 /// A renewal appends another `CsidIssued` rather than replacing the last, so the
 /// aggregate grows without bound while the answer stays one row. `stage` keeps
 /// the furthest reached rather than the most recent, because a production
-/// certificate does not un-issue the compliance one.
+/// certificate does not un-issue the compliance one — within one environment.
+/// A certificate for another environment starts over, because what was reached
+/// in simulation says nothing about production.
 #[derive(Debug)]
 pub struct Onboardings;
 
@@ -216,45 +218,98 @@ impl Projection for Onboardings {
             return Ok(());
         }
 
-        let OnboardingEvent::CsidIssued {
-            stage,
-            environment,
-            serial,
-            not_after,
-            at,
-            ..
-        } = ctx
-            .decode::<OnboardingEvent>(envelope)
-            .map_err(|source| ProjectionError::Decode {
-                event_name: envelope.event_name.as_str().to_owned(),
-                position: envelope.position,
-                source,
-            })?;
+        let event =
+            ctx.decode::<OnboardingEvent>(envelope)
+                .map_err(|source| ProjectionError::Decode {
+                    event_name: envelope.event_name.as_str().to_owned(),
+                    position: envelope.position,
+                    source,
+                })?;
 
-        // `GREATEST` on the stage keeps the furthest reached. The two values
-        // order correctly as text — `compliance` < `production` — which is
-        // luck, so the CHECK on the column is what stops a third stage relying
-        // on it silently.
-        sqlx::query(
-            "INSERT INTO onboarding
-                 (id, stage, environment, serial, not_after, issued_at, recorded_at)
-             VALUES ('self', $1, $2, $3, $4, $5, $6)
-             ON CONFLICT (id) DO UPDATE
-                SET stage       = GREATEST(onboarding.stage, EXCLUDED.stage),
-                    environment = EXCLUDED.environment,
-                    serial      = EXCLUDED.serial,
-                    not_after   = EXCLUDED.not_after,
-                    issued_at   = EXCLUDED.issued_at,
-                    recorded_at = EXCLUDED.recorded_at",
-        )
-        .bind(stage.as_str())
-        .bind(environment.as_str())
-        .bind(serial)
-        .bind(not_after)
-        .bind(at)
-        .bind(ctx.event_time())
-        .execute(&mut *conn)
-        .await?;
+        match event {
+            OnboardingEvent::CsidIssued {
+                stage,
+                environment,
+                serial,
+                not_after,
+                at,
+                ..
+            } => {
+                // **Another environment is a fresh start**; within one, the
+                // furthest stage reached, because a production certificate does
+                // not un-issue the compliance one. A new compliance certificate
+                // starts its checks clean, and any certificate clears a refusal.
+                sqlx::query(
+                    "INSERT INTO onboarding
+                         (id, stage, environment, serial, not_after, issued_at, recorded_at)
+                     VALUES ('self', $1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (id) DO UPDATE
+                        SET stage = CASE
+                                WHEN onboarding.environment <> EXCLUDED.environment THEN EXCLUDED.stage
+                                WHEN onboarding.stage = 'production' THEN 'production'
+                                ELSE EXCLUDED.stage
+                            END,
+                            environment      = EXCLUDED.environment,
+                            serial           = EXCLUDED.serial,
+                            not_after        = EXCLUDED.not_after,
+                            issued_at        = EXCLUDED.issued_at,
+                            recorded_at      = EXCLUDED.recorded_at,
+                            checks_serial    = CASE WHEN EXCLUDED.stage = 'compliance' THEN NULL ELSE onboarding.checks_serial END,
+                            checks_submitted = CASE WHEN EXCLUDED.stage = 'compliance' THEN NULL ELSE onboarding.checks_submitted END,
+                            checks_passed_at = CASE WHEN EXCLUDED.stage = 'compliance' THEN NULL ELSE onboarding.checks_passed_at END,
+                            refused_step     = NULL,
+                            refused_detail   = NULL,
+                            refused_version  = NULL,
+                            refused_at       = NULL",
+                )
+                .bind(stage.as_str())
+                .bind(environment.as_str())
+                .bind(serial)
+                .bind(not_after)
+                .bind(at)
+                .bind(ctx.event_time())
+                .execute(&mut *conn)
+                .await?;
+            }
+            OnboardingEvent::ChecksPassed {
+                certificate_serial,
+                submitted,
+                at,
+            } => {
+                sqlx::query(
+                    "UPDATE onboarding
+                        SET checks_serial = $1, checks_submitted = $2, checks_passed_at = $3,
+                            recorded_at = $4
+                      WHERE id = 'self'",
+                )
+                .bind(certificate_serial)
+                .bind(i32::try_from(submitted).unwrap_or(i32::MAX))
+                .bind(at)
+                .bind(ctx.event_time())
+                .execute(&mut *conn)
+                .await?;
+            }
+            OnboardingEvent::Refused {
+                step,
+                detail,
+                version,
+                at,
+            } => {
+                sqlx::query(
+                    "UPDATE onboarding
+                        SET refused_step = $1, refused_detail = $2, refused_version = $3,
+                            refused_at = $4, recorded_at = $5
+                      WHERE id = 'self'",
+                )
+                .bind(step.as_str())
+                .bind(detail)
+                .bind(version)
+                .bind(at)
+                .bind(ctx.event_time())
+                .execute(&mut *conn)
+                .await?;
+            }
+        }
 
         Ok(())
     }
@@ -389,6 +444,15 @@ pub struct Onboarded {
     pub serial: String,
     pub not_after: String,
     pub issued_at: Timestamp,
+    /// The compliance certificate whose samples all passed.
+    pub checks_serial: Option<String>,
+    pub checks_submitted: Option<i32>,
+    pub checks_passed_at: Option<Timestamp>,
+    /// What ZATCA last refused, standing against the current certificate.
+    pub refused_step: Option<String>,
+    pub refused_detail: Option<String>,
+    pub refused_version: Option<String>,
+    pub refused_at: Option<Timestamp>,
 }
 
 /// The onboarding row, or `None` before any certificate has been issued.
@@ -398,7 +462,9 @@ pub struct Onboarded {
 pub async fn onboarding(conn: &mut PgConnection) -> Result<Option<Onboarded>, sqlx::Error> {
     let row = sqlx::query!(
         r#"SELECT stage as "stage!", environment as "environment!", serial as "serial!",
-                  not_after as "not_after!", issued_at as "issued_at!"
+                  not_after as "not_after!", issued_at as "issued_at!",
+                  checks_serial, checks_submitted, checks_passed_at,
+                  refused_step, refused_detail, refused_version, refused_at
              FROM proj_tax_sa.onboarding
             WHERE id = 'self'"#,
     )
@@ -411,5 +477,12 @@ pub async fn onboarding(conn: &mut PgConnection) -> Result<Option<Onboarded>, sq
         serial: r.serial,
         not_after: r.not_after,
         issued_at: r.issued_at,
+        checks_serial: r.checks_serial,
+        checks_submitted: r.checks_submitted,
+        checks_passed_at: r.checks_passed_at,
+        refused_step: r.refused_step,
+        refused_detail: r.refused_detail,
+        refused_version: r.refused_version,
+        refused_at: r.refused_at,
     }))
 }

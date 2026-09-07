@@ -35,10 +35,10 @@ use crate::audience::{Subject, Topic};
 ///
 /// Minutes, and no seconds or zone: a person reading "your appointment is at
 /// 2026-05-04 10:00" knows what that means, and "10:00:00+03:00" is a machine
-/// talking. **UTC**, because that is what is stored and this system does not
-/// yet know a tenant's zone — see the note in `crate::messages`.
-fn when(at: Timestamp) -> String {
-    at.format("%Y-%m-%d %H:%M").to_string()
+/// talking. **On the tenant's clock** — the first version wrote UTC, three
+/// hours early for everyone this ships to.
+fn when(calendar: erp_types::Calendar, at: Timestamp) -> String {
+    calendar.clock(at)
 }
 
 /// Everything a template about this subject may say.
@@ -53,10 +53,15 @@ pub async fn of(
 ) -> Result<BTreeMap<String, String>, sqlx::Error> {
     let mut values = BTreeMap::new();
     let id = subject.id.as_str();
+    // **The tenant's clock**, for every instant a person reads. The first
+    // version wrote UTC, three hours early for everyone this ships to.
+    let calendar = erp_eventlog::configuration::calendar(&mut *conn)
+        .await
+        .unwrap_or_default();
 
     match subject.topic {
-        Topic::Reservation => reservation(conn, id, &mut values).await?,
-        Topic::Invoice => invoice(conn, id, &mut values).await?,
+        Topic::Reservation => reservation(conn, id, calendar, &mut values).await?,
+        Topic::Invoice => invoice(conn, id, calendar, &mut values).await?,
         Topic::Customer => customer(conn, id, &mut values).await?,
         Topic::Employee => employee(conn, id, &mut values).await?,
     }
@@ -67,6 +72,7 @@ pub async fn of(
 async fn reservation(
     conn: &mut PgConnection,
     id: &str,
+    calendar: erp_types::Calendar,
     values: &mut BTreeMap<String, String>,
 ) -> Result<(), sqlx::Error> {
     let Some(detail) = booking::reservation(conn, id).await? else {
@@ -76,11 +82,11 @@ async fn reservation(
     values.insert("reservation.id".to_owned(), detail.summary.id.clone());
     values.insert(
         "reservation.starts_at".to_owned(),
-        when(detail.summary.starts_at),
+        when(calendar, detail.summary.starts_at),
     );
     values.insert(
         "reservation.ends_at".to_owned(),
-        when(detail.summary.ends_at),
+        when(calendar, detail.summary.ends_at),
     );
     values.insert("reservation.stage".to_owned(), detail.summary.stage.clone());
 
@@ -122,6 +128,7 @@ async fn reservation(
 async fn invoice(
     conn: &mut PgConnection,
     id: &str,
+    calendar: erp_types::Calendar,
     values: &mut BTreeMap<String, String>,
 ) -> Result<(), sqlx::Error> {
     let Some(detail) = sales::invoice(conn, id).await? else {
@@ -131,9 +138,12 @@ async fn invoice(
 
     values.insert("invoice.id".to_owned(), summary.id.clone());
     values.insert("invoice.number".to_owned(), summary.number.clone());
-    values.insert("invoice.issued_on".to_owned(), when(summary.issued_on));
+    values.insert(
+        "invoice.issued_on".to_owned(),
+        when(calendar, summary.issued_on),
+    );
     if let Some(due) = summary.due_on {
-        values.insert("invoice.due_on".to_owned(), when(due));
+        values.insert("invoice.due_on".to_owned(), when(calendar, due));
     }
     values.insert("invoice.total".to_owned(), summary.gross.to_string());
     values.insert(

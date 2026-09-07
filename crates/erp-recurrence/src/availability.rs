@@ -41,8 +41,9 @@
 //! named zone, and the day that arrives this becomes `Tz` and nothing else
 //! about the shape changes.
 
-use chrono::{Datelike, FixedOffset, NaiveDate, Timelike};
+use chrono::{Datelike, NaiveDate, Timelike};
 use erp_occupancy::Span;
+use erp_types::Calendar;
 use serde::{Deserialize, Serialize};
 
 /// Minutes in a day. `closes_at` may equal it, meaning midnight.
@@ -338,9 +339,11 @@ impl Availability {
     /// has to answer "and when is it free?" for a month of calendar at once,
     /// which is a different question than this one.
     #[must_use]
-    pub fn covers(&self, span: Span, at: FixedOffset) -> bool {
-        let from = span.from().with_timezone(&at);
-        let until = span.until().with_timezone(&at);
+    pub fn covers(&self, span: Span, calendar: Calendar) -> bool {
+        // On the tenant's clock, instant by instant: a span across a daylight
+        // saving change has two offsets, and each end gets its own.
+        let from = calendar.local(span.from());
+        let until = calendar.local(span.until());
 
         // Minutes past local midnight, which is what the window is in. The
         // second is dropped deliberately: a rule is written to the minute, and
@@ -415,8 +418,8 @@ impl Availability {
 /// that takes bookings whenever, which is what a hotel room and a museum slot
 /// are, and it means declaring a resource is one step rather than two.
 #[must_use]
-pub fn any_covers(rules: &[Availability], span: Span, at: FixedOffset) -> bool {
-    rules.is_empty() || rules.iter().any(|rule| rule.covers(span, at))
+pub fn any_covers(rules: &[Availability], span: Span, calendar: Calendar) -> bool {
+    rules.is_empty() || rules.iter().any(|rule| rule.covers(span, calendar))
 }
 
 const fn minute_of_day(hour: u32, minute: u32) -> u16 {

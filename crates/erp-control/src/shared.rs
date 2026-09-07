@@ -232,6 +232,55 @@ impl Shared {
     }
 
     // -----------------------------------------------------------------------
+    // Rate limiting
+    // -----------------------------------------------------------------------
+
+    /// **One fixed-window counter, seen by every node.**
+    ///
+    /// `SET key 0 EX window NX` then `INCR`, in one round trip: the first hit in
+    /// a window creates the key with its expiry, every later hit only counts.
+    /// The window therefore starts at the first request and ends at the same
+    /// instant for every node, which is what makes ten API processes one
+    /// limiter rather than ten.
+    ///
+    /// `Ok(Ok(()))` under the limit; `Ok(Err(seconds))` over it, where the
+    /// seconds are what is left of the window — the `Retry-After` a caller is
+    /// told. `Err` is Redis being unreachable, which the caller answers by
+    /// falling back to its per-node count: a weaker limit is not a broken one
+    /// (L6), and a cache outage must not be an API outage.
+    pub async fn charge(
+        &self,
+        key: &str,
+        limit: u32,
+        window: Duration,
+    ) -> redis::RedisResult<Result<(), u64>> {
+        let mut conn = self.conn.clone();
+        let key = format!("erp:rate:{key}");
+        let seconds = i64::try_from(window.as_secs().max(1)).unwrap_or(i64::MAX);
+
+        let (count,): (i64,) = redis::pipe()
+            .atomic()
+            .cmd("SET")
+            .arg(&key)
+            .arg(0)
+            .arg("EX")
+            .arg(seconds)
+            .arg("NX")
+            .ignore()
+            .incr(&key, 1)
+            .query_async(&mut conn)
+            .await?;
+
+        if count <= i64::from(limit) {
+            return Ok(Ok(()));
+        }
+        // Over. Tell them when the window ends, never less than a second so a
+        // client that sleeps for `seconds` cannot come straight back in.
+        let ttl: i64 = conn.ttl(&key).await?;
+        Ok(Err(u64::try_from(ttl).unwrap_or(1).max(1)))
+    }
+
+    // -----------------------------------------------------------------------
     // Invalidation
     // -----------------------------------------------------------------------
 

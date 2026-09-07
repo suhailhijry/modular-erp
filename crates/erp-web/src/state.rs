@@ -24,10 +24,17 @@ pub struct AppState {
     /// protects; there is no version of it that is safe to keep unsealed
     /// because an environment variable was missing.
     pub sealing: Option<erp_eventlog::SealingKey>,
-    /// What bounds the public surface, which has no session to attribute abuse
-    /// to. Shared across every request this process serves — see
-    /// [`crate::rate`] for what it is and honestly is not.
+    /// What bounds every surface that has no session to attribute abuse to:
+    /// the public booking site, the login and signup routes, one-time codes.
+    /// Fleet-wide when the control plane has its Redis layer — see
+    /// [`crate::rate`].
     pub limiter: Arc<crate::rate::Limiter>,
+    /// **Whether the last hop of `X-Forwarded-For` is the client.** True only
+    /// when a proxy this deployment controls sits in front and appends the peer
+    /// address; false means the socket's own peer is the client and the header
+    /// is ignored, because a header the caller can write is not an identity.
+    /// See [`crate::extract::caller_address`].
+    pub trust_forwarded: bool,
     /// Where files are kept.
     ///
     /// `None` when the deployment has configured no storage, and then anything
@@ -52,12 +59,26 @@ impl AppState {
     #[must_use]
     pub fn on(control: Arc<ControlPlane>, domain: &str) -> Self {
         Self {
-            control,
             domain: domain.trim().trim_start_matches('.').to_lowercase().into(),
             sealing: None,
-            limiter: Arc::new(crate::rate::Limiter::new()),
+            // Fleet-wide when the control plane has its Redis layer, per node
+            // otherwise — the same fallback the session cache makes.
+            limiter: Arc::new(crate::rate::Limiter::sharing(control.shared().cloned())),
+            control,
             storage: None,
+            trust_forwarded: false,
         }
+    }
+
+    /// Reads the client address from the last hop of `X-Forwarded-For`.
+    ///
+    /// **Only behind a proxy you run.** With this on and no proxy, a caller
+    /// writes the header and is whoever they say — which is the failure the
+    /// address-keyed limiter exists to prevent.
+    #[must_use]
+    pub const fn trusting_forwarded_for(mut self, trust: bool) -> Self {
+        self.trust_forwarded = trust;
+        self
     }
 
     /// The same state, with somewhere to keep files.

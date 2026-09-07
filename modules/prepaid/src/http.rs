@@ -26,6 +26,7 @@ use erp_web::{
     After, Allowed, Amount, IdempotencyKey, Language, ManageAccounts, Paged, PostEntries, Read,
 };
 use erp_web::{Consistency, nudge};
+use erp_web::{IfMatch, Versioned, config_problem};
 use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
 
 use crate::{
@@ -892,7 +893,7 @@ async fn outstanding(
     path = "/v1/prepaid/posting-accounts",
     tag = "prepaid",
     responses(
-        (status = OK, body = DeferralAccounts),
+        (status = OK, body = DeferralAccounts, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = NOT_FOUND, description = "The tenant did not enable prepaid", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -901,17 +902,23 @@ async fn outstanding(
 async fn deferral_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<DeferralAccounts>, Problem> {
+) -> Result<Versioned<DeferralAccounts>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::PostingAccounts::KEY)
+        .await
+        .map_err(|e| config(&e, locale))?;
     let accounts = crate::PostingAccounts::resolve(&mut conn)
         .await
         .map_err(|e| config(&e, locale))?;
 
-    Ok(Json(DeferralAccounts {
-        deferred: accounts.deferred.to_string(),
-        revenue: accounts.revenue.to_string(),
-    }))
+    Ok(Versioned(
+        version,
+        DeferralAccounts {
+            deferred: accounts.deferred.to_string(),
+            revenue: accounts.revenue.to_string(),
+        },
+    ))
 }
 
 /// Choose them.
@@ -919,9 +926,11 @@ async fn deferral_accounts(
     put,
     path = "/v1/prepaid/posting-accounts",
     tag = "prepaid",
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.")),
     request_body = DeferralAccounts,
     responses(
         (status = NO_CONTENT, description = "Set."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "Not an account code", body = Problem),
         (status = NOT_FOUND, description = "The tenant did not enable prepaid", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
@@ -931,6 +940,7 @@ async fn deferral_accounts(
 async fn set_deferral_accounts(
     tenant: Allowed<ManageAccounts>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<DeferralAccounts>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -945,6 +955,7 @@ async fn set_deferral_accounts(
         crate::PostingAccounts::KEY,
         &accounts,
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
     .map_err(|e| config(&e, locale))?;
@@ -1337,7 +1348,7 @@ async fn expire_card_points(
     path = "/v1/prepaid/loyalty-scheme",
     tag = "prepaid",
     responses(
-        (status = OK, body = LoyaltySchemeRecord),
+        (status = OK, body = LoyaltySchemeRecord, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = NOT_FOUND, description = "No scheme is configured, or the tenant did not enable prepaid", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -1346,9 +1357,12 @@ async fn expire_card_points(
 async fn loyalty_scheme(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<LoyaltySchemeRecord>, Problem> {
+) -> Result<Versioned<LoyaltySchemeRecord>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::Scheme::KEY)
+        .await
+        .map_err(|e| config(&e, locale))?;
     let scheme = crate::Scheme::resolve(&mut conn)
         .await
         .map_err(|e| config(&e, locale))?
@@ -1357,11 +1371,14 @@ async fn loyalty_scheme(
         // fallback. See `crate::loyalty::Scheme`.
         .ok_or_else(|| missing(crate::messages::NO_SCHEME, "", locale))?;
 
-    Ok(Json(LoyaltySchemeRecord {
-        worth: money(scheme.worth),
-        rate_bp: scheme.rate_bp,
-        tiers: scheme.tiers.into_iter().map(tier).collect(),
-    }))
+    Ok(Versioned(
+        version,
+        LoyaltySchemeRecord {
+            worth: money(scheme.worth),
+            rate_bp: scheme.rate_bp,
+            tiers: scheme.tiers.into_iter().map(tier).collect(),
+        },
+    ))
 }
 
 /// Choose them.
@@ -1369,9 +1386,11 @@ async fn loyalty_scheme(
     put,
     path = "/v1/prepaid/loyalty-scheme",
     tag = "prepaid",
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.")),
     request_body = NewLoyaltyScheme,
     responses(
         (status = NO_CONTENT, description = "Set."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "Not a currency", body = Problem),
         (status = NOT_FOUND, description = "The tenant did not enable prepaid", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
@@ -1381,6 +1400,7 @@ async fn loyalty_scheme(
 async fn set_loyalty_scheme(
     tenant: Allowed<ManageAccounts>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<NewLoyaltyScheme>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -1404,6 +1424,7 @@ async fn set_loyalty_scheme(
         crate::Scheme::KEY,
         &scheme,
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
     .map_err(|e| config(&e, locale))?;
@@ -1571,13 +1592,7 @@ fn pool(error: &erp_tenant::PoolError, locale: Locale) -> Problem {
 }
 
 fn config(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem {
-    tracing::error!(error = %error, "prepaid configuration failed");
-    Problem::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &error.message(),
-        locale,
-        &CATALOG,
-    )
+    config_problem(error, locale, &CATALOG)
 }
 
 fn database(error: &sqlx::Error, locale: Locale) -> Problem {

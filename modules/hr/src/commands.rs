@@ -474,11 +474,14 @@ pub async fn salary_for(
     from: chrono::NaiveDate,
     until: chrono::NaiveDate,
 ) -> Result<Option<crate::Salary>, erp_eventlog::LoadError> {
+    let calendar = erp_eventlog::configuration::calendar(&mut *conn)
+        .await
+        .unwrap_or_default();
     let held = load::<Employee>(conn, id, crate::upcasters())
         .await?
         .aggregate;
     Ok(held
-        .was_employed_throughout(from, until)
+        .was_employed_throughout(from, until, calendar)
         .then_some(held.salary)
         .flatten())
 }
@@ -683,7 +686,7 @@ pub async fn is_working_at(
     // The tenant's own clock, which both the diary and the rota read — see
     // `erp_recurrence::Calendar`, whose key is `tenant.calendar` and not any
     // one module's.
-    let calendar = erp_recurrence::Calendar::resolve(&mut *conn)
+    let calendar = erp_eventlog::configuration::calendar(&mut *conn)
         .await
         .unwrap_or_default();
     Ok(load::<Employee>(conn, id, crate::upcasters())

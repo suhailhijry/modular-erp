@@ -38,6 +38,14 @@
 //! FCM has none — not a header, not a field. `collapse_key` is not one: it
 //! collapses *undelivered* messages on the device, and says nothing about two
 //! sends of the same message. A retried delivery can arrive twice.
+//!
+//! # A `401` throws the access token away
+//!
+//! A `401` from the send is Google saying the bearer token is not good — spent,
+//! or revoked early. It is retried, and the retry must not present the same
+//! token: the cached one is forgotten on the spot, so the next attempt mints a
+//! fresh one instead of looping on the rejected one for the rest of its cached
+//! lifetime.
 
 use std::sync::Mutex;
 
@@ -234,6 +242,13 @@ impl Fcm {
         (minted.expires > std::time::Instant::now()).then(|| minted.token.clone())
     }
 
+    /// Forgets the cached token, because Google just refused it.
+    fn forget(&self) {
+        if let Ok(mut held) = self.minted.lock() {
+            *held = None;
+        }
+    }
+
     /// The signed JWT Google exchanges for an access token.
     ///
     /// `now` is a parameter so a test can pin it and read the claims back.
@@ -329,6 +344,11 @@ impl Transport for Fcm {
         if status.is_success() {
             return Ok(());
         }
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            // Whatever the reason, this token is not one Google will take.
+            // See the module docs.
+            self.forget();
+        }
         let said = response.text().await.unwrap_or_default();
         Err(verdict(status, &said))
     }
@@ -390,8 +410,7 @@ fn verdict(status: reqwest::StatusCode, body: &str) -> TransportError {
 
         Some("QUOTA_EXCEEDED" | "UNAVAILABLE" | "INTERNAL") => TransportError::Unreachable(said),
 
-        _ if status.is_server_error()
-            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        _ if crate::transport::worth_retrying(status)
             || status == reqwest::StatusCode::UNAUTHORIZED =>
         {
             TransportError::Unreachable(said)
@@ -599,6 +618,56 @@ mod tests {
             fcm.send(&apns, "k").await,
             Err(TransportError::Refused(_))
         ));
+    }
+
+    /// **A refused token is not presented again.** The first send's `401`
+    /// forgets the cached token, so the retry exchanges a fresh one rather
+    /// than looping on the rejected one until it would have expired anyway.
+    #[tokio::test]
+    async fn a_401_forgets_the_access_token_and_the_retry_mints_another() {
+        let server = crate::fake::OneRequest::sequence(vec![
+            (
+                200,
+                r#"{"access_token":"ya29.first","expires_in":3600,"token_type":"Bearer"}"#,
+            ),
+            (401, r#"{"error":{"code":401,"status":"UNAUTHENTICATED"}}"#),
+            (
+                200,
+                r#"{"access_token":"ya29.second","expires_in":3600,"token_type":"Bearer"}"#,
+            ),
+            (
+                200,
+                r#"{"name":"projects/bassat-erp/messages/0:1500415314455276"}"#,
+            ),
+        ])
+        .await;
+
+        let (account, _) = account();
+        let fcm = Fcm::new(account).expect("built").at(&server.url());
+        assert!(matches!(
+            fcm.send(&message("device-token-1"), "k").await,
+            Err(TransportError::Unreachable(_))
+        ));
+        fcm.send(&message("device-token-1"), "k")
+            .await
+            .expect("the retry sends");
+
+        // Bounded: a retry that presented the spent token again would have
+        // taken the second token answer as its send and left the server
+        // waiting for a fourth request that never comes.
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(5), server.seen())
+            .await
+            .expect("all four requests arrived");
+        let requests: Vec<&str> = sent.split("\n===\n").collect();
+        assert_eq!(requests.len(), 5, "four requests and a trailing separator");
+        assert!(requests[0].starts_with("POST /token "), "{}", requests[0]);
+        assert!(requests[1].contains("Bearer ya29.first"), "{}", requests[1]);
+        assert!(requests[2].starts_with("POST /token "), "{}", requests[2]);
+        assert!(
+            requests[3].contains("Bearer ya29.second"),
+            "{}",
+            requests[3]
+        );
     }
 
     /// **Both requests, in order**, against a server that shows their bytes.

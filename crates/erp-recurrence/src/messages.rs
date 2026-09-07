@@ -20,7 +20,6 @@ pub const NOT_A_DAY_OF_THE_MONTH: MessageCode =
     MessageCode::new("recurrence.not_a_day_of_the_month");
 pub const NOT_A_MONTH: MessageCode = MessageCode::new("recurrence.not_a_month");
 pub const NOT_A_WEEKDAY: MessageCode = MessageCode::new("recurrence.not_a_weekday");
-pub const NOT_AN_OFFSET: MessageCode = MessageCode::new("recurrence.not_an_offset");
 
 pub const CODES: &[MessageCode] = &[
     NOT_A_WINDOW,
@@ -29,7 +28,6 @@ pub const CODES: &[MessageCode] = &[
     NOT_A_DAY_OF_THE_MONTH,
     NOT_A_MONTH,
     NOT_A_WEEKDAY,
-    NOT_AN_OFFSET,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -96,15 +94,5 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_A_WEEKDAY,
         Locale::Arabic,
         Template::Simple("{value} ليس يومًا من أيام الأسبوع. الاثنين هو 1 والأحد هو 7."),
-    ),
-    (
-        NOT_AN_OFFSET,
-        Locale::English,
-        Template::Simple("A timezone offset is minutes from UTC, between -{limit} and {limit}."),
-    ),
-    (
-        NOT_AN_OFFSET,
-        Locale::Arabic,
-        Template::Simple("فرق التوقيت هو عدد الدقائق عن التوقيت العالمي، بين -{limit} و {limit}."),
     ),
 ];

@@ -21,6 +21,8 @@ pub enum TaxError {
     InvalidDocument(String),
     #[error(transparent)]
     Read(#[from] sqlx::Error),
+    #[error(transparent)]
+    Config(#[from] erp_eventlog::ConfigError),
 }
 
 impl erp_i18n::Localize for TaxError {
@@ -43,6 +45,7 @@ impl erp_i18n::Localize for TaxError {
                 .with("document", MessageArg::text(document.clone())),
             // Ours: the read models are unwell, not something a user did.
             Self::Read(_) => Message::new(erp_eventlog::messages::INTERNAL),
+            Self::Config(e) => e.message(),
         }
     }
 }
@@ -52,17 +55,16 @@ impl erp_i18n::Localize for TaxError {
 /// **The period is the identity**, which is what makes filing one twice a
 /// conflict rather than a second return. A currency is part of it because a
 /// business invoicing in two files two.
+/// **A period is two local dates**, `from` inclusive and `until` exclusive,
+/// and its identity is spelled from them: `SAR.2026-01-01.2026-04-01`. The
+/// first version took two instants and labelled them in UTC, so a quarter that
+/// started at local midnight was labelled with the evening before.
 pub fn period_id(
     currency: CurrencyCode,
-    from: Timestamp,
-    until: Timestamp,
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
 ) -> Result<AggregateId, TaxError> {
-    let raw = format!(
-        "{}.{}.{}",
-        currency,
-        from.format("%Y-%m-%d"),
-        until.format("%Y-%m-%d")
-    );
+    let raw = format!("{currency}.{from}.{until}");
     AggregateId::new(&raw).map_err(|_| TaxError::InvalidPeriod(raw))
 }
 
@@ -75,6 +77,10 @@ pub struct Filed {
     /// telling a caller what went to ZATCA and telling them what it thinks now.
     pub payable: Money,
     pub filed_on: Timestamp,
+    /// The period's bounds as instants on the tenant's calendar — what the
+    /// return was computed over and what the books were closed through.
+    pub from: Timestamp,
+    pub until: Timestamp,
 }
 
 /// Records that a period was filed, with the numbers that went.
@@ -86,8 +92,8 @@ pub async fn file_return(
     db: &TenantDb,
     sides: Sides,
     currency: CurrencyCode,
-    from: Timestamp,
-    until: Timestamp,
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
     filed_on: Timestamp,
     metadata: &Metadata,
 ) -> Result<Filed, CommandError<TaxError>> {
@@ -133,8 +139,8 @@ async fn file_in(
     id: &AggregateId,
     sides: Sides,
     currency: CurrencyCode,
-    from: Timestamp,
-    until: Timestamp,
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
     filed_on: Timestamp,
     metadata: &Metadata,
 ) -> Result<Filed, ExecuteError<TaxError>> {
@@ -142,7 +148,13 @@ async fn file_in(
     // that were true when the filing committed. Reading them outside would let a
     // write land in between and file a figure that was never current — the same
     // argument `sales` makes about posting accounts and the VAT rate.
-    let declared = crate::report::vat_return(&mut *conn, sides, currency, from, until)
+    // The dates become instants once, here, on the tenant's clock; everything
+    // below — the return, the event, the ledger's watermark — uses those.
+    let calendar = erp_eventlog::configuration::calendar(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(TaxError::Config(e)))?;
+    let (from, until) = (calendar.start_of(from), calendar.start_of(until));
+    let declared = crate::report::vat_return_between(&mut *conn, sides, currency, from, until)
         .await
         .map_err(|e| ExecuteError::Rejected(TaxError::Read(e)))?;
 
@@ -171,10 +183,25 @@ async fn file_in(
     )
     .await?;
 
+    // **A filed period is a closed period**, in the same transaction. What
+    // went to the authority was computed from the documents dated inside it,
+    // and `ledger::post_entry_in` is the one gate every posting passes — so
+    // moving its watermark here is what makes a backdated credit note or
+    // invoice into that period a refusal rather than a silent change to a
+    // return somebody has already filed. The first version left the two apart
+    // and relied on somebody remembering to close the books.
+    if committed.at.is_some() {
+        ledger::period::close_through(&mut *conn, until, None)
+            .await
+            .map_err(|e| ExecuteError::Rejected(TaxError::Config(e)))?;
+    }
+
     Ok(Filed {
         committed,
         payable: declared.payable,
         filed_on,
+        from,
+        until,
     })
 }
 
@@ -205,7 +232,15 @@ const _: fn() = || {
         at: Timestamp,
         metadata: &Metadata,
     ) {
-        assert_send(file_return(db, sides, currency, at, at, at, metadata));
+        assert_send(file_return(
+            db,
+            sides,
+            currency,
+            chrono::NaiveDate::default(),
+            chrono::NaiveDate::default(),
+            at,
+            metadata,
+        ));
     }
     let _ = commands_are_send;
 };
@@ -341,6 +376,69 @@ pub(crate) async fn record_csid(
                 return Ok(Decision::nothing());
             }
             Ok(Decision::one(event.clone()))
+        },
+    )
+    .await
+}
+
+/// Records that every compliance sample signed with this certificate passed.
+///
+/// Recorded once per certificate: the worker that crashed between ZATCA's
+/// answer and this write repeats the samples, and the second write is nothing.
+pub(crate) async fn record_checks_passed(
+    db: &TenantDb,
+    certificate_serial: &str,
+    submitted: usize,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<Committed<crate::onboarded::OnboardingEvent>, CommandError<TaxError>> {
+    db.execute::<crate::onboarded::Onboarding, _, TaxError>(
+        &crate::onboarded::onboarding_id(),
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if loaded.aggregate.checks_passed_for.as_deref() == Some(certificate_serial) {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(
+                crate::onboarded::OnboardingEvent::ChecksPassed {
+                    certificate_serial: certificate_serial.to_owned(),
+                    submitted,
+                    at,
+                },
+            ))
+        },
+    )
+    .await
+}
+
+/// Records that ZATCA refused a step, so the worker stops asking until
+/// something changes — a new build, or a new certificate.
+pub(crate) async fn record_refusal(
+    db: &TenantDb,
+    step: crate::onboarded::Step,
+    detail: &str,
+    version: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<Committed<crate::onboarded::OnboardingEvent>, CommandError<TaxError>> {
+    db.execute::<crate::onboarded::Onboarding, _, TaxError>(
+        &crate::onboarded::onboarding_id(),
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            // The same refusal twice is one refusal.
+            if loaded.aggregate.refused.as_ref().is_some_and(|standing| {
+                standing.step == step && standing.detail == detail && standing.version == version
+            }) {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(crate::onboarded::OnboardingEvent::Refused {
+                step,
+                detail: detail.to_owned(),
+                version: version.to_owned(),
+                at,
+            }))
         },
     )
     .await

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.id as \"id!\" FROM proj_booking.reservation r\n            WHERE r.stage = 'completed' AND r.billed_by IS NULL\n              AND EXISTS (SELECT 1 FROM proj_booking.reservation_line l\n                           WHERE l.reservation_id = r.id AND l.net IS NOT NULL)\n            ORDER BY r.ends_at ASC LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.reservation",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d0794ec06d7546dfc2340fee70dc4b365313a400e959b59f90510648c9826bec"
+}

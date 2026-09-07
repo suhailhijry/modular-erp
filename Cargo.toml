@@ -66,6 +66,10 @@ uuid = { version = "1.24", features = ["serde", "v5", "v7"] }
 sha2 = "0.11"
 base64 = "0.22"
 hex = "0.4"
+# The Unicode bidi character classes, so a message can tell whether an argument
+# runs the other way from the sentence around it. Already in the lock through
+# `idna`; naming it adds nothing to the build.
+unicode-bidi = "0.3"
 # RFC 4180 is not "split on commas": a field can hold a comma, a quote or a
 # newline, and the number of ways to write that parser wrong is why this is a
 # dependency rather than twenty lines. Used for both directions of Phase 11d.
@@ -130,6 +134,10 @@ axum = { version = "0.8", features = ["macros"] }
 # in the build is worth more than the churn of two.
 #
 # No cookies, no gzip, no blocking client.
+# The IANA zone database, for the tenant's calendar.
+chrono-tz = { version = "0.10", features = ["serde"] }
+# DNS, for proving a tenant owns the domain it puts its API on.
+hickory-resolver = "0.26"
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "native-tls",

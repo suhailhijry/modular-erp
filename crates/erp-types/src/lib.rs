@@ -22,13 +22,16 @@
 //! values built in Rust is not a guarantee in a system whose state arrives from
 //! an append-only log written by older versions of itself.
 
+mod calendar;
 mod error;
 mod ids;
 mod macros;
 mod money;
 mod non_empty;
 mod page;
+pub mod phone;
 
+pub use calendar::{Calendar, NotAZone};
 pub use error::{
     Empty, IdParseError, InvalidCurrency, InvalidString, InvalidStringReason, MoneyError,
     NegativeCounter,

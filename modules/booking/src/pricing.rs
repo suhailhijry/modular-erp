@@ -163,6 +163,29 @@ impl PublicBooking {
 /// **Bands, not prices.** What a service costs is the caller's to send; when it
 /// costs more is the tenant's to configure, and it is the half that must not be
 /// something a client can decide for itself.
+/// **When a booking is billed.**
+///
+/// The desk can always raise the invoice for a booking on demand. This says
+/// whether the worker does it too, the moment a booking is completed — right
+/// for a salon that never adds anything at the till, and wrong for one that
+/// does, which is why it is off until the business turns it on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Billing {
+    /// Raise the invoice when a booking is moved to completed.
+    #[serde(default)]
+    pub on_completion: bool,
+}
+
+impl Billing {
+    pub const KEY: &'static str = "booking.billing";
+
+    pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, erp_eventlog::ConfigError> {
+        Ok(erp_eventlog::configuration::get::<Self>(conn, Self::KEY)
+            .await?
+            .map_or_else(Self::default, |configured| configured.value))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tariff {
     /// **First match wins**, so the order is the tenant's priority. A specific
@@ -195,8 +218,9 @@ impl Tariff {
     /// booking, which is what they would do at the till anyway.
     #[must_use]
     pub fn band_for(&self, span: Span, calendar: Calendar) -> Option<&Band> {
-        let at = calendar.offset();
-        self.bands.iter().find(|band| band.when.covers(span, at))
+        self.bands
+            .iter()
+            .find(|band| band.when.covers(span, calendar))
     }
 }
 

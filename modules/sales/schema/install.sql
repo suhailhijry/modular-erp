@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS invoice (
     -- nobody owes anything on it.
     cancelled_on TIMESTAMPTZ,
     credit_note  TEXT,
+    -- **The prepayment invoice this one deducted**, by number, when it is the
+    -- final invoice after a deposit. Its own net, tax and gross are what it
+    -- charges — the rest of the supply — and the lines say the whole.
+    prepaid_number TEXT,
 
     -- The event's own timestamp, never `now()` (architecture L2).
     recorded_at  TIMESTAMPTZ NOT NULL
@@ -404,7 +408,10 @@ SELECT i.id,
        CASE WHEN i.cancelled_on IS NOT NULL THEN 0
             ELSE (i.gross - p.paid)
        END::BIGINT AS outstanding,
-       p.payments
+       p.payments,
+       -- Last, because a view can only ever gain columns at its end: a
+       -- `CREATE OR REPLACE` that inserts one in the middle is refused.
+       i.prepaid_number
   FROM invoice i
   LEFT JOIN LATERAL (
       SELECT COALESCE(sum(amount), 0)::BIGINT AS paid,

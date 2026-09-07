@@ -51,7 +51,7 @@
 //! anything else would be inventing a fact about somebody's money.
 
 use erp_eventlog::Metadata;
-use erp_payments::{Charge, Gateway, GatewayError, Returns, Source};
+use erp_payments::{Charge, Charged, Gateway, GatewayError, Returns, Source, Status};
 use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 
 /// What one pass did.
@@ -73,6 +73,17 @@ pub struct Swept {
     pub stopped: Option<String>,
 }
 
+/// One payment the settle pass has to ask about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pending {
+    pub id: AggregateId,
+    /// The gateway's own id for it.
+    pub gateway_id: String,
+    /// What the payment is for — what a capture takes, and what the gateway's
+    /// figure is checked against.
+    pub amount: Money,
+}
+
 /// Everything still waiting on one provider, oldest first.
 ///
 /// Oldest first because a payment that has been pending longest is the one
@@ -82,9 +93,10 @@ pub async fn pending(
     conn: &mut sqlx::PgConnection,
     provider: &str,
     limit: i64,
-) -> Result<Vec<(AggregateId, String)>, sqlx::Error> {
+) -> Result<Vec<Pending>, sqlx::Error> {
     let rows = sqlx::query!(
-        r#"SELECT id as "id!", gateway_id as "gateway_id!"
+        r#"SELECT id as "id!", gateway_id as "gateway_id!",
+                  amount_minor as "amount_minor!", currency as "currency!"
              FROM proj_payments.payment
             WHERE stage = 'pending' AND provider = $1
             ORDER BY started_at ASC LIMIT $2"#,
@@ -96,7 +108,14 @@ pub async fn pending(
 
     Ok(rows
         .into_iter()
-        .filter_map(|row| Some((AggregateId::new(&row.id).ok()?, row.gateway_id)))
+        .filter_map(|row| {
+            let currency = CurrencyCode::new(&row.currency).ok()?;
+            Some(Pending {
+                id: AggregateId::new(&row.id).ok()?,
+                gateway_id: row.gateway_id,
+                amount: Money::from_minor(row.amount_minor, currency),
+            })
+        })
         .collect())
 }
 
@@ -116,8 +135,9 @@ pub async fn settle_pending(
     drop(conn);
 
     let mut swept = Swept::default();
-    for (id, gateway_id) in waiting {
-        let charged = match gateway.fetch(&gateway_id).await {
+    for want in waiting {
+        let Pending { id, gateway_id, .. } = &want;
+        let charged = match gateway.fetch(gateway_id).await {
             Ok(charged) => charged,
             // **The gateway has no record of it.** Permanent, and not a reason
             // to stop: the rest of the batch is unaffected. Left pending and
@@ -141,8 +161,22 @@ pub async fn settle_pending(
             }
         };
 
+        // **An authorised payment is captured before it settles.** See
+        // [`capture_authorised`].
+        let charged = match capture_authorised(db, gateway, &want, charged, now, metadata).await? {
+            Captured::Charged(charged) => charged,
+            Captured::Failed => {
+                swept.resolved += 1;
+                continue;
+            }
+            Captured::Stopped(why) => {
+                swept.stopped = Some(why);
+                break;
+            }
+        };
+
         let mut tx = db.begin().await?;
-        match crate::settle_in(&mut tx, &id, &charged, now, metadata).await {
+        match crate::settle_in(&mut tx, id, &charged, now, metadata).await {
             Ok(committed) => {
                 tx.commit().await?;
                 if committed.events.is_empty() {
@@ -159,11 +193,40 @@ pub async fn settle_pending(
                     }
                 }
             }
+            Err(erp_eventlog::ExecuteError::Rejected(crate::PaymentsError::WrongAmount {
+                expected,
+                found,
+            })) => {
+                tx.rollback().await?;
+                // **The gateway holds a different amount from the one this
+                // payment was for.** For a deposit the customer created in
+                // their own browser, that is a customer who paid short — or
+                // over — and the money at the gateway is real; for anything
+                // else it is a gateway misreporting. Neither is a state to
+                // retry every tick for ever, and neither may be posted (L6). So
+                // the payment fails, loudly and with both figures, and the
+                // money is the operator's to give back at the gateway.
+                tracing::error!(
+                    tenant = %db.tenant(),
+                    provider = gateway.provider(),
+                    payment = %id,
+                    %expected,
+                    %found,
+                    "the gateway holds a different amount from what this payment was for; failed"
+                );
+                fail(
+                    db,
+                    id,
+                    &format!("the gateway holds {found}; this payment was for {expected}"),
+                    now,
+                    metadata,
+                )
+                .await?;
+                swept.resolved += 1;
+            }
             Err(e) => {
                 tx.rollback().await?;
-                // **Loudly, and then on to the next.** The most likely cause is
-                // the amount check refusing — which means the gateway is
-                // reporting something other than what was started, and that is
+                // **Loudly, and then on to the next.** Whatever refused here is
                 // exactly the thing somebody has to look at.
                 tracing::error!(
                     tenant = %db.tenant(),
@@ -178,6 +241,76 @@ pub async fn settle_pending(
     }
 
     Ok(swept)
+}
+
+/// What the settle pass did with a payment the gateway reports as authorised.
+enum Captured {
+    /// Captured, or not authorised in the first place: what to settle.
+    Charged(Charged),
+    /// Failed, with the reason recorded. Nothing to settle.
+    Failed,
+    /// The gateway could not be reached. The rest of the batch waits.
+    Stopped(String),
+}
+
+/// **An authorised payment is captured here, in full and once.**
+///
+/// A lender authorises when the customer commits and settles only what the
+/// merchant captures — Tabby's and Tamara's own words — and nobody else in
+/// this system asks. Captured for what the payment is for, under a key of its
+/// own, and not at all when the gateway holds a different figure: that is the
+/// refusal `settle_in` makes, made here before money moves. Anything not
+/// authorised passes through untouched.
+async fn capture_authorised(
+    db: &erp_tenant::TenantDb,
+    gateway: &dyn Gateway,
+    want: &Pending,
+    charged: Charged,
+    now: Timestamp,
+    metadata: &Metadata,
+) -> Result<Captured, Box<dyn std::error::Error + Send + Sync>> {
+    if charged.status != Status::Authorized {
+        return Ok(Captured::Charged(charged));
+    }
+    if !charged.matches(want.amount) {
+        tracing::error!(
+            tenant = %db.tenant(),
+            provider = gateway.provider(),
+            payment = %want.id,
+            expected = %want.amount,
+            found = %charged.amount,
+            "the gateway authorised a different amount from what this payment was for; failed, not captured"
+        );
+        fail(
+            db,
+            &want.id,
+            &format!(
+                "the gateway authorised {}; this payment was for {}",
+                charged.amount, want.amount
+            ),
+            now,
+            metadata,
+        )
+        .await?;
+        return Ok(Captured::Failed);
+    }
+    match gateway
+        .capture(
+            &want.gateway_id,
+            &format!("{}.capture", want.id),
+            Some(want.amount),
+        )
+        .await
+    {
+        Ok(captured) => Ok(Captured::Charged(captured)),
+        // The lender would not release it after all. Recorded with the reason,
+        // for the reason a refused charge is.
+        Err(GatewayError::Refused(why)) => {
+            fail(db, &want.id, &why, now, metadata).await?;
+            Ok(Captured::Failed)
+        }
+        Err(e) => Ok(Captured::Stopped(e.to_string())),
+    }
 }
 
 /// A saved-card charge that has been asked for and not yet sent.
@@ -196,6 +329,10 @@ pub struct Waiting {
     pub collects: crate::Collects,
     pub amount: Money,
     pub callback_url: String,
+    /// **What a hosted checkout is told**, when this is one. `Some` is
+    /// `open_checkouts`'s to send; `None` is a card, or a charge the customer's
+    /// browser creates itself.
+    pub checkout: Option<crate::Checkout>,
 }
 
 /// What one charging pass did.
@@ -222,7 +359,7 @@ pub async fn requested(
         r#"SELECT id as "id!", card, invoice, advance_for,
                   advance_net_minor, advance_buyer, advance_buyer_vat,
                   amount_minor as "amount_minor!", currency as "currency!",
-                  callback_url as "callback_url!"
+                  callback_url as "callback_url!", checkout
              FROM proj_payments.payment
             WHERE stage = 'requested' AND provider = $1
             ORDER BY started_at ASC LIMIT $2"#,
@@ -232,9 +369,23 @@ pub async fn requested(
     .fetch_all(&mut *conn)
     .await?;
 
-    Ok(rows
+    // **A stored checkout that will not read is a failure, not an absence**
+    // (L6). Reading it as "no checkout" would make the payment one the
+    // customer's browser is expected to create, and nobody ever would.
+    let mut decoded = Vec::with_capacity(rows.len());
+    for row in rows {
+        let checkout: Option<crate::Checkout> = row
+            .checkout
+            .clone()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        decoded.push((row, checkout));
+    }
+
+    Ok(decoded
         .into_iter()
-        .filter_map(|row| {
+        .filter_map(|(row, checkout)| {
             let currency = CurrencyCode::new(&row.currency).ok()?;
             let invoice = row
                 .invoice
@@ -259,6 +410,7 @@ pub async fn requested(
                 collects: crate::Collects::of(invoice.as_ref(), advance.as_ref())?,
                 amount: Money::from_minor(row.amount_minor, currency),
                 callback_url: row.callback_url,
+                checkout,
             })
         })
         .collect())
@@ -299,6 +451,12 @@ pub async fn collect_awaited(
         if want.card.is_some() {
             continue;
         }
+        // A hosted checkout. `open_checkouts` creates those, and the gateway's
+        // id for one is not this system's, so asking by ours would say "no
+        // such payment" for ever.
+        if want.checkout.is_some() {
+            continue;
+        }
         let id = want.id;
         let charged = match gateway.fetch(id.as_str()).await {
             Ok(charged) => charged,
@@ -318,6 +476,7 @@ pub async fn collect_awaited(
             &mut tx,
             &id,
             &crate::Attempt {
+                pay_at: charged.challenge.clone(),
                 provider: gateway.provider().to_owned(),
                 gateway_id: charged.id.clone(),
                 // **Ignored, and it has to be.** What this collects was settled
@@ -325,6 +484,83 @@ pub async fn collect_awaited(
                 // payment's own target over anything a later pass hands it.
                 collects: want.collects,
                 amount: charged.amount,
+            },
+            now,
+            metadata,
+        )
+        .await?;
+        tx.commit().await?;
+        attempted.started += 1;
+    }
+
+    Ok(attempted)
+}
+
+/// Opens every checkout somebody asked for at a provider that hosts its own.
+///
+/// # A session is not a charge
+///
+/// A buy-now-pay-later provider is told about the order and answers with a page
+/// to send the customer to; nothing has been paid when this returns, and the
+/// settle pass is what finds out whether they did. So what is recorded here is
+/// only that the checkout exists and where it is — `pay_at` — which the public
+/// read beside the deposit route answers to a customer waiting for it.
+///
+/// # What a retry costs, and why that is accepted
+///
+/// The gateway's id for a session is not known until it is created, so there
+/// is no fetch-before-charge here the way there is for a saved card: a pass
+/// that died between creating the session and recording it opens a second one
+/// on its next pass. That is an unpaid page, not a second charge — the customer
+/// is sent to the one that was recorded — and the alternative, refusing to
+/// retry, is a customer with nowhere to pay.
+pub async fn open_checkouts(
+    db: &erp_tenant::TenantDb,
+    gateway: &dyn Gateway,
+    now: Timestamp,
+    limit: i64,
+    metadata: &Metadata,
+) -> Result<Attempted, Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = db.read().await?;
+    let waiting = requested(&mut conn, gateway.provider(), limit).await?;
+    drop(conn);
+
+    let mut attempted = Attempted::default();
+    for want in waiting {
+        // Cards and browser-created charges are other passes'.
+        let Some(checkout) = &want.checkout else {
+            continue;
+        };
+        let charged = match gateway
+            .charge(&checkout.charge(&want.id, want.amount))
+            .await
+        {
+            Ok(charged) => charged,
+            // **The lender would not open one**, and will not next tick: the
+            // buyer was declined at the door, or the order is one it does not
+            // finance. Recorded with the reason, for the reason a refused card
+            // charge is.
+            Err(GatewayError::Refused(why)) => {
+                attempted.refused += 1;
+                fail(db, &want.id, &why, now, metadata).await?;
+                continue;
+            }
+            Err(e) => {
+                attempted.stopped = Some(e.to_string());
+                break;
+            }
+        };
+
+        let mut tx = db.begin().await?;
+        crate::start_in(
+            &mut tx,
+            &want.id,
+            &crate::Attempt {
+                pay_at: charged.challenge.clone(),
+                provider: gateway.provider().to_owned(),
+                gateway_id: charged.id.clone(),
+                collects: want.collects.clone(),
+                amount: want.amount,
             },
             now,
             metadata,
@@ -409,6 +645,9 @@ pub async fn charge_requested(
                         success: want.callback_url.clone(),
                         cancel: want.callback_url.clone(),
                         failure: want.callback_url.clone(),
+                        // A card gateway registers its webhook once for the
+                        // account; there is no per-charge address to give.
+                        notification: None,
                     },
                     source: Source::Token { token },
                     description: format!("Saved card · {}", want.collects.invoice(&want.id)),
@@ -442,6 +681,8 @@ pub async fn charge_requested(
             &mut tx,
             &want.id,
             &crate::Attempt {
+                // A 3-D Secure challenge, when the charge raised one.
+                pay_at: charged.challenge.clone(),
                 provider: gateway.provider().to_owned(),
                 gateway_id: charged.id.clone(),
                 collects: want.collects.clone(),
@@ -456,6 +697,169 @@ pub async fn charge_requested(
     }
 
     Ok(attempted)
+}
+
+/// What one refund pass did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Refunding {
+    /// Given back and recorded — at the gateway, then in the books.
+    pub refunded: usize,
+    /// The gateway said no, and that is recorded with its reason.
+    pub refused: usize,
+    /// Why it stopped early, when it did.
+    pub stopped: Option<String>,
+}
+
+/// **Carries every refund somebody asked for to the gateway**, and records
+/// what the gateway said.
+///
+/// # It asks before it acts, for the same reason `charge_requested` does
+///
+/// A pass that died between the gateway refunding and this system recording it
+/// must not refund again. So the payment is `fetch`ed first: if the gateway's
+/// refunded total already covers this request, the money went back and only
+/// the record is missing — written, and nothing sent. Otherwise the refund is
+/// sent, and recorded from what came back.
+///
+/// # What is recorded is what the gateway confirmed
+///
+/// The gateway answers with its refunded total. The difference from what this
+/// system had recorded is what went back on this call, and it has to be the
+/// amount asked for: a gateway that returns success and a different figure is
+/// recorded as a refusal with both numbers in the reason, because neither may be
+/// posted (L6) and somebody has to look.
+///
+/// # A refusal is final and loud
+///
+/// A gateway that says no — payment too old, card gone, amount it will not
+/// split — will say no again. The request is closed with the reason, the
+/// payment's balance is released, and the operator reads why in the payment's
+/// refunds.
+pub async fn refund_requested(
+    db: &erp_tenant::TenantDb,
+    gateway: &dyn Gateway,
+    now: Timestamp,
+    limit: i64,
+    metadata: &Metadata,
+) -> Result<Refunding, Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = db.read().await?;
+    let awaiting = crate::awaiting_refunds(&mut conn, gateway.provider(), limit).await?;
+    drop(conn);
+
+    let mut done = Refunding::default();
+    for want in awaiting {
+        let before = match gateway.fetch(&want.gateway_id).await {
+            Ok(charged) => charged,
+            Err(e) => {
+                done.stopped = Some(e.to_string());
+                break;
+            }
+        };
+        let expected_after = want.already_refunded.minor() + want.amount.minor();
+
+        // **Already happened, only unrecorded.** The pass before this one died
+        // between the gateway and the database.
+        let after = if before.refunded.minor() >= expected_after {
+            before
+        } else {
+            // **The refund's own key, scoped by the payment.** Two customers
+            // can both call their refund "march"; two refunds of one payment
+            // for the same amount on different days are two refunds. The
+            // gateway that has an idempotency key gets this in it, so a
+            // retry is a retry and a second request is a second refund.
+            let key = format!("{}.{}", want.payment, want.reference);
+            match gateway
+                .refund(&want.gateway_id, &key, Some(want.amount))
+                .await
+            {
+                Ok(after) => after,
+                Err(GatewayError::Refused(why)) => {
+                    refuse(db, &want, &why, now, metadata).await?;
+                    done.refused += 1;
+                    continue;
+                }
+                Err(e) => {
+                    done.stopped = Some(e.to_string());
+                    break;
+                }
+            }
+        };
+
+        // What went back on this call, by the gateway's own arithmetic.
+        let went_back = after.refunded.minor() - want.already_refunded.minor();
+        if went_back != want.amount.minor() {
+            let why = format!(
+                "the gateway reports {} refunded in total; {} was asked for on top of {} already back",
+                after.refunded, want.amount, want.already_refunded
+            );
+            tracing::error!(
+                tenant = %db.tenant(),
+                provider = gateway.provider(),
+                payment = %want.payment,
+                reference = %want.reference,
+                %why,
+                "a refund came back with a figure this system cannot reconcile; refused, not posted"
+            );
+            refuse(db, &want, &why, now, metadata).await?;
+            done.refused += 1;
+            continue;
+        }
+
+        let mut tx = db.begin().await?;
+        match crate::refund_in(
+            &mut tx,
+            &want.payment,
+            &want.reference,
+            want.amount,
+            &want.reason,
+            now,
+            metadata,
+        )
+        .await
+        {
+            Ok(_) => {
+                tx.commit().await?;
+                done.refunded += 1;
+            }
+            Err(e) => {
+                tx.rollback().await?;
+                // The gateway gave the money back and the books could not take
+                // it. Loud, and left awaiting: the next pass sees the gateway's
+                // total already covers it and only has the recording to retry.
+                tracing::error!(
+                    tenant = %db.tenant(),
+                    provider = gateway.provider(),
+                    payment = %want.payment,
+                    reference = %want.reference,
+                    error = %e,
+                    "the gateway refunded and the books could not record it; will retry the record"
+                );
+            }
+        }
+    }
+
+    Ok(done)
+}
+
+/// Closes a refund request with the gateway's refusal.
+async fn refuse(
+    db: &erp_tenant::TenantDb,
+    want: &crate::AwaitedRefund,
+    why: &str,
+    now: Timestamp,
+    metadata: &Metadata,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing::warn!(
+        tenant = %db.tenant(),
+        payment = %want.payment,
+        reference = %want.reference,
+        why,
+        "the gateway refused a refund"
+    );
+    let mut tx = db.begin().await?;
+    crate::refuse_refund_in(&mut tx, &want.payment, &want.reference, why, now, metadata).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Records that a requested charge will never happen, and why.

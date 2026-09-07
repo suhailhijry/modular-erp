@@ -295,6 +295,15 @@ pub enum ReservationEvent {
         payment: AggregateId,
         at: Timestamp,
     },
+    /// **The invoice for the work was raised.** Recorded when something outside
+    /// this module — the desk, or the worker when the business asks for it on
+    /// completion — has billed the booking.
+    ///
+    /// The invoice is an **opaque id**, for the reason [`Self::Secured`]'s
+    /// payment is: this module does not know what an invoice is. What it knows
+    /// is that this booking has been billed, which is the one fact that stops
+    /// it being billed twice.
+    Billed { invoice: AggregateId, at: Timestamp },
     /// A unit picked out of a pool. See `crate::commands::assign`.
     ///
     /// Assigning again **replaces**: a room reassigned from 302 to 305 is one
@@ -316,6 +325,7 @@ impl DomainEvent for ReservationEvent {
             Self::Moved { .. } => Self::NAMES[1],
             Self::Rescheduled { .. } => Self::NAMES[2],
             Self::Secured { .. } => Self::NAMES[3],
+            Self::Billed { .. } => Self::NAMES[5],
             Self::Assigned { .. } => Self::NAMES[4],
         })
     }
@@ -326,12 +336,13 @@ impl DomainEvent for ReservationEvent {
 }
 
 impl ReservationEvent {
-    pub const NAMES: [&'static str; 5] = [
+    pub const NAMES: [&'static str; 6] = [
         "booking.reservation.reserved",
         "booking.reservation.moved",
         "booking.reservation.rescheduled",
         "booking.reservation.secured",
         "booking.reservation.assigned",
+        "booking.reservation.billed",
     ];
 }
 
@@ -344,6 +355,9 @@ pub struct Reservation {
     pub deposit: Option<Deposit>,
     /// What paid it, once something has.
     pub secured_by: Option<AggregateId>,
+    /// The invoice raised for the work, once one has been. Opaque, like
+    /// `secured_by`.
+    pub billed_by: Option<AggregateId>,
     pub lines: Vec<Line>,
     /// The unit picked for each line, by index. Sparse: most lines never have
     /// one, because most businesses book the thing itself.
@@ -373,6 +387,9 @@ impl Aggregate for Reservation {
             }
             ReservationEvent::Secured { payment, .. } => {
                 self.secured_by = Some(payment.clone());
+            }
+            ReservationEvent::Billed { invoice, .. } => {
+                self.billed_by = Some(invoice.clone());
             }
             ReservationEvent::Moved { to, .. } => self.stage = Some(*to),
             ReservationEvent::Rescheduled { lines, .. } => {

@@ -48,7 +48,7 @@ pub mod http;
 pub mod messages;
 mod projections;
 
-pub use commands::{FileError, attach, detach};
+pub use commands::{FileError, attach, detach, owner_exists};
 pub use file::{File, FileEvent, Owner, OwnerKind, UnknownOwner};
 pub use projections::{Attachment, Attachments, Files, attached_to, attachment, projections};
 

@@ -41,6 +41,11 @@ fn riyals(major: i64) -> Money {
 fn on(day: &str) -> Timestamp {
     format!("{day}T00:00:00Z").parse().expect("a valid instant")
 }
+
+/// A local date, for a period boundary.
+fn day(day: &str) -> chrono::NaiveDate {
+    day.parse().expect("a valid date")
+}
 const BOTH: Sides = Sides {
     sells: true,
     buys: true,
@@ -192,11 +197,21 @@ impl Fixture {
 
     /// One invoice, charged at whatever the tenant's rate is.
     async fn sell(&self, id: &str, day: &str, net: Money) {
+        self.try_sell(id, day, net).await.expect("issues");
+    }
+
+    async fn try_sell(
+        &self,
+        id: &str,
+        day: &str,
+        net: Money,
+    ) -> Result<sales::Numbered, CommandError<sales::SalesError>> {
         sales::issue_invoice(
             &self.db,
             &code(id),
             &Draft {
                 prepayment: false,
+                prepaid: None,
                 customer: Customer::new("Rawabi").with_vat_number("310000000000003"),
                 issued_on: on(day),
                 due_on: None,
@@ -213,7 +228,6 @@ impl Fixture {
             &Metadata::default(),
         )
         .await
-        .expect("issues");
     }
 
     /// One bill, at the tax the supplier stated.
@@ -245,7 +259,7 @@ impl Fixture {
 
     async fn declared(&self, from: &str, until: &str) -> tax_sa::Return {
         let mut conn = self.db.acquire().await.expect("connection");
-        let declared = tax_sa::vat_return(&mut conn, BOTH, sar(), on(from), on(until))
+        let declared = tax_sa::vat_return(&mut conn, BOTH, sar(), day(from), day(until))
             .await
             .expect("reads");
         drop(conn);
@@ -306,6 +320,7 @@ async fn re_installing_does_not_overwrite_a_rate_the_tenant_set() {
         ledger::Rates::KEY,
         &ledger::Rates { standard: 500 },
         Some("the-accountant"),
+        None,
     )
     .await
     .expect("sets");
@@ -379,8 +394,8 @@ async fn a_filed_return_records_what_went() {
         &fixture.db,
         BOTH,
         sar(),
-        on("2026-01-01"),
-        on("2026-04-01"),
+        day("2026-01-01"),
+        day("2026-04-01"),
         on("2026-04-28"),
         &Metadata::default(),
     )
@@ -420,8 +435,8 @@ async fn a_period_is_filed_once() {
             &fixture.db,
             BOTH,
             sar(),
-            on("2026-01-01"),
-            on("2026-04-01"),
+            day("2026-01-01"),
+            day("2026-04-01"),
             on("2026-04-28"),
             &Metadata::default(),
         )
@@ -443,8 +458,8 @@ async fn a_period_is_filed_once() {
         &fixture.db,
         BOTH,
         sar(),
-        on("2026-04-01"),
-        on("2026-07-01"),
+        day("2026-04-01"),
+        day("2026-07-01"),
         on("2026-07-28"),
         &Metadata::default(),
     )
@@ -463,8 +478,8 @@ async fn a_period_must_end_after_it_starts() {
         &fixture.db,
         BOTH,
         sar(),
-        on("2026-04-01"),
-        on("2026-01-01"),
+        day("2026-04-01"),
+        day("2026-01-01"),
         on("2026-04-28"),
         &Metadata::default(),
     )
@@ -495,8 +510,8 @@ async fn a_filing_replays_to_exactly_what_it_recorded() {
         &fixture.db,
         BOTH,
         sar(),
-        on("2026-01-01"),
-        on("2026-04-01"),
+        day("2026-01-01"),
+        day("2026-04-01"),
         on("2026-04-28"),
         &Metadata::default(),
     )
@@ -552,6 +567,7 @@ fn registration() -> tax_sa::Registration {
             postal_code: "12211".to_owned(),
             country: "SA".to_owned(),
         },
+        industry: Some("Consulting".to_owned()),
     }
 }
 
@@ -574,6 +590,7 @@ impl Fixture {
             &code(id),
             &Draft {
                 prepayment: false,
+                prepaid: None,
                 customer: Customer::new("زبون"),
                 issued_on: on(day),
                 due_on: None,
@@ -1368,7 +1385,9 @@ async fn an_outage_marks_nothing_refused_and_stops_the_sweep() {
 // Onboarding
 // ---------------------------------------------------------------------------
 
+use tax_sa::Step;
 use tax_sa::zatca::csr::{Environment, Issues, Unit};
+use tax_sa::zatca::finish::finish;
 use tax_sa::zatca::onboarding::{
     ComplianceRequest, Csid, CsidResponse, Onboarder, Otp, ProductionRequest, Registrar, Stage,
 };
@@ -1413,6 +1432,9 @@ struct FakeZatcaCa {
     checked: std::sync::Mutex<Vec<tax_sa::zatca::wire::Submission>>,
     /// Set to refuse every compliance document.
     refuse_checks: bool,
+    /// How many production requests to leave unanswered before issuing —
+    /// ZATCA down for a moment, which is not a refusal.
+    production_unanswered: std::sync::Mutex<u32>,
 }
 
 impl FakeZatcaCa {
@@ -1424,7 +1446,13 @@ impl FakeZatcaCa {
             refuse: false,
             checked: std::sync::Mutex::new(Vec::new()),
             refuse_checks: false,
+            production_unanswered: std::sync::Mutex::new(0),
         }
+    }
+
+    /// How many compliance documents it has been shown.
+    fn checks(&self) -> usize {
+        self.checked.lock().expect("not poisoned").len()
     }
 
     fn otps(&self) -> Vec<String> {
@@ -1563,6 +1591,15 @@ impl Registrar for FakeZatcaCa {
         compliance: &Csid,
         request: &ProductionRequest,
     ) -> Result<CsidResponse, tax_sa::zatca::wire::Unanswered> {
+        {
+            let mut left = self.production_unanswered.lock().expect("not poisoned");
+            if *left > 0 {
+                *left -= 1;
+                return Err(tax_sa::zatca::wire::Unanswered::Unavailable(
+                    "connection reset".to_owned(),
+                ));
+            }
+        }
         // The production call must quote the compliance request's id, and
         // authenticate as the compliance certificate.
         assert_eq!(request.compliance_request_id, compliance.request_id);
@@ -2305,7 +2342,7 @@ async fn the_compliance_checks_submit_one_of_every_declared_document() {
     let checks = onboarder
         .pass_compliance_checks(
             &registration(),
-            &unit(),
+            Issues::both(),
             Environment::Simulation,
             on("2026-01-01"),
         )
@@ -2388,7 +2425,7 @@ async fn a_failed_compliance_check_names_the_document_and_the_reason() {
     let checks = onboarder
         .pass_compliance_checks(
             &registration(),
-            &unit(),
+            Issues::both(),
             Environment::Simulation,
             on("2026-01-01"),
         )
@@ -2417,7 +2454,7 @@ async fn the_compliance_checks_need_a_compliance_certificate_first() {
     let refused = Onboarder::new(&fixture.db, &sealing, &zatca)
         .pass_compliance_checks(
             &registration(),
-            &unit(),
+            Issues::both(),
             Environment::Simulation,
             on("2026-01-01"),
         )
@@ -2431,6 +2468,333 @@ async fn the_compliance_checks_need_a_compliance_certificate_first() {
         "{refused:?}"
     );
     assert!(zatca.checked.lock().expect("not poisoned").is_empty());
+
+    fixture.cleanup().await;
+}
+
+/// **A filed period is a closed period.** What went to the authority was
+/// computed from the documents dated inside it; a sale backdated into it
+/// afterwards would silently change a return somebody has already filed. The
+/// first version left filing and closing apart and relied on somebody
+/// remembering to close the books.
+#[tokio::test]
+async fn filing_a_period_closes_it_to_backdated_documents() {
+    let fixture = Fixture::new().await;
+    fixture.sell("crm-1", "2026-02-10", riyals(1_000)).await;
+    fixture.project().await;
+
+    tax_sa::file_return(
+        &fixture.db,
+        BOTH,
+        sar(),
+        day("2026-01-01"),
+        day("2026-04-01"),
+        on("2026-04-28"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("files");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let books = ledger::period::books(&mut conn).await.expect("reads");
+    drop(conn);
+    assert_eq!(
+        books.closed_before,
+        // Local midnight on 1 April in Riyadh is the evening before in UTC.
+        Some("2026-03-31T21:00:00Z".parse().expect("a valid instant")),
+        "filing must move the ledger's watermark to the end of the period"
+    );
+
+    let backdated = fixture
+        .try_sell("crm-late", "2026-03-15", riyals(100))
+        .await;
+    assert!(
+        matches!(
+            backdated,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                sales::SalesError::Ledger(ledger::LedgerError::PeriodClosed { .. })
+            )))
+        ),
+        "a sale dated inside a filed period was accepted: {backdated:?}"
+    );
+
+    // The next period is open, and filing it does not reopen the last.
+    fixture.sell("crm-2", "2026-04-02", riyals(100)).await;
+
+    fixture.cleanup().await;
+}
+
+/// **Onboarding into another environment starts from compliance.** Live in
+/// simulation, then a production OTP: simulation's production credentials
+/// cannot clear a real invoice, and the submit sweep would try with them. So
+/// they go, and the read model says compliance in production — not production
+/// anywhere.
+#[tokio::test]
+async fn onboarding_into_another_environment_starts_from_compliance() {
+    let fixture = Fixture::new().await;
+    let zatca = FakeZatcaCa::new();
+    let sealing = sealing();
+    let onboarder = Onboarder::new(&fixture.db, &sealing, &zatca);
+
+    onboarder
+        .onboard(
+            &unit(),
+            Environment::Simulation,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards in simulation");
+    onboarder
+        .go_live(
+            Environment::Simulation,
+            on("2026-01-02"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("goes live in simulation");
+    fixture.project().await;
+
+    onboarder
+        .onboard(
+            &unit(),
+            Environment::Production,
+            &otp(),
+            on("2026-02-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards in production");
+    fixture.project().await;
+
+    assert_eq!(
+        tax_sa::zatca::onboarding::reached(&fixture.db)
+            .await
+            .expect("reads"),
+        vec![Stage::Compliance],
+        "simulation's production credentials are gone"
+    );
+    let mut conn = fixture.db.read().await.expect("a connection");
+    let row = tax_sa::onboarding(&mut conn)
+        .await
+        .expect("reads")
+        .expect("a row");
+    drop(conn);
+    assert_eq!(
+        (row.stage.as_str(), row.environment.as_str()),
+        ("compliance", "production")
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **One OTP, and the worker does the rest.** The route stops at the
+/// compliance certificate; this is everything after it, in one pass. A second
+/// pass finds nothing to do and sends nothing.
+#[tokio::test]
+async fn the_worker_finishes_what_one_otp_started() {
+    let fixture = Fixture::new().await;
+    fixture.register().await;
+    let zatca = FakeZatcaCa::new();
+    let sealing = sealing();
+    Onboarder::new(&fixture.db, &sealing, &zatca)
+        .onboard(
+            &unit(),
+            Environment::Simulation,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards");
+    fixture.project().await;
+
+    let finished = finish(
+        &fixture.db,
+        &sealing,
+        &zatca,
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("finishes");
+    let checks = finished.checks.expect("the samples were submitted");
+    assert_eq!((checks.submitted, checks.passed), (6, 6));
+    assert_eq!(
+        finished.production.expect("went live").stage,
+        Stage::Production
+    );
+    assert_eq!(finished.refused, None);
+    assert_eq!(zatca.checks(), 6);
+    assert_eq!(
+        tax_sa::zatca::onboarding::reached(&fixture.db)
+            .await
+            .expect("reads"),
+        vec![Stage::Compliance, Stage::Production]
+    );
+
+    fixture.project().await;
+    let mut conn = fixture.db.read().await.expect("a connection");
+    let row = tax_sa::onboarding(&mut conn)
+        .await
+        .expect("reads")
+        .expect("a row");
+    drop(conn);
+    assert_eq!(row.stage, "production");
+    assert_eq!(row.checks_submitted, Some(6));
+    assert!(row.checks_passed_at.is_some());
+    assert_eq!(row.refused_step, None);
+
+    // Live: nothing more to do, and nothing more is sent.
+    let again = finish(
+        &fixture.db,
+        &sealing,
+        &zatca,
+        on("2026-01-03"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("finishes");
+    assert!(!again.did_something(), "{again:?}");
+    assert_eq!(zatca.checks(), 6, "the samples were not sent again");
+
+    fixture.cleanup().await;
+}
+
+/// **A refused sample is recorded, not retried.** The samples are generated
+/// here, so the same build would be refused again; the refusal names the build,
+/// and the same build asking again sends nothing.
+#[tokio::test]
+async fn a_refused_sample_is_recorded_and_waits_for_a_new_build() {
+    let fixture = Fixture::new().await;
+    fixture.register().await;
+    let mut zatca = FakeZatcaCa::new();
+    zatca.refuse_checks = true;
+    let sealing = sealing();
+    Onboarder::new(&fixture.db, &sealing, &zatca)
+        .onboard(
+            &unit(),
+            Environment::Simulation,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards");
+    fixture.project().await;
+
+    let finished = finish(
+        &fixture.db,
+        &sealing,
+        &zatca,
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("finishes");
+    assert_eq!(finished.refused, Some(Step::ComplianceChecks));
+    assert!(finished.production.is_none());
+    assert_eq!(
+        tax_sa::zatca::onboarding::reached(&fixture.db)
+            .await
+            .expect("reads"),
+        vec![Stage::Compliance]
+    );
+
+    fixture.project().await;
+    let mut conn = fixture.db.read().await.expect("a connection");
+    let row = tax_sa::onboarding(&mut conn)
+        .await
+        .expect("reads")
+        .expect("a row");
+    drop(conn);
+    assert_eq!(row.stage, "compliance");
+    assert_eq!(row.refused_step.as_deref(), Some("compliance_checks"));
+    assert!(
+        row.refused_detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("BR-KSA-99")),
+        "{row:?}"
+    );
+    assert_eq!(
+        row.refused_version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+
+    // The same build asks again: nothing is sent.
+    let again = finish(
+        &fixture.db,
+        &sealing,
+        &zatca,
+        on("2026-01-02"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("finishes");
+    assert!(!again.did_something(), "{again:?}");
+    assert_eq!(zatca.checks(), 6);
+
+    fixture.cleanup().await;
+}
+
+/// **Passed checks are not resent** when the production request is what
+/// failed. They are recorded, and the next pass starts from step 4.
+#[tokio::test]
+async fn passed_checks_are_not_resent_when_going_live_fails() {
+    let fixture = Fixture::new().await;
+    fixture.register().await;
+    let zatca = FakeZatcaCa::new();
+    *zatca.production_unanswered.lock().expect("not poisoned") = 1;
+    let sealing = sealing();
+    Onboarder::new(&fixture.db, &sealing, &zatca)
+        .onboard(
+            &unit(),
+            Environment::Simulation,
+            &otp(),
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("onboards");
+    fixture.project().await;
+
+    let first = finish(
+        &fixture.db,
+        &sealing,
+        &zatca,
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            first,
+            Err(tax_sa::zatca::onboarding::OnboardError::Unanswered {
+                step: "requesting a production certificate",
+                ..
+            })
+        ),
+        "{first:?}"
+    );
+    assert_eq!(zatca.checks(), 6);
+    fixture.project().await;
+
+    let second = finish(
+        &fixture.db,
+        &sealing,
+        &zatca,
+        on("2026-01-02"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("finishes");
+    assert!(second.checks.is_none(), "the samples were not resubmitted");
+    assert_eq!(zatca.checks(), 6);
+    assert_eq!(
+        second.production.expect("went live").stage,
+        Stage::Production
+    );
 
     fixture.cleanup().await;
 }

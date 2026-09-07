@@ -34,7 +34,7 @@ pub use config::{ConfigError, Configured};
 pub use numbering::NumberingError;
 pub mod configuration {
     //! Tenant configuration: the store, not the meaning. See [`crate::config`].
-    pub use crate::config::{get, set, version};
+    pub use crate::config::{calendar, get, set, version, version_of};
 }
 pub use aggregate::{
     Aggregate, BRANCH, Committed, Decision, DomainEvent, ExecuteError, LoadError, Loaded,
@@ -44,8 +44,9 @@ pub use aggregate::{
 pub use append::{AppendError, NewEvent, append};
 pub use envelope::{Envelope, Metadata};
 pub use outbox::{
-    DeliveryError, DispatchError, Dispatched, Dispatcher, Effect, EffectHandler, EnqueueError,
-    OutboxHealth, PendingEffect, RetryPolicy, Settlement, enqueue, outbox_health,
+    DeadLetter, DeliveryError, DispatchError, Dispatched, Dispatcher, Effect, EffectHandler,
+    EnqueueError, OutboxHealth, PendingEffect, RetryPolicy, Settlement, dead_letters, enqueue,
+    outbox_health, requeue, sweep_delivered, sweep_webhook_events,
 };
 pub use read::{Integrity, ReadError, integrity, read_since, read_stream, read_stream_since};
 pub use secrets::{SealingKey, SecretError};

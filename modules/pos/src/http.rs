@@ -26,6 +26,7 @@ use erp_web::{
     After, Allowed, Amount, IdempotencyKey, Language, ManageAccounts, Paged, PostEntries,
 };
 use erp_web::{Consistency, Read, nudge};
+use erp_web::{IfMatch, Versioned, config_problem};
 use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
 
 use crate::{Basket, Method, Opening, PayOut, PosError, Return, Tender};
@@ -151,13 +152,25 @@ struct NewPayOut {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+struct ReturnedLine {
+    /// Which line of the sale, by position from zero.
+    against: u16,
+    /// How much of that line is coming back, excluding tax, as a positive
+    /// amount. Its tax follows from the line's own rate.
+    net: Amount,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 struct NewReturn {
     /// Your key. Sending it twice is a no-op.
     reference: String,
-    /// What the customer is handed back, and how. Must come to the whole sale:
-    /// this credits the document, and a partial credit note is not something
-    /// `sales` can write.
+    /// What the customer is handed back, and how. Must come to what is being
+    /// credited: the whole sale without `lines`, those lines with.
     tenders: Vec<NewTender>,
+    /// Which lines are coming back. **Empty is the whole sale.** With lines,
+    /// the tenders must come to exactly what those lines credit, tax included.
+    #[serde(default)]
+    lines: Vec<ReturnedLine>,
     #[serde(default)]
     why: String,
     #[serde(default)]
@@ -509,7 +522,7 @@ async fn ring_sale(
         (status = OK, body = PosAccepted),
         (status = BAD_REQUEST, description = "Nothing handed back, or a value that did not parse", body = Problem),
         (status = NOT_FOUND, description = "No such shift", body = Problem),
-        (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the sale is not one that can be credited, or the ledger refused it", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the sale is not one that can be credited, the tenders do not come to what the lines credit, or the ledger refused it", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
@@ -529,6 +542,16 @@ async fn take_back(
     let returning = Return {
         reference: body.reference,
         tenders: tenders(&body.tenders, locale)?,
+        lines: body
+            .lines
+            .iter()
+            .map(|l| {
+                Ok(sales::CreditLine {
+                    against: l.against,
+                    net: amount(&l.net, locale)?,
+                })
+            })
+            .collect::<Result<Vec<_>, Problem>>()?,
         why: body.why,
         at: body.at.unwrap_or_else(chrono::Utc::now),
     };
@@ -634,7 +657,7 @@ async fn close_shift(
     path = "/v1/pos/till-accounts",
     tag = "pos",
     responses(
-        (status = OK, body = TillAccounts),
+        (status = OK, body = TillAccounts, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = NOT_FOUND, description = "The tenant did not enable pos", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -643,18 +666,24 @@ async fn close_shift(
 async fn till_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<TillAccounts>, Problem> {
+) -> Result<Versioned<TillAccounts>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::PostingAccounts::KEY)
+        .await
+        .map_err(|e| config(&e, locale))?;
     let accounts = crate::PostingAccounts::resolve(&mut conn)
         .await
         .map_err(|e| config(&e, locale))?;
 
-    Ok(Json(TillAccounts {
-        cash: accounts.cash.to_string(),
-        bank: accounts.bank.to_string(),
-        over_short: accounts.over_short.to_string(),
-    }))
+    Ok(Versioned(
+        version,
+        TillAccounts {
+            cash: accounts.cash.to_string(),
+            bank: accounts.bank.to_string(),
+            over_short: accounts.over_short.to_string(),
+        },
+    ))
 }
 
 /// Choose them.
@@ -662,9 +691,11 @@ async fn till_accounts(
     put,
     path = "/v1/pos/till-accounts",
     tag = "pos",
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.")),
     request_body = TillAccounts,
     responses(
         (status = NO_CONTENT, description = "Set."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "Not an account code", body = Problem),
         (status = NOT_FOUND, description = "The tenant did not enable pos", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
@@ -674,6 +705,7 @@ async fn till_accounts(
 async fn set_till_accounts(
     tenant: Allowed<ManageAccounts>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<TillAccounts>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -689,6 +721,7 @@ async fn set_till_accounts(
         crate::PostingAccounts::KEY,
         &accounts,
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
     .map_err(|e| config(&e, locale))?;
@@ -858,13 +891,7 @@ fn pool(error: &erp_tenant::PoolError, locale: Locale) -> Problem {
 }
 
 fn config(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem {
-    tracing::error!(error = %error, "pos configuration failed");
-    Problem::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &error.message(),
-        locale,
-        &CATALOG,
-    )
+    config_problem(error, locale, &CATALOG)
 }
 
 fn database(error: &sqlx::Error, locale: Locale) -> Problem {

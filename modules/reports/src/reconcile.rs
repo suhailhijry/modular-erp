@@ -38,10 +38,12 @@
 //!    point: if this pipeline applied an event twice or a rebuild diverged, the
 //!    ledger would still balance and this would not.
 //! 2. **Every document against the entry it posted.** The debits of the journal
-//!    entry an invoice made equal what the invoice came to; the same for the
-//!    entry that credited it. Account-agnostic, so a tenant who renamed their
-//!    revenue account or enabled `prepaid` — which moves money in and out of
-//!    revenue as packages are redeemed — does not produce a false alarm.
+//!    entry an invoice made equal what the invoice came to; the same for every
+//!    credit note against it — a whole cancellation or a partial credit, each
+//!    a document with an entry of its own. Account-agnostic, so a tenant who
+//!    renamed their revenue account or enabled `prepaid` — which moves money in
+//!    and out of revenue as packages are redeemed — does not produce a false
+//!    alarm.
 
 use erp_projection::ProjectionGroup;
 use erp_types::{CurrencyCode, Money};
@@ -63,24 +65,25 @@ pub enum Discrepancy {
         /// Debits plus credits. Zero is healthy.
         difference: Money,
     },
-    /// An invoice that made no journal entry.
+    /// A document — an invoice or a credit note — that made no journal entry.
     ///
     /// Excludes the tail of the log — see [`reconciles`] — so this is a
     /// document that really has no accounting, not one whose entry has yet to
     /// be projected.
     Unposted {
-        invoice: String,
+        /// The invoice's id or the credit note's number.
+        document: String,
         /// The entry that should exist.
         entry: String,
         /// What the document came to.
-        document: Money,
+        came_to: Money,
     },
     /// A journal entry that does not come to what its document says.
     Mismatched {
-        invoice: String,
+        document: String,
         entry: String,
         /// Net plus tax, from the document.
-        document: Money,
+        came_to: Money,
         /// The entry's debits.
         posted: Money,
     },
@@ -96,16 +99,16 @@ impl Discrepancy {
                 difference,
             } => format!("{currency} postings are out by {difference}"),
             Self::Unposted {
-                invoice,
-                entry,
                 document,
-            } => format!("invoice {invoice} came to {document} and posted no entry {entry}"),
+                entry,
+                came_to,
+            } => format!("document {document} came to {came_to} and posted no entry {entry}"),
             Self::Mismatched {
-                invoice,
-                entry,
                 document,
+                entry,
+                came_to,
                 posted,
-            } => format!("invoice {invoice} came to {document}; entry {entry} posted {posted}"),
+            } => format!("document {document} came to {came_to}; entry {entry} posted {posted}"),
         }
     }
 }
@@ -158,28 +161,34 @@ async fn unbalanced(conn: &mut PgConnection) -> Result<Vec<Discrepancy>, sqlx::E
 
 /// Every document whose entry is missing or disagrees.
 ///
-/// One query over two tables **in this schema**, which is what makes it a
-/// reconciliation and not a cross-group join.
+/// One query over three tables **in this schema**, which is what makes it a
+/// reconciliation and not a cross-group join. Invoices and credit notes are
+/// one list: each is a document that posted an entry of its own, and a credit
+/// whose posting disagrees with its document is as wrong as an invoice's —
+/// and was, until this read both, the one that passed.
 async fn undocumented(conn: &mut PgConnection) -> Result<Vec<Discrepancy>, sqlx::Error> {
     let checkpoint = erp_projection::checkpoint_of(conn, Reports::NAME)
         .await?
         .get();
 
     let rows = sqlx::query!(
-        r#"SELECT i.id as "invoice!", i.currency as "currency!",
-                  (i.net + i.tax)::BIGINT as "document!",
-                  i.entry as "entry!",
+        r#"SELECT d.id as "document!", d.currency as "currency!",
+                  d.came_to as "came_to!", d.entry as "entry!",
                   e.debits as "posted?"
-             FROM proj_reports.invoiced i
-             LEFT JOIN proj_reports.entry e ON e.id = i.entry
-            WHERE i.position < $1
-              AND (e.id IS NULL OR e.debits <> i.net + i.tax)
+             FROM (SELECT id, currency, (net + tax)::BIGINT AS came_to, entry, position
+                     FROM proj_reports.invoiced
+                    UNION ALL
+                   SELECT id, currency, (net + tax)::BIGINT, entry, position
+                     FROM proj_reports.credited) d
+             LEFT JOIN proj_reports.entry e ON e.id = d.entry
+            WHERE d.position < $1
+              AND (e.id IS NULL OR e.debits <> d.came_to)
               -- A document that came to nothing posts nothing, and the ledger
               -- drops zero lines rather than writing an entry with no effect.
               -- Reporting that as unposted would flag every zero-rated
               -- placeholder a business ever issues.
-              AND (i.net + i.tax) <> 0
-            ORDER BY i.id
+              AND d.came_to <> 0
+            ORDER BY d.id
             LIMIT 100"#,
         checkpoint,
     )
@@ -190,17 +199,17 @@ async fn undocumented(conn: &mut PgConnection) -> Result<Vec<Discrepancy>, sqlx:
         .map(|row| {
             let currency =
                 CurrencyCode::new(&row.currency).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
-            let document = Money::from_minor(row.document, currency);
+            let came_to = Money::from_minor(row.came_to, currency);
             Ok(match row.posted {
                 None => Discrepancy::Unposted {
-                    invoice: row.invoice,
+                    document: row.document,
                     entry: row.entry,
-                    document,
+                    came_to,
                 },
                 Some(posted) => Discrepancy::Mismatched {
-                    invoice: row.invoice,
+                    document: row.document,
                     entry: row.entry,
-                    document,
+                    came_to,
                     posted: Money::from_minor(posted, currency),
                 },
             })

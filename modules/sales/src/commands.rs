@@ -81,6 +81,9 @@ pub enum SalesError {
     AlreadyCredited(String),
     #[error("a credit note must credit something")]
     NothingToCredit,
+    /// The prepayment invoice does not fit the supply it is deducted from.
+    #[error(transparent)]
+    Prepaid(#[from] crate::vat::PrepaidError),
     #[error("{0} cannot be used as a reference")]
     InvalidReference(String),
     #[error("there is no customer {0} to issue this to")]
@@ -142,6 +145,8 @@ impl erp_i18n::Localize for SalesError {
             Self::AlreadyCredited(invoice) => Message::new(messages::ALREADY_CREDITED)
                 .with("invoice", MessageArg::text(invoice.clone())),
             Self::NothingToCredit => Message::new(messages::NOTHING_TO_CREDIT),
+            Self::Prepaid(why) => Message::new(messages::PREPAID_DOES_NOT_FIT)
+                .with("why", MessageArg::text(why.to_string())),
             Self::InvalidReference(reference) => Message::new(messages::INVALID_REFERENCE)
                 .with("reference", MessageArg::text(reference.clone())),
             Self::Tax(TaxError::MixedCurrencies) => Message::new(messages::MIXED_CURRENCIES),
@@ -203,6 +208,11 @@ pub struct Draft {
     /// ordinary one, because receiving consideration is its own tax point.
     /// Everything else about issuing it is the same.
     pub prepayment: bool,
+    /// **The other end of that**: the final invoice for a supply a deposit was
+    /// taken on. The lines are the whole supply; what the prepayment invoice
+    /// already declared comes off, band by band, and this document charges
+    /// and declares only the rest. See [`crate::Prepaid`].
+    pub prepaid: Option<crate::vat::Prepaid>,
     pub note: String,
 }
 
@@ -327,6 +337,14 @@ pub async fn issue_in(
         draft.currency,
     )
     .map_err(|e| ExecuteError::Rejected(SalesError::Tax(e)))?;
+    // **What this document charges.** The whole supply, less what a
+    // prepayment invoice already billed and declared for it.
+    let totals = match &draft.prepaid {
+        Some(prepaid) => totals
+            .less(prepaid)
+            .map_err(|e| ExecuteError::Rejected(SalesError::Prepaid(e)))?,
+        None => totals,
+    };
     let totals = &totals;
 
     // Resolved **in this transaction**, so what the invoice was posted to and
@@ -369,6 +387,7 @@ pub async fn issue_in(
             Ok(Decision::one(InvoiceEvent::Issued {
                 number: Some(number.clone()),
                 prepayment: draft.prepayment,
+                prepaid: draft.prepaid.clone(),
                 customer: Box::new(draft.customer.clone()),
                 issued_on: draft.issued_on,
                 due_on: draft.due_on,
@@ -588,6 +607,7 @@ pub async fn refund_invoice(
                 &mut tx,
                 invoice,
                 &receipt.reference,
+                receipt.amount,
                 reason,
                 receipt.received_on,
                 metadata,
@@ -614,12 +634,26 @@ pub async fn refund_invoice(
     Err(contended(invoice))
 }
 
-/// Credits an invoice a refund has left holding nothing.
+/// Credits what a refund undid: the whole invoice when it now holds nothing,
+/// and **the refunded part when it still holds some** and the invoice has one
+/// tax band.
 ///
-/// **`HasPayments` is the ordinary answer, not a failure.** It is what
-/// [`cancel_in`] says while an invoice is still holding money, which after a
-/// partial refund is simply true. `AlreadyCancelled` is the same: the document
-/// exists, which is the outcome wanted.
+/// **A whole cancellation first.** `AlreadyCancelled` is the outcome wanted —
+/// the document exists. `HasPayments` is what [`cancel_in`] says while the
+/// invoice still holds money, which after a partial refund is simply true, and
+/// that is where the partial credit note comes in.
+///
+/// **Only a single-band invoice gets one.** A credit note for part of an
+/// invoice carries bands of its own, and how an arbitrary refund divides
+/// across a standard-rated line and a zero-rated one is not something this
+/// system may guess. With one band there is one answer: the net that, taxed at
+/// that band's rate, comes to what went back. Every deposit is such an
+/// invoice, which is why this exists. A multi-band invoice refunded in part
+/// is left as it was — a document this system knows is overstated — and says
+/// so in the log rather than looking like success.
+///
+/// `refunded` is what went back under `reference`, tax included; the credit
+/// note is keyed on the same reference, so a retried refund credits once.
 ///
 /// Not folded into [`refund_in`], deliberately. That one is a per-money-movement
 /// primitive — a till calls it once per tender — and a credit note is per
@@ -629,16 +663,129 @@ pub async fn credit_what_is_clear(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,
     reference: &str,
+    refunded: Money,
     reason: &str,
     on: Timestamp,
     metadata: &Metadata,
 ) -> Result<(), ExecuteError<SalesError>> {
     match credit_in(&mut *conn, invoice, reference, reason, on, metadata).await {
+        Err(ExecuteError::Rejected(SalesError::AlreadyCancelled { .. })) => return Ok(()),
+        // Still holding money — or already partly credited, which is what a
+        // second partial refund, or a retry of the first, finds. Both go on
+        // to the partial credit, which dedupes on the reference.
         Err(ExecuteError::Rejected(
-            SalesError::HasPayments(_) | SalesError::AlreadyCancelled { .. },
-        )) => Ok(()),
-        other => other.map(|_| ()),
+            SalesError::HasPayments(_) | SalesError::AlreadyCredited(_),
+        )) => {}
+        other => return other.map(|_| ()),
     }
+
+    // Still holding money: credit the part that went back, if there is one
+    // honest way to.
+    let state = erp_eventlog::load::<Invoice>(&mut *conn, invoice, crate::upcasters())
+        .await?
+        .aggregate;
+    let [band] = state.bands.as_slice() else {
+        tracing::warn!(
+            %invoice,
+            %reference,
+            bands = state.bands.len(),
+            "a partial refund of a multi-band invoice gets no credit note; the document is overstated by the refund"
+        );
+        return Ok(());
+    };
+    let Some(net) = net_of_gross(refunded, band.basis_points) else {
+        tracing::warn!(
+            %invoice,
+            %reference,
+            %refunded,
+            "no net at this band's rate comes to exactly what was refunded; no credit note"
+        );
+        return Ok(());
+    };
+    let lines = spread_over_lines(&state, net);
+
+    match credit_part_in(
+        &mut *conn,
+        invoice,
+        &CreditNote {
+            reference: reference.to_owned(),
+            lines,
+            reason: reason.to_owned(),
+            on,
+        },
+        metadata,
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        // More than is left to credit — refunds after a credit note raised by
+        // hand — or nothing to spread the net over. The refund stands; the
+        // document does not follow, and the log says which.
+        Err(ExecuteError::Rejected(
+            SalesError::CreditTooLarge { .. } | SalesError::NothingToCredit,
+        )) => {
+            tracing::warn!(
+                %invoice,
+                %reference,
+                %refunded,
+                "a partial refund could not be credited against what is left of the invoice"
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The net that, taxed at `basis_points` the way every invoice is, comes to
+/// exactly `gross` — or none, when no net lands on it.
+///
+/// Dividing a gross by a rate does not always land: at 15% no net comes to
+/// exactly 10.00. So the candidates around the division are checked forwards,
+/// with the same rounding the invoice used, rather than trusted backwards.
+fn net_of_gross(gross: Money, basis_points: i32) -> Option<Money> {
+    let currency = gross.currency();
+    let rate = i64::from(basis_points);
+    let base = gross.minor().checked_mul(10_000)? / (10_000 + rate);
+    [base - 1, base, base + 1]
+        .into_iter()
+        .filter(|candidate| *candidate > 0)
+        .map(|candidate| Money::from_minor(candidate, currency))
+        .find(|net| {
+            net.scaled_by(basis_points)
+                .and_then(|tax| net.checked_add(tax))
+                .is_ok_and(|comes_to| comes_to == gross)
+        })
+}
+
+/// Spreads a net across the invoice's lines, in order, each up to what is left
+/// of it to credit. One band means every line credits at the same rate, so
+/// which line takes it changes nothing but the description.
+fn spread_over_lines(state: &Invoice, net: Money) -> Vec<CreditLine> {
+    let mut left = net.minor();
+    let mut lines = Vec::new();
+    for (index, line) in state.lines.iter().enumerate() {
+        if left <= 0 {
+            break;
+        }
+        let credited = state
+            .credited_lines
+            .get(index)
+            .map_or(0, |money| money.minor());
+        let room = line.net.minor() - credited;
+        if room <= 0 {
+            continue;
+        }
+        let part = room.min(left);
+        let Ok(against) = u16::try_from(index) else {
+            break;
+        };
+        lines.push(CreditLine {
+            against,
+            net: Money::from_minor(part, net.currency()),
+        });
+        left -= part;
+    }
+    lines
 }
 
 /// One attempt at refunding, in the caller's transaction. Public for the reason

@@ -703,6 +703,17 @@ committed, which makes position order equal commit order. Because the counter is
 ordinary transactional data rather than a sequence, a rollback **returns** the
 number instead of burning it — so positions are gapless as well as ordered.
 
+**What it costs, measured.** One row lock held to commit means a tenant's
+writes serialise at roughly one per commit latency. `erp-eventlog/tests/throughput.rs`
+runs eight writers against one tenant for two seconds and prints the rate; on
+the development machine it comes to about **470 appends per second** with every
+position contiguous afterwards. The test asserts only a low floor, so it says
+when appends have started waiting on something new rather than how fast the
+hardware is. That number is far above any one business this ships to and is the
+ceiling to revisit if a tenant ever approaches it — the alternative (a sequence
+plus a visibility watermark) trades away contiguity, and is not worth paying for
+before somebody needs it.
+
 There is no advisory lock, and an earlier draft of this section wrongly said
 there was. A sequence plus `pg_advisory_xact_lock` would also give commit
 ordering, but it leaves a hole wherever a transaction rolls back, and then the

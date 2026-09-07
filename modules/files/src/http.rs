@@ -255,6 +255,25 @@ async fn upload_file(
     };
     let media_type = declared_type(&headers, locale)?;
 
+    // **Asked before the bytes are written**, so a document for a record that
+    // does not exist leaves no orphaned object behind. `attach` asks again; that
+    // one is the guard, this one is the tidiness.
+    {
+        let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+        let exists = crate::owner_exists(&mut conn, &owner)
+            .await
+            .map_err(|e| refused(&CommandError::Execute(ExecuteError::Load(e.into())), locale))?;
+        if !exists {
+            return Err(refused(
+                &CommandError::Execute(ExecuteError::Rejected(crate::FileError::NoSuchOwner(
+                    owner.kind.as_str().to_owned(),
+                    owner.id.to_string(),
+                ))),
+                locale,
+            ));
+        }
+    }
+
     let key = crate::key_for(tenant.db.tenant(), &owner, file.as_str());
     let stored = erp_storage::store(storage.as_ref(), &key, &body, &media_type)
         .await
@@ -508,7 +527,9 @@ fn refused(error: &CommandError<crate::FileError>, locale: Locale) -> Problem {
     let (status, message) = match error {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
-                crate::FileError::NoSuchFile(_) => StatusCode::NOT_FOUND,
+                crate::FileError::NoSuchFile(_) | crate::FileError::NoSuchOwner(..) => {
+                    StatusCode::NOT_FOUND
+                }
                 crate::FileError::AlreadyRemoved(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 crate::FileError::Storage(e) => return storage_refused(e, locale),
                 crate::FileError::NoName => StatusCode::BAD_REQUEST,

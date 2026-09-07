@@ -31,7 +31,7 @@ use utoipa_axum::routes;
 use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{Allowed, Authenticated, Language, Read};
+use erp_web::{Allowed, Anonymous, Authenticated, Language, Read};
 
 /// Everything the router serves, as a description.
 ///
@@ -243,6 +243,17 @@ impl Modify for Conventions {
                 item.trace.as_mut(),
             ];
             for operation in operations.into_iter().flatten() {
+                // **One sentence about `Host`, everywhere.** Routes were written
+                // when the tenant was always a subdomain; now a proved custom
+                // domain reaches the tenant too, and the document should say so
+                // once rather than in a hundred places.
+                if let Some(parameters) = operation.parameters.as_mut() {
+                    for parameter in parameters.iter_mut() {
+                        if parameter.name.eq_ignore_ascii_case("host") {
+                            parameter.description = Some(HOST_DOC.to_owned());
+                        }
+                    }
+                }
                 // What every operation can answer regardless of what it does.
                 // Written here rather than on each handler because they are
                 // uniform, and because the ones a handler is least likely to
@@ -297,6 +308,11 @@ impl Modify for Conventions {
     }
 }
 
+/// What every `Host` header parameter says.
+const HOST_DOC: &str = "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — \
+or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then \
+`POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.";
+
 /// Every route, with the document that describes it.
 fn api_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
@@ -315,6 +331,9 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(crate::hooks::routes())
         .merge(crate::codes::routes())
         .merge(crate::deposits::routes())
+        .merge(crate::billing::routes())
+        .merge(crate::effects::routes())
+        .merge(crate::calendar::routes())
         // Every module's own routes, from the one list that also says what to
         // install. See `crate::modules::REGISTERED`.
         .merge(crate::modules::mounted())
@@ -339,6 +358,13 @@ const MAX_JSON_BODY: usize = 1 << 20;
 pub fn router(state: AppState) -> Router {
     parts()
         .0
+        // **Every answer is problem+json, including "there is no such
+        // route".** axum's defaults are a bare 404 and 405 with no body; a
+        // client that reads `code` from every refusal would read nothing from
+        // these two, and the contract test could not see them because they are
+        // on no route.
+        .fallback(no_such_route)
+        .method_not_allowed_fallback(method_not_allowed)
         .layer(axum::extract::DefaultBodyLimit::max(MAX_JSON_BODY))
         // **Every list, including the ones that do not exist yet.** An export
         // is the same query with a different encoder, so it is a layer rather
@@ -357,6 +383,24 @@ pub fn router(state: AppState) -> Router {
             erp_web::cors::layer,
         ))
         .with_state(state)
+}
+
+async fn no_such_route(Language(locale): Language) -> Problem {
+    Problem::new(
+        StatusCode::NOT_FOUND,
+        &erp_i18n::Message::new(erp_web::messages::NO_SUCH_ROUTE),
+        locale,
+        &crate::CATALOG,
+    )
+}
+
+async fn method_not_allowed(Language(locale): Language) -> Problem {
+    Problem::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        &erp_i18n::Message::new(erp_web::messages::METHOD_NOT_ALLOWED),
+        locale,
+        &crate::CATALOG,
+    )
 }
 
 /// The document, for anything that wants it without running a server.
@@ -438,13 +482,21 @@ struct SessionCreated {
     responses(
         (status = CREATED, body = SessionCreated),
         (status = UNAUTHORIZED, description = "Wrong handle or password — the same answer for both, deliberately", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
     ),
 )]
 async fn log_in(
+    anonymous: Anonymous,
     State(state): State<AppState>,
     Language(locale): Language,
     Json(credentials): Json<Credentials>,
 ) -> Result<impl IntoResponse, Problem> {
+    // **Before the hash.** The per-address budget was charged by the extractor;
+    // this is the per-account one, so a guess spread over many addresses still
+    // runs out. Refusing here costs the limiter a lookup and Argon2 nothing.
+    anonymous
+        .charge_for_handle(&state, &credentials.handle)
+        .await?;
     let (token, session) = state
         .control
         .log_in(&credentials.handle, &credentials.password)

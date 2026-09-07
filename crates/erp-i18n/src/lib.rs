@@ -121,6 +121,12 @@ impl Locale {
             let quality = fields
                 .find_map(|f| f.trim().strip_prefix("q=")?.parse::<f32>().ok())
                 .unwrap_or(1.0);
+            // **`q=0` means "not acceptable"** (RFC 9110 §12.4.2), not "least
+            // preferred": `ar;q=0, fr` is a client saying it cannot read
+            // Arabic, and choosing it anyway is the one answer they excluded.
+            if quality <= 0.0 {
+                continue;
+            }
 
             let primary = tag.split('-').next().unwrap_or(tag).to_ascii_lowercase();
             let locale = match primary.as_str() {
@@ -276,6 +282,23 @@ mod tests {
         assert_eq!(Locale::from_accept_language("*"), Locale::DEFAULT);
         // A known language alongside unknown ones still wins.
         assert_eq!(Locale::from_accept_language("fr, ar"), Locale::Arabic);
+    }
+
+    /// `q=0` is a refusal, not a low preference.
+    #[test]
+    fn a_language_the_client_refused_is_never_chosen() {
+        assert_eq!(Locale::from_accept_language("ar;q=0, fr"), Locale::DEFAULT);
+        assert_eq!(Locale::from_accept_language("en;q=0, ar"), Locale::Arabic);
+        assert_eq!(
+            Locale::from_accept_language("ar;q=0.0, en;q=0.1"),
+            Locale::English
+        );
+        // Refusing everything this system speaks falls back rather than
+        // honouring the refusal with silence.
+        assert_eq!(
+            Locale::from_accept_language("ar;q=0, en;q=0"),
+            Locale::DEFAULT
+        );
     }
 
     #[test]

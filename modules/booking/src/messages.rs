@@ -15,6 +15,8 @@ pub const NOT_OFFERED: MessageCode = MessageCode::new("booking.not_offered");
 pub const BARRED: MessageCode = MessageCode::new("booking.barred");
 pub const NO_REASON_TO_BAR: MessageCode = MessageCode::new("booking.no_reason_to_bar");
 pub const NO_SUCH_RESERVATION: MessageCode = MessageCode::new("booking.no_such_reservation");
+pub const SECURED: MessageCode = MessageCode::new("booking.secured");
+pub const NOT_LAPSED: MessageCode = MessageCode::new("booking.not_lapsed");
 pub const OVER: MessageCode = MessageCode::new("booking.over");
 pub const CANNOT_MOVE: MessageCode = MessageCode::new("booking.cannot_move");
 pub const NO_SUCH_LINE: MessageCode = MessageCode::new("booking.no_such_line");
@@ -24,6 +26,8 @@ pub const UNKNOWN_STAGE: MessageCode = MessageCode::new("booking.unknown_stage")
 pub const UNKNOWN_KIND: MessageCode = MessageCode::new("booking.unknown_kind");
 pub const NO_SUCH_TRADE: MessageCode = MessageCode::new("booking.no_such_trade");
 pub const NOT_A_RATE: MessageCode = MessageCode::new("booking.not_a_rate");
+pub const NOT_A_FRACTION: MessageCode = MessageCode::new("booking.not_a_fraction");
+pub const NOTHING_TO_BILL: MessageCode = MessageCode::new("booking.nothing_to_bill");
 pub const NOTHING_CHARGED: MessageCode = MessageCode::new("booking.nothing_charged");
 pub const NOT_AN_ALLOWANCE: MessageCode = MessageCode::new("booking.not_an_allowance");
 pub const ALLOWANCE_TOO_LARGE: MessageCode = MessageCode::new("booking.allowance_too_large");
@@ -46,6 +50,7 @@ pub fn code_for(error: &crate::verification::VerificationError) -> MessageCode {
 }
 
 pub static CODES: &[MessageCode] = &[
+    NOTHING_TO_BILL,
     NOT_A_PHONE,
     CODE_TOO_SOON,
     CODE_NOT_VALID,
@@ -62,6 +67,8 @@ pub static CODES: &[MessageCode] = &[
     BARRED,
     NO_REASON_TO_BAR,
     NO_SUCH_RESERVATION,
+    SECURED,
+    NOT_LAPSED,
     OVER,
     CANNOT_MOVE,
     NO_SUCH_LINE,
@@ -71,6 +78,7 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_KIND,
     NO_SUCH_TRADE,
     NOT_A_RATE,
+    NOT_A_FRACTION,
     NOTHING_CHARGED,
     NOT_AN_ALLOWANCE,
     ALLOWANCE_TOO_LARGE,
@@ -79,6 +87,16 @@ pub static CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NOTHING_TO_BILL,
+        Locale::English,
+        Template::Simple("Booking {reservation} has no priced line to bill."),
+    ),
+    (
+        NOTHING_TO_BILL,
+        Locale::Arabic,
+        Template::Simple("الحجز {reservation} لا يحتوي على بند مُسعَّر لإصدار فاتورة به."),
+    ),
     (
         NO_SUCH_EMPLOYEE_TO_ROSTER,
         Locale::English,
@@ -217,6 +235,26 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Template::Simple("لا يوجد حجز {reservation}."),
     ),
     (
+        SECURED,
+        Locale::English,
+        Template::Simple("Booking {reservation} has been paid for and cannot lapse."),
+    ),
+    (
+        SECURED,
+        Locale::Arabic,
+        Template::Simple("الحجز {reservation} مدفوع ولا يمكن إسقاطه."),
+    ),
+    (
+        NOT_LAPSED,
+        Locale::English,
+        Template::Simple("Booking {reservation} is not an unpaid hold past its deadline."),
+    ),
+    (
+        NOT_LAPSED,
+        Locale::Arabic,
+        Template::Simple("الحجز {reservation} ليس حجزًا غير مدفوع تجاوز موعده."),
+    ),
+    (
         OVER,
         Locale::English,
         Template::Simple("This booking is already {stage}, and nothing more can happen to it."),
@@ -285,6 +323,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         UNKNOWN_KIND,
         Locale::Arabic,
         Template::Simple("{value} ليس شخصًا ولا مكانًا ولا شيئًا."),
+    ),
+    (
+        NOT_A_FRACTION,
+        Locale::English,
+        Template::Simple(
+            "A deposit is a fraction of the booking: at most 10000 basis points, not {deposit_bp}.",
+        ),
+    ),
+    (
+        NOT_A_FRACTION,
+        Locale::Arabic,
+        Template::Simple(
+            "العربون جزء من قيمة الحجز: 10000 نقطة أساس على الأكثر، وليس {deposit_bp}.",
+        ),
     ),
     (
         NOT_A_RATE,

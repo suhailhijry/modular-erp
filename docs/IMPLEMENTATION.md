@@ -11,7 +11,7 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
-**Where this stands:** 1,228 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,287 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end.
@@ -650,6 +650,174 @@ before they will lend, so `Charge` carries an optional `Buyer` and `Basket` and
 the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
+
+### 45 · The OTP is typed once, and the worker finishes the onboarding
+
+**`activate` did everything in one request, and that was the problem.** Ten
+network calls inside a request handler, five unit details beside the OTP, and
+no way to resume: a failure after the compliance certificate left the tenant
+half-way and the only way forward was a new OTP. Every other outbound call in
+this system is the worker's, made after a route records the request; onboarding
+was the exception.
+
+**The split follows the credential.** The OTP is the taxpayer's proof of who
+they are for about an hour, and the one call that needs it — the compliance
+certificate — is answered while they wait, so the OTP is still never stored.
+Everything after needs only that certificate, which is sealed here, so
+`zatca::finish` runs the six samples and the production request from the
+worker (`tax_sa.onboard`), reading the onboarding read model to decide what is
+due (L7) and writing two new facts to the log: `ChecksPassed`, per certificate,
+and `Refused`, naming the step, ZATCA's words and the build version. What ZATCA
+did not answer is retried next pass; what it refused waits for a new build,
+because the samples are generated here and the same build would be refused
+again. `the_worker_finishes_what_one_otp_started`,
+`a_refused_sample_is_recorded_and_waits_for_a_new_build` and
+`passed_checks_are_not_resent_when_going_live_fails` are the tests; the build
+version rule is `a_refusal_holds_this_build_and_releases_the_next`.
+
+**The unit is derived, not typed.** The industry moved onto the registration,
+where the VAT number, name and address already were; both document types are
+always declared; the serial and common name are minted; and a branch is only
+for a business that wants its invoices distinct per branch (per-branch units,
+with their own keys and chains, are not built). The request is `environment`,
+`otp` and at most `branch`. Both routes build the unit through one function, so
+the manual CSR path takes the same body.
+
+**Another environment starts over.** The read model kept the furthest stage
+ever reached, so a tenant live in simulation that onboarded to production read
+as "production" while holding simulation's credentials, and the submit sweep
+would have sent real invoices with them. A compliance certificate for another
+environment now resets the stage and forgets the old production credentials,
+in the aggregate, the projection and the secret store.
+`onboarding_into_another_environment_starts_from_compliance` and
+`a_certificate_for_another_environment_starts_over` hold it.
+
+**Over HTTP**, `a_tenant_goes_live_from_one_otp_and_the_status_says_so`
+registers with an industry, refuses a registration without one, derives the
+unit into the certificate's subject, drives the worker with a fake ZATCA, reads
+`state`, `checks` and `refusal` from the status, and is refused with 409 when
+it asks again while live. The route's one real call is covered by the module
+tests with the same kind of fake.
+
+**Two compatibility breaks, taken deliberately with `just baseline`:** the
+activate response no longer carries the production certificate and the check
+counts, and the registration body requires `industry`.
+
+### 44 · The final invoice after a deposit, and the credit note for part of one
+
+**Nothing billed a booking.** The deposit raised its prepayment invoice when
+it settled, because receiving consideration is a tax point; the service was
+delivered; and then nothing — the counter or a person typed an invoice, or
+did not, and the deposit's tax stood declared with no document for the rest.
+ZATCA's shape for the rest is a final invoice (388) that shows the whole
+supply, names the prepayment invoice on a line of its own with what it
+declared, deducts that in `PrepaidAmount`, and declares tax on the remainder.
+
+**The deduction is `sales`'.** `Draft::prepaid` names the prepayment invoice
+and carries its bands; `issue_in` subtracts them band by band
+(`Totals::less`) and refuses a band the supply does not have or a prepayment
+larger than it. The event keeps the whole supply on its lines and **the
+remainder in its totals** — what this document charges, posts and declares —
+so the ledger, the revenue report, the reconciliation and the return all keep
+working unchanged and the deposit's tax is declared once. Only the ZATCA
+rendering has to know both: `Document::supply_gross` for the tax-inclusive
+total and the QR, the prepayment line from `PrepaidRef`, and the payable
+amount from the totals. `the_final_invoice_after_a_deposit_charges_and_declares_only_the_rest`
+and `a_final_invoice_after_a_deposit_shows_the_supply_and_deducts_the_prepayment`
+are the tests; the rendering is built from ZATCA's published fields and the
+sandbox call is still the operator's.
+
+**The composition is `erp_api::billing`, and it runs twice.** The desk asks at
+`POST /v1/booking/reservations/{reservation}/invoice`; the worker asks for
+every completed, priced, unbilled booking when `PUT /v1/booking/billing` has
+`on_completion` on — the user's decision, both, with a per-tenant switch. One
+function reads what `booking` and `sales` say in their read models (a route
+or a worker may load no aggregate), derives the invoice id from the booking
+(`bk-<reservation>`), and issues the invoice and records `Billed` on the
+booking in one transaction. Asked twice, or by the desk and the worker at
+once, it raises one document: `sales` answers the existing invoice on a
+retry, `booking` records once, and the worker counts only what was actually
+raised — the first version counted a read model that had not caught up as
+work, and the test caught it. `a_completed_booking_is_billed_with_its_deposit_deducted`
+runs the whole story over HTTP, ZATCA document included.
+
+**The partial credit note.** §35 left a partial refund of a deposit with the
+money back and the prepayment invoice standing whole. `credit_what_is_clear`
+now takes what went back: when the invoice still holds money and has **one
+tax band**, it finds the net that, taxed at that rate the way the invoice
+was, comes to exactly the refund — checked forwards rather than divided
+backwards, because at 15% no net comes to 10.00 — spreads it over the lines
+and issues a partial credit note keyed on the refund's reference, so a
+retried refund credits once. A multi-band invoice, or a gross no net lands
+on, is left as it was and says so in the log. `part_of_a_deposit_can_be_returned`
+and `a_partial_refund_credits_the_part_when_the_invoice_has_one_band` are
+the tests.
+
+**Not built, by decision:** the never-pays blacklist. A public booking has no
+customer record to bar, and keying it on a phone number was offered and
+declined in favour of waiting for customer accounts.
+
+### 43 · A lender's checkout, and the price a stranger could not send
+
+**Found by writing the test, not by reading.** §39 said the loop ran end to
+end: a public booking records what holding the slot costs, the customer pays,
+the worker settles. It did in the module tests, which price the booking the
+way the counter does. Over HTTP it never had: `public_lines` set `charge:
+None` on every line — a stranger may not send a price, and nothing else
+supplied one — so `deposit_for` found nothing to take a fraction of, the
+deposit route answered *not waiting to be paid* to every booking ever made
+through the site, and neither Tabby nor Tamara had a caller anywhere.
+
+**A published rate, not a catalogue.** Phase 8d refused a price list on the
+server because nothing had asked for one. A public booking asks: the price
+has to come from the business, and the smallest thing that is the business's
+own is one optional field on a bookable — `rate`, before tax, shown on
+`GET /v1/booking/public/services` and stamped onto a public line as its
+charge. `what` stays opaque, the counter still sends what it charges, and the
+tenant's bands still decide when it costs more. A service with no rate books
+unpriced, which is a business that bills elsewhere and asks for no deposit.
+
+**A lender is told everything up front, and the worker opens the page.** A
+card is paid in the browser against this system's id. A lender hosts its own
+page and has to be told who is buying, where the service is delivered, and
+where to send them afterwards — Tabby's schema marks the buyer's history and
+a shipping address required, and both providers want landing pages. So the
+deposit route takes a `provider`, and for a lender the email, the phone (the
+booking's own by default) and three `return_to` pages, each of which must be
+on an origin the business has allowed — the same list CORS answers from, so a
+lender never sends a customer back to a page somebody else named. The
+address is the branch the first resource belongs to, or the business's ZATCA
+registration; with neither the request is refused by name rather than filled
+with dashes, because a placeholder is one more thing the lender scores.
+
+All of it is frozen on the request as `payments::Checkout` (L5): the worker
+may load no aggregate and may not name `booking` or `branches` (L7), so the
+`Requested` event carries what the lender will be told, and what it was told
+is what this system recorded telling it. Opening the checkout is an outbound
+call, so it is the worker's — `open_checkouts`, beside the saved-card pass —
+and the page it answers with is recorded as `pay_at` for the `GET` beside the
+route to hand the waiting customer. A tick, not a request handler holding a
+connection for as long as somebody else's server takes.
+
+**Capture is the sweep's.** Both lenders authorise when the customer commits
+and settle only what the merchant captures; nothing in this system asked. So
+`settle_pending` captures an authorised payment in full and once, under
+`<payment>.capture`, before anything is posted — and not at all when the
+gateway authorised a different figure, which is failed with both numbers
+rather than captured and refused a line later. Reading Tamara's `approved`
+as "waiting on the customer" would have left every Tamara order there until
+it expired; it is the merchant's turn, and the adapter now says so and asks
+the order where it stands before authorising, because authorising an
+already-authorised order is a `409`.
+
+**What a retry costs.** A lender's id for a session is not known until it is
+created, so there is no fetch-before-charge here the way there is for a card:
+a pass that died between creating a session and recording it opens a second
+one next tick. That is an unpaid page, not a second charge, and the customer
+is sent to the one that was recorded.
+
+**Still ahead:** a sandbox call against either lender, which is the
+operator's. The 388 and the partial credit note followed in §44.
 
 ### 42 · The specialist blacklist, as a constraint the command enforces
 
@@ -1958,7 +2126,9 @@ Not in the original plan at all — it was one line in 4a. It is a phase.
 - [x] `modules/tax_sa` — the VAT return netting output against input, filed
       returns, and the first module standing on two others
 - [x] The invoice hash chain (PIH/ICV), the QR as TLV, the canonical UBL
-- [x] Onboarding: key pair, CSR, OTP, compliance checks, production certificate
+- [x] Onboarding: key pair, CSR, OTP, compliance checks, production certificate.
+      The route spends the OTP and the worker finishes (§45); the industry
+      lives on the registration
 - [x] The XAdES signature, and the transport (`reqwest` over the OpenSSL stack
       sqlx already links)
 - [x] Sealed module secrets — `SEALING_KEY`, and anything that would store a
@@ -2353,6 +2523,12 @@ costs more is the tenant's to configure. Putting the price list on the server
 would need a service catalogue, which nothing has asked for and which `what`
 being opaque is currently buying us. A client cannot decide its own peak rate,
 which is the half that had to be server-side.
+
+*Amended by Phase 17 (§43).* A stranger booking through the public site cannot
+send a price either, and a deposit is a fraction of one — so a bookable now
+carries an optional **published rate**, and a public line is priced at it.
+That is one field, not a catalogue: `what` stays opaque, the counter still
+sends what it charges, and the bands still do the rest.
 
 **A whole span, not its start.** A treatment beginning before peak and running
 into it is charged at the base rate. The alternative is the answer a customer
@@ -3726,6 +3902,29 @@ same-origin server-rendered site would never have needed.
       **Keeping one is built and is the business's call** — a sale by default,
       `payments.retention` to say otherwise. The tax is not what it decides:
       that was settled when the deposit was billed. See §34 and §35.
+
+      **And the loop now runs over HTTP, through a lender as well as a card**
+      (§43). Writing the end-to-end test found the public path had never been
+      priced — a public line carried no charge, so no deposit was ever asked
+      for through the site — and that neither buy-now-pay-later provider could
+      be reached at all. A bookable carries a published rate; the deposit
+      route takes a provider, and for a lender the email, phone and landing
+      pages it needs; the worker opens the checkout and captures what the
+      customer authorises; and `GET` on the same path hands the waiting
+      customer the page. `a_public_deposit_is_paid_through_a_lender_at_the_published_price`
+      is the test.
+
+      **The 388 with the advance deducted is built** (§44): the desk raises it
+      at `POST /v1/booking/reservations/{reservation}/invoice`, or the worker
+      does on completion when `PUT /v1/booking/billing` asks; either way one
+      invoice, showing the whole supply, naming the prepayment invoice and
+      charging the rest. **And a partial refund of a deposit gets its credit
+      note** (§35's next thing): a single-band invoice has one honest net for
+      what went back, and `credit_what_is_clear` issues it.
+
+      **Left by decision:** blacklisting a customer who repeatedly books and
+      never pays waits for customer accounts, because a public booking has no
+      record to bar (§42).
 - [x] **`docs/openapi.json` as a contract.** `docs/openapi.baseline.json` is what
       clients may rely on, and `tests/compatibility.rs` fails on a change that
       would break one: an operation that disappears or is renamed, a required
@@ -3908,7 +4107,7 @@ This document claimed "a required CI check" in two places, which is how a claim
 like that survives — it was true of the intent and never of the repository. Both
 are corrected above.
 
-What CI has to run, and why each one is not optional: `just check`, `just errors`
+What CI has to run, and why each one is not optional: `just check`
 and `just openapi` (both regenerate a committed file and fail on drift), and
 `just migrate-fleet check` / `versions` against a scratch database (the two
 pre-deploy gates). The soak test and the ZATCA sandbox tests are `#[ignore]`d and
@@ -6768,3 +6967,186 @@ nothing, because `cargo fmt` had split the line across three; the test passed an
 `git checkout` reported "Updated 0 paths", which is the tell. Worth knowing: a
 scripted edit that reports success and a `git checkout` that reports no change
 are contradictory, and the second one is right.
+
+## Thirty-six findings, ten roots, and the guards that hold them
+
+Written 2026-09-05, after the whole-codebase review in
+[REVIEW.md](./REVIEW.md) and the pass that fixed it. The review found
+thirty-six things; sorting them by what they had in common gave ten roots, and
+the fixes were made at the root rather than at the symptom, each with a test
+that was **falsified** — the fix reverted, the test watched fail, the fix
+restored — before it counted. The status table at the top of REVIEW.md says
+which test guards which finding.
+
+### The roots, and what each became
+
+**No identity for an unauthenticated request** (A1–A3). Every public and
+sign-in route now goes through `Anonymous` or `Public`, both of which know the
+caller's address — the last hop of `X-Forwarded-For` when the deployment says
+to trust it, the socket otherwise — and charge a limit against it before doing
+any work. Limits are `Limit { count, window }` constants in `erp_web::rate`,
+per caller and per target (a handle, a phone number, a tenant), and counted in
+Redis when it is there so a second pod does not double them. The contract test
+walks every operation in the OpenAPI document and refuses any unauthenticated
+one that is not limited; the two that are unbounded by design are named.
+
+**Liveness state that was never refreshed** (B1–B3). A claim on a tenant now
+pushes its `next_visit_at` out to the lease end, the visit renews the lease
+between jobs and stops if it has lost it, and one failing job no longer stalls
+the rest. B1 was filed as *plausible*; the falsification produced the double
+visit, so it was real.
+
+**"Recorded" standing in for "done"** (C1, B7). A gateway refund is a request
+the worker takes to the gateway and settles from what the gateway says, the
+same shape as a saved-card charge. A settled deposit is repaired into `booking`
+from `payments::settled_advances` on every visit, so hold expiry can no longer
+cancel a paid booking.
+
+**Irreversible actions taken from lagging state** (C7). The deposit amount
+comes from the payment aggregate, not the projection; the kept net is
+apportioned from the advance rather than re-taxed at today's rate; and one
+deposit per booking is a `payments` aggregate keyed on the thing the deposit is
+against, so two tabs cannot both pay.
+
+**Time facts without an anchor** (C2). Filing a VAT return closes the ledger
+through the end of the period in the same transaction, so a backdated document
+into a filed quarter is a refusal rather than a silent change to the return.
+
+**Promises without a compiler** (E1, E2, A11, D6). `PUT /v1/booking/public-settings`
+exists, bounds the deposit at the whole price, and is in the role matrix;
+unknown routes and wrong methods answer in `problem+json`; the stale docs say
+what the code does.
+
+**Nothing forgets** (D2, A9). `erp_worker::Retention` is a kernel job every
+tenant gets: delivered effects at thirty days, webhook payloads at ninety,
+past occupancy claims at a hundred and eighty, dead short links at thirty past
+their death; `SweepSessions` is the control-plane half. Nothing pending, dead
+or permanent is ever swept, and the worker test plants one old and one young
+row of each kind to prove which side of the line each falls.
+
+**Failure handling that did too much or too little** (B4, A10). A dead letter
+is a queue, not a grave: `GET /v1/effects/dead` lists them and
+`POST /v1/effects/dead/{id}/requeue` puts one back with its attempts reset and
+its idempotency key intact; the default retry schedule is sixteen attempts
+capped at an hour, so a provider outage over lunch is not a permanent loss. An
+OTP attempts update that fails now refuses the guess instead of allowing
+unlimited guessing.
+
+**The till and the prepaid ledger one step short** (C4–C6). A return names its
+lines and credits only those, and its tenders must come to what the lines
+credit, read off the credit note `sales` issued rather than recomputed; a
+closed till refuses a return the way it refuses a sale; a package with zero
+uses is refused.
+
+**Settings with no optimistic concurrency** (D1). `configuration::set` takes
+the version the caller read and refuses with `Conflict` if the key has moved.
+Every settings `GET` answers with the version as `ETag`; every settings `PUT`
+takes `If-Match` and answers `412` when it is stale — `erp_web::IfMatch`,
+`erp_web::Versioned`, and one `config_problem` mapping for all of them.
+Templates, which share one key, do the compare-and-swap internally and retry.
+
+### Guards that name the seam rather than the symptom
+
+Two tests are about facts one crate states about another. `files` names the
+event-log domain of every record a document can go on as a string, because
+depending on six modules for one fact each would make it require all of them;
+`every_owner_kind_names_the_domain_its_module_uses` in `erp-api` — the one
+crate with everything in scope — pins each string to the aggregate that owns
+it. `recipient_exists` and `owner_exists` both read the log rather than a
+projection, so a customer registered a moment ago is somebody already.
+
+### The second pass (2026-09-06)
+
+The seven that were left open were closed the next day, each with a guard:
+
+- **The tenant's clock is a kernel type** (C3, C8). `erp_types::Calendar` —
+  an IANA zone, `Asia/Riyadh` by default, settable at `PUT /v1/tenant/calendar`,
+  with daylight saving where the zone has it —
+  is stamped onto every event's metadata by `append`, so a projection reads
+  the clock an event was written under (`ctx.calendar()`) and a rebuild
+  reproduces what was live after the setting changes; a command reads it from
+  configuration. Tax periods are local dates on the wire; reports' months, the
+  till's, payroll's posting date, messages' times, ZATCA's `IssueDate` and the
+  rota's day all go through it. Two source-scanning tests keep it so:
+  `an_instant_becomes_a_day_only_through_the_calendar` refuses `date_naive()`,
+  `and_hms`, and `format("%Y-%m…")` anywhere but the calendar itself, and
+  `no_module_reads_the_wall_clock` refuses `Utc::now()` outside a module's
+  HTTP layer.
+- **A domain is proved, not declared** (A6, A7). Claiming a domain names a
+  DNS TXT record; `verify_domain` resolves it (behind a `DomainProver`, so
+  tests publish to a fake) and only a match proves the zone. An origin must be
+  `https://<host>[:port]` under a proved domain. A proved domain then serves
+  the whole API on any host under it — `tenant_by_host` beside `tenant_by_slug`
+  — and CORS offers the session, `If-Match`, `X-Branch` and every method to
+  those origins, because they are the tenant's own app.
+- **A slow delivery keeps its lease** (B6). Every claim mints a `leased_by`
+  token; a heartbeat renews the lease every third of it while the handler runs,
+  and settlement is conditional on still holding it. A second dispatcher
+  polling through a one-second delivery on a 300 ms lease claims nothing.
+- **The compatibility gate sees every branch** (D4): the cycle guard is the
+  path, not the walk.
+- **The append ceiling is a number** (D5): about 470 appends/s per tenant on
+  the development machine, printed by `throughput.rs` and recorded under L1.
+- `ERRORS.md`, its drift test and `just errors` are gone by decision; the
+  catalogs themselves stay test-guarded. E3 stays open by decision.
+
+### The second pass's own findings (§G, 2026-09-06)
+
+The parts the first pass did not read — the payment adapters, the message
+transports, the reports projections, `erp-i18n`, the demo — got eighteen
+findings and the same treatment. What each became:
+
+- **A provider reports to the hook, and the hook reads what it sends** (G1).
+  `Returns` gained `notification`, which is `POST /v1/hooks/<provider>` on the
+  tenant's host and never a page a person lands on; Tamara sends it when it is
+  given. Tamara talks back in two shapes under one token — a registered
+  webhook's `{order_id, event_type, data}` and a checkout notification's
+  `{order_id, order_status}`; its own SDK reads them through two services —
+  and neither carries an `id`. So `erp_payments::authenticate` now answers a
+  `Callback { payment, event, kind }`: the adapter that read the body names the
+  delivery (Moyasar's event number; Tabby's payment and status; Tamara's order,
+  what was said, and the capture or refund id), and the hook route stops
+  guessing at a gateway's body. Both Tamara bodies land, each is its own
+  delivery, and a resend of either is a duplicate.
+- **One meaning for a refusal** (G2, G7). `erp_payments::refusal` decides once
+  for every gateway: `401`/`403` are the account, a `404` *about a named
+  payment* is the only absence, `408`/`429`/`5xx` are the moment. The two
+  BNPL adapters had read every `4xx` as "no such payment", which is what the
+  saved-card sweep charges again on. `messaging::transport::worth_retrying`
+  does the same for the three transports, so a rate-limited relay is retried
+  rather than dead-lettered.
+- **Paid means what was captured** (G3), and **a refund carries its own key**
+  (G4): `Gateway::capture` and `refund` take the caller's reference, the sweep
+  sends `<payment>.<reference>`, Tabby puts it in `reference_id` — its only
+  idempotency key — and Tamara in the refund's `comment`, which is the only
+  field of the merchant's it keeps. Moyasar has nowhere for it and says so.
+- **The checkout bodies say what the lenders ask** (G5, G6). `Buyer` carries
+  `registered_since` and `purchases`, `Basket` a `deliver_to`, `Item` a
+  `category`; Tabby's `buyer_history` and `shipping_address` are built from
+  them rather than sent empty, and Tamara's lines total the unit price times
+  the quantity and each carry an id of their own. Asked of the caller rather
+  than invented in an adapter, because a placeholder is one more thing the
+  lender scores.
+- **A phone number is read in one place** (G9). `erp_types::phone::normalise`
+  is the rule the control plane's codes, the booking door and the SMS
+  transport all read by; the transport had refused the dashes the other two
+  stripped. `a_phone_number_is_read_in_one_place` refuses a fourth copy.
+- **A refused FCM token is forgotten** (G8), so the retry mints another.
+- **Credit notes are documents to the report** (G11, G14). `Revenue` takes a
+  partial credit's lines out in the period the credit was dated to; `credited`
+  is one row per credit note, and the reconciliation lists invoices and credit
+  notes together and checks each against the entry it posted. Doing that found
+  the name was wrong: `sales` posts a credit's entry as
+  `cn.<invoice>.<reference>` — the number is minted inside the transaction the
+  entry is posted in — and the report had looked for the statutory number, in
+  a column nothing read.
+- **A booking is one booking** (G12, G13). `held` is one row per resource with
+  every line's minutes and the notice it was counted with; a reschedule gives
+  the old month back its `booked` and its lead and counts the new one, with
+  the notice measured from the move.
+- **`q=0` is a refusal** (G15) and **an argument's own direction decides its
+  isolation** (G16): an Arabic name in an English sentence is isolated, read
+  off the Unicode bidi classes rather than a list of scripts.
+- **The demo's colleague has a password of her own** (G17), printed with the
+  rest, and **the demo starts no payment the gateway never issued** (G18): it
+  asks for a saved-card charge, which is a state this system owns.

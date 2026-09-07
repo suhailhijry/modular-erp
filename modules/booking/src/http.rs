@@ -26,9 +26,11 @@ use utoipa_axum::routes;
 use erp_web::AppState;
 use erp_web::Problem;
 use erp_web::{
-    After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Public, Read,
+    After, Allowed, Anonymous, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Public,
+    Read,
 };
 use erp_web::{Consistency, nudge};
+use erp_web::{IfMatch, Versioned, config_problem};
 use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, publicly, require_module};
 
 use crate::{Availability, BookingError, Details, Draft, DraftLine, Held, Kind, Stage};
@@ -54,6 +56,11 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(public_availability))
         .routes(routes!(public_reserve))
         .routes(routes!(tariff, set_tariff))
+        .routes(routes!(
+            public_booking_settings,
+            set_public_booking_settings
+        ))
+        .routes(routes!(billing_settings, set_billing_settings))
         // Unauthenticated on purpose, like `ledger::list_charts`: a signup form
         // needs to show a salon what a salon gets before anybody has an
         // account. It is product information, not data — nothing here reads a
@@ -122,6 +129,12 @@ struct OpeningHours {
     "capacity": 1
 }))]
 struct NewBookable {
+    /// **The published price, before tax.** What the public site shows and
+    /// what a public booking is priced at — a stranger cannot send a price —
+    /// and so what a deposit is a fraction of. Absent for a business that
+    /// bills elsewhere.
+    #[serde(default)]
+    rate: Option<ListRate>,
     /// Which branch it is at. Omit it in a single-branch business.
     ///
     /// **Set once**: a chair that physically moves is a new resource, because
@@ -156,6 +169,47 @@ struct AmendBookable {
     name: String,
     name_latin: Option<String>,
     capacity: u16,
+    /// See `NewBookable::rate`. Absent withdraws a published price.
+    #[serde(default)]
+    rate: Option<ListRate>,
+}
+
+/// A published price on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({"amount": 20000, "currency": "SAR"}))]
+struct ListRate {
+    /// Minor units, before tax.
+    amount: i64,
+    currency: String,
+}
+
+impl ListRate {
+    fn read(&self, locale: Locale) -> Result<erp_types::Money, Problem> {
+        let currency = erp_types::CurrencyCode::new(&self.currency).map_err(|_| {
+            bad_request(
+                erp_web::messages::UNKNOWN_CURRENCY,
+                "currency",
+                &self.currency,
+                locale,
+            )
+        })?;
+        if self.amount < 0 {
+            return Err(bad_request(
+                erp_web::messages::MALFORMED_BODY,
+                "reason",
+                "a price cannot be negative",
+                locale,
+            ));
+        }
+        Ok(erp_types::Money::from_minor(self.amount, currency))
+    }
+
+    fn of(rate: erp_types::Money) -> Self {
+        Self {
+            amount: rate.minor(),
+            currency: rate.currency().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -182,6 +236,8 @@ struct BookableRecord {
     name_latin: Option<String>,
     kind: String,
     capacity: u16,
+    /// The published price, before tax, when there is one.
+    rate: Option<ListRate>,
     withdrawn: bool,
     withdrawn_why: Option<String>,
 }
@@ -387,6 +443,12 @@ struct ReservationRecord {
     #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     ends_at: Timestamp,
     note: Option<String>,
+    /// The payment that secured the slot, when a deposit was paid.
+    secured_by: Option<String>,
+    /// The invoice raised for the work, once one has been —
+    /// `POST /v1/booking/reservations/{reservation}/invoice`, or the worker
+    /// when `PUT /v1/booking/billing` asks for it on completion.
+    billed_by: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -462,6 +524,10 @@ struct DiaryQuery {
 struct ServiceView {
     id: String,
     name: String,
+    /// **What booking it costs, before tax**, when the business publishes a
+    /// price. What a booking through this surface is priced at, and what a
+    /// deposit is a fraction of. Absent for a business that bills elsewhere.
+    rate: Option<ListRate>,
     /// For a site rendering in English. Absent means show `name`.
     name_latin: Option<String>,
     /// `person`, `room`, `equipment` — what a site groups by.
@@ -549,6 +615,7 @@ async fn public_services(
         ServiceView {
             id: r.id,
             name: r.name,
+            rate: r.rate.map(ListRate::of),
             name_latin: r.name_latin,
             kind: r.kind,
             branch: r.branch,
@@ -659,9 +726,12 @@ struct PublicReservationTaken {
     /// making it** — the business confirms, which is the whole difference
     /// between a request and a promise.
     stage: &'static str,
-    /// What the business will ask for to hold it, in basis points of the
-    /// booking. **Zero unless configured, and not collected by this build** —
-    /// card payments are Phase 12a. It is here so a site can say what will be
+    /// What the business asks for to hold it, in basis points of the booking's
+    /// net. **Zero unless configured** (`PUT /v1/booking/public-settings`).
+    /// When it is not zero the slot is held unpaid for the configured
+    /// `hold_minutes` and lapses unless the deposit is paid through
+    /// `POST /v1/booking/public/reservations/{reservation}/deposit`; it is
+    /// secured when the money settles. Here so a site can say what will be
     /// asked, not so it can claim it was taken.
     deposit_bp: u32,
 }
@@ -677,10 +747,13 @@ struct PublicReservationTaken {
 ///
 /// # What it does not do
 ///
-/// **It takes no money.** A deposit is the honest answer to no-shows and
-/// `prepaid` already models one; the half that is missing is the gateway, which
-/// is Phase 12a. So a booking made here is held at `reserved` and the business
-/// confirms it — which is what a shop with no online payment does anyway.
+/// **It takes no money itself.** A deposit, when the business asks for one, is
+/// a separate step: this answer says how much (`deposit_bp`), the deposit route
+/// starts the charge, and the booking is secured when the gateway settles it —
+/// see `erp_api::deposits`. Until then it is held at `reserved` for
+/// `hold_minutes` and lapses if nothing arrives. A business that asks for no
+/// deposit confirms by hand, which is what a shop with no online payment does
+/// anyway.
 #[utoipa::path(
     post,
     path = "/v1/booking/public/reservations",
@@ -746,6 +819,10 @@ async fn public_reserve(
             .map_err(|e| verification_problem(&e, locale))?;
     }
 
+    let lines = {
+        let mut conn = caller.db.read().await.map_err(|e| pool(&e, locale))?;
+        public_lines(&mut conn, &body.lines, locale).await?
+    };
     let draft = Draft {
         customer: crate::Customer {
             // **Never from the request.** A stranger does not name which
@@ -755,7 +832,7 @@ async fn public_reserve(
             name: body.customer_name,
             phone: body.customer_phone,
         },
-        lines: public_lines(&body.lines, locale)?,
+        lines,
         note: body.note,
         // The business's clock, not the caller's. A public caller sending a
         // booking date in the past is either confused or trying something.
@@ -869,6 +946,7 @@ async fn declare_bookable(
         name_latin: body.name_latin,
         kind: kind(&body.kind, locale)?,
         capacity: body.capacity,
+        rate: body.rate.as_ref().map(|r| r.read(locale)).transpose()?,
         // **Where the resource is**, which is not where the request came from —
         // an owner at head office declares a chair at Olaya. So it is a field on
         // the body and not `Allowed::branch`, and the two mean different things.
@@ -977,6 +1055,7 @@ async fn amend_bookable(
         name: body.name,
         name_latin: body.name_latin,
         capacity: body.capacity,
+        rate: body.rate.as_ref().map(|r| r.read(locale)).transpose()?,
     };
     let committed = crate::amend_resource(
         &tenant.db,
@@ -1649,6 +1728,206 @@ struct TariffBand {
     hours: OpeningHours,
 }
 
+/// What a stranger may do on this tenant's public booking site.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[schema(example = json!({ "open": true, "deposit_bp": 2500, "hold_minutes": 30, "verify_phone": false }))]
+struct PublicBookingView {
+    /// Whether the public site takes bookings at all. Off until somebody turns
+    /// it on: the absence of a setting is a no.
+    open: bool,
+    /// The deposit, as a fraction of the booking's net in basis points. `0` is
+    /// no deposit; `10000` is the whole price.
+    deposit_bp: u32,
+    /// How long an unpaid slot is held before it lapses. `0` is indefinitely,
+    /// which is right only when no deposit is asked for.
+    hold_minutes: u32,
+    /// Whether a public booker must prove their phone number first.
+    verify_phone: bool,
+}
+
+/// **The setting the public site, the deposit, the hold and the phone check
+/// all read.** The first build had every one of those and no way to turn any
+/// of them on.
+#[utoipa::path(
+    get,
+    path = "/v1/booking/public-settings",
+    tag = "booking",
+    responses(
+        (status = OK, description = "The closed default until somebody sets it.", body = PublicBookingView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+    ),
+)]
+async fn public_booking_settings(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Versioned<PublicBookingView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::PublicBooking::KEY)
+        .await
+        .map_err(|e| config(&e, locale))?;
+    let settings = crate::PublicBooking::resolve(&mut conn)
+        .await
+        .map_err(|e| config(&e, locale))?;
+    Ok(Versioned(
+        version,
+        PublicBookingView {
+            open: settings.open,
+            deposit_bp: settings.deposit_bp,
+            hold_minutes: settings.hold_minutes,
+            verify_phone: settings.verify_phone,
+        },
+    ))
+}
+
+/// Set them.
+///
+/// The deposit is a fraction of the booking's net, so it is bounded at the
+/// whole price; `hold_minutes` of zero with a deposit is allowed and unwise,
+/// because a slot held for somebody who never pays is a slot nobody else can
+/// take.
+#[utoipa::path(
+    put,
+    path = "/v1/booking/public-settings",
+    tag = "booking",
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.")),
+    request_body = PublicBookingView,
+    responses(
+        (status = NO_CONTENT, description = "Set. Applies to the next booking; a slot already held keeps the deadline it was given."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
+        (status = BAD_REQUEST, description = "A deposit over the whole price", body = Problem),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+    ),
+)]
+async fn set_public_booking_settings(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+    IfMatch(expected): IfMatch,
+    Json(body): Json<PublicBookingView>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    // **A deposit is a fraction of the price.** Over ten thousand basis points
+    // it is more than the booking costs, which is not a deposit and would have
+    // the public route ask a stranger for more than the service.
+    if body.deposit_bp > 10_000 {
+        return Err(Problem::new(
+            StatusCode::BAD_REQUEST,
+            &erp_i18n::Message::new(crate::messages::NOT_A_FRACTION).with(
+                "deposit_bp",
+                erp_i18n::MessageArg::text(body.deposit_bp.to_string()),
+            ),
+            locale,
+            &CATALOG,
+        ));
+    }
+    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    erp_eventlog::configuration::set(
+        &mut conn,
+        crate::PublicBooking::KEY,
+        &crate::PublicBooking {
+            open: body.open,
+            deposit_bp: body.deposit_bp,
+            hold_minutes: body.hold_minutes,
+            verify_phone: body.verify_phone,
+        },
+        Some(&tenant.session.identity.to_string()),
+        expected,
+    )
+    .await
+    .map_err(|e| config(&e, locale))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// When a booking is billed.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[schema(example = json!({ "on_completion": true }))]
+struct BillingView {
+    /// **Raise the invoice the moment a booking is completed.** Off until the
+    /// business turns it on: the desk can always bill on demand, and a salon
+    /// that adds things at the till wants to. The invoice deducts the deposit's
+    /// prepayment invoice, so the customer is charged only the rest.
+    on_completion: bool,
+}
+
+/// When a booking is billed.
+///
+/// The desk can always raise a booking's invoice on demand; this says whether
+/// the worker does it too, the moment a booking is completed.
+#[utoipa::path(
+    get,
+    path = "/v1/booking/billing",
+    tag = "booking",
+    responses(
+        (status = OK, description = "Off until somebody sets it.", body = BillingView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+    ),
+)]
+async fn billing_settings(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Versioned<BillingView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::Billing::KEY)
+        .await
+        .map_err(|e| config(&e, locale))?;
+    let settings = crate::Billing::resolve(&mut conn)
+        .await
+        .map_err(|e| config(&e, locale))?;
+    Ok(Versioned(
+        version,
+        BillingView {
+            on_completion: settings.on_completion,
+        },
+    ))
+}
+
+/// Decide whether completed bookings are billed automatically.
+///
+/// Off until the business turns it on. A salon that adds things at the till
+/// bills on demand instead; one that never does saves a click per customer.
+#[utoipa::path(
+    put,
+    path = "/v1/booking/billing",
+    tag = "booking",
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.")),
+    request_body = BillingView,
+    responses(
+        (status = NO_CONTENT, description = "Set. Applies from the worker's next pass."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+    ),
+)]
+async fn set_billing_settings(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+    IfMatch(expected): IfMatch,
+    Json(body): Json<BillingView>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    erp_eventlog::configuration::set(
+        &mut conn,
+        crate::Billing::KEY,
+        &crate::Billing {
+            on_completion: body.on_completion,
+        },
+        Some(&tenant.session.identity.to_string()),
+        expected,
+    )
+    .await
+    .map_err(|e| config(&e, locale))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 struct TariffView {
     /// **First match wins**, so the order is your priority. A public holiday
@@ -1662,7 +1941,7 @@ struct TariffView {
     path = "/v1/booking/tariff",
     tag = "booking",
     responses(
-        (status = OK, description = "An empty list means every hour is the same price.", body = TariffView),
+        (status = OK, description = "An empty list means every hour is the same price.", body = TariffView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -1671,24 +1950,30 @@ struct TariffView {
 async fn tariff(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<TariffView>, Problem> {
+) -> Result<Versioned<TariffView>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::Tariff::KEY)
+        .await
+        .map_err(|e| config(&e, locale))?;
     let resolved = crate::Tariff::resolve(&mut conn)
         .await
         .map_err(|e| config(&e, locale))?;
 
-    Ok(Json(TariffView {
-        bands: resolved
-            .bands
-            .iter()
-            .map(|b| TariffBand {
-                name: b.name.clone(),
-                uplift: b.uplift,
-                hours: hours(&b.when),
-            })
-            .collect(),
-    }))
+    Ok(Versioned(
+        version,
+        TariffView {
+            bands: resolved
+                .bands
+                .iter()
+                .map(|b| TariffBand {
+                    name: b.name.clone(),
+                    uplift: b.uplift,
+                    hours: hours(&b.when),
+                })
+                .collect(),
+        },
+    ))
 }
 
 /// Set the whole tariff, replacing what was there.
@@ -1701,9 +1986,11 @@ async fn tariff(
     put,
     path = "/v1/booking/tariff",
     tag = "booking",
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.")),
     request_body = TariffView,
     responses(
         (status = NO_CONTENT, description = "Set."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "A window that closes before it opens, or an uplift that would make the service cost you money", body = Problem),
         (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
@@ -1713,6 +2000,7 @@ async fn tariff(
 async fn set_tariff(
     tenant: Allowed<ManageTenant>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<TariffView>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -1755,6 +2043,7 @@ async fn set_tariff(
         crate::Tariff::KEY,
         &crate::Tariff { bands },
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
     .map_err(|e| config(&e, locale))?;
@@ -1772,9 +2061,12 @@ async fn set_tariff(
     path = "/v1/booking/trades",
     tag = "booking",
     security(),
-    responses((status = OK, body = Vec<TradeView>)),
+    responses(
+        (status = OK, body = Vec<TradeView>),
+        (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
+    ),
 )]
-async fn list_trades(Language(locale): Language) -> Json<Vec<TradeView>> {
+async fn list_trades(_anonymous: Anonymous, Language(locale): Language) -> Json<Vec<TradeView>> {
     Json(
         crate::TRADES
             .iter()
@@ -1874,23 +2166,42 @@ async fn fit_out(
 /// One resource per line rather than a set, for the same reason: a customer
 /// books a chair, and which stylist *and* which room that consumes is the
 /// business's arrangement of its own capacity.
-fn public_lines(sent: &[PublicLine], locale: Locale) -> Result<Vec<DraftLine>, Problem> {
-    sent.iter()
-        .map(|line| {
-            let span = Span::new(line.from, line.until).map_err(|e| {
-                Problem::new(StatusCode::BAD_REQUEST, &e.message(), locale, &CATALOG)
-            })?;
-            Ok(DraftLine {
-                what: line.what.clone(),
-                span,
-                takes: vec![Held {
-                    resource: parse_id(&line.resource, locale)?,
-                    quantity: 1,
-                }],
-                charge: None,
-            })
-        })
-        .collect()
+/// **Priced from what the business published, never from the request.** A
+/// stranger cannot send a price; the service's own rate is what the line
+/// costs, and the tenant's bands do the rest in `reserve`. A service with no
+/// published price is booked unpriced — a business that bills elsewhere —
+/// which is also a booking no deposit is asked for.
+async fn public_lines(
+    conn: &mut sqlx::PgConnection,
+    sent: &[PublicLine],
+    locale: Locale,
+) -> Result<Vec<DraftLine>, Problem> {
+    let mut lines = Vec::with_capacity(sent.len());
+    for line in sent {
+        let span = Span::new(line.from, line.until)
+            .map_err(|e| Problem::new(StatusCode::BAD_REQUEST, &e.message(), locale, &CATALOG))?;
+        let resource = parse_id(&line.resource, locale)?;
+        // A resource that is not there is `reserve`'s refusal to make; here
+        // it simply has no price.
+        let rate = crate::resource(&mut *conn, resource.as_str())
+            .await
+            .map_err(|e| database(&e, locale))?
+            .and_then(|r| r.summary.rate);
+        lines.push(DraftLine {
+            what: line.what.clone(),
+            span,
+            takes: vec![Held {
+                resource,
+                quantity: 1,
+            }],
+            charge: rate.map(|rate| crate::Charge {
+                rate,
+                quantity: 1,
+                allowances: Vec::new(),
+            }),
+        });
+    }
+    Ok(lines)
 }
 
 fn lines(sent: &[NewReservationLine], locale: Locale) -> Result<Vec<DraftLine>, Problem> {
@@ -2004,6 +2315,7 @@ fn bookable(r: crate::ResourceSummary) -> BookableRecord {
         name_latin: r.name_latin,
         kind: r.kind,
         capacity: r.capacity,
+        rate: r.rate.map(ListRate::of),
         branch: r.branch,
         employee: r.employee,
         withdrawn: r.withdrawn,
@@ -2022,6 +2334,8 @@ fn view(r: crate::ReservationSummary) -> ReservationRecord {
         starts_at: r.starts_at,
         ends_at: r.ends_at,
         note: r.note,
+        secured_by: r.secured_by,
+        billed_by: r.billed_by,
     }
 }
 
@@ -2058,6 +2372,8 @@ fn problem_for(error: &CommandError<BookingError>, locale: Locale) -> Problem {
                 | BookingError::Barred { .. }
                 | BookingError::Withdrawn(_)
                 | BookingError::Over { .. }
+                | BookingError::Secured(_)
+                | BookingError::NotLapsed(_)
                 | BookingError::CannotMove { .. } => StatusCode::UNPROCESSABLE_ENTITY,
 
                 _ => StatusCode::BAD_REQUEST,
@@ -2124,13 +2440,7 @@ fn pool(error: &erp_tenant::PoolError, locale: Locale) -> Problem {
 }
 
 fn config(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem {
-    tracing::error!(error = %error, "booking configuration failed");
-    Problem::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &error.message(),
-        locale,
-        &CATALOG,
-    )
+    config_problem(error, locale, &CATALOG)
 }
 
 fn database(error: &sqlx::Error, locale: Locale) -> Problem {

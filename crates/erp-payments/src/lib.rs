@@ -58,7 +58,7 @@ pub use tabby::{Tabby, UAE};
 pub use tamara::{SANDBOX, Tamara};
 
 use erp_i18n::{Localize, Message, MessageArg, StaticCatalog};
-use erp_types::Money;
+use erp_types::{Money, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// This crate's messages, in every supported language.
@@ -81,12 +81,17 @@ pub enum Source {
     Hosted,
 }
 
-/// Where a customer is sent when the provider is done with them.
+/// Where a customer is sent when the provider is done with them — and where the
+/// provider itself reports back.
 ///
-/// Three, because the providers that redirect distinguish three endings and
-/// collapsing them would lose the difference between "they changed their mind"
-/// and "they were declined". A gateway that takes only one — Moyasar — is given
-/// [`Returns::success`], because its own answer carries the outcome.
+/// Three browser destinations, because the providers that redirect distinguish
+/// three endings and collapsing them would lose the difference between "they
+/// changed their mind" and "they were declined". A gateway that takes only one
+/// — Moyasar — is given [`Returns::success`], because its own answer carries
+/// the outcome.
+///
+/// The fourth is not a browser destination at all, and confusing it with one
+/// is how Tamara's callbacks once went to the customer's thank-you page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Returns {
     pub success: String,
@@ -96,6 +101,15 @@ pub struct Returns {
     /// error: the customer was scored and declined, and the shop should offer
     /// them a card.
     pub failure: String,
+    /// **Where the provider posts order status, server to server.** This
+    /// system's `POST /v1/hooks/<provider>` on the tenant's own host — never a
+    /// page a person lands on.
+    ///
+    /// `None` for a provider that registers its webhooks once per account
+    /// (Moyasar, Tabby) or when the caller has no host to name; a provider that
+    /// takes one per checkout (Tamara) sends it when it is given and otherwise
+    /// relies on the account-wide registration.
+    pub notification: Option<String>,
 }
 
 /// Who is buying.
@@ -103,6 +117,11 @@ pub struct Returns {
 /// Required by both buy-now-pay-later providers, which score the person before
 /// they will lend to them, and unused by card gateways — a card is its own
 /// credit decision, made by somebody else.
+///
+/// **Everything here is something the lender asks for**, and it is asked of the
+/// caller rather than invented in an adapter: Tabby's checkout schema marks the
+/// buyer's history required, and a body that sends it empty is scored as a
+/// stranger or refused outright.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Buyer {
     pub name: String,
@@ -110,6 +129,29 @@ pub struct Buyer {
     /// The identity a lender actually scores on, and where the one-time code
     /// goes.
     pub phone: String,
+    /// When this person first became a customer of the business — the
+    /// customer record's own date, or the moment of this booking for somebody
+    /// walking in for the first time.
+    pub registered_since: Timestamp,
+    /// How many purchases they have completed here before this one. Zero is an
+    /// honest answer for a first visit.
+    pub purchases: u32,
+}
+
+/// Where what is bought goes.
+///
+/// Both lenders require one on every checkout, a service with nowhere to ship
+/// included; for a salon or a clinic it is the branch the customer will be
+/// served at. Asked of the caller rather than filled with dashes, because a
+/// placeholder address is one more thing the lender scores.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Address {
+    /// Street and building, on one line.
+    pub line: String,
+    pub city: String,
+    pub postcode: String,
+    /// ISO 3166-1 alpha-2, upper case: `SA`, `AE`.
+    pub country: String,
 }
 
 /// What is being bought.
@@ -120,14 +162,31 @@ pub struct Buyer {
 pub struct Basket {
     /// This system's own order reference, echoed back on every callback.
     pub reference: String,
+    pub deliver_to: Address,
+    /// What of the charge is tax. The lines carry their prices tax included;
+    /// this is the figure the lender shows beside them.
+    pub tax: Money,
     pub items: Vec<Item>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub title: String,
+    /// The lender's high-level category — `Services`, `Beauty`, `Clothes`.
+    /// Required by Tabby on every line, and it feeds their scoring.
+    pub category: String,
     pub quantity: u32,
     pub unit_price: Money,
+}
+
+impl Item {
+    /// What the line comes to: the unit price, times the quantity.
+    ///
+    /// **Sent as a separate field by Tamara**, which checks that the lines add
+    /// up to the order and refuses a basket where they do not.
+    pub fn total(&self) -> Result<Money, erp_types::MoneyError> {
+        self.unit_price.checked_mul_int(i64::from(self.quantity))
+    }
 }
 
 /// What a caller is asking the gateway to do.
@@ -300,22 +359,59 @@ pub trait Gateway: Send + Sync + std::fmt::Debug {
     async fn fetch(&self, id: &str) -> Result<Charged, GatewayError>;
 
     /// Takes an authorized hold, in full or in part.
-    async fn capture(&self, id: &str, amount: Option<Money>) -> Result<Charged, GatewayError>;
+    ///
+    /// `reference` is **this system's own id for the capture** — the
+    /// idempotency key, passed to whichever field the provider uses for one, so
+    /// a capture this process believes failed but which actually landed is not
+    /// taken twice. A provider with no such field is told so in its adapter.
+    async fn capture(
+        &self,
+        id: &str,
+        reference: &str,
+        amount: Option<Money>,
+    ) -> Result<Charged, GatewayError>;
 
     /// Gives money back, in full or in part.
-    async fn refund(&self, id: &str, amount: Option<Money>) -> Result<Charged, GatewayError>;
+    ///
+    /// `reference` is the refund request's own id, and it is what stops two
+    /// refunds of the same amount against one payment — two of the same item
+    /// returned on different days — being one refund replayed. See
+    /// [`Gateway::capture`].
+    async fn refund(
+        &self,
+        id: &str,
+        reference: &str,
+        amount: Option<Money>,
+    ) -> Result<Charged, GatewayError>;
 
     /// Cancels before settlement. Cheaper than a refund where it is allowed,
     /// and allowed for a much shorter time.
     async fn void(&self, id: &str) -> Result<Charged, GatewayError>;
 }
 
+/// What an authentic callback said, which is **which payment to look at** and
+/// nothing about money.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Callback {
+    /// The gateway's own id for the payment, to go and ask [`Gateway::fetch`]
+    /// about.
+    pub payment: String,
+    /// The provider's own id for **this delivery** — what makes a retry a
+    /// retry and a second event a second event. A provider that numbers its
+    /// events gives that number; one that does not is keyed on the payment and
+    /// what it said about it, so "authorised" and "captured" for one order are
+    /// two deliveries and a resend of either is one.
+    pub event: String,
+    /// What the provider says happened, in its own words, for a person reading
+    /// the log of what arrived. Never acted on.
+    pub kind: Option<String>,
+}
+
 /// **Whether a callback is worth acting on**, and nothing more.
 ///
-/// Returns the gateway's **payment id**, to go and ask [`Gateway::fetch`]
-/// about. It does not return the payload, and that is the whole point: no
-/// gateway here signs its bodies, so the body proves nothing about the amount.
-/// See the crate docs.
+/// Returns the gateway's **payment id** and the delivery's own id. It does not
+/// return the payload, and that is the whole point: no gateway here signs its
+/// bodies, so the body proves nothing about the amount. See the crate docs.
 ///
 /// A free function rather than a method on [`Gateway`] because the route that
 /// receives a callback is **public** and holds no credentials — it has the
@@ -327,7 +423,7 @@ pub fn authenticate(
     secret: &[u8],
     headers: &[(&str, &str)],
     body: &[u8],
-) -> Result<String, CallbackError> {
+) -> Result<Callback, CallbackError> {
     match provider {
         "moyasar" => moyasar::authenticate(secret, body),
         "tabby" => tabby::authenticate(secret, headers, body),
@@ -395,6 +491,46 @@ pub fn secrets_match(a: &[u8], b: &[u8]) -> bool {
         == 0
 }
 
+/// **What a refusal means**, the same for every provider.
+///
+/// The distinction callers branch on is coarse and it has to be right: a `404`
+/// is the only answer that means *no such payment* — the pending sweep leaves
+/// one alone and warns, the saved-card sweep takes one as "never created" and
+/// charges. Every other `4xx` is the provider saying no to *this request*, and
+/// calling that an absence is how a malformed id or a state the provider will
+/// not leave becomes a second charge. `401`/`403` are the account; `408`,
+/// `429` and every `5xx` are the moment rather than the payment.
+///
+/// `about` is the payment the request named, when it named one; a `404` on a
+/// request that named none — creating a checkout at a wrong base URL — is a
+/// refusal, because there is no payment for it to be an absence of.
+pub(crate) fn refusal(
+    status: reqwest::StatusCode,
+    said: String,
+    about: Option<&str>,
+) -> GatewayError {
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            GatewayError::Unauthenticated
+        }
+        reqwest::StatusCode::NOT_FOUND => match about {
+            Some(id) => GatewayError::NoSuchPayment(id.to_owned()),
+            None => GatewayError::Refused(said),
+        },
+        reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            GatewayError::Unreachable(format!("{status}: {said}"))
+        }
+        _ if status.is_server_error() => GatewayError::Unreachable(format!("{status}: {said}")),
+        _ => GatewayError::Refused(said),
+    }
+}
+
+/// The first five hundred characters of a body, for an error message. A gateway
+/// that answers with a page of HTML should not put a page of HTML in a log.
+pub(crate) fn clipped(body: &str) -> String {
+    body.chars().take(500).collect()
+}
+
 #[cfg(test)]
 mod fake;
 
@@ -433,6 +569,50 @@ mod tests {
         assert!(!secrets_match(b"abc", b"abcd"));
         assert!(!secrets_match(b"", b"a"));
         assert!(secrets_match(b"", b""));
+    }
+
+    /// **Only a `404` is an absence.** Every other refusal is the provider
+    /// saying no to the request, and a caller that took it for "no such
+    /// payment" would charge again.
+    #[test]
+    fn only_a_404_about_a_named_payment_is_no_such_payment() {
+        let status = |code: u16| reqwest::StatusCode::from_u16(code).expect("a status");
+        let said = || "no".to_owned();
+
+        assert_eq!(
+            refusal(status(404), said(), Some("pay_1")),
+            GatewayError::NoSuchPayment("pay_1".to_owned())
+        );
+        // A 404 on a request that named no payment is a wrong URL, not a
+        // missing payment.
+        assert!(matches!(
+            refusal(status(404), said(), None),
+            GatewayError::Refused(_)
+        ));
+        for no in [400, 402, 405, 409, 410, 422] {
+            assert!(
+                matches!(
+                    refusal(status(no), said(), Some("pay_1")),
+                    GatewayError::Refused(_)
+                ),
+                "{no} is a refusal of this request, not an absence"
+            );
+        }
+        for account in [401, 403] {
+            assert_eq!(
+                refusal(status(account), said(), Some("pay_1")),
+                GatewayError::Unauthenticated
+            );
+        }
+        for busy in [408, 429, 500, 502, 503] {
+            assert!(
+                matches!(
+                    refusal(status(busy), said(), Some("pay_1")),
+                    GatewayError::Unreachable(_)
+                ),
+                "{busy} is worth another go"
+            );
+        }
     }
 
     /// Every provider the dispatcher names can actually be dispatched to, and

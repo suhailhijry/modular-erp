@@ -87,7 +87,35 @@ pub struct Sides {
 }
 
 /// The return for a period.
+/// The return for a period given as **local dates**, `until` exclusive, on the
+/// tenant's calendar.
 pub async fn vat_return(
+    conn: &mut sqlx::PgConnection,
+    sides: Sides,
+    currency: CurrencyCode,
+    from: chrono::NaiveDate,
+    until: chrono::NaiveDate,
+) -> Result<Return, sqlx::Error> {
+    let calendar = erp_eventlog::configuration::calendar(&mut *conn)
+        .await
+        .map_err(|e| match e {
+            erp_eventlog::ConfigError::Database(e) => e,
+            other => sqlx::Error::Protocol(other.to_string()),
+        })?;
+    vat_return_between(
+        conn,
+        sides,
+        currency,
+        calendar.start_of(from),
+        calendar.start_of(until),
+    )
+    .await
+}
+
+/// The return between two instants. `vat_return` is the one callers want; this
+/// is for a caller that has already turned the dates into instants and needs
+/// them to agree with what it records.
+pub async fn vat_return_between(
     conn: &mut sqlx::PgConnection,
     sides: Sides,
     currency: CurrencyCode,

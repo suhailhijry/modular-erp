@@ -162,7 +162,12 @@ pub async fn draft_run(
 /// and the whole point of a period is that it does.
 ///
 /// Idempotent: approving an approved run reports the entry it already made.
-pub async fn approve_run(db: &TenantDb, id: &AggregateId, metadata: &Metadata) -> Outcome {
+pub async fn approve_run(
+    db: &TenantDb,
+    id: &AggregateId,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
     let entry = derived("pr", id)?;
 
     for _ in 1..=MAX_ATTEMPTS {
@@ -190,7 +195,7 @@ pub async fn approve_run(db: &TenantDb, id: &AggregateId, metadata: &Metadata) -
                     }
                     Ok(Decision::one(RunEvent::Approved {
                         entry: entry.clone(),
-                        at: chrono::Utc::now(),
+                        at,
                     }))
                 },
             )
@@ -233,10 +238,12 @@ async fn post(
     let lines = entry_for_run(gross, deductions, net, &accounts)
         .map_err(|e| ExecuteError::Rejected(e.into()))?;
 
+    let calendar = erp_eventlog::configuration::calendar(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(e.into()))?;
     let occurred_on = period
         .ends_on()
-        .and_then(|day| day.and_hms_opt(0, 0, 0))
-        .map(|naive| naive.and_utc())
+        .map(|day| calendar.start_of(day))
         .ok_or_else(|| {
             ExecuteError::Rejected(PayrollError::Period(NotAPeriod(period.to_string())))
         })?;

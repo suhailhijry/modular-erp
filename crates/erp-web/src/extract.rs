@@ -181,6 +181,7 @@ impl FromRequestParts<AppState> for Authenticated {
             if let Err(seconds) = state
                 .limiter
                 .check(&key.tenant.to_string(), &key.public_key)
+                .await
             {
                 return Err(too_many_requests(seconds, locale));
             }
@@ -241,22 +242,11 @@ impl FromRequestParts<AppState> for Tenant {
             .unwrap_or(Language(Locale::DEFAULT));
         let auth = Authenticated::from_request_parts(parts, state).await?;
 
-        // **The tenant is the subdomain.** `bassat.erp.com` is Bassat Media
-        // Productions, and every path below it is about them — which is why no
-        // route carries a `{slug}` any more.
-        let slug = subdomain(parts, &state.domain).ok_or_else(|| not_found(locale))?;
-
-        // Slug → id is one cached lookup, and the same 404 covers "no such
-        // tenant" and "not yours".
-        let tenant = state
-            .control
-            .tenant_by_slug(&slug)
-            .await
-            .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?
-            .ok_or_else(|| {
-                ApiError::Access(erp_control::AccessError::NoSuchTenant)
-                    .into_problem(locale, &crate::CATALOG)
-            })?;
+        // **The tenant is the host.** `bassat.erp.com` is Bassat Media
+        // Productions, and so is `api.bassat.sa` once they have proved
+        // `bassat.sa` — which is why no route carries a `{slug}` any more, and
+        // why the same 404 covers "no such tenant" and "not yours".
+        let tenant = tenant_of(parts, state, locale).await?;
 
         let db = state
             .control
@@ -301,18 +291,35 @@ impl FromRequestParts<AppState> for Tenant {
 /// this and maintenance access: suspension stops people using the system, and
 /// a booking form is people using the system.
 ///
-/// # What it does not do yet
+/// # It is bounded, per caller and per business
 ///
-/// **Nothing here rate-limits.** There is no session to attribute abuse to, so
-/// the defence has to be scoped by origin, address and the tenant being
-/// reached — Phase 12c, and Phase 17 is what stops it being deferrable. Until
-/// then the only bound on this surface is the client lane's connection budget,
-/// which stops it taking the system down but does not stop it being abused.
+/// There is no session to attribute abuse to, so the bound is keyed on the
+/// caller's **address** — see [`caller_address`] for why that is the only header
+/// a caller cannot write — and on the tenant being reached. Both are charged
+/// here, in the extractor, so a public route added tomorrow is bounded without
+/// anybody remembering to bound it; `every_public_route_is_rate_limited` is the
+/// test that would notice if one were not.
 #[derive(Debug)]
 pub struct Public {
     pub db: TenantDb,
     /// The subdomain this arrived on, which is the tenant's name.
     pub slug: String,
+    /// Where the request came from, as [`caller_address`] answers it.
+    pub address: String,
+    locale: Locale,
+}
+
+impl Public {
+    /// **One more text is about to be sent because of this caller.**
+    ///
+    /// A code is money — the business's on this surface — and a per-number
+    /// cooldown bounds only how often *one* number is texted. This bounds how
+    /// many numbers one address may cause texts to, and how many the platform
+    /// sends in an hour at all: the second is the circuit breaker for a caller
+    /// whose own premium numbers are the ones receiving the codes.
+    pub async fn charge_for_a_code(&self, state: &AppState) -> Result<(), Problem> {
+        charge_for_a_code(state, &self.address, self.locale).await
+    }
 }
 
 impl FromRequestParts<AppState> for Public {
@@ -323,17 +330,7 @@ impl FromRequestParts<AppState> for Public {
             .await
             .unwrap_or(Language(Locale::DEFAULT));
 
-        let slug = subdomain(parts, &state.domain).ok_or_else(|| not_found(locale))?;
-
-        let tenant = state
-            .control
-            .tenant_by_slug(&slug)
-            .await
-            .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?
-            .ok_or_else(|| {
-                ApiError::Access(erp_control::AccessError::NoSuchTenant)
-                    .into_problem(locale, &crate::CATALOG)
-            })?;
+        let tenant = tenant_of(parts, state, locale).await?;
 
         // **Charged here and not in each handler**, for the same reason the
         // branch is read here: a public route added tomorrow is bounded without
@@ -341,12 +338,8 @@ impl FromRequestParts<AppState> for Public {
         // so a flood aimed at names that do not exist cannot consume a real
         // tenant's budget — and before the database is opened, so a refused
         // request costs no connection.
-        let caller = parts
-            .headers
-            .get(header::ORIGIN)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("anonymous");
-        if let Err(seconds) = state.limiter.check(tenant.slug.as_str(), caller) {
+        let address = caller_address(parts, state);
+        if let Err(seconds) = state.limiter.check(tenant.slug.as_str(), &address).await {
             return Err(too_many_requests(seconds, locale));
         }
 
@@ -359,8 +352,151 @@ impl FromRequestParts<AppState> for Public {
         Ok(Self {
             db,
             slug: tenant.slug,
+            address,
+            locale,
         })
     }
+}
+
+/// **Where a request came from, as something the caller did not write.**
+///
+/// # Why this is the key and `Origin` was not
+///
+/// The first limiter keyed on `Origin`, which is whatever the client sends: a
+/// flood rotated it and had a fresh budget per request, and a caller that sent
+/// none shared one bucket with every legitimate non-browser client. An address
+/// is the one thing about a request the caller cannot choose.
+///
+/// # Which address
+///
+/// Behind a proxy this deployment runs, the client is the **last** entry of
+/// `X-Forwarded-For` — the one that proxy appended. Earlier entries are
+/// whatever the client sent and are ignored. Whether there is such a proxy is
+/// [`AppState::trust_forwarded`], set from the environment, because a header
+/// trusted with no proxy in front is a header the caller writes.
+///
+/// Without one, the socket's peer address, which axum supplies when the server
+/// is started with `into_make_service_with_connect_info`. A build that started
+/// it any other way, or a test driving the router directly, has neither and
+/// gets `"unknown"` — one shared bucket, which is the per-node limit at its
+/// weakest and still a limit.
+pub(crate) fn caller_address(parts: &Parts, state: &AppState) -> String {
+    if state.trust_forwarded
+        && let Some(forwarded) = parts
+            .headers
+            .get(FORWARDED_FOR)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|chain| chain.rsplit(',').next())
+            .map(str::trim)
+            .filter(|last| !last.is_empty())
+    {
+        return forwarded.to_owned();
+    }
+
+    parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map_or_else(|| "unknown".to_owned(), |info| info.0.ip().to_string())
+}
+
+/// The header a trusted proxy appends the client's address to.
+pub const FORWARDED_FOR: &str = "x-forwarded-for";
+
+/// **A caller with no session and no business**, on the authentication surface.
+///
+/// # What this is for
+///
+/// Logging in, signing up, accepting an invitation, asking for a code and
+/// verifying one all happen before there is anybody to blame, and every one of
+/// them either hashes a password or sends a text. The first version of this API
+/// let all of them run unbounded, which made each a password oracle with
+/// Argon2 attached and the OTP route a phone bill somebody else pays.
+///
+/// So this is the extractor every one of them takes, and taking it **is** the
+/// bound: the per-address budget ([`crate::rate::AUTH_PER_CALLER`]) is charged
+/// before the handler runs, and a handler that names an account or a number
+/// charges that too through [`Self::charge_for_handle`] — because the attack on
+/// one account comes from many addresses and the bound has to follow the
+/// account.
+///
+/// # Why it is a type
+///
+/// The same reason [`Allowed`] is. A handler that takes this cannot forget to
+/// bound itself, and `every_public_route_is_rate_limited` refuses a build with
+/// a public route that takes neither this nor [`Public`].
+#[derive(Debug)]
+pub struct Anonymous {
+    /// Where the request came from, as [`caller_address`] answers it.
+    pub address: String,
+    locale: Locale,
+}
+
+impl Anonymous {
+    /// **One attempt against this account or number**, whoever is making it.
+    ///
+    /// Call it before hashing the password or looking the number up, so a
+    /// refused attempt costs nothing but the lookup in the limiter. The handle is
+    /// lowercased and trimmed, the way the authenticators store it, so
+    /// `Ali@Example.com` and `ali@example.com` are one budget.
+    pub async fn charge_for_handle(&self, state: &AppState, handle: &str) -> Result<(), Problem> {
+        let handle = handle.trim().to_lowercase();
+        if let Err(seconds) = state
+            .limiter
+            .charge(&format!("handle:{handle}"), crate::rate::AUTH_PER_HANDLE)
+            .await
+        {
+            return Err(too_many_requests(seconds, self.locale));
+        }
+        Ok(())
+    }
+
+    /// **One more text is about to be sent because of this caller.** See
+    /// [`Public::charge_for_a_code`].
+    pub async fn charge_for_a_code(&self, state: &AppState) -> Result<(), Problem> {
+        charge_for_a_code(state, &self.address, self.locale).await
+    }
+}
+
+impl FromRequestParts<AppState> for Anonymous {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Problem> {
+        let Language(locale) = Language::from_request_parts(parts, state)
+            .await
+            .unwrap_or(Language(Locale::DEFAULT));
+        let address = caller_address(parts, state);
+        if let Err(seconds) = state
+            .limiter
+            .charge(&format!("auth:{address}"), crate::rate::AUTH_PER_CALLER)
+            .await
+        {
+            return Err(too_many_requests(seconds, locale));
+        }
+        Ok(Self { address, locale })
+    }
+}
+
+/// The two bounds on sending a code: this address's, and the platform's.
+async fn charge_for_a_code(state: &AppState, address: &str, locale: Locale) -> Result<(), Problem> {
+    if let Err(seconds) = state
+        .limiter
+        .charge(&format!("codes:{address}"), crate::rate::CODES_PER_CALLER)
+        .await
+    {
+        return Err(too_many_requests(seconds, locale));
+    }
+    if let Err(seconds) = state
+        .limiter
+        .charge("codes", crate::rate::CODES_PER_PLATFORM)
+        .await
+    {
+        tracing::error!(
+            address,
+            "the platform-wide one-time-code breaker tripped; somebody is pumping texts"
+        );
+        return Err(too_many_requests(seconds, locale));
+    }
+    Ok(())
 }
 
 /// The tenant's name, from the host a request arrived on.
@@ -378,15 +514,50 @@ impl FromRequestParts<AppState> for Public {
 /// absent because `:authority` replaced it. A reverse proxy in front of this has
 /// to pass one of them through unchanged — if it rewrites the host to its own,
 /// every tenant-scoped request becomes a 404, which is at least loud.
+/// The slug, when the host is a label under the platform domain.
+#[cfg(test)]
 fn subdomain(parts: &Parts, domain: &str) -> Option<String> {
-    let host = parts
+    tenant_label(&host_of(parts)?, domain)
+}
+
+/// The host a request was addressed to, from `Host` or the URI.
+fn host_of(parts: &Parts) -> Option<String> {
+    parts
         .headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned)
-        .or_else(|| parts.uri.host().map(str::to_owned))?;
+        .or_else(|| parts.uri.host().map(str::to_owned))
+}
 
-    tenant_label(&host, domain)
+/// **The tenant a host names.** A label under the platform domain
+/// (`bassat.erp.com`) is a slug; anything else is a custom host, which reaches
+/// a tenant only if it is under a domain that tenant has **proved** — see
+/// `erp_control::domains`. Unproved, unclaimed and lookalike hosts are all the
+/// same `None`.
+pub async fn tenant_of_host(
+    state: &AppState,
+    host: &str,
+) -> Result<Option<erp_control::Tenant>, erp_control::AccessError> {
+    match tenant_label(host, &state.domain) {
+        Some(slug) => state.control.tenant_by_slug(&slug).await,
+        None => state.control.tenant_by_host(host).await,
+    }
+}
+
+async fn tenant_of(
+    parts: &Parts,
+    state: &AppState,
+    locale: Locale,
+) -> Result<erp_control::Tenant, Problem> {
+    let host = host_of(parts).ok_or_else(|| not_found(locale))?;
+    tenant_of_host(state, &host)
+        .await
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?
+        .ok_or_else(|| {
+            ApiError::Access(erp_control::AccessError::NoSuchTenant)
+                .into_problem(locale, &crate::CATALOG)
+        })
 }
 
 /// The tenant label in a host, or nothing.
@@ -815,5 +986,87 @@ mod tests {
         assert_eq!(module_of("/v1/nonsense/x", &enabled), None);
         assert_eq!(module_of("/v1/Sales/invoices", &enabled), None);
         assert_eq!(module_of("/v1/../sales/invoices", &enabled), None);
+    }
+}
+
+/// **The version a settings write is conditional on**, from `If-Match`.
+///
+/// A settings `GET` answers with an `ETag` carrying the setting's version; a
+/// client that sends it back as `If-Match` on the `PUT` writes only if nobody
+/// else has written since, and is told with `412` if somebody has. Without the
+/// header the write is unconditional, which is what a script that owns the
+/// setting wants and what a screen two people can have open does not.
+///
+/// `"12"`, `12` and `W/"12"` all name version twelve; `*` is "whatever is
+/// there", the same as no header. Anything else is a `400`, because a client
+/// that meant to be conditional and was not is the bug this exists to catch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IfMatch(pub Option<i64>);
+
+impl IfMatch {
+    pub const HEADER: &'static str = "if-match";
+
+    /// What a header value means: `Ok(None)` is "any version", `Ok(Some(n))`
+    /// is version `n`, and `Err(())` is not a version at all.
+    fn parse(raw: &str) -> Result<Option<i64>, ()> {
+        let raw = raw.trim();
+        if raw == "*" {
+            return Ok(None);
+        }
+        let raw = raw.strip_prefix("W/").unwrap_or(raw);
+        let raw = raw
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix('"'))
+            .unwrap_or(raw);
+        raw.parse::<i64>()
+            .ok()
+            .filter(|v| *v >= 0)
+            .map(Some)
+            .ok_or(())
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for IfMatch {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let sent = parts
+            .headers
+            .get(Self::HEADER)
+            .map(|value| value.to_str().unwrap_or_default().to_owned());
+        let Some(raw) = sent else {
+            return Ok(Self(None));
+        };
+        let locale = Language::from_request_parts(parts, state)
+            .await
+            .map_or(Locale::DEFAULT, |Language(locale)| locale);
+        Self::parse(&raw).map(Self).map_err(|()| {
+            crate::wire::bad_request(crate::messages::NOT_A_VERSION, "if_match", &raw, locale)
+        })
+    }
+}
+
+#[cfg(test)]
+mod if_match_tests {
+    use super::IfMatch;
+
+    #[test]
+    fn a_version_is_read_the_ways_a_client_writes_one() {
+        assert_eq!(IfMatch::parse("\"12\""), Ok(Some(12)));
+        assert_eq!(IfMatch::parse("12"), Ok(Some(12)));
+        assert_eq!(IfMatch::parse("W/\"12\""), Ok(Some(12)));
+        assert_eq!(IfMatch::parse(" \"0\" "), Ok(Some(0)));
+        assert_eq!(IfMatch::parse("*"), Ok(None), "any version is no condition");
+    }
+
+    #[test]
+    fn what_is_not_a_version_is_refused_rather_than_ignored() {
+        for bad in ["", "abc", "\"-1\"", "\"1", "1\"", "\"1\", \"2\""] {
+            assert_eq!(
+                IfMatch::parse(bad),
+                Err(()),
+                "{bad:?} was read as a version"
+            );
+        }
     }
 }

@@ -1,0 +1,19 @@
+-- **Who holds an outbox lease**, so it can be renewed while a delivery runs.
+--
+-- `leased_until` said *until when* an effect was somebody's; nothing said
+-- *whose*. A dispatcher could not extend its own lease without risking
+-- extending one it had already lost, so the lease was fixed at claim time and a
+-- delivery slower than it — an email through a congested relay, a text to a
+-- provider having a bad minute — was claimed again by the next dispatcher and
+-- performed twice. The idempotency key stops the *record* duplicating; a text
+-- message at the provider has no such key.
+--
+-- Now a claim mints a token per row, a heartbeat renews `leased_until` only
+-- `WHERE leased_by = <token>`, and settlement is likewise conditional. A live
+-- dispatcher can therefore never be double-claimed however slow the provider;
+-- a dead one's lease still lapses on schedule, because nothing renews it.
+--
+-- `IF NOT EXISTS`, like the control plane's `CREATE TABLE outbox` before it: the
+-- type-check database runs the tenant chain and then this one against the same
+-- `outbox`, and the tenant migration has already added the column.
+ALTER TABLE outbox ADD COLUMN IF NOT EXISTS leased_by TEXT;

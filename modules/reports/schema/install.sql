@@ -32,12 +32,14 @@ CREATE TABLE IF NOT EXISTS revenue (
     currency      TEXT NOT NULL,
 
     -- All in minor units. **Net of credit notes**: a cancelled invoice takes
-    -- its own numbers back out, so what this says is what the business kept.
+    -- its own numbers back out and a partial credit takes its lines out, so
+    -- what this says is what the business kept.
     net           BIGINT NOT NULL DEFAULT 0,
     tax           BIGINT NOT NULL DEFAULT 0,
-    -- Documents issued less those credited. Can reach zero on a period where
-    -- everything was cancelled, and the row stays — "we issued four and
-    -- credited four" is a different fact from "we issued nothing".
+    -- Invoices issued in the period, and credit notes issued in it — a whole
+    -- cancellation and a partial credit alike, because both are documents
+    -- from the same numbered series. A period can issue four and credit four,
+    -- and the row stays: that is a different fact from issuing nothing.
     documents     INTEGER NOT NULL DEFAULT 0,
     credited      INTEGER NOT NULL DEFAULT 0,
 
@@ -67,15 +69,13 @@ CREATE TABLE IF NOT EXISTS invoiced (
     period        TEXT NOT NULL,
     branch        TEXT NOT NULL DEFAULT '',
 
-    -- **The journal entries this document made**, named by `sales`' own scheme
-    -- (`sales::issue_entry_of`, `sales::credit_entry_of`). Stored rather than
-    -- recomputed at read time so the reconciliation in §10b is one join inside
-    -- one schema instead of an `IN` list with a row per invoice ever issued.
-    --
-    -- `credit_entry` is null until the document is credited, which is what
-    -- almost every invoice stays.
+    -- **The journal entry this document made**, named by `sales`' own scheme
+    -- (`sales::issue_entry_of`). Stored rather than recomputed at read time so
+    -- the reconciliation in §10b is one join inside one schema instead of an
+    -- `IN` list with a row per invoice ever issued. The entries its credit
+    -- notes made are in `credited` below, one row each, because an invoice
+    -- can have several.
     entry         TEXT NOT NULL,
-    credit_entry  TEXT,
 
     -- **Where in the log this invoice was seen.** The reconciliation needs it
     -- for one reason: an invoice and its journal entry commit together and so
@@ -83,6 +83,26 @@ CREATE TABLE IF NOT EXISTS invoiced (
     -- Reporting the invoice at the very tail as "made no entry" would be
     -- reporting a batch boundary as a broken ledger — which is precisely the
     -- crying wolf that gets an invariant switched off. See `reconcile.rs`.
+    position      BIGINT NOT NULL
+);
+
+-- What each credit note took back, and the entry it posted.
+--
+-- One row per credit note — a whole cancellation or a partial credit — so the
+-- reconciliation checks every credit's posting the way it checks every
+-- invoice's. `sales.invoice.credited` carries its own totals;
+-- `sales.invoice.cancelled` does not, so a cancellation's row is what
+-- `invoiced` remembered.
+CREATE TABLE IF NOT EXISTS credited (
+    -- The credit note's number, which is its id.
+    id            TEXT PRIMARY KEY,
+    invoice       TEXT NOT NULL,
+    net           BIGINT NOT NULL,
+    tax           BIGINT NOT NULL,
+    currency      TEXT NOT NULL,
+    -- `sales::credit_entry_of(invoice, credit_note)`.
+    entry         TEXT NOT NULL,
+    -- Where in the log it was seen, for the reason `invoiced.position` is.
     position      BIGINT NOT NULL
 );
 
@@ -138,9 +158,14 @@ CREATE TABLE IF NOT EXISTS held (
     resource      TEXT NOT NULL,
 
     -- The period and length are frozen when the booking is made or moved, so a
-    -- completion months later still lands in the month it was for.
+    -- completion months later still lands in the month it was for. Two lines
+    -- on one resource are one row with both lines' minutes: a two-service
+    -- visit is one booking.
     period        TEXT NOT NULL,
     minutes       BIGINT NOT NULL,
+    -- The notice this booking gave, as it was counted into `utilisation`, so
+    -- a reschedule can take it back out of the month it left.
+    lead          BIGINT NOT NULL DEFAULT 0,
     -- The last stage this module saw, so a booking moved twice is not counted
     -- twice — `reserved → confirmed → completed` is one completion.
     stage         TEXT NOT NULL DEFAULT 'reserved',

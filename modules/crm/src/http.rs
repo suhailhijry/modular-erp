@@ -19,6 +19,7 @@ use erp_web::Problem;
 use erp_web::csv::{Imported, Rejected};
 use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Read};
 use erp_web::{Consistency, nudge};
+use erp_web::{IfMatch, Versioned, config_problem};
 use erp_web::{Json, Query, bad_request, creating, importing, metadata, parse_id, require_module};
 
 use crate::{Address, Contact, CrmError, CustomerKind, Details, TaxRegistration};
@@ -904,7 +905,7 @@ fn held_view(holding: &crate::fields::Holding) -> ValueView {
     path = "/v1/crm/fields",
     tag = "crm",
     responses(
-        (status = OK, body = FieldSet),
+        (status = OK, body = FieldSet, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -914,16 +915,22 @@ fn held_view(holding: &crate::fields::Holding) -> ValueView {
 async fn customer_fields(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<FieldSet>, Problem> {
+) -> Result<Versioned<FieldSet>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::fields::Fields::KEY)
+        .await
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
     let fields = crate::fields::Fields::resolve(&mut conn)
         .await
-        .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
 
-    Ok(Json(FieldSet {
-        fields: fields.fields.iter().map(field_view).collect(),
-    }))
+    Ok(Versioned(
+        version,
+        FieldSet {
+            fields: fields.fields.iter().map(field_view).collect(),
+        },
+    ))
 }
 
 /// Decide what a business records about its customers.
@@ -950,9 +957,11 @@ async fn customer_fields(
     put,
     path = "/v1/crm/fields",
     tag = "crm",
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.")),
     request_body = FieldSet,
     responses(
         (status = NO_CONTENT, description = "Recorded."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "Not a key, not a kind, a repeat, or a choice with nothing to choose from", body = Problem),
         (status = CONFLICT, description = "A field was removed or redefined while customers still hold values for it", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
@@ -964,6 +973,7 @@ async fn customer_fields(
 async fn set_customer_fields(
     tenant: Allowed<ManageTenant>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<FieldSet>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -985,7 +995,7 @@ async fn set_customer_fields(
     // previous setting said, because the values are what would be lost.
     let before = crate::fields::Fields::resolve(&mut tx)
         .await
-        .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
     for was in &before.fields {
         let still = wanted.get(&was.key);
         let changed = still.is_none_or(|now| now.kind.as_str() != was.kind.as_str());
@@ -1009,9 +1019,10 @@ async fn set_customer_fields(
         crate::fields::Fields::KEY,
         &wanted,
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
-    .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+    .map_err(|e| config_problem(&e, locale, &CATALOG))?;
     tx.commit().await.map_err(|e| database(&e, locale))?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -1101,6 +1112,22 @@ async fn set_held_fields(
     }
 
     let mut tx = tenant.db.begin().await.map_err(|e| pool(&e, locale))?;
+    // **A value needs a customer to be about.** Written under an id that
+    // parses but names nobody, these would be shown on no page, found by no
+    // erasure request, and reported by nothing — health data the business does
+    // not know it holds. Checked against the log, in this transaction, the way
+    // every other command that names a customer checks.
+    if !crate::accepts_documents(&mut tx, &customer)
+        .await
+        .map_err(|e| problem_for(&CommandError::Execute(ExecuteError::Load(e)), locale))?
+    {
+        return Err(problem_for(
+            &CommandError::Execute(ExecuteError::Rejected(CrmError::NoSuchCustomer(
+                customer.to_string(),
+            ))),
+            locale,
+        ));
+    }
     crate::fields::set(
         &mut tx,
         customer.as_str(),

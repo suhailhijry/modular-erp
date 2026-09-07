@@ -11,14 +11,25 @@
 //! # The shape
 //!
 //! ```text
-//!   seal:    key + plaintext ──► nonce ‖ AES-256-GCM(plaintext) ‖ tag
-//!   unseal:  key + that      ──► plaintext, or an error. Never a guess.
+//!   seal:    key + name + plaintext ──► 0x02 ‖ nonce ‖ AES-256-GCM(plaintext, aad = name) ‖ tag
+//!   unseal:  key + name + that      ──► plaintext, or an error. Never a guess.
 //! ```
 //!
 //! AES-256-GCM through OpenSSL, which this workspace already links for
 //! Postgres TLS. The nonce is 12 random bytes and lives in the ciphertext, so a
 //! row is self-describing and there is no second column to fall out of step
 //! with the first.
+//!
+//! # A value is bound to the name it was sealed under
+//!
+//! The row's `key` — `payments.card.A`, `tax_sa.csid` — is the associated data.
+//! The first version sealed with none, so anybody with SQL write access could
+//! copy the blob from one row onto another and it would unseal under the new
+//! name: a tenant's card token presented as a different tenant's, a retired
+//! signing key presented as the current one. GCM authenticates the associated
+//! data along with the ciphertext, so a blob moved to another row now fails to
+//! unseal, at no cost. The leading version byte is what lets a row sealed
+//! before this still be read — see [`SealingKey::unseal`].
 //!
 //! # What it does not protect against
 //!
@@ -38,6 +49,9 @@ const NONCE: usize = 12;
 const TAG: usize = 16;
 /// AES-256.
 const KEY: usize = 32;
+/// The leading byte of a value sealed with its row name as associated data.
+/// The first format had no version byte; `0x02` says "this is the second".
+const BOUND: u8 = 0x02;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {
@@ -133,8 +147,9 @@ impl SealingKey {
         &self.id
     }
 
-    /// `nonce ‖ ciphertext ‖ tag`.
-    pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, SecretError> {
+    /// `0x02 ‖ nonce ‖ ciphertext ‖ tag`, with `key` — the row's name — as the
+    /// associated data, so the result unseals under that name and no other.
+    pub fn seal(&self, key: &str, plaintext: &[u8]) -> Result<Vec<u8>, SecretError> {
         let mut nonce = [0u8; NONCE];
         rand_bytes(&mut nonce).map_err(|e| SecretError::Crypto(e.to_string()))?;
 
@@ -143,13 +158,14 @@ impl SealingKey {
             Cipher::aes_256_gcm(),
             &self.bytes,
             Some(&nonce),
-            &[],
+            key.as_bytes(),
             plaintext,
             &mut tag,
         )
         .map_err(|e| SecretError::Crypto(e.to_string()))?;
 
-        let mut sealed = Vec::with_capacity(NONCE + ciphertext.len() + TAG);
+        let mut sealed = Vec::with_capacity(1 + NONCE + ciphertext.len() + TAG);
+        sealed.push(BOUND);
         sealed.extend_from_slice(&nonce);
         sealed.extend_from_slice(&ciphertext);
         sealed.extend_from_slice(&tag);
@@ -157,27 +173,46 @@ impl SealingKey {
     }
 
     /// The plaintext, or an error. Never a guess: GCM authenticates, so a
-    /// tampered value fails rather than decrypting to something.
+    /// tampered value — or one sealed under another name — fails rather than
+    /// decrypting to something.
+    ///
+    /// **Reads both formats.** A value that begins with [`BOUND`] is tried as
+    /// bound to `key`; failing that, or without the byte, it is tried as the
+    /// unbound first format. Trying both is safe because GCM refuses a wrong
+    /// parse outright: a legacy value whose random first nonce byte happens to
+    /// be `0x02` fails the bound attempt and passes the legacy one, and a
+    /// bound value can never pass as legacy. What this cannot do is protect a
+    /// legacy row from being moved; `put` writes the bound format, so any row
+    /// written or rotated since is protected, and a rotation over every row
+    /// finishes the job.
     pub fn unseal(&self, key: &str, sealed: &[u8]) -> Result<Vec<u8>, SecretError> {
+        let unsealable = || SecretError::Unsealable {
+            key: key.to_owned(),
+        };
+        if let Some((&BOUND, bound)) = sealed.split_first()
+            && let Ok(plaintext) = self.open(key.as_bytes(), bound)
+        {
+            return Ok(plaintext);
+        }
+        self.open(&[], sealed).map_err(|()| unsealable())
+    }
+
+    /// One attempt at `nonce ‖ ciphertext ‖ tag` under `aad`.
+    fn open(&self, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, ()> {
         if sealed.len() <= NONCE + TAG {
-            return Err(SecretError::Unsealable {
-                key: key.to_owned(),
-            });
+            return Err(());
         }
         let (nonce, rest) = sealed.split_at(NONCE);
         let (ciphertext, tag) = rest.split_at(rest.len() - TAG);
-
         openssl::symm::decrypt_aead(
             Cipher::aes_256_gcm(),
             &self.bytes,
             Some(nonce),
-            &[],
+            aad,
             ciphertext,
             tag,
         )
-        .map_err(|_| SecretError::Unsealable {
-            key: key.to_owned(),
-        })
+        .map_err(|_| ())
     }
 }
 
@@ -188,7 +223,7 @@ pub async fn put(
     key: &str,
     plaintext: &[u8],
 ) -> Result<(), SecretError> {
-    let sealed = sealing.seal(plaintext)?;
+    let sealed = sealing.seal(key, plaintext)?;
     sqlx::query!(
         "INSERT INTO module_secret (key, sealed, sealed_with)
          VALUES ($1, $2, $3)
@@ -256,10 +291,80 @@ mod tests {
 
     #[test]
     fn a_secret_survives_the_round_trip() {
-        let sealed = key().seal(b"a private key").expect("seals");
+        let sealed = key().seal("k", b"a private key").expect("seals");
         assert_eq!(
             key().unseal("k", &sealed).expect("unseals"),
             b"a private key"
+        );
+    }
+
+    /// **A value unseals under the name it was sealed for and no other.** The
+    /// first version let anybody with SQL write access copy the blob from
+    /// `payments.card.A` onto `payments.card.B` and read it there.
+    #[test]
+    fn a_secret_moved_to_another_row_does_not_unseal() {
+        let key = key();
+        let sealed = key.seal("payments.card.A", b"tok_a").expect("seals");
+        assert!(
+            matches!(
+                key.unseal("payments.card.B", &sealed),
+                Err(SecretError::Unsealable { .. })
+            ),
+            "a blob sealed for A unsealed under B"
+        );
+        assert_eq!(
+            key.unseal("payments.card.A", &sealed).expect("unseals"),
+            b"tok_a"
+        );
+    }
+
+    /// A row written before names were bound still reads, so a deployment does
+    /// not lose every signing key on upgrade; it is re-sealed bound on the
+    /// next `put`.
+    #[test]
+    fn a_value_sealed_by_the_first_format_still_unseals() {
+        let key = key();
+        // The first format, built by hand: nonce ‖ ciphertext ‖ tag, no
+        // version byte, no associated data.
+        let mut legacy = vec![0u8; NONCE];
+        rand_bytes(&mut legacy).expect("nonce");
+        let mut tag = [0u8; TAG];
+        let ciphertext = openssl::symm::encrypt_aead(
+            Cipher::aes_256_gcm(),
+            &key.bytes,
+            Some(&legacy),
+            &[],
+            b"an old key",
+            &mut tag,
+        )
+        .expect("encrypts");
+        legacy.extend_from_slice(&ciphertext);
+        legacy.extend_from_slice(&tag);
+
+        assert_eq!(
+            key.unseal("tax_sa.csid", &legacy).expect("unseals"),
+            b"an old key"
+        );
+
+        // Including one whose random first byte is the version byte: the bound
+        // attempt fails authentication and the legacy attempt is still made.
+        legacy[0] = BOUND;
+        let mut tag = [0u8; TAG];
+        let ciphertext = openssl::symm::encrypt_aead(
+            Cipher::aes_256_gcm(),
+            &key.bytes,
+            Some(&legacy[..NONCE]),
+            &[],
+            b"an old key",
+            &mut tag,
+        )
+        .expect("encrypts");
+        legacy.truncate(NONCE);
+        legacy.extend_from_slice(&ciphertext);
+        legacy.extend_from_slice(&tag);
+        assert_eq!(
+            key.unseal("tax_sa.csid", &legacy).expect("unseals"),
+            b"an old key"
         );
     }
 
@@ -268,12 +373,13 @@ mod tests {
     #[test]
     fn the_sealed_bytes_do_not_contain_the_plaintext() {
         let plaintext = b"-----BEGIN EC PRIVATE KEY-----";
-        let sealed = key().seal(plaintext).expect("seals");
+        let sealed = key().seal("k", plaintext).expect("seals");
         assert!(
             !sealed.windows(plaintext.len()).any(|w| w == plaintext),
             "the plaintext is sitting in the ciphertext"
         );
-        assert_eq!(sealed.len(), NONCE + plaintext.len() + TAG);
+        assert_eq!(sealed.len(), 1 + NONCE + plaintext.len() + TAG);
+        assert_eq!(sealed[0], BOUND);
     }
 
     /// Two seals of the same value differ, or the nonce is not doing its job and
@@ -282,14 +388,14 @@ mod tests {
     fn sealing_twice_gives_two_different_ciphertexts() {
         let key = key();
         assert_ne!(
-            key.seal(b"same").expect("seals"),
-            key.seal(b"same").expect("seals")
+            key.seal("k", b"same").expect("seals"),
+            key.seal("k", b"same").expect("seals")
         );
     }
 
     #[test]
     fn another_key_cannot_unseal_it() {
-        let sealed = key().seal(b"a private key").expect("seals");
+        let sealed = key().seal("k", b"a private key").expect("seals");
         let other = SealingKey::new("other", &[9u8; KEY]).expect("32 bytes");
         assert!(matches!(
             other.unseal("k", &sealed),
@@ -302,8 +408,8 @@ mod tests {
     #[test]
     fn a_tampered_value_is_refused_rather_than_decrypted() {
         let key = key();
-        for at in [0, NONCE + 1] {
-            let mut sealed = key.seal(b"a private key").expect("seals");
+        for at in [1, NONCE + 2] {
+            let mut sealed = key.seal("k", b"a private key").expect("seals");
             sealed[at] ^= 0x01;
             assert!(
                 matches!(
@@ -313,8 +419,9 @@ mod tests {
                 "a bit flipped at {at} was accepted"
             );
         }
-        // And so is a value too short to be one.
+        // And so is a value too short to be one, in either format.
         assert!(key.unseal("k", &[0u8; NONCE + TAG]).is_err());
+        assert!(key.unseal("k", &[BOUND; 1 + NONCE + TAG]).is_err());
     }
 
     #[test]

@@ -24,14 +24,13 @@ use erp_eventlog::{
 };
 use erp_occupancy::{BadSpan, Claim, OccupancyError, Span};
 use erp_tenant::{CommandError, TenantDb};
-use erp_types::{AggregateId, DomainName, StreamId, Timestamp};
+use erp_types::{AggregateId, DomainName, Money, StreamId, Timestamp};
 
 use crate::bars::{BarEvent, Bars};
 use crate::pricing::{PriceError, Tariff, price};
 use crate::reservation::{Customer, DraftLine, Line, Reservation, ReservationEvent, Stage};
 use crate::resource::{Kind, Resource, ResourceEvent};
 use crate::trades::{FittedOut, Trade};
-use erp_recurrence::Calendar;
 use erp_recurrence::{Availability, BadRule, any_covers};
 
 /// The prefix under which a customer is held as a resource.
@@ -69,12 +68,26 @@ pub enum BookingError {
     /// note, and these are not set for the reasons notes are.
     #[error("{resource} may not be booked for this customer")]
     Barred { resource: String },
+    /// Billing a booking with no priced line: a business that bills elsewhere
+    /// has nothing here to raise a document from.
+    #[error("{0} has no priced line to bill")]
+    NothingToBill(String),
     #[error("a bar needs a reason, for whoever has to explain the refusal")]
     NoReasonToBar,
     #[error("reservation {0} does not exist")]
     NoSuchReservation(String),
     #[error("reservation {reservation} is {stage} and nothing more can happen to it")]
     Over { reservation: String, stage: Stage },
+    /// **A paid booking cannot lapse.** The refusal that stands between a
+    /// projection that has not caught up and a customer whose deposit arrived a
+    /// moment ago; see [`lapse`].
+    #[error("reservation {0} has been paid for and cannot lapse")]
+    Secured(String),
+    /// Asked to lapse a hold whose deadline has not passed, or that never had
+    /// one. Refused rather than obeyed: the deadline is the booking's, not the
+    /// caller's.
+    #[error("reservation {0} is not an unpaid hold past its deadline")]
+    NotLapsed(String),
     #[error("a reservation cannot go from {from} to {to}")]
     CannotMove { from: Stage, to: Stage },
     #[error("this reservation has no line {0}")]
@@ -128,10 +141,18 @@ impl erp_i18n::Localize for BookingError {
                 Message::new(messages::BARRED).with("resource", MessageArg::text(resource))
             }
             Self::NoReasonToBar => Message::new(messages::NO_REASON_TO_BAR),
+            Self::NothingToBill(id) => Message::new(messages::NOTHING_TO_BILL)
+                .with("reservation", MessageArg::text(id.clone())),
             Self::NoSuchReservation(id) => Message::new(messages::NO_SUCH_RESERVATION)
                 .with("reservation", MessageArg::text(id)),
             Self::Over { stage, .. } => {
                 Message::new(messages::OVER).with("stage", MessageArg::text(stage.as_str()))
+            }
+            Self::Secured(id) => {
+                Message::new(messages::SECURED).with("reservation", MessageArg::text(id))
+            }
+            Self::NotLapsed(id) => {
+                Message::new(messages::NOT_LAPSED).with("reservation", MessageArg::text(id))
             }
             Self::CannotMove { from, to } => Message::new(messages::CANNOT_MOVE)
                 .with("from", MessageArg::text(from.as_str()))
@@ -209,6 +230,11 @@ pub struct Details {
     /// How many can be held at once. One stylist, six covers, eight rooms of a
     /// type, five hundred places in a museum slot.
     pub capacity: u16,
+    /// **The published price**, before tax, when the business publishes one.
+    /// What a public booking is priced at — a stranger cannot send a price —
+    /// and so what a deposit is a fraction of. `None` is a business that
+    /// bills elsewhere.
+    pub rate: Option<Money>,
     /// Where it is. **Set once**, for the reason `kind` is — see
     /// [`crate::ResourceEvent::Declared`] — so [`Amendment`] does not carry one.
     ///
@@ -234,6 +260,9 @@ pub struct Amendment {
     pub name: String,
     pub name_latin: Option<String>,
     pub capacity: u16,
+    /// See [`Details::rate`]. Part of what an amendment says, so `None` here
+    /// withdraws a published price.
+    pub rate: Option<Money>,
 }
 
 impl Details {
@@ -336,6 +365,7 @@ pub async fn declare_resource(
                         name_latin: details.name_latin.clone(),
                         kind: details.kind,
                         capacity: details.capacity,
+                        rate: details.rate,
                         branch: details.branch.clone(),
                         employee: details.employee.clone(),
                         at,
@@ -376,6 +406,7 @@ pub async fn amend_resource(
         if resource.name == amendment.name
             && resource.name_latin == amendment.name_latin
             && resource.capacity == amendment.capacity
+            && resource.rate == amendment.rate
         {
             return Ok(Decision::nothing());
         }
@@ -383,6 +414,7 @@ pub async fn amend_resource(
             name: amendment.name.clone(),
             name_latin: amendment.name_latin.clone(),
             capacity: amendment.capacity,
+            rate: amendment.rate,
             at,
         }))
     })
@@ -537,6 +569,8 @@ pub async fn fit_out(
             },
             kind: template.kind,
             capacity: template.capacity,
+            // A blueprint's resource is unpriced until the business says.
+            rate: None,
             // A fixture installs one trade's worth of resources, and a trade is
             // not a place. A business with branches assigns them afterwards by
             // declaring its own.
@@ -704,6 +738,92 @@ pub async fn move_to(
 
 /// Moves a booking in time, or onto different resources.
 ///
+/// **Releases an unpaid hold whose deadline has passed** — and nothing else.
+///
+/// # Why this is not `move_to(Cancelled)`
+///
+/// Because `move_to` does what it is told, and the thing telling it is a job
+/// that decided from a projection. The first version of hold expiry read
+/// `secured_by IS NULL` from `proj_booking.reservation` and then cancelled; a
+/// deposit that settled between that read and this write — the projection had
+/// not caught up — was cancelled anyway, with the money taken and the
+/// prepayment invoice standing. The doc said the ordering "only fails safe",
+/// and it did only as long as the projection was fresh.
+///
+/// So the refusal lives here, against the log, where `branches` and `bars` put
+/// theirs: a booking that has been told its deposit arrived **cannot lapse**,
+/// whatever any read model says. The projection still decides *which* bookings
+/// to look at; this decides whether each one may go.
+///
+/// Three refusals and one no-op. Paid → refused. No deposit asked, or the
+/// deadline not yet reached → refused, because the deadline is the booking's.
+/// Already over → nothing to do. Otherwise it is cancelled with the reason
+/// written down, and the capacity goes back.
+pub async fn lapse(
+    db: &TenantDb,
+    id: &AggregateId,
+    now: Timestamp,
+    metadata: &Metadata,
+) -> Outcome<ReservationEvent> {
+    for _ in 1..=MAX_ATTEMPTS {
+        let mut tx = db.begin().await?;
+        let outcome = async {
+            let conn = &mut *tx;
+            // For the reason in the cancellation, which a person reads.
+            let calendar = erp_eventlog::configuration::calendar(&mut *conn)
+                .await
+                .map_err(|e| ExecuteError::Rejected(BookingError::Config(e)))?;
+            let committed = try_execute::<Reservation, _, _>(
+                &mut *conn,
+                id,
+                crate::upcasters(),
+                metadata,
+                |loaded: &Loaded<Reservation>| {
+                    let reservation = &loaded.aggregate;
+                    let stage = reservation
+                        .stage
+                        .ok_or_else(|| BookingError::NoSuchReservation(id.to_string()))?;
+                    if stage.is_over() {
+                        return Ok(Decision::nothing());
+                    }
+                    if reservation.secured_by.is_some() {
+                        return Err(BookingError::Secured(id.to_string()));
+                    }
+                    let due = reservation
+                        .deposit
+                        .as_ref()
+                        .filter(|deposit| deposit.due_by <= now)
+                        .ok_or_else(|| BookingError::NotLapsed(id.to_string()))?;
+                    // Only a hold lapses. A booking the business has confirmed
+                    // is a promise the business made, and a deposit that never
+                    // arrived is then a conversation, not an automatic release.
+                    if stage != Stage::Reserved {
+                        return Err(BookingError::NotLapsed(id.to_string()));
+                    }
+                    Ok(Decision::one(ReservationEvent::Moved {
+                        to: Stage::Cancelled,
+                        why: format!("the deposit was not paid by {}", calendar.clock(due.due_by)),
+                        at: now,
+                    }))
+                },
+            )
+            .await?;
+
+            if committed.at.is_some() {
+                erp_occupancy::release(&mut *conn, id)
+                    .await
+                    .map_err(|e| ExecuteError::Rejected(BookingError::Occupancy(e)))?;
+            }
+            Ok(committed)
+        }
+        .await;
+        if let Some(done) = settle(tx, outcome).await? {
+            return Ok(done);
+        }
+    }
+    contended(id, Reservation::domain())
+}
+
 /// One command for both, because underneath they are one operation: give back
 /// everything this reservation holds, then take what it wants. Giving back
 /// first is what stops a booking colliding with where it already was, so
@@ -820,7 +940,12 @@ pub async fn assign(
             // same thing here: this is not somebody who can do this job.
             if let Some(employee) = &resource.employee {
                 let services = booked_services(&mut *conn, id, line).await?;
-                let day = at.date_naive();
+                // The tenant's day, not UTC's: a 01:00 appointment is on the
+                // date the rota and the documents say it is.
+                let day = erp_eventlog::configuration::calendar(&mut *conn)
+                    .await
+                    .map_err(|e| ExecuteError::Rejected(BookingError::Config(e)))?
+                    .day(at);
                 for service in &services {
                     if !hr::eligible_for(&mut *conn, employee, service, day)
                         .await
@@ -1186,7 +1311,7 @@ async fn priced(
     conn: &mut sqlx::PgConnection,
     drafts: &[DraftLine],
 ) -> Result<Vec<Line>, ExecuteError<BookingError>> {
-    let calendar = Calendar::resolve(&mut *conn)
+    let calendar = erp_eventlog::configuration::calendar(&mut *conn)
         .await
         .map_err(|e| ExecuteError::Rejected(BookingError::Config(e)))?;
     let tariff = Tariff::resolve(&mut *conn)
@@ -1246,10 +1371,9 @@ async fn check_offered(
     conn: &mut sqlx::PgConnection,
     lines: &[Line],
 ) -> Result<(), ExecuteError<BookingError>> {
-    let calendar = Calendar::resolve(&mut *conn)
+    let calendar = erp_eventlog::configuration::calendar(&mut *conn)
         .await
         .map_err(|e| ExecuteError::Rejected(BookingError::Config(e)))?;
-    let offset = calendar.offset();
 
     // One load per distinct resource, however many lines name it.
     let mut loaded: BTreeMap<&str, Resource> = BTreeMap::new();
@@ -1264,7 +1388,7 @@ async fn check_offered(
             let Some(resource) = loaded.get(key) else {
                 continue;
             };
-            if !any_covers(&resource.availability, line.span, offset) {
+            if !any_covers(&resource.availability, line.span, calendar) {
                 return Err(ExecuteError::Rejected(BookingError::NotOffered {
                     resource: key.to_owned(),
                 }));
@@ -1370,6 +1494,55 @@ fn rejected(error: BookingError) -> Refusal {
     CommandError::Execute(ExecuteError::Rejected(error))
 }
 
+/// **Records that the work was billed.** Charges nothing, raises nothing.
+///
+/// The invoice is whoever's called this: the desk's route or the worker's
+/// pass, standing where `booking` and `sales` meet, raised the document and
+/// tells the diary in the same transaction. This is the half that stops it
+/// happening twice: a booking already billed answers nothing, however many
+/// times it is asked, and one that was cancelled or never turned up is refused
+/// because there was no supply to bill.
+///
+/// Nothing here requires the booking to be *completed* — the desk bills what
+/// it bills — but the worker only asks about completed ones.
+pub async fn bill_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    invoice: &AggregateId,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<Committed<ReservationEvent>, ExecuteError<BookingError>> {
+    try_execute::<Reservation, _, BookingError>(
+        &mut *conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            let held = &loaded.aggregate;
+            let stage = held
+                .stage
+                .ok_or_else(|| BookingError::NoSuchReservation(id.to_string()))?;
+            if held.billed_by.is_some() {
+                return Ok(Decision::nothing());
+            }
+            if matches!(stage, Stage::Cancelled | Stage::NoShow) {
+                return Err(BookingError::Over {
+                    reservation: id.to_string(),
+                    stage,
+                });
+            }
+            if !held.lines.iter().any(|line| line.charge.is_some()) {
+                return Err(BookingError::NothingToBill(id.to_string()));
+            }
+            Ok(Decision::one(ReservationEvent::Billed {
+                invoice: invoice.clone(),
+                at,
+            }))
+        },
+    )
+    .await
+}
+
 /// **Records that the deposit arrived.**
 ///
 /// # Why this takes an opaque id and asks nothing
@@ -1403,15 +1576,27 @@ pub async fn secure_in(
         crate::upcasters(),
         metadata,
         |loaded| {
-            let state = &loaded.aggregate;
-            if state.stage.is_none() {
-                return Err(BookingError::NoSuchReservation(id.to_string()));
-            }
+            let held = &loaded.aggregate;
+            let stage = held
+                .stage
+                .ok_or_else(|| BookingError::NoSuchReservation(id.to_string()))?;
             // A retry, or a second payment against a slot already paid for. The
             // first one holds it; a second is money to give back, not a fact
             // about this booking.
-            if state.secured_by.is_some() {
+            if held.secured_by.is_some() {
                 return Ok(Decision::nothing());
+            }
+            // **Money for a booking that is already over is refused, not
+            // recorded.** Writing `Secured` onto a cancelled booking would say
+            // the slot is paid for when there is no slot, and nothing would ever
+            // look at it again. Refusing makes the worker log it, which is the
+            // one place somebody will see that a customer paid for a booking
+            // they no longer have.
+            if stage.is_over() {
+                return Err(BookingError::Over {
+                    reservation: id.to_string(),
+                    stage,
+                });
             }
             Ok(Decision::one(ReservationEvent::Secured {
                 payment: payment.clone(),

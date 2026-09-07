@@ -15,7 +15,7 @@
 //! not. Collapsing them into "0%" is a decision that cannot be undone later
 //! without asking a bookkeeper to reclassify every historic line.
 
-use erp_types::{CurrencyCode, Money};
+use erp_types::{AggregateId, CurrencyCode, Money, MoneyError, Timestamp};
 use serde::{Deserialize, Serialize};
 
 // Defined in `ledger` because `purchases` classifies by the same three
@@ -131,7 +131,100 @@ pub struct Totals {
     pub bands: Vec<TaxBand>,
 }
 
+/// **What a prepayment invoice already billed for a supply**, so the final
+/// invoice charges only the rest.
+///
+/// A deposit is taxed when it is received — that is its own tax point — and the
+/// prepayment invoice declared it then. When the service is delivered the
+/// final invoice must not declare it again: ZATCA's final invoice after a
+/// prepayment shows the whole supply and deducts what the prepayment invoice
+/// covered, band by band. This carries exactly that: which document, and what
+/// each of its bands came to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Prepaid {
+    /// The prepayment invoice's aggregate id, for anybody following the money.
+    pub invoice: AggregateId,
+    /// Its statutory number — what the final invoice references.
+    pub number: String,
+    pub issued_on: Timestamp,
+    /// What it declared, per band. Deducted from the same bands of the supply.
+    pub bands: Vec<TaxBand>,
+}
+
+impl Prepaid {
+    /// What the prepayment invoice came to, before tax.
+    pub fn net(&self, currency: CurrencyCode) -> Result<Money, MoneyError> {
+        Money::checked_sum(self.bands.iter().map(|b| b.net), currency)
+    }
+
+    /// And its tax.
+    pub fn tax(&self, currency: CurrencyCode) -> Result<Money, MoneyError> {
+        Money::checked_sum(self.bands.iter().map(|b| b.tax), currency)
+    }
+
+    /// What was paid up front, tax included.
+    pub fn gross(&self, currency: CurrencyCode) -> Result<Money, MoneyError> {
+        self.net(currency)?.checked_add(self.tax(currency)?)
+    }
+}
+
+/// Why a prepayment cannot be deducted from a supply.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PrepaidError {
+    /// The prepayment declared a band the supply does not have — a deposit at
+    /// the standard rate against a zero-rated service.
+    #[error("the prepayment was declared as {} at {basis_points} basis points, which this supply does not charge", category.as_str())]
+    NoSuchBand {
+        category: VatCategory,
+        basis_points: i32,
+    },
+    /// The prepayment came to more than the supply does. A deposit larger than
+    /// the service is a refund, not a deduction.
+    #[error("the prepayment ({prepaid}) is more than the supply ({supply}) in its band")]
+    MoreThanTheSupply { prepaid: Money, supply: Money },
+    #[error(transparent)]
+    Money(#[from] MoneyError),
+}
+
 impl Totals {
+    /// **These totals less what a prepayment invoice already declared.**
+    ///
+    /// Band by band, because tax is declared by band: the deposit's standard-
+    /// rated 100 comes off the supply's standard-rated 1,000 and leaves 900 to
+    /// declare at that rate, and nothing else moves. Refuses a band the supply
+    /// does not have and a prepayment larger than the supply, rather than
+    /// declaring a negative.
+    pub fn less(&self, prepaid: &Prepaid) -> Result<Self, PrepaidError> {
+        let mut bands = self.bands.clone();
+        for paid in &prepaid.bands {
+            let band = bands
+                .iter_mut()
+                .find(|b| b.category == paid.category && b.basis_points == paid.basis_points)
+                .ok_or(PrepaidError::NoSuchBand {
+                    category: paid.category,
+                    basis_points: paid.basis_points,
+                })?;
+            if paid.net.minor() > band.net.minor() || paid.tax.minor() > band.tax.minor() {
+                return Err(PrepaidError::MoreThanTheSupply {
+                    prepaid: paid.net,
+                    supply: band.net,
+                });
+            }
+            band.net = band.net.checked_sub(paid.net)?;
+            band.tax = band.tax.checked_sub(paid.tax)?;
+        }
+        let currency = self.net.currency();
+        let net = Money::checked_sum(bands.iter().map(|b| b.net), currency)?;
+        let tax = Money::checked_sum(bands.iter().map(|b| b.tax), currency)?;
+        Ok(Self {
+            net,
+            tax,
+            gross: net.checked_add(tax)?,
+            discount: self.discount,
+            bands,
+        })
+    }
+
     /// What was discounted, in this invoice's currency. Zero when nothing was.
     #[must_use]
     pub fn discount(&self) -> Money {

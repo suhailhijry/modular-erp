@@ -66,14 +66,14 @@ pub use documents::{
     pending, registered, standing, unsigned,
 };
 pub use filing::{Filing, FilingEvent};
-pub use onboarded::{Onboarding, OnboardingEvent, onboarding_id};
+pub use onboarded::{Onboarding, OnboardingEvent, Refusal, Step, onboarding_id};
 pub use projections::{
     FiledReturn, FiledReturns, Onboarded, Onboardings, Outcomes, TaxSa, filed, onboarding,
     projections,
 };
-pub use report::{Band, Return, Side, Sides, vat_return};
+pub use report::{Band, Return, Side, Sides, vat_return, vat_return_between};
 pub use submit::{SignedOff, SweepError, Swept, sign_pending, submit_pending};
-pub use taxpayer::{Registration, Taxpayer, TaxpayerEvent};
+pub use taxpayer::{Address, IdScheme, Registration, Taxpayer, TaxpayerEvent};
 
 use erp_i18n::StaticCatalog;
 use erp_types::{DomainName, EventName, SchemaVersion};

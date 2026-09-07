@@ -154,7 +154,18 @@ impl Job for OutboxJob {
         }
 
         for effect in &claimed {
-            let settlement = self.dispatcher.deliver(effect).await;
+            // The heartbeat renews through the tenant handle, one budgeted
+            // connection per beat, given back at once.
+            let settlement = self
+                .dispatcher
+                .deliver(effect, || async {
+                    let mut conn = db
+                        .acquire()
+                        .await
+                        .map_err(|e| erp_eventlog::DispatchError::Lease(e.to_string()))?;
+                    self.dispatcher.renew(&mut conn, effect).await
+                })
+                .await;
 
             let mut conn = db.acquire().await?;
             self.dispatcher

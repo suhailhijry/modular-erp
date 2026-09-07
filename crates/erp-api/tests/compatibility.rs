@@ -205,35 +205,57 @@ fn required_of(doc: &Value, body: &Value) -> BTreeSet<String> {
         &body["content"]["application/json"]["schema"],
         "",
         0,
-        &mut BTreeSet::new(),
+        &mut Vec::new(),
         &mut required,
     );
     required
 }
 
 /// Collects every required property, at every level, as a dotted path.
+/// **The cycle guard is the branch, not the walk.** A component referenced from
+/// two properties is walked under both — a field removed from the second
+/// occurrence is a break the gate must see — and only a reference already open
+/// on the current branch stops the descent, which is what keeps a recursive
+/// schema finite. The first version shared one set across the whole walk, so
+/// the second occurrence of any component was invisible.
 fn walk_required(
     doc: &Value,
     schema: &Value,
     prefix: &str,
     depth: usize,
-    seen: &mut BTreeSet<String>,
+    branch: &mut Vec<String>,
     into: &mut BTreeSet<String>,
 ) {
     if depth > MAX_DEPTH {
         return;
     }
-    if let Some(reference) = schema["$ref"].as_str()
-        && !seen.insert(reference.to_owned())
-    {
-        return;
+    let reference = schema["$ref"].as_str().map(str::to_owned);
+    if let Some(reference) = &reference {
+        if branch.contains(reference) {
+            return;
+        }
+        branch.push(reference.clone());
     }
+    walk_required_inner(doc, schema, prefix, depth, branch, into);
+    if reference.is_some() {
+        branch.pop();
+    }
+}
+
+fn walk_required_inner(
+    doc: &Value,
+    schema: &Value,
+    prefix: &str,
+    depth: usize,
+    branch: &mut Vec<String>,
+    into: &mut BTreeSet<String>,
+) {
     let schema = resolve(doc, schema);
 
     // An array's requirements are its items': a caller filling in `lines[0]`
     // has to satisfy whatever one element requires.
     if !schema["items"].is_null() {
-        walk_required(doc, &schema["items"], prefix, depth, seen, into);
+        walk_required(doc, &schema["items"], prefix, depth, branch, into);
     }
 
     let named = |name: &str| {
@@ -261,7 +283,7 @@ fn walk_required(
     // it — and a gate nobody reads is not a gate.
     for (name, property) in properties {
         if required.contains(name.as_str()) {
-            walk_required(doc, property, &named(name), depth + 1, seen, into);
+            walk_required(doc, property, &named(name), depth + 1, branch, into);
         }
     }
 }
@@ -289,7 +311,7 @@ fn success_fields(doc: &Value, responses: &Value) -> BTreeSet<String> {
             &response["content"]["application/json"]["schema"],
             "",
             0,
-            &mut BTreeSet::new(),
+            &mut Vec::new(),
             &mut fields,
         );
     }
@@ -303,31 +325,53 @@ fn success_fields(doc: &Value, responses: &Value) -> BTreeSet<String> {
 /// full structural diff starts.
 const MAX_DEPTH: usize = 3;
 
+/// **The cycle guard is the branch, not the walk.** A component referenced from
+/// two properties is walked under both — a field removed from the second
+/// occurrence is a break the gate must see — and only a reference already open
+/// on the current branch stops the descent, which is what keeps a recursive
+/// schema finite. The first version shared one set across the whole walk, so
+/// the second occurrence of any component was invisible.
 fn walk(
     doc: &Value,
     schema: &Value,
     prefix: &str,
     depth: usize,
-    seen: &mut BTreeSet<String>,
+    branch: &mut Vec<String>,
     into: &mut BTreeSet<String>,
 ) {
     if depth > MAX_DEPTH {
         return;
     }
+    let reference = schema["$ref"].as_str().map(str::to_owned);
+    if let Some(reference) = &reference {
+        if branch.contains(reference) {
+            return;
+        }
+        branch.push(reference.clone());
+    }
+    walk_inner(doc, schema, prefix, depth, branch, into);
+    if reference.is_some() {
+        branch.pop();
+    }
+}
+
+fn walk_inner(
+    doc: &Value,
+    schema: &Value,
+    prefix: &str,
+    depth: usize,
+    branch: &mut Vec<String>,
+    into: &mut BTreeSet<String>,
+) {
     // A `$ref` already on this branch is a cycle. Following it again would add
     // nothing and would not terminate.
-    if let Some(reference) = schema["$ref"].as_str()
-        && !seen.insert(reference.to_owned())
-    {
-        return;
-    }
     let schema = resolve(doc, schema);
 
     // An array's fields are its items' fields, at the same name: a client
     // reading `items[0].name` is reading `items.name` as far as this is
     // concerned.
     if !schema["items"].is_null() {
-        walk(doc, &schema["items"], prefix, depth, seen, into);
+        walk(doc, &schema["items"], prefix, depth, branch, into);
     }
 
     let Some(properties) = schema["properties"].as_object() else {
@@ -340,7 +384,7 @@ fn walk(
             format!("{prefix}.{name}")
         };
         into.insert(path.clone());
-        walk(doc, property, &path, depth + 1, seen, into);
+        walk(doc, property, &path, depth + 1, branch, into);
     }
 }
 
@@ -359,4 +403,58 @@ fn resolve(doc: &Value, schema: &Value) -> Value {
         .and_then(|name| doc["components"]["schemas"].get(name))
         .cloned()
         .unwrap_or_else(|| schema.clone())
+}
+
+/// **The same component under two properties is checked under both.** Before
+/// the cycle guard was per branch, `Money` referenced from `net` and from `tax`
+/// was walked once, and a field dropped from the second was a break the gate
+/// could not see.
+#[test]
+fn a_component_referenced_twice_is_walked_under_both_paths() {
+    let doc = serde_json::json!({
+        "components": { "schemas": {
+            "Money": { "type": "object", "properties": { "minor": {}, "currency": {} }, "required": ["minor", "currency"] },
+            "Node": { "type": "object", "properties": { "child": { "$ref": "#/components/schemas/Node" }, "name": {} } }
+        } },
+    });
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "net": { "$ref": "#/components/schemas/Money" },
+            "tax": { "$ref": "#/components/schemas/Money" },
+            "tree": { "$ref": "#/components/schemas/Node" }
+        },
+        "required": ["net", "tax"]
+    });
+    let mut fields = BTreeSet::new();
+    walk(&doc, &schema, "", 0, &mut Vec::new(), &mut fields);
+    for expected in [
+        "net.minor",
+        "net.currency",
+        "tax.minor",
+        "tax.currency",
+        "tree.name",
+    ] {
+        assert!(
+            fields.contains(expected),
+            "{expected} missing from {fields:?}"
+        );
+    }
+    assert!(
+        fields.contains("tree.child") && !fields.contains("tree.child.child"),
+        "a recursive schema is walked once per branch and then stops: {fields:?}"
+    );
+
+    let mut required = BTreeSet::new();
+    walk_required(&doc, &schema, "", 0, &mut Vec::new(), &mut required);
+    for expected in ["net", "tax"] {
+        assert!(
+            required.contains(expected),
+            "{expected} missing from {required:?}"
+        );
+    }
+    assert!(
+        required.iter().any(|r| r.starts_with("tax.")),
+        "the second occurrence of Money was not walked: {required:?}"
+    );
 }

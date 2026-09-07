@@ -24,6 +24,7 @@ use utoipa_axum::routes;
 use erp_web::AppState;
 use erp_web::Problem;
 use erp_web::{Allowed, Consistency, Language, ManageAccounts, Read};
+use erp_web::{IfMatch, Versioned, config_problem};
 use erp_web::{Json, Query, bad_request, parse_id, require_module};
 
 use crate::gosi::{Footing, Schedule};
@@ -180,7 +181,7 @@ struct GratuityQuery {
     tag = "hr_sa",
     params(("Host" = String, Header, description = "The tenant's subdomain."),),
     responses(
-        (status = OK, body = ScheduleView),
+        (status = OK, body = ScheduleView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -190,7 +191,7 @@ struct GratuityQuery {
 async fn gosi_schedule(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<ScheduleView>, Problem> {
+) -> Result<Versioned<ScheduleView>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
 
@@ -198,11 +199,12 @@ async fn gosi_schedule(
     // came to: a tenant on the defaults needs to be told so.
     let stored = erp_eventlog::configuration::get::<Schedule>(&mut conn, Schedule::KEY)
         .await
-        .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
     let configured = stored.is_some();
+    let version = stored.as_ref().map_or(0, |c| c.version);
     let schedule = stored.map_or_else(Schedule::default, |c| c.value);
 
-    Ok(Json(view(schedule, configured)))
+    Ok(Versioned(version, view(schedule, configured)))
 }
 
 /// Set it.
@@ -210,10 +212,11 @@ async fn gosi_schedule(
     put,
     path = "/v1/hr_sa/gosi/schedule",
     tag = "hr_sa",
-    params(("Host" = String, Header, description = "The tenant's subdomain."),),
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally."), ("Host" = String, Header, description = "The tenant's subdomain."),),
     request_body = NewSchedule,
     responses(
         (status = NO_CONTENT, description = "Stored."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -224,6 +227,7 @@ async fn set_gosi_schedule(
     tenant: Allowed<ManageAccounts>,
     State(_state): State<AppState>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<NewSchedule>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -241,9 +245,10 @@ async fn set_gosi_schedule(
         Schedule::KEY,
         &schedule,
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
-    .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+    .map_err(|e| config_problem(&e, locale, &CATALOG))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -370,6 +375,9 @@ async fn end_of_service_for(
     let details = hr::pay_details(&mut conn, employee.as_str())
         .await
         .map_err(|e| database(&e, locale))?;
+    let calendar = erp_eventlog::configuration::calendar(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
     drop(conn);
 
     let Some(details) = details else {
@@ -404,11 +412,8 @@ async fn end_of_service_for(
 
     // Service runs to the day they left, or to today if they have not — which
     // is what a business asking "what would we owe her" means.
-    let from = details.hired_on.date_naive();
-    let until = details
-        .left_at
-        .unwrap_or_else(chrono::Utc::now)
-        .date_naive();
+    let from = calendar.day(details.hired_on);
+    let until = calendar.day(details.left_at.unwrap_or_else(chrono::Utc::now));
     let days = (until - from).num_days();
 
     let award = crate::end_of_service(wage, days, reason).map_err(|_| {
@@ -470,6 +475,9 @@ async fn leave_entitlement(
         .await?;
 
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let calendar = erp_eventlog::configuration::calendar(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
     let person = hr::employee(&mut conn, &id)
         .await
         .map_err(|e| database(&e, locale))?
@@ -479,13 +487,13 @@ async fn leave_entitlement(
         .map_err(|e| database(&e, locale))?;
     drop(conn);
 
-    let hired = person.hired_on.date_naive();
+    let hired = calendar.day(person.hired_on);
     // Employed for the part of the window that is after they joined and before
     // they left — a joiner is owed the part of the year they were here for.
     let opens = window.from.max(hired);
     let closes = person
         .left_at
-        .map_or(window.until, |at| window.until.min(at.date_naive()));
+        .map_or(window.until, |at| window.until.min(calendar.day(at)));
     let days_in_window = (closes - opens).num_days() + 1;
     let served_days = (opens - hired).num_days();
 

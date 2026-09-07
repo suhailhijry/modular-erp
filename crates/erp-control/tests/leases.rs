@@ -87,10 +87,15 @@ impl Fixture {
             .expect("reads")
     }
 
-    /// Winds a tenant's lease back so it reads as lapsed.
+    /// Winds the clock forward past a tenant's lease, as far as the row is
+    /// concerned. A claim sets the lease and the next visit to the same
+    /// instant, so a lapsed lease is a due tenant; the helper moves both.
     async fn expire_lease(&self, tenant: TenantId) {
         sqlx::query(
-            "UPDATE tenant SET worker_lease_until = now() - INTERVAL '1 second' WHERE id = $1",
+            "UPDATE tenant
+                SET worker_lease_until = now() - INTERVAL '1 second',
+                    next_visit_at      = now() - INTERVAL '1 second'
+              WHERE id = $1",
         )
         .bind(tenant.as_uuid())
         .execute(self.db.pool())
@@ -127,8 +132,42 @@ async fn a_claimed_tenant_is_not_claimable_by_another_worker() {
     );
 }
 
+/// **A claimed tenant is not handed back to its own worker while the visit
+/// runs.** The first version did exactly that — "renewing and claiming are the
+/// same call" — and the worker's claim loop, which comes straight back round
+/// after spawning visits, was handed its own in-flight tenants again: one due
+/// tenant filled every concurrency slot with visits of itself, and two of them
+/// could both charge a saved card. A claim pushes `next_visit_at` past the
+/// lease, so until the lease lapses the tenant is nobody's to claim.
 #[tokio::test]
-async fn re_claiming_your_own_tenant_renews_it() {
+async fn a_claimed_tenant_is_not_claimable_again_by_its_own_worker() {
+    let fixture = Fixture::new().await;
+    let tenant = fixture.tenant("acme").await;
+
+    let first = fixture
+        .control
+        .claim_tenants("worker-a", 10, schedule())
+        .await
+        .expect("claims");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].tenant.id, tenant);
+
+    let again = fixture
+        .control
+        .claim_tenants("worker-a", 10, schedule())
+        .await
+        .expect("claims");
+    assert!(
+        again.is_empty(),
+        "the same worker was handed a tenant it is already visiting"
+    );
+}
+
+/// **Renewing is its own call, from inside the visit.** It extends the lease
+/// only for the worker that holds it, and says so; a worker whose lease has
+/// lapsed is told, and the right answer to that is to stop.
+#[tokio::test]
+async fn a_lease_is_renewed_only_by_its_holder_and_only_while_it_holds() {
     let fixture = Fixture::new().await;
     let tenant = fixture.tenant("acme").await;
 
@@ -138,15 +177,46 @@ async fn re_claiming_your_own_tenant_renews_it() {
         .await
         .expect("claims");
 
-    // Renewing and claiming are the same call, so long work needs no second
-    // code path to keep hold of its tenant.
-    let again = fixture
+    assert!(
+        fixture
+            .control
+            .renew_lease(tenant, "worker-a", schedule().lease)
+            .await
+            .expect("renews"),
+        "the holder could not renew its own lease"
+    );
+    assert!(
+        !fixture
+            .control
+            .renew_lease(tenant, "worker-b", schedule().lease)
+            .await
+            .expect("answers"),
+        "a worker that does not hold the lease renewed it"
+    );
+
+    // Renewing also keeps the tenant off the claim list: nobody else gets it
+    // while the holder is still saying it is working.
+    let poached = fixture
         .control
-        .claim_tenants("worker-a", 10, schedule())
+        .claim_tenants("worker-b", 10, schedule())
         .await
         .expect("claims");
-    assert_eq!(again.len(), 1);
-    assert_eq!(again[0].tenant.id, tenant);
+    assert!(
+        poached.is_empty(),
+        "a renewed tenant was claimed by another worker"
+    );
+
+    // Once the lease has lapsed, the holder is told so rather than renewing
+    // a lease it no longer has.
+    fixture.expire_lease(tenant).await;
+    assert!(
+        !fixture
+            .control
+            .renew_lease(tenant, "worker-a", schedule().lease)
+            .await
+            .expect("answers"),
+        "a lapsed lease was renewed as if it were still held"
+    );
 }
 
 #[tokio::test]

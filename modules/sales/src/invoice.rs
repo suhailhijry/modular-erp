@@ -308,6 +308,12 @@ pub enum InvoiceEvent {
         /// decodes as the ordinary one it was, and no upcaster is needed.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         prepayment: bool,
+        /// **What a prepayment invoice already billed for this supply**, and
+        /// what `totals` therefore leaves out. The lines are the whole supply;
+        /// the totals are what this document charges and declares — the rest.
+        /// `None` on every invoice that is not the final one after a deposit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prepaid: Option<crate::vat::Prepaid>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         note: String,
     },
@@ -720,6 +726,7 @@ mod tests {
         let net = Money::from_minor(gross_net, currency);
         InvoiceEvent::Issued {
             prepayment: false,
+            prepaid: None,
             number: Some("INV-00001".to_owned()),
             customer: Box::new(Customer::new("Acme")),
             issued_on: Timestamp::UNIX_EPOCH,

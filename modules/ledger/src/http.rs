@@ -30,9 +30,10 @@ use utoipa_axum::routes;
 use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{Allowed, IdempotencyKey, Language, ManageAccounts, PostEntries, Read};
+use erp_web::{Allowed, Anonymous, IdempotencyKey, Language, ManageAccounts, PostEntries, Read};
 use erp_web::{Amount, Json, bad_request, creating, metadata, parse_id, require_module};
 use erp_web::{Consistency, nudge};
+use erp_web::{IfMatch, Versioned};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -625,13 +626,7 @@ async fn close_books(
 }
 
 fn config_problem(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem {
-    tracing::error!(error = %error, "configuration failed");
-    Problem::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &error.message(),
-        locale,
-        &CATALOG,
-    )
+    erp_web::config_problem(error, locale, &CATALOG)
 }
 
 // ---------------------------------------------------------------------------
@@ -660,7 +655,7 @@ struct RatesView {
     tag = "ledger",
     params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     responses(
-        (status = OK, body = RatesView),
+        (status = OK, body = RatesView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -669,7 +664,7 @@ struct RatesView {
 async fn vat_rates(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<RatesView>, Problem> {
+) -> Result<Versioned<RatesView>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let mut conn = tenant
@@ -677,14 +672,20 @@ async fn vat_rates(
         .acquire()
         .await
         .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::Rates::KEY)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
     let rates = crate::Rates::resolve(&mut conn)
         .await
         .map_err(|e| config_problem(&e, locale))?;
     drop(conn);
 
-    Ok(Json(RatesView {
-        standard: rates.standard,
-    }))
+    Ok(Versioned(
+        version,
+        RatesView {
+            standard: rates.standard,
+        },
+    ))
 }
 
 /// Set what this business charges VAT at.
@@ -701,10 +702,11 @@ async fn vat_rates(
     put,
     path = "/v1/ledger/vat-rates",
     tag = "ledger",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally."), ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = RatesView,
     responses(
         (status = NO_CONTENT, description = "Set. Applies to the next invoice, not to past ones."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "A negative rate, or one over 100%", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -714,6 +716,7 @@ async fn vat_rates(
 async fn set_vat_rates(
     tenant: Allowed<ManageAccounts>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<RatesView>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -741,6 +744,7 @@ async fn set_vat_rates(
             standard: body.standard,
         },
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
     .map_err(|e| config_problem(&e, locale))?;
@@ -781,9 +785,12 @@ struct ChartAccountView {
     path = "/v1/ledger/charts",
     tag = "ledger",
     security(),
-    responses((status = OK, body = Vec<ChartView>)),
+    responses(
+        (status = OK, body = Vec<ChartView>),
+        (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
+    ),
 )]
-async fn list_charts(Language(locale): Language) -> Json<Vec<ChartView>> {
+async fn list_charts(_anonymous: Anonymous, Language(locale): Language) -> Json<Vec<ChartView>> {
     Json(
         crate::CHARTS
             .iter()

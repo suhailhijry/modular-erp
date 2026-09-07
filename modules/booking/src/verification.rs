@@ -77,8 +77,18 @@ pub async fn issue(
 ) -> Result<Issued, VerificationError> {
     let handle = normalise(raw).ok_or_else(|| VerificationError::NotANumber(raw.to_owned()))?;
 
-    // **The cooldown, in the database.** Per number, so a second pod does not
-    // double the rate — which is the whole reason it is not a counter in memory.
+    // **The cooldown, in the database and serialised per number.** In the
+    // database so a second pod does not double the rate; under an advisory lock
+    // because a check followed by an insert is a race two requests a
+    // millisecond apart both win. The lock is this number's alone and goes with
+    // the caller's transaction.
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        format!("booking_verification:{handle}"),
+    )
+    .execute(&mut *conn)
+    .await?;
+
     let recent = sqlx::query_scalar!(
         "SELECT count(*) FROM booking_verification
           WHERE handle = $1 AND created_at > $2",
@@ -177,29 +187,8 @@ pub async fn sweep(conn: &mut sqlx::PgConnection, now: Timestamp) -> Result<u64,
     .rows_affected())
 }
 
-/// E.164, or nothing.
-///
-/// **Spaces, dashes and brackets are how people write numbers** and none of them
-/// mean anything; a leading `00` is the international prefix spelled the old
-/// way. Everything else is refused rather than repaired, because a number this
-/// cannot read is one the message would not reach either.
-#[must_use]
-pub fn normalise(raw: &str) -> Option<String> {
-    let stripped: String = raw
-        .chars()
-        .filter(|c| !matches!(c, ' ' | '-' | '(' | ')' | '.'))
-        .collect();
-    let digits = stripped
-        .strip_prefix('+')
-        .or_else(|| stripped.strip_prefix("00"))?;
-    if digits.len() < 8 || digits.len() > 15 || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    if digits.starts_with('0') {
-        return None;
-    }
-    Some(format!("+{digits}"))
-}
+/// A number, as E.164, or nothing. The kernel's rule — see [`erp_types::phone`].
+pub use erp_types::phone::normalise;
 
 fn digest(code: &str) -> [u8; 32] {
     sha2::Sha256::digest(code.as_bytes()).into()
@@ -221,35 +210,6 @@ fn six_digits() -> Result<String, VerificationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_number_is_read_the_way_people_write_one() {
-        assert_eq!(
-            normalise("+966 50 000 0000").as_deref(),
-            Some("+966500000000")
-        );
-        assert_eq!(
-            normalise("00966500000000").as_deref(),
-            Some("+966500000000")
-        );
-        assert_eq!(
-            normalise("+966-50-000-0000").as_deref(),
-            Some("+966500000000")
-        );
-    }
-
-    /// **A national number is refused, not guessed at.** `0500000000` is a
-    /// Saudi number to a Saudi reader and nothing at all to a message gateway,
-    /// and inventing a country code sends somebody else's phone a code.
-    #[test]
-    fn what_is_not_a_number_is_refused_rather_than_repaired() {
-        assert!(normalise("0500000000").is_none());
-        assert!(normalise("500000000").is_none());
-        assert!(normalise("+0966500000000").is_none());
-        assert!(normalise("+96650000000a").is_none());
-        assert!(normalise("+1234").is_none());
-        assert!(normalise("").is_none());
-    }
 
     #[test]
     fn a_code_is_six_digits() {

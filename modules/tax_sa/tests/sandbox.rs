@@ -108,6 +108,7 @@ fn registration() -> tax_sa::Registration {
             postal_code: "12211".to_owned(),
             country: "SA".to_owned(),
         },
+        industry: Some("Consulting".to_owned()),
     }
 }
 
@@ -124,6 +125,7 @@ fn document(kind: Kind, type_code: TypeCode, link: Link) -> Document {
         uuid: document_uuid(VAT_NUMBER, &number),
         number,
         issued_at: "2026-08-17T10:00:00Z".parse::<Timestamp>().expect("valid"),
+        calendar: erp_types::Calendar::default(),
         currency,
         seller: registration(),
         buyer: match kind {
@@ -164,6 +166,7 @@ fn document(kind: Kind, type_code: TypeCode, link: Link) -> Document {
         },
         link,
         reference: None,
+        prepaid: None,
         note: String::new(),
     }
 }
@@ -370,9 +373,13 @@ async fn zatca_accepts_every_compliance_document_this_build_generates() {
     };
     let at = "2026-08-17T10:00:00Z".parse::<Timestamp>().expect("valid");
 
-    let submissions =
-        tax_sa::zatca::onboarding::compliance_submissions(&registration(), &unit, &signer, at)
-            .expect("builds and signs");
+    let submissions = tax_sa::zatca::onboarding::compliance_submissions(
+        &registration(),
+        unit.issues,
+        &signer,
+        at,
+    )
+    .expect("builds and signs");
     assert_eq!(submissions.len(), 6, "both kinds, three documents each");
 
     let client = tax_sa::zatca::http::Fatoora::new(Environment::Sandbox).expect("a client");

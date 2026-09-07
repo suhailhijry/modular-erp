@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS resource (
     -- diary to its people — which changes nothing about how the diary works.
     employee      TEXT,
 
+    -- **The published price**, before tax, when the business publishes one.
+    -- What a public booking is priced at, and what the public services page
+    -- shows. Null is a business that bills elsewhere.
+    rate_minor    BIGINT,
+    rate_currency TEXT CHECK (rate_currency IS NULL OR length(rate_currency) = 3),
+
     -- The timetable, as the rules were written. JSONB because it is read whole
     -- and never queried into: the question "is this resource open then" is
     -- answered from the aggregate inside the booking transaction, not from here.
@@ -102,6 +108,12 @@ CREATE TABLE IF NOT EXISTS reservation (
     -- is — and null until something says the money arrived.
     secured_by     TEXT,
     secured_at     TIMESTAMPTZ,
+
+    -- **The invoice raised for the work**, once one has been. Opaque, like
+    -- `secured_by`: this module does not know what an invoice is, only that
+    -- this booking has one, which is what stops it getting two.
+    billed_by      TEXT,
+    billed_at      TIMESTAMPTZ,
 
     note           TEXT,
     reserved_on    TIMESTAMPTZ NOT NULL,

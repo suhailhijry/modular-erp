@@ -143,75 +143,52 @@
       },
       "ActivationRequest": {
         "example": {
-          "branch": "الفرع الرئيسي",
-          "common_name": "EGS1-886431145",
           "environment": "simulation",
-          "industry": "Consulting",
-          "otp": "123456",
-          "serial": "886431145"
+          "otp": "123456"
         },
         "properties": {
           "branch": {
-            "type": "string"
-          },
-          "common_name": {
-            "type": "string"
+            "description": "Only when this business wants its invoices distinct per branch. Absent,\nthe unit is the whole business.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "environment": {
+            "description": "`sandbox`, `simulation` or `production` — whichever portal the OTP was\ngenerated in.",
             "type": "string"
-          },
-          "industry": {
-            "type": "string"
-          },
-          "issues_simplified": {
-            "type": "boolean"
-          },
-          "issues_standard": {
-            "type": "boolean"
           },
           "otp": {
             "description": "**The six digits the taxpayer generates in the Fatoora portal.** Valid\nfor about an hour, used once, and never stored here.",
-            "type": "string"
-          },
-          "serial": {
             "type": "string"
           }
         },
         "required": [
           "environment",
-          "otp",
-          "branch",
-          "common_name",
-          "serial",
-          "industry"
+          "otp"
         ],
         "type": "object"
       },
       "ActivationView": {
         "properties": {
-          "checks_passed": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "checks_submitted": {
-            "description": "How many sample documents ZATCA was shown, and how many it accepted.",
+          "checks_expected": {
+            "description": "How many sample documents the worker will submit.",
             "minimum": 0,
             "type": "integer"
           },
           "compliance": {
             "$ref": "#/components/schemas/CertificateView",
-            "description": "The certificate an OTP bought."
+            "description": "The certificate the OTP bought. It can sign the compliance samples and\nnothing else."
           },
-          "production": {
-            "$ref": "#/components/schemas/CertificateView",
-            "description": "**The one that clears real invoices.**"
+          "state": {
+            "description": "`checking`: the worker now submits the samples and asks for the\nproduction certificate. Watch `GET /v1/tax_sa/zatca/onboarding`.",
+            "type": "string"
           }
         },
         "required": [
           "compliance",
-          "checks_submitted",
-          "checks_passed",
-          "production"
+          "state",
+          "checks_expected"
         ],
         "type": "object"
       },
@@ -342,6 +319,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "rate": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ListRate",
+                "description": "See `NewBookable::rate`. Absent withdraws a published price."
+              }
             ]
           }
         },
@@ -813,6 +801,52 @@
         ],
         "type": "object"
       },
+      "Billed": {
+        "description": "The invoice a booking was billed on.",
+        "properties": {
+          "deducted": {
+            "description": "The prepayment invoice it deducted, when a deposit had been paid.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invoice": {
+            "description": "The invoice's id — `bk-<reservation>`, so asking again finds it.",
+            "type": "string"
+          },
+          "number": {
+            "description": "Its statutory number.",
+            "type": "string"
+          },
+          "raised": {
+            "description": "**Whether this call raised it**, or found it already raised. A retry,\nor the worker reading a read model that had not yet caught up, answers\nthe same invoice and `false`.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "invoice",
+          "number",
+          "raised"
+        ],
+        "type": "object"
+      },
+      "BillingView": {
+        "description": "When a booking is billed.",
+        "example": {
+          "on_completion": true
+        },
+        "properties": {
+          "on_completion": {
+            "description": "**Raise the invoice the moment a booking is completed.** Off until the\nbusiness turns it on: the desk can always bill on demand, and a salon\nthat adds things at the till wants to. The invoice deducts the deposit's\nprepayment invoice, so the customer is charged only the rest.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "on_completion"
+        ],
+        "type": "object"
+      },
       "BodyView": {
         "properties": {
           "subject": {
@@ -888,6 +922,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "rate": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ListRate",
+                "description": "The published price, before tax, when there is one."
+              }
             ]
           },
           "withdrawn": {
@@ -1104,6 +1149,21 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "CalendarView": {
+        "description": "An IANA timezone, by name. Daylight saving, where the zone has it, is the\nzone's business and not a setting.",
+        "example": {
+          "zone": "Asia/Riyadh"
+        },
+        "properties": {
+          "zone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "zone"
+        ],
         "type": "object"
       },
       "CardRecord": {
@@ -1405,6 +1465,23 @@
           "description",
           "accounts",
           "preview"
+        ],
+        "type": "object"
+      },
+      "ChecksView": {
+        "properties": {
+          "passed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "submitted": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "submitted",
+          "passed_at"
         ],
         "type": "object"
       },
@@ -1853,6 +1930,48 @@
         ],
         "type": "object"
       },
+      "DeadLetterView": {
+        "properties": {
+          "attempts": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "dead_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "enqueued_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "The routing key — `email.send`, `webhook.post`.",
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "idempotency_key",
+          "attempts",
+          "enqueued_at",
+          "dead_at"
+        ],
+        "type": "object"
+      },
       "DeferralAccounts": {
         "properties": {
           "deferred": {
@@ -1892,8 +2011,19 @@
             "format": "int64",
             "type": "integer"
           },
+          "pay_at": {
+            "description": "**Where the customer goes to pay**, when a lender hosts the page. `null`\nuntil the worker has opened the checkout — a tick, not a request — and\nalways `null` for a card, which is paid in the browser.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "payment": {
-            "description": "**The charge to pay.** Give this to the gateway's form as its own id —\nMoyasar's `given_id` — so what the customer pays is this charge and not\none the browser chose.",
+            "description": "**The charge to pay.** For a card, give this to the gateway's form as its\nown id — Moyasar's `given_id` — so what the customer pays is this charge\nand not one the browser chose. For a lender, poll `GET` on this same\npath until `pay_at` names the page to send them to.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Which provider it is paid through.",
             "type": "string"
           },
           "tax": {
@@ -1903,6 +2033,7 @@
         },
         "required": [
           "payment",
+          "provider",
           "amount",
           "currency",
           "net",
@@ -1921,6 +2052,103 @@
         },
         "required": [
           "supply"
+        ],
+        "type": "object"
+      },
+      "DepositRequest": {
+        "description": "How the customer wants to pay. **Optional, and empty is a card.**",
+        "example": {
+          "email": "sara@example.com",
+          "provider": "tabby",
+          "return_to": {
+            "cancel": "https://salon.example/cancelled",
+            "failure": "https://salon.example/declined",
+            "success": "https://salon.example/booked"
+          }
+        },
+        "properties": {
+          "email": {
+            "description": "**Required by a lender**, which scores the buyer before it will lend.\nNever shown to staff, and never used to match a customer record.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phone": {
+            "description": "E.164, or something a person would write that reads as one. Falls back\nto the number the booking was made with. Required by a lender, which\nsends its one-time code there.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "description": "`moyasar` (the default), `tabby` or `tamara`. Only one this business has\nconfigured; anything else is refused by name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "return_to": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReturnTo",
+                "description": "**Where the customer lands when the lender is done with them.** Required\nby a lender; each must be on an origin this business has allowed."
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "DepositStatus": {
+        "description": "Where a booking's deposit has got to.",
+        "properties": {
+          "amount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "due_by": {
+            "description": "When the hold lapses, while it is still a hold.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paid": {
+            "description": "Whether the money is real and the slot is theirs.",
+            "type": "boolean"
+          },
+          "pay_at": {
+            "description": "Where to send the customer, while there is somewhere. See\n[`DepositDue::pay_at`].",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payment": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "stage": {
+            "description": "`requested` (asked for, nothing at the gateway yet), `pending` (at the\ngateway, waiting on the customer or a capture), `settled`, `failed`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "payment",
+          "provider",
+          "stage",
+          "amount",
+          "currency",
+          "paid"
         ],
         "type": "object"
       },
@@ -2042,14 +2270,24 @@
           "domain": {
             "type": "string"
           },
+          "record_name": {
+            "description": "Where to publish the proof: a DNS `TXT` record at this name…",
+            "type": "string"
+          },
+          "record_value": {
+            "description": "…with exactly this value. Then `POST /v1/domains/{domain}/verification`.",
+            "type": "string"
+          },
           "verification_token": {
-            "description": "Publish this where only the domain's owner could — a `TXT` record on\n`_erp-verification.<domain>`.\n\n**The same token every time you ask.** A tenant who has already published\none must not be told to publish a different one.",
+            "description": "**The same token every time you ask.** A tenant who has already published\none must not be told to publish a different one.",
             "type": "string"
           }
         },
         "required": [
           "domain",
-          "verification_token"
+          "verification_token",
+          "record_name",
+          "record_value"
         ],
         "type": "object"
       },
@@ -2712,6 +2950,13 @@
               "null"
             ]
           },
+          "pay_at": {
+            "description": "**Where the customer goes to pay**, while there is somewhere: the\ncheckout the worker opened at a provider that hosts one, or the 3-D\nSecure page a saved-card charge raised. `null` until the gateway has\nsaid, and for a charge that needs nobody.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "provider": {
             "type": "string"
           },
@@ -3305,6 +3550,28 @@
         ],
         "type": "object"
       },
+      "ListRate": {
+        "description": "A published price on the wire.",
+        "example": {
+          "amount": 20000,
+          "currency": "SAR"
+        },
+        "properties": {
+          "amount": {
+            "description": "Minor units, before tax.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "amount",
+          "currency"
+        ],
+        "type": "object"
+      },
       "LoyaltySchemeRecord": {
         "properties": {
           "rate_bp": {
@@ -3817,6 +4084,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "rate": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ListRate",
+                "description": "**The published price, before tax.** What the public site shows and\nwhat a public booking is priced at — a stranger cannot send a price —\nand so what a deposit is a fraction of. Absent for a business that\nbills elsewhere."
+              }
             ]
           }
         },
@@ -4555,8 +4833,8 @@
         "example": {
           "currency": "SAR",
           "filed_on": "2026-04-28T00:00:00Z",
-          "from": "2026-01-01T00:00:00Z",
-          "until": "2026-04-01T00:00:00Z"
+          "from": "2026-01-01",
+          "until": "2026-04-01"
         },
         "properties": {
           "currency": {
@@ -4568,12 +4846,13 @@
             "type": "string"
           },
           "from": {
-            "format": "date-time",
+            "description": "The first day of the period, on the tenant's calendar.",
+            "example": "2026-01-01",
             "type": "string"
           },
           "until": {
-            "description": "**Exclusive.**",
-            "format": "date-time",
+            "description": "**Exclusive.**\nThe first day **after** the period: consecutive returns neither\noverlap nor leave a day out.",
+            "example": "2026-04-01",
             "type": "string"
           }
         },
@@ -5454,12 +5733,19 @@
               "null"
             ]
           },
+          "lines": {
+            "description": "Which lines are coming back. **Empty is the whole sale.** With lines,\nthe tenders must come to exactly what those lines credit, tax included.",
+            "items": {
+              "$ref": "#/components/schemas/ReturnedLine"
+            },
+            "type": "array"
+          },
           "reference": {
             "description": "Your key. Sending it twice is a no-op.",
             "type": "string"
           },
           "tenders": {
-            "description": "What the customer is handed back, and how. Must come to the whole sale:\nthis credits the document, and a partial credit note is not something\n`sales` can write.",
+            "description": "What the customer is handed back, and how. Must come to what is being\ncredited: the whole sale without `lines`, those lines with.",
             "items": {
               "$ref": "#/components/schemas/NewTender"
             },
@@ -5970,54 +6256,39 @@
       "OnboardingRequest": {
         "example": {
           "branch": "الفرع الرئيسي",
-          "common_name": "EGS1-886431145",
-          "environment": "simulation",
-          "industry": "Consulting",
-          "issues_simplified": true,
-          "issues_standard": true,
-          "serial": "886431145"
+          "environment": "simulation"
         },
         "properties": {
           "branch": {
-            "description": "The branch this unit belongs to. For a VAT group member, their own\n10-digit TIN.",
-            "type": "string"
-          },
-          "common_name": {
-            "description": "A name for this unit, unique among the taxpayer's units.",
-            "type": "string"
+            "description": "Only when this business wants its invoices distinct per branch: the\nbranch this unit belongs to (for a VAT group member, their own\n10-digit TIN). Absent, the unit is the whole business and carries its\nregistered name.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "environment": {
             "description": "`sandbox`, `simulation` or `production`. **Not a default** — the only\nvisible difference is a string in the request, and a mistake onboards\ninto the wrong authority rather than failing.",
             "type": "string"
-          },
-          "industry": {
-            "description": "The taxpayer's industry.",
-            "type": "string"
-          },
-          "issues_simplified": {
-            "description": "Whether it issues simplified ones — reported within 24 hours.",
-            "type": "boolean"
-          },
-          "issues_standard": {
-            "description": "Whether this unit issues standard invoices — the ones cleared before the\nbuyer gets them.",
-            "type": "boolean"
-          },
-          "serial": {
-            "description": "This unit's serial number, unique per taxpayer.",
-            "type": "string"
           }
         },
         "required": [
-          "environment",
-          "branch",
-          "common_name",
-          "serial",
-          "industry"
+          "environment"
         ],
         "type": "object"
       },
       "OnboardingView": {
         "properties": {
+          "checks": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChecksView",
+                "description": "The samples, once they all passed for the current certificate."
+              }
+            ]
+          },
           "environment": {
             "type": [
               "string",
@@ -6042,17 +6313,33 @@
             },
             "type": "array"
           },
+          "refusal": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RefusalView",
+                "description": "What ZATCA refused about the current certificate, if anything."
+              }
+            ]
+          },
           "serial": {
             "description": "The certificate currently on record.",
             "type": [
               "string",
               "null"
             ]
+          },
+          "state": {
+            "description": "`none`, `checking` (the worker is submitting samples or asking for the\nproduction certificate), `refused` (ZATCA said no — see `refusal`), or\n`live`.",
+            "type": "string"
           }
         },
         "required": [
           "reached",
-          "live"
+          "live",
+          "state"
         ],
         "type": "object"
       },
@@ -6384,6 +6671,17 @@
                   "type": [
                     "string",
                     "null"
+                  ]
+                },
+                "rate": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ListRate",
+                      "description": "The published price, before tax, when there is one."
+                    }
                   ]
                 },
                 "withdrawn": {
@@ -7044,6 +7342,13 @@
           "items": {
             "items": {
               "properties": {
+                "billed_by": {
+                  "description": "The invoice raised for the work, once one has been —\n`POST /v1/booking/reservations/{reservation}/invoice`, or the worker\nwhen `PUT /v1/booking/billing` asks for it on completion.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "customer": {
                   "type": [
                     "string",
@@ -7067,6 +7372,13 @@
                   "type": "string"
                 },
                 "note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "secured_by": {
+                  "description": "The payment that secured the slot, when a deposit was paid.",
                   "type": [
                     "string",
                     "null"
@@ -7210,6 +7522,17 @@
                   "type": [
                     "string",
                     "null"
+                  ]
+                },
+                "rate": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ListRate",
+                      "description": "**What booking it costs, before tax**, when the business publishes a\nprice. What a booking through this surface is priced at, and what a\ndeposit is a fraction of. Absent for a business that bills elsewhere."
+                    }
                   ]
                 }
               },
@@ -7766,6 +8089,44 @@
         ],
         "type": "object"
       },
+      "PublicBookingView": {
+        "description": "What a stranger may do on this tenant's public booking site.",
+        "example": {
+          "deposit_bp": 2500,
+          "hold_minutes": 30,
+          "open": true,
+          "verify_phone": false
+        },
+        "properties": {
+          "deposit_bp": {
+            "description": "The deposit, as a fraction of the booking's net in basis points. `0` is\nno deposit; `10000` is the whole price.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "hold_minutes": {
+            "description": "How long an unpaid slot is held before it lapses. `0` is indefinitely,\nwhich is right only when no deposit is asked for.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "open": {
+            "description": "Whether the public site takes bookings at all. Off until somebody turns\nit on: the absence of a setting is a no.",
+            "type": "boolean"
+          },
+          "verify_phone": {
+            "description": "Whether a public booker must prove their phone number first.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "open",
+          "deposit_bp",
+          "hold_minutes",
+          "verify_phone"
+        ],
+        "type": "object"
+      },
       "PublicLine": {
         "description": "One slot a customer is asking for.",
         "properties": {
@@ -7845,7 +8206,7 @@
         "description": "What a customer is told after booking.",
         "properties": {
           "deposit_bp": {
-            "description": "What the business will ask for to hold it, in basis points of the\nbooking. **Zero unless configured, and not collected by this build** —\ncard payments are Phase 12a. It is here so a site can say what will be\nasked, not so it can claim it was taken.",
+            "description": "What the business asks for to hold it, in basis points of the booking's\nnet. **Zero unless configured** (`PUT /v1/booking/public-settings`).\nWhen it is not zero the slot is held unpaid for the configured\n`hold_minutes` and lapses unless the deposit is paid through\n`POST /v1/booking/public/reservations/{reservation}/deposit`; it is\nsecured when the money settles. Here so a site can say what will be\nasked, not so it can claim it was taken.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
@@ -7922,6 +8283,28 @@
         ],
         "type": "object"
       },
+      "RefusalView": {
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "detail": {
+            "description": "ZATCA's words, or the first refused document and its first error.",
+            "type": "string"
+          },
+          "step": {
+            "description": "`compliance_checks` or `production_certificate`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step",
+          "detail",
+          "at"
+        ],
+        "type": "object"
+      },
       "RegistrationBody": {
         "example": {
           "address": {
@@ -7935,6 +8318,7 @@
           },
           "effective_from": "2026-01-01T00:00:00Z",
           "identifier": "1010101010",
+          "industry": "Consulting",
           "name": "روابي للاستشارات",
           "name_latin": "Rawabi Consulting",
           "scheme": "crn",
@@ -7954,6 +8338,10 @@
           },
           "identifier": {
             "description": "The number in that register — the commercial registration, usually.",
+            "type": "string"
+          },
+          "industry": {
+            "description": "The business's industry — `Consulting`, `Retail`, `Beauty`. It goes in\nthe ZATCA certificate request as the business category, so it is\nrequired: no industry, no certificate.",
             "type": "string"
           },
           "name": {
@@ -7981,7 +8369,8 @@
           "name",
           "scheme",
           "identifier",
-          "address"
+          "address",
+          "industry"
         ],
         "type": "object"
       },
@@ -8111,6 +8500,13 @@
       },
       "ReservationRecord": {
         "properties": {
+          "billed_by": {
+            "description": "The invoice raised for the work, once one has been —\n`POST /v1/booking/reservations/{reservation}/invoice`, or the worker\nwhen `PUT /v1/booking/billing` asks for it on completion.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "customer": {
             "type": [
               "string",
@@ -8134,6 +8530,13 @@
             "type": "string"
           },
           "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secured_by": {
+            "description": "The payment that secured the slot, when a deposit was paid.",
             "type": [
               "string",
               "null"
@@ -8235,6 +8638,27 @@
         ],
         "type": "object"
       },
+      "ReturnTo": {
+        "properties": {
+          "cancel": {
+            "description": "The customer backed out.",
+            "type": "string"
+          },
+          "failure": {
+            "description": "The lender said no — a normal outcome, and the page should offer a card.",
+            "type": "string"
+          },
+          "success": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success",
+          "cancel",
+          "failure"
+        ],
+        "type": "object"
+      },
       "ReturnView": {
         "properties": {
           "currency": {
@@ -8269,6 +8693,25 @@
           "output",
           "input",
           "payable"
+        ],
+        "type": "object"
+      },
+      "ReturnedLine": {
+        "properties": {
+          "against": {
+            "description": "Which line of the sale, by position from zero.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "net": {
+            "$ref": "#/components/schemas/Amount",
+            "description": "How much of that line is coming back, excluding tax, as a positive\namount. Its tax follows from the line's own rate."
+          }
+        },
+        "required": [
+          "against",
+          "net"
         ],
         "type": "object"
       },
@@ -8708,6 +9151,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "rate": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ListRate",
+                "description": "**What booking it costs, before tax**, when the business publishes a\nprice. What a booking through this surface is priced at, and what a\ndeposit is a fraction of. Absent for a business that bills elsewhere."
+              }
             ]
           }
         },
@@ -9900,7 +10354,7 @@
         "operationId": "follow_link",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -10003,6 +10457,227 @@
           }
         }
       ]
+    },
+    "/v1/booking/billing": {
+      "get": {
+        "description": "The desk can always raise a booking's invoice on demand; this says whether\nthe worker does it too, the moment a booking is completed.",
+        "operationId": "billing_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingView"
+                }
+              }
+            },
+            "description": "Off until somebody sets it.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "When a booking is billed.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "Off until the business turns it on. A salon that adds things at the till\nbills on demand instead; one that never does saves a click per customer.",
+        "operationId": "set_billing_settings",
+        "parameters": [
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BillingView"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Set. Applies from the worker's next pass."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Decide whether completed bookings are billed automatically.",
+        "tags": [
+          "booking"
+        ]
+      }
     },
     "/v1/booking/customers/{customer}/bars": {
       "get": {
@@ -10525,13 +11200,233 @@
         ]
       }
     },
+    "/v1/booking/public-settings": {
+      "get": {
+        "operationId": "public_booking_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicBookingView"
+                }
+              }
+            },
+            "description": "The closed default until somebody sets it.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "**The setting the public site, the deposit, the hold and the phone check\nall read.** The first build had every one of those and no way to turn any\nof them on.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "The deposit is a fraction of the booking's net, so it is bounded at the\nwhole price; `hold_minutes` of zero with a deposit is allowed and unwise,\nbecause a slot held for somebody who never pays is a slot nobody else can\ntake.",
+        "operationId": "set_public_booking_settings",
+        "parameters": [
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicBookingView"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Set. Applies to the next booking; a slot already held keeps the deadline it was given."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A deposit over the whole price"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Set them.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
     "/v1/booking/public/availability": {
       "get": {
         "description": "What a booking form checks before it submits. **It takes no locks**, so it\nis what was free a moment ago; taking the booking is what decides.",
         "operationId": "public_availability",
         "parameters": [
           {
-            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -10668,11 +11563,11 @@
         }
       ],
       "post": {
-        "description": "# Off unless the business turned it on\n\nLetting strangers write into a diary is a decision a business makes, not a\ndefault they discover. It is a tenant setting — see [`crate::PublicBooking`]\n— whose absence is a **no**, so a salon that never asked for online booking\ncannot find their week full of appointments nobody intends to keep.\n\n# What it does not do\n\n**It takes no money.** A deposit is the honest answer to no-shows and\n`prepaid` already models one; the half that is missing is the gateway, which\nis Phase 12a. So a booking made here is held at `reserved` and the business\nconfirms it — which is what a shop with no online payment does anyway.",
+        "description": "# Off unless the business turned it on\n\nLetting strangers write into a diary is a decision a business makes, not a\ndefault they discover. It is a tenant setting — see [`crate::PublicBooking`]\n— whose absence is a **no**, so a salon that never asked for online booking\ncannot find their week full of appointments nobody intends to keep.\n\n# What it does not do\n\n**It takes no money itself.** A deposit, when the business asks for one, is\na separate step: this answer says how much (`deposit_bp`), the deposit route\nstarts the charge, and the booking is secured when the gateway settles it —\nsee `erp_api::deposits`. Until then it is held at `reserved` for\n`hold_minutes` and lapses if nothing arrives. A business that asks for no\ndeposit confirms by hand, which is what a shop with no online payment does\nanyway.",
         "operationId": "public_reserve",
         "parameters": [
           {
-            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -10791,6 +11686,97 @@
       }
     },
     "/v1/booking/public/reservations/{reservation}/deposit": {
+      "get": {
+        "description": "**The read beside the write.** A customer sent to a lender waits here for\nthe page to go to, and a site that lost the answer to `POST` — a reload, a\nsecond tab — finds it again. Public, keyed on the booking, and it says\nnothing a stranger could not learn by asking to pay: the amount, and where.",
+        "operationId": "public_deposit_status",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `POST /v1/booking/public/reservations`.",
+            "in": "path",
+            "name": "reservation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepositStatus"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not an id"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such business, it does not take bookings online, or no deposit has been asked for against that booking"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This surface is bounded per origin and per business."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "security": [],
+        "summary": "Where a booking's deposit has got to, and where to pay it.",
+        "tags": [
+          "booking"
+        ]
+      },
       "parameters": [
         {
           "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
@@ -10806,11 +11792,11 @@
         }
       ],
       "post": {
-        "description": "# It takes no money and no amount\n\nIt creates a charge and answers with its id. What the customer pays is\nworked out from the booking — the fraction the business asked for, of what\nthe booking was priced at, with tax — so nothing in the request decides what\nanybody is charged.\n\nThe browser then pays that charge against the gateway's publishable key,\ngiving it this `payment` as its own id. This system finds out by asking the\ngateway, not by being told: a callback is a doorbell, and what a browser\nreports is not evidence.\n\n# It answers the same thing twice\n\nSending the same `Idempotency-Key` again returns the same charge rather than\nmaking a second one, which is what a customer who reloaded the page needs.",
+        "description": "# It takes no money and no amount\n\nIt creates a charge and answers with its id. What the customer pays is\nworked out from the booking — the fraction the business asked for, of what\nthe booking was priced at, with tax — so nothing in the request decides what\nanybody is charged.\n\nWith no body, or `provider: \"moyasar\"`, the browser then pays that charge\nagainst the gateway's publishable key, giving it this `payment` as its own\nid. This system finds out by asking the gateway, not by being told: a\ncallback is a doorbell, and what a browser reports is not evidence.\n\nWith a lender (`tabby`, `tamara`) the request has to carry what the lender\nasks — an email, a phone, and where to send the customer afterwards — and\nthe page to send them to arrives a moment later on `GET`, because opening a\ncheckout is a call to a third party and this system makes those from the\nworker.\n\n# It answers the same thing twice\n\nSending the same `Idempotency-Key` again returns the same charge rather than\nmaking a second one, which is what a customer who reloaded the page needs.",
         "operationId": "public_deposit",
         "parameters": [
           {
-            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -10837,6 +11823,17 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepositRequest"
+              }
+            }
+          },
+          "description": "Optional. Empty is a card paid in the browser; a lender needs the rest.",
+          "required": true
+        },
         "responses": {
           "201": {
             "content": {
@@ -10846,7 +11843,7 @@
                 }
               }
             },
-            "description": "Created."
+            "description": "The charge to pay. When this booking already has a deposit in flight, the answer names *that* charge rather than making a second one."
           },
           "400": {
             "content": {
@@ -10856,7 +11853,7 @@
                 }
               }
             },
-            "description": "Not an id, or a key that is not a UUID"
+            "description": "Not an id, a key that is not a UUID, a provider this business does not take, something the lender needs missing, or a return address on a site the business has not allowed"
           },
           "404": {
             "content": {
@@ -10867,6 +11864,36 @@
               }
             },
             "description": "No such business, it does not take bookings online, or that booking is not waiting to be paid"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
           },
           "429": {
             "content": {
@@ -10912,7 +11939,7 @@
         "operationId": "public_services",
         "parameters": [
           {
-            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -11052,7 +12079,7 @@
         "operationId": "public_verification",
         "parameters": [
           {
-            "description": "The tenant's subdomain — which is how a public request names the business.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -11177,7 +12204,7 @@
         "operationId": "list_reservations",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -11558,6 +12585,132 @@
           }
         }
       ]
+    },
+    "/v1/booking/reservations/{reservation}/invoice": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The whole supply, less the deposit: the prepayment invoice the deposit\nraised is named on the document and what it declared comes off, band by\nband, so the customer is charged and the authority told about only the\nrest. Asking again answers the same invoice. A business that wants this\ndone the moment a booking is completed turns it on at\n`PUT /v1/booking/billing`.",
+        "operationId": "bill_reservation_route",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The booking to bill.",
+            "in": "path",
+            "name": "reservation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Billed"
+                }
+              }
+            },
+            "description": "Raised, or already raised — the same invoice either way."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not an id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such booking, or a module it needs is not enabled"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Nothing to bill: no priced line, or the booking was cancelled or a no-show"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The deposit's invoice is not visible yet, or the database is unwell. Retryable."
+          }
+        },
+        "summary": "Raise the final invoice for a booking.",
+        "tags": [
+          "booking"
+        ]
+      }
     },
     "/v1/booking/reservations/{reservation}/lines": {
       "parameters": [
@@ -12013,7 +13166,7 @@
         "operationId": "list_bookables",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -12901,7 +14054,15 @@
                 }
               }
             },
-            "description": "An empty list means every hour is the same price."
+            "description": "An empty list means every hour is the same price.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -12976,6 +14137,20 @@
       "put": {
         "description": "**Bookings already taken keep the price they were given.** The band is\nfrozen onto the line when the booking is written (L5), so moving your peak\nhours changes what the next booking costs and nothing that was already\nagreed.",
         "operationId": "set_tariff",
+        "parameters": [
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -13029,6 +14204,16 @@
               }
             },
             "description": "The tenant did not enable booking"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
           },
           "413": {
             "content": {
@@ -13105,6 +14290,16 @@
             },
             "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too many attempts from this address, or against this account. `args.seconds` says how long to wait."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -13142,7 +14337,7 @@
         "operationId": "list_branches",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -13910,6 +15105,16 @@
             },
             "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too many attempts from this address, or against this account. `args.seconds` says how long to wait."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -14029,7 +15234,7 @@
                 }
               }
             },
-            "description": "One went moments ago. `args.seconds` says how long to wait."
+            "description": "One went to this number moments ago, this address has asked for too many, or the platform's hourly ceiling is reached. `args.seconds` says how long to wait."
           },
           "500": {
             "content": {
@@ -14064,7 +15269,7 @@
         "operationId": "list_customers",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -14352,7 +15557,7 @@
         "operationId": "import_customers",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -15423,7 +16628,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -15508,6 +16721,20 @@
       "put": {
         "description": "# It replaces the whole set\n\nSend every field you want, in the order you want them shown. A field that is\nnot in the list is removed — which is refused while anybody still holds a\nvalue for it, because a field that vanished with its data still in the table\nis exactly how a business comes to hold health details it has forgotten\nabout. Erase them first: `DELETE /v1/crm/fields/{field}/values`.\n\n**Redefining a field under its own values is refused for the same reason.**\nTurning a text field into a date leaves every stored value unreadable, and a\nsettings screen that allowed it would be quietly discarding what somebody\ntyped.\n\n# Whose decision this is\n\nThe owner's. What a business records about a person — and especially that it\nrecords health details at all — is not a preference, and the fields decide\nwhat every customer page asks for from then on.",
         "operationId": "set_customer_fields",
+        "parameters": [
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -15571,6 +16798,16 @@
               }
             },
             "description": "A field was removed or redefined while customers still hold values for it"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
           },
           "413": {
             "content": {
@@ -15855,7 +17092,7 @@
         "operationId": "claim_domain",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -15992,7 +17229,7 @@
         "operationId": "verify_domain",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -16012,7 +17249,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Proved. Already-proved is the same answer."
+            "description": "Proved: the DNS record named at claim time was found. Already-proved is the same answer."
           },
           "400": {
             "content": {
@@ -16054,6 +17291,16 @@
             },
             "description": "This tenant has not claimed that domain"
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The record is not published, or says something else. `args` carries the record to publish."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -16063,6 +17310,16 @@
               }
             },
             "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "DNS could not be asked. Retryable."
           }
         },
         "summary": "Record that a domain's ownership has been proved.",
@@ -16071,12 +17328,231 @@
         ]
       }
     },
+    "/v1/effects/dead": {
+      "get": {
+        "operationId": "list_dead_letters",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DeadLetterView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Every effect given up on, oldest first.",
+        "tags": [
+          "service"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/effects/dead/{id}/requeue": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**Only a dead one.** A pending effect is already in the queue and a\ndelivered one was kept; there is nothing to put back, and the answer is\n`404` rather than a silent no-op so a second click on the same row says so.",
+        "operationId": "requeue_dead_letter",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `GET /v1/effects/dead`.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Back in the queue; the worker has been nudged."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not an id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No dead letter with that id"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Put one back in the queue, due now.",
+        "tags": [
+          "service"
+        ]
+      }
+    },
     "/v1/files": {
       "get": {
         "operationId": "list_attachments",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -16214,7 +17690,7 @@
         "operationId": "remove_file",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -16346,7 +17822,7 @@
         "operationId": "get_attachment",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -16472,7 +17948,7 @@
         "operationId": "download_file",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -16582,7 +18058,7 @@
         "operationId": "upload_file",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -16847,11 +18323,11 @@
         }
       ],
       "post": {
-        "description": "Public, because a provider has no account here — the tenant is the subdomain\nand the signature is the credential.\n\nThe signed message is `<x-webhook-timestamp>.<body>`, HMAC-SHA256, hex, in\n`x-webhook-signature`. The timestamp is inside the signature, so a copy\nsomebody kept cannot be re-sent with a fresh one.",
+        "description": "Public, because a provider has no account here — the tenant is the subdomain\nand the signature is the credential.\n\nThe signed message is `<x-webhook-timestamp>.<body>`, HMAC-SHA256, hex, in\n`x-webhook-signature`. The timestamp is inside the signature, so a copy\nsomebody kept cannot be re-sent with a fresh one.\n\nA payment gateway this system integrates is authenticated its own way\ninstead: `moyasar` by the `secret_token` inside its body, `tabby` by the\n`x-erp-webhook-secret` header registered with it, `tamara` by its\n`tamaraToken` (HS256, signed with the notification token) in\n`Authorization: Bearer`. Tamara's two bodies — a registered webhook's\n`event_type` and a checkout notification's `order_status` — both arrive here.",
         "operationId": "receive_callback",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -16860,7 +18336,7 @@
             }
           },
           {
-            "description": "Whose callback this is — the name the secret was stored under.",
+            "description": "Whose callback this is — the name the secret was stored under. `moyasar`, `tabby` and `tamara` are authenticated the way each provider does it; anything else by the signed contract below.",
             "in": "path",
             "name": "provider",
             "required": true,
@@ -16869,7 +18345,7 @@
             }
           },
           {
-            "description": "HMAC-SHA256 of `<timestamp>.<body>`, hex.",
+            "description": "HMAC-SHA256 of `<timestamp>.<body>`, hex. The signed contract, for a provider this system does not know.",
             "in": "header",
             "name": "x-webhook-signature",
             "required": true,
@@ -17013,7 +18489,7 @@
         "operationId": "list_webhook_events",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -17146,7 +18622,7 @@
         "operationId": "set_webhook_secret",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -17281,7 +18757,7 @@
         "operationId": "expiring_documents",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -17411,7 +18887,7 @@
         "operationId": "list_employees",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -17571,7 +19047,7 @@
         "operationId": "hire_employee",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -17703,7 +19179,7 @@
         "operationId": "get_employee",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -17826,7 +19302,7 @@
         "operationId": "amend_employee",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -17981,7 +19457,7 @@
         "operationId": "transfer_employee",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -18122,7 +19598,7 @@
         "operationId": "list_claims",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -18238,7 +19714,7 @@
         "operationId": "grant_claim",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -18379,7 +19855,7 @@
         "operationId": "revoke_claim",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -18512,7 +19988,7 @@
         "operationId": "timesheet",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -18673,7 +20149,7 @@
         "operationId": "record_day",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -18838,7 +20314,7 @@
         "operationId": "record_document",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -18989,7 +20465,7 @@
         "operationId": "list_leave",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -19130,7 +20606,7 @@
         "operationId": "record_leave",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -19286,7 +20762,7 @@
         "operationId": "record_leaving",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -19442,7 +20918,7 @@
         "operationId": "reparent_employee",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -19598,7 +21074,7 @@
         "operationId": "record_salary",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -19739,7 +21215,7 @@
         "operationId": "list_rota",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -19863,7 +21339,7 @@
         "operationId": "record_shifts",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -20004,7 +21480,7 @@
         "operationId": "list_skills",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -20128,7 +21604,7 @@
         "operationId": "record_skills",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -20270,7 +21746,7 @@
         "operationId": "end_of_service_for",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -20415,7 +21891,7 @@
         "operationId": "leave_entitlement",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -20559,7 +22035,7 @@
         "operationId": "gosi_for",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -20694,7 +22170,7 @@
         "operationId": "gosi_schedule",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -20712,7 +22188,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -20798,7 +22282,19 @@
         "operationId": "set_gosi_schedule",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -20860,6 +22356,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
           },
           "413": {
             "content": {
@@ -20923,7 +22429,7 @@
         "operationId": "list_invitations",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -21021,7 +22527,7 @@
         "operationId": "invite",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -21153,7 +22659,7 @@
         "operationId": "revoke_invitation",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -21293,6 +22799,16 @@
             },
             "description": "No such token, or a spent or expired one — the same answer for all three"
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too many attempts from this address, or against this account. `args.seconds` says how long to wait."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -21429,6 +22945,16 @@
             },
             "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too many attempts from this address, or against this account. `args.seconds` says how long to wait."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -21453,7 +22979,7 @@
         "operationId": "list_keys",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -21560,7 +23086,7 @@
         "operationId": "issue_key",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -21692,7 +23218,7 @@
         "operationId": "revoke_key",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -21855,7 +23381,7 @@
         "operationId": "rotate_key",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -21997,7 +23523,7 @@
         "operationId": "list_accounts",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -22114,7 +23640,7 @@
         "operationId": "open_account",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -22249,7 +23775,7 @@
         "operationId": "books",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -22344,7 +23870,7 @@
         "operationId": "close_books",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -22474,7 +24000,7 @@
         "operationId": "install_chart",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -22629,6 +24155,16 @@
             },
             "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too many attempts from this address, or against this account. `args.seconds` says how long to wait."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -22681,7 +24217,7 @@
         "operationId": "post_entry",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -22838,7 +24374,7 @@
         "operationId": "reverse_entry",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -22990,7 +24526,7 @@
         "operationId": "trial_balance",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -23109,7 +24645,7 @@
         "operationId": "vat_rates",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -23127,7 +24663,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -23204,7 +24748,19 @@
         "operationId": "set_vat_rates",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -23267,6 +24823,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
+          },
           "413": {
             "content": {
               "application/json": {
@@ -23320,7 +24886,7 @@
         "operationId": "list_members",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -23418,7 +24984,7 @@
         "operationId": "add_member",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -23551,7 +25117,7 @@
         "operationId": "remove_member",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -23658,7 +25224,7 @@
         "operationId": "change_role",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -23784,7 +25350,7 @@
         "operationId": "clear_module_role",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -23891,7 +25457,7 @@
         "operationId": "set_module_role",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -24025,7 +25591,7 @@
         "operationId": "messaging_budget",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -24043,7 +25609,15 @@
                 }
               }
             },
-            "description": "`configured` says whether anybody chose these"
+            "description": "`configured` says whether anybody chose these",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -24130,7 +25704,19 @@
         "operationId": "set_messaging_budget",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -24192,6 +25778,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
           },
           "413": {
             "content": {
@@ -24270,7 +25866,7 @@
         "operationId": "register_device",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -24410,7 +26006,7 @@
         "operationId": "send_message",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -24552,7 +26148,7 @@
         "operationId": "messaging_settings",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -24570,7 +26166,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -24656,7 +26260,19 @@
         "operationId": "set_messaging_settings",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -24718,6 +26334,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
           },
           "413": {
             "content": {
@@ -24781,7 +26407,7 @@
         "operationId": "messaging_spend",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -24899,7 +26525,7 @@
         "operationId": "list_templates",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25009,7 +26635,7 @@
         "operationId": "delete_template",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25101,7 +26727,7 @@
         "operationId": "get_template",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25215,7 +26841,7 @@
         "operationId": "put_template",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25350,7 +26976,7 @@
         "operationId": "vocabulary",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25459,7 +27085,7 @@
         "operationId": "list_modules",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25557,7 +27183,7 @@
         "operationId": "enable_module",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25673,7 +27299,7 @@
         "operationId": "disable_module",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25824,7 +27450,7 @@
         "operationId": "list_origins",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25918,7 +27544,7 @@
         "operationId": "allow_origin",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -25939,7 +27565,7 @@
         },
         "responses": {
           "204": {
-            "description": "Licensed. It answers once the domain is proved."
+            "description": "Licensed. Browsers on this origin may now call the API — the whole API, with the session — for this tenant."
           },
           "400": {
             "content": {
@@ -25949,7 +27575,7 @@
                 }
               }
             },
-            "description": "Not an origin, or a domain this tenant has not claimed"
+            "description": "Not `https://<host>[:port]`, or a host that is not under the domain"
           },
           "401": {
             "content": {
@@ -25980,6 +27606,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The domain has not been proved yet"
           },
           "413": {
             "content": {
@@ -26034,7 +27670,7 @@
         "operationId": "revoke_origin",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -26866,7 +28502,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -26951,6 +28595,20 @@
       "put": {
         "description": "**An accounting position, so it is the owner's**, the same as choosing which\naccounts a sale posts to. It changes where a kept deposit lands in the\nprofit and loss, which is not a preference.",
         "operationId": "set_deposit_policy",
+        "parameters": [
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -27004,6 +28662,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
           },
           "413": {
             "content": {
@@ -27557,7 +29225,7 @@
         }
       ],
       "post": {
-        "description": "**Issues the credit note ZATCA requires**, when the refund leaves the\ninvoice holding nothing. A partial refund does not get one — see\n`credit_the_invoice` for why that is a deferral rather than a decision.\n\n**Records and posts; it does not ask the gateway.** Instruct the gateway\nfirst and record what it confirmed — a refund posted here that the gateway\nrefused is a set of books saying money went back when it did not.",
+        "description": "**Records the request; the worker carries it to the gateway.** Nothing is\nposted and no document is issued until the gateway confirms the money went\nback — then the refund lands in the books and, when it leaves the invoice\nholding nothing, the credit note ZATCA requires is issued. The first version\nof this route recorded the refund on the spot and never spoke to the\ngateway, on the instruction that the operator would refund there first;\nnothing enforced the order, and a refund recorded that the gateway never\nmade is a set of books saying money went back when it did not.\n\n`GET /v1/payments/{payment}` shows each request and what the gateway said.\nA refusal is recorded with the gateway's reason and is final: asking again\nunder the same reference is the same answer.\n\nA partial refund gets no credit note — see `credit_the_invoice` for why that\nis a deferral rather than a decision.",
         "operationId": "refund_gateway_payment",
         "parameters": [
           {
@@ -27590,7 +29258,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
@@ -27598,7 +29266,7 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Recorded. The worker will ask the gateway, and the books follow what it says."
           },
           "400": {
             "content": {
@@ -27668,7 +29336,7 @@
                 }
               }
             },
-            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+            "description": "The gateway already refused this refund"
           },
           "500": {
             "content": {
@@ -27691,7 +29359,7 @@
             "description": "Not serving right now rather than broken. Retryable."
           }
         },
-        "summary": "Give money back.",
+        "summary": "Ask for money to go back.",
         "tags": [
           "payments"
         ]
@@ -27819,7 +29487,7 @@
         "operationId": "payroll_accounts",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -27837,7 +29505,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -27923,7 +29599,19 @@
         "operationId": "set_payroll_accounts",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -27985,6 +29673,16 @@
               }
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
           },
           "413": {
             "content": {
@@ -28048,7 +29746,7 @@
         "operationId": "list_runs",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -28183,7 +29881,7 @@
         "operationId": "get_run",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -28307,7 +30005,7 @@
         "operationId": "draft_run",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -28463,7 +30161,7 @@
         "operationId": "approve_run",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -28574,7 +30272,7 @@
         "operationId": "run_payslips",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -28702,7 +30400,7 @@
         "operationId": "list_shifts",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -29650,7 +31348,7 @@
                 }
               }
             },
-            "description": "The till is shut, the sale is not one that can be credited, or the ledger refused it"
+            "description": "The till is shut, the sale is not one that can be credited, the tenders do not come to what the lines credit, or the ledger refused it"
           },
           "500": {
             "content": {
@@ -29797,7 +31495,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -29871,6 +31577,20 @@
       ],
       "put": {
         "operationId": "set_till_accounts",
+        "parameters": [
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -29925,6 +31645,16 @@
             },
             "description": "The tenant did not enable pos"
           },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
+          },
           "413": {
             "content": {
               "application/json": {
@@ -29977,7 +31707,7 @@
         "operationId": "list_cards",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -30796,7 +32526,7 @@
         "operationId": "list_entitlements",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -31629,7 +33359,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -31703,6 +33441,20 @@
       ],
       "put": {
         "operationId": "set_loyalty_scheme",
+        "parameters": [
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -31756,6 +33508,16 @@
               }
             },
             "description": "The tenant did not enable prepaid"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
           },
           "413": {
             "content": {
@@ -31912,7 +33674,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -31986,6 +33756,20 @@
       ],
       "put": {
         "operationId": "set_deferral_accounts",
+        "parameters": [
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -32040,6 +33824,16 @@
             },
             "description": "The tenant did not enable prepaid"
           },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
+          },
           "413": {
             "content": {
               "application/json": {
@@ -32092,7 +33886,7 @@
         "operationId": "list_subscriptions",
         "parameters": [
           {
-            "description": "The tenant's subdomain.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -33166,7 +34960,7 @@
         "operationId": "list_bills",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -33281,7 +35075,7 @@
         "operationId": "record_bill",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -33423,7 +35217,7 @@
         "operationId": "get_bill",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -33562,7 +35356,7 @@
         "operationId": "pay_bill",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -33713,7 +35507,7 @@
         "operationId": "people_cost",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -33851,7 +35645,7 @@
         "operationId": "reconciliation",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -33968,7 +35762,7 @@
         "operationId": "revenue",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -34105,7 +35899,7 @@
         "operationId": "takings",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -34242,7 +36036,7 @@
         "operationId": "utilisation",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -34380,7 +36174,7 @@
         "operationId": "list_invoices",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -34495,7 +36289,7 @@
         "operationId": "issue_invoice",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -34637,7 +36431,7 @@
         "operationId": "get_invoice",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -34777,7 +36571,7 @@
         "operationId": "credit_note",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -34929,7 +36723,7 @@
         "operationId": "list_credit_notes",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -35056,7 +36850,7 @@
         "operationId": "credit_invoice_part",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -35222,7 +37016,7 @@
         "operationId": "attach_customer",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -35378,7 +37172,7 @@
         "operationId": "record_payment",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -35544,7 +37338,7 @@
         "operationId": "refund_payment",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -35696,7 +37490,7 @@
         "operationId": "posting_accounts",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -35714,7 +37508,15 @@
                 }
               }
             },
-            "description": "Done."
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -35791,7 +37593,19 @@
         "operationId": "set_posting_accounts",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -35854,6 +37668,16 @@
             },
             "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
           },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
+          },
           "413": {
             "content": {
               "application/json": {
@@ -35907,7 +37731,7 @@
         "operationId": "receivables",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -36053,7 +37877,7 @@
         "operationId": "unmatched_customers",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -36265,6 +38089,16 @@
             },
             "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too many attempts from this address, or against this account. `args.seconds` says how long to wait."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -36371,6 +38205,16 @@
               }
             },
             "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too many attempts from this address, or against this account. `args.seconds` says how long to wait."
           },
           "500": {
             "content": {
@@ -36565,7 +38409,7 @@
                 }
               }
             },
-            "description": "A confirmation went to this address moments ago. Retryable, and the message says when."
+            "description": "A confirmation went to this address moments ago, or too many attempts came from this address. Retryable, and the message says when."
           },
           "500": {
             "content": {
@@ -36655,6 +38499,16 @@
             },
             "description": "The slug was taken while the link sat in a mailbox. The link still works; ask for another name."
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too many attempts from this address, or against this account. `args.seconds` says how long to wait."
+          },
           "500": {
             "content": {
               "application/json": {
@@ -36678,7 +38532,7 @@
         "operationId": "registration",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -36793,7 +38647,7 @@
         "operationId": "register",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -36925,7 +38779,7 @@
         "operationId": "filed_returns",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -37043,7 +38897,7 @@
         "operationId": "file_return",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -37186,7 +39040,7 @@
         "operationId": "vat_return",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -37195,7 +39049,7 @@
             }
           },
           {
-            "description": "Start of the period, inclusive. RFC 3339.",
+            "description": "First day of the period, `YYYY-MM-DD`, on the tenant's calendar.",
             "in": "query",
             "name": "from",
             "required": true,
@@ -37204,7 +39058,7 @@
             }
           },
           {
-            "description": "End of the period, **exclusive**. RFC 3339.",
+            "description": "First day **after** the period, `YYYY-MM-DD`.",
             "in": "query",
             "name": "until",
             "required": true,
@@ -37330,7 +39184,7 @@
         "operationId": "zatca_standing",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -37455,7 +39309,7 @@
         "operationId": "zatca_documents",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -37571,7 +39425,7 @@
         "operationId": "zatca_document",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -37693,11 +39547,11 @@
     },
     "/v1/tax_sa/zatca/onboarding": {
       "get": {
-        "description": "Answered without unsealing anything: whether a secret exists is a different\nquestion from what it is, and this endpoint may only ask the first.",
+        "description": "`state` is the short answer — `none`, `checking`, `refused` or `live`;\n`checks` and `refusal` say what the worker has done since the certificate.\nAnswered without unsealing anything: whether a secret exists is a different\nquestion from what it is, and this endpoint may only ask the first.",
         "operationId": "onboarding_status",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -37812,7 +39666,7 @@
         "operationId": "begin_onboarding",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -37955,11 +39809,11 @@
         }
       ],
       "post": {
-        "description": "Four calls to ZATCA, in the order it requires:\n\n1. a key pair and a certificate request, generated here,\n2. `POST /compliance` with the OTP — the compliance certificate,\n3. `POST /compliance/invoices` — one signed sample of every document type\n   this unit declared, which ZATCA must accept before it will go further,\n4. `POST /production/csids` — the certificate that clears real invoices.\n\n**Nothing is stored unless the step that produced it succeeded**, and the\nprivate key is sealed before the first call, so a certificate is never issued\nagainst a key this system no longer has.\n\nIf the compliance samples are refused, that is **this software's problem, not\nthe caller's** — the samples are generated here — and it answers 502 with\nwhat ZATCA said.",
+        "description": "This request spends the OTP: a key pair and a certificate request are\ngenerated here, the OTP buys the compliance certificate, and both are\nsealed. **The worker does the rest** — one signed sample of every document\ntype, then the production certificate — and `GET\n/v1/tax_sa/zatca/onboarding` says where it stands. Nothing after this\nrequest needs the taxpayer or a second OTP.\n\nThe unit is the registration's: VAT number, legal name, address and\nindustry. Both document types are declared. A `branch` is only for a\nbusiness that wants its invoices distinct per branch.",
         "operationId": "activate",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -37979,7 +39833,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
@@ -37987,7 +39841,7 @@
                 }
               }
             },
-            "description": "Live. This business can now clear and report invoices."
+            "description": "The compliance certificate is sealed; the worker is finishing. Watch the status."
           },
           "400": {
             "content": {
@@ -37997,7 +39851,7 @@
                 }
               }
             },
-            "description": "An OTP that is not six digits, an unknown environment, or a unit detail that cannot go in a certificate"
+            "description": "An OTP that is not six digits, an unknown environment, or a registration with no industry"
           },
           "401": {
             "content": {
@@ -38028,6 +39882,16 @@
               }
             },
             "description": "No such tenant, the module is not enabled, or nothing is registered with ZATCA yet"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Already live in this environment. Renew or replace the certificate through the manual route."
           },
           "413": {
             "content": {
@@ -38077,7 +39941,7 @@
                 }
               }
             },
-            "description": "ZATCA refused, or could not be reached. Nothing beyond the last successful step was stored."
+            "description": "ZATCA refused the OTP, or could not be reached. Nothing was stored."
           },
           "503": {
             "content": {
@@ -38090,7 +39954,7 @@
             "description": "This deployment has no sealing key"
           }
         },
-        "summary": "Take this business all the way live with ZATCA, from a Fatoora OTP.",
+        "summary": "Start taking this business live with ZATCA, from a Fatoora OTP.",
         "tags": [
           "tax_sa"
         ]
@@ -38116,7 +39980,7 @@
         "operationId": "accept_certificate",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -38249,7 +40113,7 @@
         "operationId": "tenant",
         "parameters": [
           {
-            "description": "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant.",
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
             "in": "header",
             "name": "Host",
             "required": true,
@@ -38339,6 +40203,266 @@
           }
         }
       ]
+    },
+    "/v1/tenant/calendar": {
+      "get": {
+        "operationId": "tenant_calendar",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalendarView"
+                }
+              }
+            },
+            "description": "`Asia/Riyadh` until somebody sets it.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "The clock every day, month and period on this tenant is read by.",
+        "tags": [
+          "tenants"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "**Applies to what happens next.** Every event already written carries the\nclock it was written under, so nothing that has happened moves; a report or\na return computed from now on reads new instants by the new clock.",
+        "operationId": "set_tenant_calendar",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CalendarView"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Set."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a name in the IANA zone database"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Set it.",
+        "tags": [
+          "tenants"
+        ]
+      }
     }
   },
   "security": [

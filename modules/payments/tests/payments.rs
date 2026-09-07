@@ -198,6 +198,7 @@ impl Fixture {
             &code(id),
             &Draft {
                 prepayment: false,
+                prepaid: None,
                 customer: sales::Customer::new("سارة"),
                 issued_on: when(),
                 due_on: None,
@@ -232,6 +233,7 @@ impl Fixture {
             &mut tx,
             &code(id),
             &Attempt {
+                pay_at: None,
                 provider: provider.to_owned(),
                 gateway_id: id.to_owned(),
                 collects: payments::Collects::Advance(payments::Advance {
@@ -258,6 +260,7 @@ impl Fixture {
             &mut tx,
             &code(id),
             &Attempt {
+                pay_at: None,
                 provider: provider.to_owned(),
                 gateway_id: id.to_owned(),
                 collects: payments::Collects::Invoice(code(invoice)),
@@ -369,6 +372,7 @@ impl Fixture {
             &mut tx,
             &code(payment),
             &payments::Collection {
+                checkout: None,
                 card: Some(code(card)),
                 provider: "moyasar".to_owned(),
                 collects: payments::Collects::Invoice(code(invoice)),
@@ -416,6 +420,39 @@ impl Fixture {
             tx.rollback().await.expect("rolls back");
         }
         outcome
+    }
+}
+
+/// Everything a lender is told about a booking deposit.
+fn checkout(provider: &str, amount: Money) -> payments::Checkout {
+    payments::Checkout {
+        shopper: payments::Shopper {
+            name: "سارة".to_owned(),
+            email: "sara@example.com".to_owned(),
+            phone: "+966500000001".to_owned(),
+            since: when(),
+            purchases: 0,
+        },
+        deliver_to: payments::Place {
+            line: "King Fahd Road 12".to_owned(),
+            city: "Riyadh".to_owned(),
+            postcode: "12211".to_owned(),
+            country: "SA".to_owned(),
+        },
+        landing: payments::Landing {
+            success: "https://salon.example/booked".to_owned(),
+            cancel: "https://salon.example/cancelled".to_owned(),
+            failure: "https://salon.example/declined".to_owned(),
+            notification: Some(format!("https://acme.erp.example/v1/hooks/{provider}")),
+        },
+        description: "Booking deposit: قص".to_owned(),
+        items: vec![payments::Line {
+            title: "Booking deposit: قص".to_owned(),
+            category: "Services".to_owned(),
+            quantity: 1,
+            unit_price: amount,
+        }],
+        tax: riyals(15),
     }
 }
 
@@ -733,9 +770,18 @@ struct FakeGateway {
     asked: std::sync::atomic::AtomicUsize,
     /// What `charge` answers, and what it was sent — `(reference, token,
     /// amount, callback)`, which is everything a saved-card charge has to get
-    /// right.
+    /// right — and, for a hosted checkout, the whole charge.
     charging: std::sync::Mutex<Option<Result<Charged, GatewayError>>>,
     charges: std::sync::Mutex<Vec<(String, String, Money, String)>>,
+    hosted: std::sync::Mutex<Vec<erp_payments::Charge>>,
+    /// What `capture` answers, and what it was asked — `(gateway id,
+    /// reference, amount)`.
+    capturing: std::sync::Mutex<Option<Result<Charged, GatewayError>>>,
+    captures: std::sync::Mutex<Vec<(String, String, Option<Money>)>>,
+    /// What `refund` answers, and what it was asked — `(gateway id, reference,
+    /// amount)`.
+    refunding: std::sync::Mutex<Option<Result<Charged, GatewayError>>>,
+    refunds: std::sync::Mutex<Vec<(String, String, Option<Money>)>>,
 }
 
 impl FakeGateway {
@@ -746,7 +792,21 @@ impl FakeGateway {
             asked: std::sync::atomic::AtomicUsize::new(0),
             charging: std::sync::Mutex::new(None),
             charges: std::sync::Mutex::new(Vec::new()),
+            hosted: std::sync::Mutex::new(Vec::new()),
+            capturing: std::sync::Mutex::new(None),
+            captures: std::sync::Mutex::new(Vec::new()),
+            refunding: std::sync::Mutex::new(None),
+            refunds: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    fn refunding(self, answer: Result<Charged, GatewayError>) -> Self {
+        *self.refunding.lock().expect("not poisoned") = Some(answer);
+        self
+    }
+
+    fn refunded(&self) -> Vec<(String, String, Option<Money>)> {
+        self.refunds.lock().expect("not poisoned").clone()
     }
 
     fn charging(self, answer: Result<Charged, GatewayError>) -> Self {
@@ -756,6 +816,19 @@ impl FakeGateway {
 
     fn charged(&self) -> Vec<(String, String, Money, String)> {
         self.charges.lock().expect("not poisoned").clone()
+    }
+
+    fn hosted(&self) -> Vec<erp_payments::Charge> {
+        self.hosted.lock().expect("not poisoned").clone()
+    }
+
+    fn capturing(self, answer: Result<Charged, GatewayError>) -> Self {
+        *self.capturing.lock().expect("not poisoned") = Some(answer);
+        self
+    }
+
+    fn captured(&self) -> Vec<(String, String, Option<Money>)> {
+        self.captures.lock().expect("not poisoned").clone()
     }
 
     fn saying(self, id: &str, answer: Result<Charged, GatewayError>) -> Self {
@@ -798,17 +871,51 @@ impl Gateway for FakeGateway {
             charge.amount,
             charge.returns.success.clone(),
         ));
+        if charge.source == erp_payments::Source::Hosted {
+            self.hosted
+                .lock()
+                .expect("not poisoned")
+                .push(charge.clone());
+        }
         self.charging
             .lock()
             .expect("not poisoned")
             .clone()
             .expect("this gateway was not expecting to be charged")
     }
-    async fn capture(&self, _id: &str, _amount: Option<Money>) -> Result<Charged, GatewayError> {
-        unreachable!("the sweep never captures")
+    async fn capture(
+        &self,
+        id: &str,
+        reference: &str,
+        amount: Option<Money>,
+    ) -> Result<Charged, GatewayError> {
+        self.captures.lock().expect("not poisoned").push((
+            id.to_owned(),
+            reference.to_owned(),
+            amount,
+        ));
+        self.capturing
+            .lock()
+            .expect("not poisoned")
+            .clone()
+            .expect("this gateway was not expecting to capture")
     }
-    async fn refund(&self, _id: &str, _amount: Option<Money>) -> Result<Charged, GatewayError> {
-        unreachable!("the sweep never refunds")
+    async fn refund(
+        &self,
+        id: &str,
+        reference: &str,
+        amount: Option<Money>,
+    ) -> Result<Charged, GatewayError> {
+        self.refunds.lock().expect("not poisoned").push((
+            id.to_owned(),
+            reference.to_owned(),
+            amount,
+        ));
+        self.refunding
+            .lock()
+            .expect("not poisoned")
+            .clone()
+            .expect("this gateway was not expecting to refund")
     }
     async fn void(&self, _id: &str) -> Result<Charged, GatewayError> {
         unreachable!("the sweep never voids")
@@ -945,6 +1052,11 @@ async fn a_sweep_does_not_ask_one_gateway_about_anothers_payments() {
 /// A gateway reporting a different amount is refused, and **the rest of the
 /// batch still settles**. One bad answer must not strand every payment behind
 /// it.
+///
+/// And the bad one **fails** rather than staying pending: a payment the gateway
+/// will report the same wrong figure for on every tick is not one to ask about
+/// for ever, and neither figure may be posted (L6). It ends, with both figures
+/// in the reason, and the money at the gateway is the operator's to return.
 #[tokio::test]
 async fn one_payment_that_will_not_settle_does_not_strand_the_batch() {
     let fixture = Fixture::new("sweepbad").await;
@@ -969,19 +1081,29 @@ async fn one_payment_that_will_not_settle_does_not_strand_the_batch() {
     let swept = payments::settle_pending(&fixture.db, &gateway, when(), 25, &Metadata::default())
         .await
         .expect("sweeps");
-    assert_eq!(swept.resolved, 1, "the good one settled");
-    assert_eq!(swept.still_pending, 1, "the bad one did not");
+    assert_eq!(
+        swept.resolved, 2,
+        "the good one settled and the bad one ended"
+    );
+    assert_eq!(swept.still_pending, 0, "the bad one was left to loop");
     assert_eq!(swept.stopped, None, "and it did not stop the sweep");
 
     fixture.project().await;
     let mut conn = fixture.db.acquire().await.expect("connection");
+    let bad = payments::payment(&mut conn, "pay_1")
+        .await
+        .expect("reads")
+        .expect("a payment");
+    assert_eq!(bad.stage, "failed");
+    let why = bad.failed_why.expect("a reason");
+    assert!(
+        why.contains("1.00 SAR") && why.contains("115.00 SAR"),
+        "the reason must name both figures: {why}"
+    );
     assert_eq!(
-        payments::payment(&mut conn, "pay_1")
-            .await
-            .expect("reads")
-            .expect("a payment")
-            .stage,
-        "pending"
+        fixture.balance("1150").await,
+        riyals(115),
+        "only the good one was posted"
     );
     assert_eq!(
         payments::payment(&mut conn, "pay_2")
@@ -1295,7 +1417,7 @@ async fn a_rebuild_reproduces_every_payment() {
     assert_eq!(before.len(), 1);
 
     let pool = fixture.tenant_pool().await;
-    sqlx::query("TRUNCATE proj_payments.payment")
+    sqlx::query("TRUNCATE proj_payments.payment CASCADE")
         .execute(&pool)
         .await
         .expect("empties");
@@ -1874,6 +1996,159 @@ async fn refunding_one_of_two_payments_credits_nothing_until_both_are_back() {
 // Money taken before there is anything to bill
 // ---------------------------------------------------------------------------
 
+/// **A lender's checkout is opened by the worker, and the customer is sent to
+/// it.** The request records everything the lender is told; the pass opens the
+/// session and records where the customer goes; the read by booking answers
+/// it. Nothing else touches the payment: the browser pass would ask the
+/// gateway by this system's id, which a lender has never heard of.
+#[tokio::test]
+async fn a_lenders_checkout_is_opened_by_the_worker_and_the_customer_sent_to_it() {
+    let fixture = Fixture::new("hosted").await;
+    fixture
+        .request_hosted("pay_1", "tabby", "BOOK-1", riyals(100), riyals(115))
+        .await
+        .expect("requested");
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "requested");
+
+    // Not the browser pass's: asking Tabby about `pay_1` would be "no such
+    // payment" for ever.
+    let idle = FakeGateway::new("tabby");
+    let collected = fixture.collect_pass(&idle).await;
+    assert_eq!(collected.started, 0);
+    assert_eq!(
+        idle.asked(),
+        0,
+        "a hosted checkout was asked about by this system's id"
+    );
+
+    let gateway = FakeGateway::new("tabby").charging(Ok(Charged {
+        challenge: Some("https://checkout.tabby.ai/s/1".to_owned()),
+        ..charged("tabby_1", Status::Initiated, riyals(115), None)
+    }));
+    let opened = fixture.open_pass(&gateway).await;
+    assert_eq!(opened.started, 1, "{opened:?}");
+
+    // **What the lender was told is what was recorded.**
+    let sent = gateway.hosted();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].reference, "pay_1");
+    assert_eq!(sent[0].amount, riyals(115));
+    assert_eq!(sent[0].source, erp_payments::Source::Hosted);
+    let buyer = sent[0].buyer.as_ref().expect("a buyer");
+    assert_eq!(buyer.email, "sara@example.com");
+    assert_eq!(
+        sent[0].returns.notification.as_deref(),
+        Some("https://acme.erp.example/v1/hooks/tabby")
+    );
+    let basket = sent[0].basket.as_ref().expect("a basket");
+    assert_eq!(basket.tax, riyals(15));
+    assert_eq!(basket.deliver_to.city, "Riyadh");
+
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "pending");
+    let mut conn = fixture.db.read().await.expect("connection");
+    let row = payments::payment(&mut conn, "pay_1")
+        .await
+        .expect("reads")
+        .expect("there");
+    assert_eq!(
+        row.gateway_id, "tabby_1",
+        "the lender's own id, for the sweep"
+    );
+    assert_eq!(
+        row.pay_at.as_deref(),
+        Some("https://checkout.tabby.ai/s/1"),
+        "where the customer goes"
+    );
+    let by_booking = payments::awaited_for(&mut conn, "BOOK-1")
+        .await
+        .expect("reads")
+        .expect("the booking's deposit");
+    assert_eq!(by_booking.id, "pay_1");
+    drop(conn);
+
+    // Once open, another pass opens nothing more.
+    let again = fixture.open_pass(&gateway).await;
+    assert_eq!(again.started, 0);
+    assert_eq!(gateway.hosted().len(), 1, "a second session was opened");
+}
+
+/// **A lender that refuses at the door refuses for good.** The customer was
+/// scored and declined; recorded with the reason, and not asked again.
+#[tokio::test]
+async fn a_checkout_the_lender_will_not_open_is_recorded_as_failed() {
+    let fixture = Fixture::new("hosted-refused").await;
+    fixture
+        .request_hosted("pay_1", "tamara", "BOOK-1", riyals(100), riyals(115))
+        .await
+        .expect("requested");
+    fixture.project().await;
+
+    let gateway = FakeGateway::new("tamara").charging(Err(GatewayError::Refused(
+        "consumer is not eligible".to_owned(),
+    )));
+    let opened = fixture.open_pass(&gateway).await;
+    assert_eq!(opened.refused, 1, "{opened:?}");
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "failed");
+
+    let again = fixture.open_pass(&gateway).await;
+    assert_eq!(again.refused + again.started, 0, "asked the lender again");
+}
+
+/// **An authorised payment is captured before it settles**, in full and once.
+/// A lender authorises when the customer commits and settles only what the
+/// merchant captures; nobody else in this system asks. And one authorised for
+/// a different figure is failed, not captured: money must not move against a
+/// figure this payment was not for.
+#[tokio::test]
+async fn an_authorised_lender_payment_is_captured_and_then_settles() {
+    let fixture = Fixture::new("capture").await;
+    fixture
+        .start_deposit("pay_1", "tabby", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    fixture.project().await;
+
+    let gateway = FakeGateway::new("tabby")
+        .saying(
+            "pay_1",
+            Ok(charged("pay_1", Status::Authorized, riyals(115), None)),
+        )
+        .capturing(Ok(charged("pay_1", Status::Paid, riyals(115), None)));
+    let swept = fixture.settle_pass(&gateway).await;
+    assert_eq!(swept.resolved, 1, "{swept:?}");
+    assert_eq!(
+        gateway.captured(),
+        vec![(
+            "pay_1".to_owned(),
+            "pay_1.capture".to_owned(),
+            Some(riyals(115))
+        )],
+        "captured once, in full, under a key of its own"
+    );
+    assert_eq!(swept.secured, vec![(code("BOOK-1"), code("pay_1"))]);
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "settled");
+
+    fixture
+        .start_deposit("pay_2", "tabby", "BOOK-2", riyals(100), riyals(115))
+        .await;
+    fixture.project().await;
+    let short = FakeGateway::new("tabby").saying(
+        "pay_2",
+        Ok(charged("pay_2", Status::Authorized, riyals(100), None)),
+    );
+    let swept = fixture.settle_pass(&short).await;
+    assert_eq!(swept.resolved, 1, "{swept:?}");
+    assert!(
+        short.captured().is_empty(),
+        "money moved against a figure this payment was not for"
+    );
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_2").await, "failed");
+}
+
 /// **A deposit becomes a document the moment the money is real.** Receiving
 /// consideration is itself a tax point, so the prepayment invoice is raised at
 /// settlement and the VAT is declared in the period the customer paid — not in
@@ -1969,12 +2244,10 @@ async fn a_returned_deposit_is_credited_like_any_other_sale() {
     );
 }
 
-/// **Part of a deposit returned.** The money moves and the invoice is left
-/// holding the rest — and no credit note is issued, because crediting part of
-/// an invoice needs to know which band the part came out of, and only the
-/// caller of a partial credit note knows that. See the note in the plan: for a
-/// single-band invoice, which every deposit is, the answer is obvious and this
-/// is the next thing to close.
+/// **Part of a deposit given back gets a credit note for the part.** A deposit
+/// is a single-band invoice, so the net that comes to what went back has one
+/// answer; the credit note takes that out of the return, and the invoice stands
+/// for what the business still holds.
 #[tokio::test]
 async fn part_of_a_deposit_can_be_returned() {
     let fixture = Fixture::new("deposit-part").await;
@@ -2005,6 +2278,45 @@ async fn part_of_a_deposit_can_be_returned() {
         .expect("there");
     assert_eq!(row.stage, "settled");
     assert_eq!(row.refunded, money(5_750));
+
+    // **And the document followed the money.** A credit note for the half:
+    // 50.00 net, 7.50 tax, keyed on the refund's own reference.
+    let notes = sales::credit_notes(&mut conn, "dep-pay_1")
+        .await
+        .expect("reads");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].reference, "refund-1");
+    assert_eq!(notes[0].net, riyals(50));
+    assert_eq!(notes[0].tax, money(750));
+    // The return declares the deposit's 15.00 less the 7.50 given back.
+    let filed = sales::vat_return(
+        &mut conn,
+        sar(),
+        chrono::DateTime::from_timestamp(0, 0).expect("valid"),
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("reads");
+    assert_eq!(filed.tax, money(750));
+    drop(conn);
+    assert_eq!(
+        fixture.balance("4000").await,
+        riyals(-50),
+        "half the supply undone"
+    );
+    assert_eq!(fixture.balance("2100").await, money(-750));
+
+    // A retried refund credits once.
+    fixture
+        .refund("pay_1", "refund-1", money(5_750))
+        .await
+        .expect("a retry is quiet");
+    fixture.project().await;
+    let mut conn = fixture.db.read().await.expect("connection");
+    let notes = sales::credit_notes(&mut conn, "dep-pay_1")
+        .await
+        .expect("reads");
+    assert_eq!(notes.len(), 1, "a retried refund credited twice");
 }
 
 /// **Exactly one target, until settlement gives a deposit both.** A payment
@@ -2081,6 +2393,7 @@ impl Fixture {
             &mut conn,
             payments::Retention::KEY,
             &payments::Retention { supply },
+            None,
             None,
         )
         .await
@@ -2256,5 +2569,643 @@ async fn an_invoice_payment_has_no_deposit_to_keep() {
             Err(ExecuteError::Rejected(PaymentsError::NotADeposit(_)))
         ),
         "{refused:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Deposits: what was asked for is what settles, and one per booking
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// A deposit the customer pays in their own browser: no card, a booking to
+    /// hold, and the amount the business worked out.
+    async fn request_deposit(
+        &self,
+        payment: &str,
+        against: &str,
+        net: Money,
+        amount: Money,
+    ) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::request_in(
+            &mut tx,
+            &code(payment),
+            &payments::Collection {
+                checkout: None,
+                card: None,
+                provider: "moyasar".to_owned(),
+                collects: payments::Collects::Advance(payments::Advance {
+                    against: code(against),
+                    net,
+                    buyer: payments::Buyer {
+                        name: "سارة".to_owned(),
+                        vat_number: None,
+                    },
+                }),
+                amount,
+                callback_url: String::new(),
+            },
+            when(),
+            &Metadata::default(),
+        )
+        .await
+        .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+
+    /// A deposit paid through a lender: no card, a booking to hold, and
+    /// everything the lender has to be told, frozen on the request.
+    async fn request_hosted(
+        &self,
+        payment: &str,
+        provider: &str,
+        against: &str,
+        net: Money,
+        amount: Money,
+    ) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::request_in(
+            &mut tx,
+            &code(payment),
+            &payments::Collection {
+                checkout: Some(checkout(provider, amount)),
+                card: None,
+                provider: provider.to_owned(),
+                collects: payments::Collects::Advance(payments::Advance {
+                    against: code(against),
+                    net,
+                    buyer: payments::Buyer {
+                        name: "سارة".to_owned(),
+                        vat_number: None,
+                    },
+                }),
+                amount,
+                callback_url: String::new(),
+            },
+            when(),
+            &Metadata::default(),
+        )
+        .await
+        .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+
+    async fn open_pass(&self, gateway: &dyn Gateway) -> payments::Attempted {
+        payments::open_checkouts(&self.db, gateway, when(), 25, &Metadata::default())
+            .await
+            .expect("the checkout pass runs")
+    }
+
+    async fn collect_pass(&self, gateway: &dyn Gateway) -> payments::Attempted {
+        payments::collect_awaited(&self.db, gateway, when(), 25, &Metadata::default())
+            .await
+            .expect("the collect pass runs")
+    }
+
+    async fn settle_pass(&self, gateway: &dyn Gateway) -> payments::Swept {
+        payments::settle_pending(&self.db, gateway, when(), 25, &Metadata::default())
+            .await
+            .expect("the settle pass runs")
+    }
+
+    async fn fail(&self, id: &str) {
+        let mut tx = self.db.begin().await.expect("transaction");
+        payments::fail_in(&mut tx, &code(id), "declined", when(), &Metadata::default())
+            .await
+            .expect("fails");
+        tx.commit().await.expect("commits");
+    }
+
+    async fn set_standard_rate(&self, basis_points: i32) {
+        let mut conn = self.db.acquire().await.expect("connection");
+        erp_eventlog::configuration::set(
+            &mut conn,
+            ledger::Rates::KEY,
+            &ledger::Rates {
+                standard: basis_points,
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("stores the rate");
+    }
+}
+
+/// **A deposit paid short fails; it does not settle and it does not loop.**
+///
+/// The deposit is created in the customer's browser, so the gateway is where the
+/// amount actually paid lives — and the first version of the collect pass wrote
+/// *that* amount onto the payment, which made the settlement check compare the
+/// gateway to itself. The only thing that then stood between a 1-riyal payment
+/// and a 115-riyal booking was the prepayment invoice refusing to come to 1
+/// riyal, and it refused on every tick for ever, with the money taken.
+///
+/// What was asked for is what the payment is for. A gateway holding anything
+/// else is a payment that **fails**, with both figures in the reason, and the
+/// money at the gateway is the operator's to return there.
+#[tokio::test]
+async fn a_deposit_paid_short_fails_rather_than_settling_or_looping() {
+    let fixture = Fixture::new("deposit-short").await;
+    fixture
+        .request_deposit("dep-short", "BOOK-1", riyals(100), riyals(115))
+        .await
+        .expect("requested");
+    fixture.project().await;
+
+    // The customer's browser created a payment for one riyal under the id
+    // this system chose.
+    let gateway = FakeGateway::new("moyasar").saying(
+        "dep-short",
+        Ok(charged("dep-short", Status::Paid, riyals(1), None)),
+    );
+
+    let collected = fixture.collect_pass(&gateway).await;
+    assert_eq!(collected.started, 1);
+    {
+        // **The log, not the projection.** The projection keeps the requested
+        // amount regardless, so it cannot tell whether `Started` carried the
+        // right figure; the aggregate can, and it is what `settle_in` checks.
+        let mut conn = fixture.db.read().await.expect("connection");
+        let held = erp_eventlog::load::<payments::Payment>(
+            &mut conn,
+            &code("dep-short"),
+            payments::upcasters(),
+        )
+        .await
+        .expect("loads")
+        .aggregate;
+        assert_eq!(held.stage, payments::Stage::Pending);
+        assert_eq!(
+            held.amount,
+            Some(riyals(115)),
+            "the collect pass wrote what the gateway holds onto the payment instead of what was asked for"
+        );
+    }
+    fixture.project().await;
+
+    let swept = fixture.settle_pass(&gateway).await;
+    assert_eq!(swept.resolved, 1, "{swept:?}");
+    assert_eq!(swept.still_pending, 0, "a short payment was left to loop");
+    fixture.project().await;
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let row = payments::payment(&mut conn, "dep-short")
+        .await
+        .expect("reads")
+        .expect("there");
+    assert_eq!(row.stage, "failed");
+    let why = row.failed_why.expect("a reason");
+    assert!(
+        why.contains("1.00 SAR") && why.contains("115.00 SAR"),
+        "the reason names neither figure: {why}"
+    );
+    assert!(
+        sales::invoice(&mut conn, "dep-dep-short")
+            .await
+            .expect("reads")
+            .is_none(),
+        "a prepayment invoice was raised for a deposit that did not arrive"
+    );
+    drop(conn);
+    assert_eq!(
+        fixture.balance("1150").await,
+        money(0),
+        "nothing was posted"
+    );
+}
+
+/// **One deposit in flight per booking, whatever key the browser mints.**
+///
+/// The second tab is refused *against the log*, in the transaction that would
+/// have created its charge, and the refusal names the charge that exists — so
+/// the route can hand that one back. A retry of the first request is not a
+/// second deposit, and a first attempt that failed frees the booking for the
+/// next one.
+#[tokio::test]
+async fn a_booking_has_one_deposit_in_flight_at_a_time() {
+    let fixture = Fixture::new("deposit-once").await;
+    fixture
+        .request_deposit("dep-a", "BOOK-1", riyals(100), riyals(115))
+        .await
+        .expect("the first is requested");
+
+    let refused = fixture
+        .request_deposit("dep-b", "BOOK-1", riyals(100), riyals(115))
+        .await
+        .expect_err("a second deposit against the same booking was created");
+    match refused {
+        ExecuteError::Rejected(PaymentsError::AlreadyAwaited { against, payment }) => {
+            assert_eq!(against, "BOOK-1");
+            assert_eq!(payment, "dep-a", "the refusal names the charge that exists");
+        }
+        other => panic!("refused for the wrong reason: {other:?}"),
+    }
+
+    // A retry of the first is a retry.
+    fixture
+        .request_deposit("dep-a", "BOOK-1", riyals(100), riyals(115))
+        .await
+        .expect("a retry is not a second deposit");
+
+    // Another booking is another booking.
+    fixture
+        .request_deposit("dep-c", "BOOK-2", riyals(100), riyals(115))
+        .await
+        .expect("a different booking has its own budget");
+
+    // The first attempt fails — card declined — and the booking is free again.
+    fixture.fail("dep-a").await;
+    fixture
+        .request_deposit("dep-b", "BOOK-1", riyals(100), riyals(115))
+        .await
+        .expect("a failed deposit frees the booking for the next attempt");
+
+    fixture.project().await;
+    let mut conn = fixture.db.read().await.expect("connection");
+    let against = payments::against(&mut conn, "BOOK-1", 10)
+        .await
+        .expect("reads");
+    let stages: Vec<(String, String)> =
+        against.into_iter().map(|row| (row.id, row.stage)).collect();
+    assert!(
+        stages.contains(&("dep-a".to_owned(), "failed".to_owned()))
+            && stages.contains(&("dep-b".to_owned(), "requested".to_owned()))
+            && stages.len() == 2,
+        "{stages:?}"
+    );
+}
+
+/// **A kept deposit moves out of revenue the net it was billed at**, not the
+/// net today's rate would imply. The first version resolved the standard rate
+/// at retention time and divided the gross by it; a rate change between the
+/// deposit arriving and the business keeping it moved the wrong figure.
+#[tokio::test]
+async fn a_kept_deposit_is_reclassified_at_the_rate_it_was_billed_at() {
+    let fixture = Fixture::new("kept-rate").await;
+    fixture.set_supply(false).await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+
+    // The rate changes after the money arrived and before the business decides
+    // to keep it. The return the tax was declared on did not change.
+    fixture.set_standard_rate(500).await;
+
+    fixture.retain("pay_1").await.expect("keeps it");
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("4000").await, money(0), "out of revenue");
+    assert_eq!(
+        fixture.balance("4910").await,
+        riyals(-100),
+        "the forfeit must be the deposit's own net, not 115 ÷ 1.05"
+    );
+    assert_eq!(fixture.balance("2100").await, riyals(-15), "tax stays");
+}
+
+/// **The durable half of telling a booking its deposit arrived.** Everything
+/// that settled or was kept, oldest first; nothing that was given back in full.
+#[tokio::test]
+async fn settled_advances_lists_what_arrived_and_not_what_went_back() {
+    let fixture = Fixture::new("settled-advances").await;
+    for (payment, booking) in [
+        ("pay_1", "BOOK-1"),
+        ("pay_2", "BOOK-2"),
+        ("pay_3", "BOOK-3"),
+    ] {
+        fixture
+            .start_deposit(payment, "moyasar", booking, riyals(100), riyals(115))
+            .await;
+        fixture
+            .settle(payment, &charged(payment, Status::Paid, riyals(115), None))
+            .await
+            .expect("settles");
+    }
+    // One given back in full, one kept.
+    fixture
+        .refund("pay_2", "refund-1", riyals(115))
+        .await
+        .expect("refunds");
+    fixture.retain("pay_3").await.expect("keeps");
+    fixture.project().await;
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let arrived = payments::settled_advances(&mut conn, 10)
+        .await
+        .expect("reads");
+    let pairs: Vec<(String, String)> = arrived
+        .into_iter()
+        .map(|(against, payment)| (against.to_string(), payment.to_string()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("BOOK-1".to_owned(), "pay_1".to_owned()),
+            ("BOOK-3".to_owned(), "pay_3".to_owned()),
+        ],
+        "a refunded deposit is not one a booking should be told arrived"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Refunds go to the gateway first, and the books follow what it says
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    async fn request_refund(
+        &self,
+        id: &str,
+        reference: &str,
+        amount: Money,
+    ) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::request_refund_in(
+            &mut tx,
+            &code(id),
+            reference,
+            amount,
+            "the customer changed their mind",
+            when(),
+            &Metadata::default(),
+        )
+        .await
+        .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+
+    async fn refund_pass(&self, gateway: &dyn Gateway) -> payments::Refunding {
+        payments::refund_requested(&self.db, gateway, when(), 25, &Metadata::default())
+            .await
+            .expect("the refund pass runs")
+    }
+
+    async fn refund_outcomes(&self, payment: &str) -> Vec<(String, Option<String>)> {
+        let mut conn = self.db.read().await.expect("connection");
+        payments::refunds_of(&mut conn, payment)
+            .await
+            .expect("reads")
+            .into_iter()
+            .map(|r| (r.reference, r.outcome))
+            .collect()
+    }
+}
+
+/// A settled charge whose `fetch` says nothing has gone back yet.
+fn refunded_none(id: &str, amount: Money) -> Charged {
+    charged(id, Status::Paid, amount, None)
+}
+
+/// A charge as the gateway reports it after giving `back` back.
+fn refunded_some(id: &str, amount: Money, back: Money) -> Charged {
+    Charged {
+        refunded: back,
+        status: if back == amount {
+            Status::Refunded
+        } else {
+            Status::Paid
+        },
+        ..charged(id, Status::Paid, amount, None)
+    }
+}
+
+/// **The refund route records a request; the gateway is asked; the books follow
+/// what it says.** Nothing is posted and no document exists until the gateway
+/// confirms — the first version did all three on the spot and never asked.
+#[tokio::test]
+async fn a_refund_is_carried_to_the_gateway_before_the_books_record_it() {
+    let fixture = Fixture::new("refund-gateway").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+
+    fixture
+        .request_refund("pay_1", "refund-1", riyals(115))
+        .await
+        .expect("requested");
+    fixture.project().await;
+
+    // Asked, not done: the money is where it landed and the invoice stands.
+    assert_eq!(
+        fixture.balance("1150").await,
+        riyals(115),
+        "nothing moved yet"
+    );
+    assert_eq!(
+        fixture.credit_note_on("INV-1").await,
+        None,
+        "no document yet"
+    );
+    assert_eq!(
+        fixture.refund_outcomes("pay_1").await,
+        vec![("refund-1".to_owned(), None)],
+        "the request is recorded and open"
+    );
+
+    // The worker asks the gateway, which says nothing has gone back, refunds,
+    // and reports the new total.
+    let gateway = FakeGateway::new("moyasar")
+        .saying("pay_1", Ok(refunded_none("pay_1", riyals(115))))
+        .refunding(Ok(refunded_some("pay_1", riyals(115), riyals(115))));
+    let done = fixture.refund_pass(&gateway).await;
+    assert_eq!(done.refunded, 1, "{done:?}");
+    assert_eq!(
+        gateway.refunded(),
+        vec![(
+            "pay_1".to_owned(),
+            // **The refund's own key**, scoped by the payment, so the gateway
+            // can tell a retry from a second refund of the same amount.
+            "pay_1.refund-1".to_owned(),
+            Some(riyals(115))
+        )],
+        "the gateway was asked for exactly the amount requested, against its own id, under the refund's key"
+    );
+    fixture.project().await;
+
+    // And now the books say so, and the credit note exists.
+    assert_eq!(
+        fixture.balance("1150").await,
+        money(0),
+        "the money came back out"
+    );
+    assert!(
+        fixture.credit_note_on("INV-1").await.is_some(),
+        "the credit note followed"
+    );
+    assert_eq!(fixture.stage_of("pay_1").await, "refunded");
+    assert_eq!(
+        fixture.refund_outcomes("pay_1").await,
+        vec![("refund-1".to_owned(), Some("refunded".to_owned()))]
+    );
+
+    // Asking the same reference again is a retry: nothing new happens.
+    fixture
+        .request_refund("pay_1", "refund-1", riyals(115))
+        .await
+        .expect("a retry is quiet");
+    let again = fixture.refund_pass(&gateway).await;
+    assert_eq!(again.refunded, 0);
+    assert_eq!(gateway.refunded().len(), 1, "the gateway was asked twice");
+}
+
+/// **A refusal is recorded with the gateway's reason and posts nothing.** The
+/// amount it reserved is released, and asking again under the same reference
+/// is the same answer rather than another attempt.
+#[tokio::test]
+async fn a_refund_the_gateway_refuses_is_recorded_as_refused_and_posts_nothing() {
+    let fixture = Fixture::new("refund-refused").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+    fixture
+        .request_refund("pay_1", "refund-1", riyals(115))
+        .await
+        .expect("requested");
+    fixture.project().await;
+
+    let gateway = FakeGateway::new("moyasar")
+        .saying("pay_1", Ok(refunded_none("pay_1", riyals(115))))
+        .refunding(Err(GatewayError::Refused(
+            "payment is older than 180 days".to_owned(),
+        )));
+    let done = fixture.refund_pass(&gateway).await;
+    assert_eq!(done.refused, 1, "{done:?}");
+    assert_eq!(done.refunded, 0);
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1150").await, riyals(115), "nothing moved");
+    assert_eq!(fixture.credit_note_on("INV-1").await, None);
+    assert_eq!(fixture.stage_of("pay_1").await, "settled");
+    let outcomes = fixture.refund_outcomes("pay_1").await;
+    assert_eq!(
+        outcomes,
+        vec![("refund-1".to_owned(), Some("refused".to_owned()))]
+    );
+
+    // The same reference again: the same answer, no second attempt.
+    let refused = fixture
+        .request_refund("pay_1", "refund-1", riyals(115))
+        .await
+        .expect_err("a refused refund was asked for again");
+    assert!(
+        matches!(
+            refused,
+            ExecuteError::Rejected(PaymentsError::RefundRefused { .. })
+        ),
+        "{refused:?}"
+    );
+    // A different reference may try again — the amount was released.
+    fixture
+        .request_refund("pay_1", "refund-2", riyals(115))
+        .await
+        .expect("the refused amount is available to a fresh request");
+}
+
+/// **A refund the gateway already made is recorded, not repeated.** The pass
+/// before this one died between the gateway giving the money back and the
+/// database hearing about it; `fetch` shows the total already covers the
+/// request, so the record is written and nothing is sent.
+#[tokio::test]
+async fn a_refund_that_already_happened_at_the_gateway_is_recorded_not_repeated() {
+    let fixture = Fixture::new("refund-crashed").await;
+    fixture.invoice("INV-1").await;
+    fixture
+        .start("pay_1", "moyasar", "INV-1", riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+    fixture
+        .request_refund("pay_1", "refund-1", riyals(50))
+        .await
+        .expect("requested");
+    fixture.project().await;
+
+    // The gateway already shows fifty back. No `refunding` answer is armed, so
+    // a second `refund` call would panic the fake — which is the assertion.
+    let gateway = FakeGateway::new("moyasar")
+        .saying("pay_1", Ok(refunded_some("pay_1", riyals(115), riyals(50))));
+    let done = fixture.refund_pass(&gateway).await;
+    assert_eq!(done.refunded, 1);
+    assert!(
+        gateway.refunded().is_empty(),
+        "the gateway was asked to refund again"
+    );
+    fixture.project().await;
+    assert_eq!(fixture.balance("1150").await, riyals(65));
+}
+
+/// **Money that is being given back cannot be kept**, and what is spoken for by
+/// an open request cannot be asked for twice.
+#[tokio::test]
+async fn an_awaited_refund_reserves_its_amount() {
+    let fixture = Fixture::new("refund-reserved").await;
+    fixture
+        .start_deposit("pay_1", "moyasar", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(115), None))
+        .await
+        .expect("settles");
+    fixture
+        .request_refund("pay_1", "refund-1", riyals(100))
+        .await
+        .expect("requested");
+
+    // Only fifteen is left to ask for.
+    let too_much = fixture
+        .request_refund("pay_1", "refund-2", riyals(50))
+        .await
+        .expect_err("asked for money already spoken for");
+    assert!(matches!(
+        too_much,
+        ExecuteError::Rejected(PaymentsError::RefundTooLarge(_))
+    ));
+    fixture
+        .request_refund("pay_1", "refund-2", riyals(15))
+        .await
+        .expect("what is left may be asked for");
+
+    // And the business cannot keep what is on its way back.
+    let kept = fixture
+        .retain("pay_1")
+        .await
+        .expect_err("kept money being refunded");
+    assert!(
+        matches!(
+            kept,
+            ExecuteError::Rejected(PaymentsError::RefundAwaited(_))
+        ),
+        "{kept:?}"
     );
 }

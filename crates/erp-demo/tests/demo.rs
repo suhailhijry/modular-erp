@@ -71,7 +71,7 @@ impl Demo {
             .await
             .expect("cluster registers");
 
-        let state = erp_demo::with_storage(AppState::new(control)).expect("storage");
+        let state = erp_demo::with_deployment(AppState::new(control)).expect("deployment");
         // No expiry: these tests drop their own databases, and a reaper running
         // in another test must not race them.
         let seeded = erp_demo::seed(&state, slug, PASSWORD, None)
@@ -319,7 +319,7 @@ async fn the_demo_shows_a_business_rather_than_a_row() {
     let filed = demo
         .get(
             "/v1/tax_sa/vat-return\
-             ?from=2026-01-01T00:00:00Z&until=2026-04-01T00:00:00Z&currency=SAR",
+             ?from=2026-01-01&until=2026-04-01&currency=SAR",
         )
         .await;
     let output = filed["output"]["tax"].as_i64().expect("output tax");
@@ -662,7 +662,7 @@ async fn the_demo_bootstraps_a_database_nobody_prepared() {
         .await
         .expect("bootstrapping is idempotent");
 
-    let state = erp_demo::with_storage(AppState::new(control)).expect("storage");
+    let state = erp_demo::with_deployment(AppState::new(control)).expect("deployment");
     let seeded = erp_demo::seed(&state, "demo-bootstrap", PASSWORD, None)
         .await
         .expect("the demo builds on a database it prepared itself");
@@ -674,6 +674,32 @@ async fn the_demo_bootstraps_a_database_nobody_prepared() {
     let _ = erp_testkit::drop_named_database(&seeded.database).await;
 }
 
+/// **The demo starts no payment the gateway never issued.** It used to record a
+/// Moyasar payment as already started under an invented id, which a worker
+/// asked Moyasar about on every pass, for ever. What it records now is a charge
+/// *requested* against a saved card — a state this system owns, that a worker
+/// with no credentials leaves alone and one with credentials tries once.
+#[tokio::test]
+async fn the_demo_starts_no_payment_the_gateway_never_issued() {
+    let demo = Demo::build("demo-requested").await;
+    let pool = demo.tenant_pool().await;
+
+    let stages: Vec<(String, String)> =
+        sqlx::query_as("SELECT stage, provider FROM proj_payments.payment ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .expect("reads");
+    pool.close().await;
+
+    assert!(!stages.is_empty(), "the demo asks for a gateway payment");
+    assert!(
+        stages.iter().all(|(stage, _)| stage == "requested"),
+        "a payment claims a gateway state nobody at the gateway ever saw: {stages:?}"
+    );
+
+    demo.cleanup().await;
+}
+
 /// The demo has two people in it, with different jobs — which is the only way a
 /// permissions model is visible at all.
 #[tokio::test]
@@ -681,18 +707,39 @@ async fn the_demo_has_somebody_who_cannot_do_everything() {
     let demo = Demo::build("demo-people").await;
     let app = erp_api::router(demo.state.clone());
 
-    let sign_in = |handle: String| {
+    // **Her password is her own**, minted for this demo: the owner's is the
+    // one on the screen while the permissions model is being shown.
+    assert_ne!(demo.seeded.colleague_password, PASSWORD);
+    let sign_in = |handle: String, password: String| {
         axum::http::Request::post("/v1/sessions")
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::from(
-                serde_json::json!({ "handle": handle, "password": PASSWORD }).to_string(),
+                serde_json::json!({ "handle": handle, "password": password }).to_string(),
             ))
             .unwrap()
     };
 
-    let response = tower::ServiceExt::oneshot(app.clone(), sign_in(demo.seeded.colleague.clone()))
-        .await
-        .expect("responds");
+    let refused = tower::ServiceExt::oneshot(
+        app.clone(),
+        sign_in(demo.seeded.colleague.clone(), PASSWORD.to_owned()),
+    )
+    .await
+    .expect("responds");
+    assert_eq!(
+        refused.status(),
+        axum::http::StatusCode::UNAUTHORIZED,
+        "the owner's password does not open the colleague's account"
+    );
+
+    let response = tower::ServiceExt::oneshot(
+        app.clone(),
+        sign_in(
+            demo.seeded.colleague.clone(),
+            demo.seeded.colleague_password.clone(),
+        ),
+    )
+    .await
+    .expect("responds");
     assert_eq!(response.status(), axum::http::StatusCode::CREATED);
     let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
         .await

@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id as \"id: TenantId\", t.slug, t.display_name, t.status, t.cluster,\n                      t.database_name, t.demo_expires_at, t.created_at\n                 FROM tenant_domain d\n                 JOIN tenant t ON t.id = d.tenant\n                WHERE d.verified_at IS NOT NULL\n                  AND ($1 = d.domain OR $1 LIKE '%.' || d.domain)\n                ORDER BY length(d.domain) DESC\n                LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id: TenantId",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "slug",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "slug"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "cluster",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "cluster"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "database_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "database_name"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "demo_expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "demo_expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "919991d66d2d6e9509e585dc51f3e2e834ef3a328bbf11d8ae839f1650812e93"
+}

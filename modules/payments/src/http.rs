@@ -32,6 +32,7 @@ use erp_web::AppState;
 use erp_web::Problem;
 use erp_web::{Allowed, IdempotencyKey, Language, ManageTenant, PostEntries, Read};
 use erp_web::{Consistency, nudge};
+use erp_web::{IfMatch, Versioned, config_problem};
 use erp_web::{Json, Query, bad_request, creating, parse_id, require_module};
 
 use crate::PaymentsError;
@@ -164,6 +165,11 @@ struct GatewayPaymentView {
     refunded: i64,
     /// In the gateway's words, when it refused.
     failed_why: Option<String>,
+    /// **Where the customer goes to pay**, while there is somewhere: the
+    /// checkout the worker opened at a provider that hosts one, or the 3-D
+    /// Secure page a saved-card charge raised. `null` until the gateway has
+    /// said, and for a charge that needs nobody.
+    pay_at: Option<String>,
     #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     started_at: Timestamp,
     #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
@@ -192,6 +198,7 @@ fn view(row: crate::PaymentRow) -> GatewayPaymentView {
         fee: row.fee.map(Money::minor),
         refunded: row.refunded.minor(),
         failed_why: row.failed_why,
+        pay_at: row.pay_at,
         started_at: row.started_at,
         settled_at: row.settled_at,
     }
@@ -300,6 +307,7 @@ async fn start_payment(
         &mut tx,
         &id,
         &crate::Attempt {
+            pay_at: None,
             provider: body.provider.clone(),
             gateway_id: body.gateway_id.clone(),
             collects,
@@ -363,15 +371,23 @@ async fn get_payment(
     })
 }
 
-/// Give money back.
+/// Ask for money to go back.
 ///
-/// **Issues the credit note ZATCA requires**, when the refund leaves the
-/// invoice holding nothing. A partial refund does not get one — see
-/// `credit_the_invoice` for why that is a deferral rather than a decision.
+/// **Records the request; the worker carries it to the gateway.** Nothing is
+/// posted and no document is issued until the gateway confirms the money went
+/// back — then the refund lands in the books and, when it leaves the invoice
+/// holding nothing, the credit note ZATCA requires is issued. The first version
+/// of this route recorded the refund on the spot and never spoke to the
+/// gateway, on the instruction that the operator would refund there first;
+/// nothing enforced the order, and a refund recorded that the gateway never
+/// made is a set of books saying money went back when it did not.
 ///
-/// **Records and posts; it does not ask the gateway.** Instruct the gateway
-/// first and record what it confirmed — a refund posted here that the gateway
-/// refused is a set of books saying money went back when it did not.
+/// `GET /v1/payments/{payment}` shows each request and what the gateway said.
+/// A refusal is recorded with the gateway's reason and is final: asking again
+/// under the same reference is the same answer.
+///
+/// A partial refund gets no credit note — see `credit_the_invoice` for why that
+/// is a deferral rather than a decision.
 #[utoipa::path(
     post,
     path = "/v1/payments/{payment}/refunds",
@@ -382,11 +398,12 @@ async fn get_payment(
     ),
     request_body = NewGatewayRefund,
     responses(
-        (status = OK, body = GatewayPaymentRecorded),
+        (status = ACCEPTED, description = "Recorded. The worker will ask the gateway, and the books follow what it says.", body = GatewayPaymentRecorded),
         (status = BAD_REQUEST, description = "More than is left to refund, or a payment that never settled", body = Problem),
         (status = NOT_FOUND, description = "No such payment", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The gateway already refused this refund", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
 )]
@@ -397,7 +414,7 @@ async fn refund_gateway_payment(
     key: IdempotencyKey,
     Path(id): Path<String>,
     Json(body): Json<NewGatewayRefund>,
-) -> Result<Json<GatewayPaymentRecorded>, Problem> {
+) -> Result<(StatusCode, Json<GatewayPaymentRecorded>), Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let id = parse_id(&id, locale)?;
 
@@ -430,7 +447,7 @@ async fn refund_gateway_payment(
         .reason
         .unwrap_or_else(|| format!("Refunded through {} · {}", record.provider, body.reference));
 
-    let committed = crate::refund_in(
+    let committed = crate::request_refund_in(
         &mut tx,
         &id,
         &body.reference,
@@ -445,10 +462,13 @@ async fn refund_gateway_payment(
     tx.commit().await.map_err(|e| database(&e, locale))?;
     nudge(&state, tenant.db.tenant()).await;
 
-    Ok(Json(GatewayPaymentRecorded {
-        id: id.to_string(),
-        position: committed.at.map(erp_types::LogPosition::get),
-    }))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(GatewayPaymentRecorded {
+            id: id.to_string(),
+            position: committed.at.map(erp_types::LogPosition::get),
+        }),
+    ))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1164,6 +1184,8 @@ async fn charge_saved_card(
             collects,
             amount: Money::from_minor(body.amount, currency),
             callback_url: body.callback_url,
+            // A saved card is charged by this system; nothing hosts a page.
+            checkout: None,
         },
         chrono::Utc::now(),
         &creating(&tenant, &key),
@@ -1253,7 +1275,7 @@ async fn retain_deposit(
     path = "/v1/payments/deposit-policy",
     tag = "payments",
     responses(
-        (status = OK, body = DepositPolicy),
+        (status = OK, body = DepositPolicy, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -1263,16 +1285,22 @@ async fn retain_deposit(
 async fn deposit_policy(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<DepositPolicy>, Problem> {
+) -> Result<Versioned<DepositPolicy>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::Retention::KEY)
+        .await
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
     let policy = crate::Retention::resolve(&mut conn)
         .await
-        .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
 
-    Ok(Json(DepositPolicy {
-        supply: policy.supply,
-    }))
+    Ok(Versioned(
+        version,
+        DepositPolicy {
+            supply: policy.supply,
+        },
+    ))
 }
 
 /// Decide whether keeping a deposit is a supply.
@@ -1284,9 +1312,11 @@ async fn deposit_policy(
     put,
     path = "/v1/payments/deposit-policy",
     tag = "payments",
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.")),
     request_body = DepositPolicy,
     responses(
         (status = NO_CONTENT, description = "Recorded."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -1296,6 +1326,7 @@ async fn deposit_policy(
 async fn set_deposit_policy(
     tenant: Allowed<ManageTenant>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<DepositPolicy>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -1310,9 +1341,10 @@ async fn set_deposit_policy(
         // Who changed a tax position, which is the one thing somebody will ask
         // about it later.
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
-    .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+    .map_err(|e| config_problem(&e, locale, &CATALOG))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1397,6 +1429,22 @@ impl Localize for PaymentsError {
             Self::NothingToRetain(id) => {
                 Message::new(crate::messages::NOTHING_TO_RETAIN).with("id", MessageArg::text(id))
             }
+            Self::AlreadyAwaited { against, payment } => {
+                Message::new(crate::messages::ALREADY_AWAITED)
+                    .with("against", MessageArg::text(against))
+                    .with("payment", MessageArg::text(payment))
+            }
+            Self::RefundAwaited(id) => {
+                Message::new(crate::messages::REFUND_AWAITED).with("id", MessageArg::text(id))
+            }
+            Self::RefundRefused {
+                payment,
+                reference,
+                why,
+            } => Message::new(crate::messages::REFUND_REFUSED)
+                .with("payment", MessageArg::text(payment))
+                .with("reference", MessageArg::text(reference))
+                .with("why", MessageArg::text(why)),
             Self::NoSavedCards(provider) => Message::new(crate::messages::NO_SAVED_CARDS)
                 .with("provider", MessageArg::text(provider)),
             Self::NoSuchCard(id) => {
@@ -1429,6 +1477,7 @@ fn problem_for(error: &CommandError<PaymentsError>, locale: Locale) -> Problem {
                     StatusCode::NOT_FOUND
                 }
                 PaymentsError::AlreadyStarted(_)
+                | PaymentsError::AlreadyAwaited { .. }
                 | PaymentsError::PayoutRecorded(_)
                 // A removed card is a **conflict with what the customer
                 // asked for**, not a malformed request: the id was real.
@@ -1438,9 +1487,10 @@ fn problem_for(error: &CommandError<PaymentsError>, locale: Locale) -> Problem {
                 PaymentsError::Secret(_) => StatusCode::SERVICE_UNAVAILABLE,
                 // **Well-formed, and refused on what the gateway said.** A 422
                 // rather than a 400: nothing about the request was wrong.
-                PaymentsError::WrongAmount { .. } | PaymentsError::NotCollectable { .. } => {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                }
+                PaymentsError::WrongAmount { .. }
+                | PaymentsError::NotCollectable { .. }
+                | PaymentsError::RefundAwaited(_)
+                | PaymentsError::RefundRefused { .. } => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::BAD_REQUEST,
             },
             rejection.message(),

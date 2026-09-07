@@ -482,14 +482,15 @@ mod date {
         date: &chrono::NaiveDate,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&date.format("%Y-%m-%d").to_string())
+        serializer.serialize_str(&date.to_string())
     }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<chrono::NaiveDate, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        chrono::NaiveDate::parse_from_str(&raw, "%Y-%m-%d").map_err(serde::de::Error::custom)
+        raw.parse::<chrono::NaiveDate>()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -693,14 +694,15 @@ impl Employee {
         &self,
         from: chrono::NaiveDate,
         until: chrono::NaiveDate,
+        calendar: erp_types::Calendar,
     ) -> bool {
         let Some(hired_on) = self.hired_on else {
             return false;
         };
-        if hired_on.date_naive() > from {
+        if calendar.day(hired_on) > from {
             return false;
         }
-        self.left_at.is_none_or(|left| left.date_naive() >= until)
+        self.left_at.is_none_or(|left| calendar.day(left) >= until)
     }
 
     /// What was recorded for this day, if it is still in the window.
@@ -740,7 +742,7 @@ impl Employee {
         span: erp_occupancy::Span,
         calendar: erp_recurrence::Calendar,
     ) -> bool {
-        self.shifts.is_empty() || erp_recurrence::any_covers(&self.shifts, span, calendar.offset())
+        self.shifts.is_empty() || erp_recurrence::any_covers(&self.shifts, span, calendar)
     }
 
     /// **Whether this person may be rostered on this day.**

@@ -670,6 +670,7 @@ async fn a_resource_belongs_to_a_branch_and_the_rota_narrows_to_it() {
         name_latin: None,
         kind: booking::Kind::Place,
         capacity: 1,
+        rate: None,
         branch: Some(code(branch)),
         employee: None,
     };

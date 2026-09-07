@@ -60,9 +60,13 @@ pub struct Seeded {
     pub email: String,
     /// A live session for the owner. Signing up logs you in.
     pub token: String,
-    /// The colleague, and their password. A demo of a permissions model needs
-    /// two people in it or there is nothing to demonstrate.
+    /// The colleague. A demo of a permissions model needs two people in it or
+    /// there is nothing to demonstrate.
     pub colleague: String,
+    /// **Their own password**, minted for this demo and printed with it. The
+    /// owner's is shown on a screen to a prospect; the colleague's must not be
+    /// the same one.
+    pub colleague_password: String,
     pub invoices: usize,
     /// Invoices cancelled by a credit note. Part of `invoices`, not extra.
     pub credited: usize,
@@ -125,6 +129,9 @@ pub enum DemoError {
     /// it reads from is a demo that lies.
     #[error("storage is configured and not usable: {0}")]
     Storage(String),
+    /// `SEALING_KEY` is set and not a key.
+    #[error(transparent)]
+    Sealing(#[from] erp_eventlog::SecretError),
 }
 
 /// Prepares a database that has never run anything.
@@ -169,28 +176,43 @@ const DEFAULT_CAPACITY: i32 = 10_000;
 /// `ttl` is how long the tenant lives before the reaper destroys it. `None`
 /// makes it an ordinary tenant that nothing will ever clean up — right for a
 /// test that drops its own database, wrong for anything reachable from outside.
-/// Somewhere for the demo to keep its documents.
+/// The deployment's own storage and sealing key, so the demo agrees with the
+/// API process beside it.
 ///
-/// **Whatever this deployment is configured for, and a real directory if it is
-/// configured for nothing.** The demo fills itself through the public API and
-/// an upload with no storage refuses — which is right, and would leave the
-/// filing cabinet empty.
+/// **Storage: whatever this deployment is configured for, and a real directory
+/// if it is configured for nothing.** The demo fills itself through the public
+/// API and an upload with no storage refuses — which is right, and would leave
+/// the filing cabinet empty. Asking `erp_storage::from_env` rather than always
+/// taking a directory is what makes the demo agree with the API beside it: in
+/// `compose.yaml` both see `S3_BUCKET`, so a document the demo uploads is one
+/// the API can serve. A demo that wrote to its own container's disk while the
+/// API read a bucket would fill a filing cabinet nobody can open. The fallback
+/// is under the system temp, which is the right place for a demo that a
+/// reaper destroys. `FILE_ROOT` names it explicitly.
 ///
-/// Asking `erp_storage::from_env` rather than always taking a directory is what
-/// makes the demo agree with the API process beside it: in `compose.yaml` both
-/// see `S3_BUCKET`, so a document the demo uploads is one the API can serve. A
-/// demo that wrote to its own container's disk while the API read a bucket
-/// would fill a filing cabinet nobody can open.
-///
-/// The fallback is under the system temp, which is the right place for a demo
-/// that a reaper destroys. `FILE_ROOT` names it explicitly.
-pub fn with_storage(state: AppState) -> Result<AppState, DemoError> {
-    if let Some(storage) = erp_storage::from_env().map_err(DemoError::Storage)? {
-        return Ok(state.storing_in(storage));
-    }
-    Ok(state.storing_in(std::sync::Arc::new(erp_storage::Local::at(
-        std::env::temp_dir().join("erp-demo-files"),
-    ))))
+/// **Sealing: the deployment's `SEALING_KEY`**, for the same reason — the card
+/// the demo saves is sealed under it, and the worker beside the demo unseals
+/// with the same one. With none set, a key is minted for this run and what it
+/// seals is readable by this process alone; that is the posture the API takes
+/// (it warns, and anything that stores a secret refuses), and a demo with no
+/// key at all could not save a card.
+pub fn with_deployment(state: AppState) -> Result<AppState, DemoError> {
+    let state = match erp_storage::from_env().map_err(DemoError::Storage)? {
+        Some(storage) => state.storing_in(storage),
+        None => state.storing_in(std::sync::Arc::new(erp_storage::Local::at(
+            std::env::temp_dir().join("erp-demo-files"),
+        ))),
+    };
+    let sealing = if let Ok(configured) = std::env::var("SEALING_KEY") {
+        erp_eventlog::SealingKey::parse(&configured)?
+    } else {
+        tracing::warn!(
+            "SEALING_KEY is not set; the card this demo saves is sealed under a key \
+             minted for this run, which no worker beside it holds"
+        );
+        erp_eventlog::SealingKey::generate("demo")?
+    };
+    Ok(state.sealing_with(sealing))
 }
 
 pub async fn seed(
@@ -219,7 +241,7 @@ pub async fn seed(
     let journal_entries = seed_opening_balances(&app, slug, &token).await?;
     let invoices = seed_invoices(&app, slug, &token).await?;
     let payments = seed_payments(&app, slug, &token).await?;
-    let payments = payments + seed_gateway_payment(&app, slug, &token).await?;
+    let card = seed_card(&app, slug, &token).await?;
 
     // A mistake and its correction, because a demo of an accounting system in
     // which nothing was ever *wrong* is not a demo of an accounting system —
@@ -231,11 +253,6 @@ pub async fn seed(
     // calls it a return, which is half a number and the wrong half to show
     // somebody deciding whether this can file for them.
     let bills = seed_bills(&app, slug, &token).await?;
-
-    // Drive the projections before filing: a return is computed from the read
-    // models, and filing one that has not caught up would record zeroes.
-    project(&state.control, tenant).await?;
-    let filed = seed_filing(&app, slug, &token).await?;
 
     // The diary. After the customers, because a booking is made *by* somebody
     // and the reference is what stops two spellings being two people — and
@@ -267,12 +284,27 @@ pub async fn seed(
     // most of the somethings are above.
     let documents = seed_documents(&app, slug, &token).await?;
 
-    let colleague = seed_colleague(&app, slug, &token, password).await?;
+    let (colleague, colleague_password) = seed_colleague(&app, slug, &token).await?;
 
     // Drive the projections, so the demo has something to show the moment it
     // finishes rather than whenever a worker next visits. A deployment with a
     // worker running would get there on its own; this makes the demo usable
     // without one.
+    project(&state.control, tenant).await?;
+
+    // **After a projection run**, because the route that asks for a saved
+    // card to be charged checks the card against the read model — the cheap
+    // check, with the worker as the authority — and a card saved a moment ago
+    // is not in it yet. A charge request posts nothing, so the closed quarter
+    // below is not disturbed by it.
+    let payments = payments + request_card_charge(&app, slug, &token, &card).await?;
+
+    // **The return is filed last**, once every document dated inside the
+    // quarter is in: filing closes the books through the end of the period, so
+    // anything dated into it afterwards — a January package, a March till sale
+    // — would be refused, which is the fence working. A return is computed from
+    // the read models, which the run above has just brought up to date.
+    let filed = seed_filing(&app, slug, &token).await?;
     project(&state.control, tenant).await?;
 
     // Last, so a demo that failed half-way through building is not one the
@@ -305,6 +337,7 @@ pub async fn seed(
         token,
         expires_after: ttl,
         colleague,
+        colleague_password,
         invoices,
         credited,
         payments,
@@ -1071,8 +1104,8 @@ async fn seed_filing(app: &axum::Router, slug: &str, token: &str) -> Result<usiz
         "/v1/tax_sa/returns",
         Some(token),
         &serde_json::json!({
-            "from": "2026-01-01T00:00:00Z",
-            "until": "2026-04-01T00:00:00Z",
+            "from": "2026-01-01",
+            "until": "2026-04-01",
             "currency": "SAR",
             "filed_on": "2026-04-28T00:00:00Z"
         }),
@@ -1331,36 +1364,76 @@ async fn seed_payments(app: &axum::Router, slug: &str, token: &str) -> Result<us
     Ok(payments.len())
 }
 
-/// A card payment somebody started and has not finished.
+/// A card the customer saved.
 ///
-/// **Deliberately left `pending`**, because that is the honest half. This
+/// The token is what a gateway's browser SDK would have minted; this one was
+/// minted by nobody, and is refused by a real gateway the first time it is
+/// tried — which is a recorded, finished outcome, not a record chased for ever.
+/// Returns the card's id, for [`request_card_charge`].
+async fn seed_card(app: &axum::Router, slug: &str, token: &str) -> Result<String, DemoError> {
+    let card = create(
+        app,
+        slug,
+        "/v1/payments/cards",
+        token,
+        "demo-card",
+        &serde_json::json!({
+            "customer": demo_id("CUST-0001"),
+            "provider": "moyasar",
+            "token": "token_demo_minted_by_nobody",
+            "brand": "mada",
+            "last4": "4242",
+            "expiry_month": 12,
+            "expiry_year": 2030,
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+    card["id"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| DemoError::Unexpected {
+            path: "/v1/payments/cards".to_owned(),
+            body: card.to_string(),
+        })
+}
+
+/// A charge asked for against the saved card.
+///
+/// **Deliberately left `requested`**, because that is the honest half. This
 /// system only ever marks a gateway payment settled from what the *gateway*
 /// says — there is no route that lets a caller assert it — and a demo has no
-/// gateway. So what it shows is the real state a tenant is in between sending
-/// a customer to a payment page and the callback arriving, which is exactly
+/// gateway. So what it shows is the real state a tenant is in between asking
+/// for a saved card to be charged and the worker's next pass, which is exactly
 /// what somebody chasing an unpaid invoice sees.
-async fn seed_gateway_payment(
+///
+/// It used to record a payment as already *started* at Moyasar, under an id
+/// Moyasar never issued. A worker pointed at that tenant asked Moyasar about
+/// it on every pass and logged that the gateway had no record of it, for
+/// ever. A charge *requested* against a saved card is a state this system
+/// owns: with no gateway credentials the worker leaves it alone, and with
+/// them it tries the token once, is refused, and records that.
+async fn request_card_charge(
     app: &axum::Router,
     slug: &str,
     token: &str,
+    card: &str,
 ) -> Result<usize, DemoError> {
-    // The zero-rated invoice, which is half paid by bank transfer. The rest was
-    // sent to a card page.
+    // The zero-rated invoice, which is half paid by bank transfer. The rest is
+    // asked of the saved card.
     create(
         app,
         slug,
-        "/v1/payments",
+        &format!("/v1/payments/cards/{card}/charges"),
         token,
         "gateway-payment",
         &serde_json::json!({
-            "provider": "moyasar",
-            "gateway_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
             "invoice": demo_id("crm-4502"),
             "amount": 1_650_000,
             "currency": "SAR",
-            "started_at": "2026-03-02T09:00:00Z",
+            "callback_url": format!("https://{slug}.example/paid"),
         }),
-        StatusCode::CREATED,
+        StatusCode::ACCEPTED,
     )
     .await?;
 
@@ -1789,16 +1862,20 @@ async fn seed_till(app: &axum::Router, slug: &str, token: &str) -> Result<usize,
 
 /// A second person, who does the invoicing and not the books.
 ///
-/// Returns their login. Per-module roles are invisible with one user in the
-/// tenant, and "Sara can raise invoices but cannot touch the chart of accounts"
-/// is the whole point of them.
+/// Returns their login and a password minted for them. Per-module roles are
+/// invisible with one user in the tenant, and "Sara can raise invoices but
+/// cannot touch the chart of accounts" is the whole point of them — and the
+/// demonstration is given with the owner's password on the screen, which is
+/// why hers is not the same one.
 async fn seed_colleague(
     app: &axum::Router,
     slug: &str,
     token: &str,
-    password: &str,
-) -> Result<String, DemoError> {
+) -> Result<(String, String), DemoError> {
     let handle = format!("sara@{slug}.example");
+    // Random, from the OS, and long enough that nobody types it into the
+    // wrong screen by memory.
+    let password = uuid::Uuid::new_v4().simple().to_string();
 
     let added = post(
         app,
@@ -1827,7 +1904,7 @@ async fn seed_colleague(
     )
     .await?;
 
-    Ok(handle)
+    Ok((handle, password))
 }
 
 // ---------------------------------------------------------------------------
@@ -1990,24 +2067,28 @@ async fn create_at(
 /// an invoice — which are the two shapes every one of these businesses has: a
 /// paper the authority wants, and a paper a customer signed.
 async fn seed_documents(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
-    let documents: [(&str, &str, &str, &str, &[u8]); 2] = [
+    // **Owners are the record's id, not its number.** `files` checks that the
+    // record exists in the log, and an invoice lives there under the id it was
+    // created with — the same `demo_id` `seed_invoices` used — while `INV-0001`
+    // is the number it was given afterwards.
+    let documents: [(&str, &str, String, &str, &[u8]); 2] = [
         (
             "DOC-LICENCE",
             "tenant",
-            slug,
+            slug.to_owned(),
             "السجل التجاري.pdf",
             b"%PDF-1.7 commercial registration",
         ),
         (
             "DOC-CONTRACT",
             "invoice",
-            "INV-0001",
+            demo_id("crm-4471"),
             "عقد موقّع.pdf",
             b"%PDF-1.7 a signed contract",
         ),
     ];
 
-    for (id, kind, owner, name, bytes) in documents {
+    for (id, kind, owner, name, bytes) in &documents {
         let path = format!(
             "/v1/files/{id}/content?owner_kind={kind}&owner_id={owner}&name={}",
             urlencoded(name)

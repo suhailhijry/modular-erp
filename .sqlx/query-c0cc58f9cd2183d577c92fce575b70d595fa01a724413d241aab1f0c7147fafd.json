@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT reference as \"reference!\", amount_minor as \"amount_minor!\",\n                  currency as \"currency!\", reason as \"reason!\",\n                  requested_at as \"requested_at!\", outcome, outcome_why, outcome_at\n             FROM proj_payments.refund_request\n            WHERE payment_id = $1\n            ORDER BY requested_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reference!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "reference"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "amount_minor!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "amount_minor"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "reason!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "requested_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "requested_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "outcome",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "outcome"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "outcome_why",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "outcome_why"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "outcome_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "outcome_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "c0cc58f9cd2183d577c92fce575b70d595fa01a724413d241aab1f0c7147fafd"
+}

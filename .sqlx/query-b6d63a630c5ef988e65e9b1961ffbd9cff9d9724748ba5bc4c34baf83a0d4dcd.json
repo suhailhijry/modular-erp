@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", advance_for as \"against!\"\n             FROM proj_payments.payment\n            WHERE advance_for IS NOT NULL AND stage IN ('settled', 'retained')\n            ORDER BY settled_at ASC NULLS LAST, id\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "against!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "advance_for"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "b6d63a630c5ef988e65e9b1961ffbd9cff9d9724748ba5bc4c34baf83a0d4dcd"
+}

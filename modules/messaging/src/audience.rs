@@ -268,6 +268,26 @@ async fn client_of(conn: &mut PgConnection, subject: &Subject) -> Result<Vec<Per
         .collect())
 }
 
+/// **Whether an id names anybody a device could belong to** — an employee or a
+/// customer on this tenant's books. What `register_device` asks before binding
+/// a token to it.
+///
+/// **Read from the log, not the projections**, so a customer registered a
+/// moment ago is somebody already — the same call `crm::accepts_documents`
+/// makes for every command that names a customer.
+pub async fn recipient_exists(
+    conn: &mut PgConnection,
+    id: &str,
+) -> Result<bool, erp_eventlog::LoadError> {
+    let Ok(id) = AggregateId::new(id) else {
+        return Ok(false);
+    };
+    if hr::exists(conn, &id).await? {
+        return Ok(true);
+    }
+    crm::accepts_documents(conn, &id).await
+}
+
 /// The employee doing the work.
 async fn worker_of(conn: &mut PgConnection, subject: &Subject) -> Result<Vec<Person>, sqlx::Error> {
     let id = match subject.topic {

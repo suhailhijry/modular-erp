@@ -54,7 +54,9 @@
 pub mod http;
 pub mod messages;
 
+mod awaiting;
 mod card;
+mod checkout;
 mod commands;
 mod gateways;
 mod payment;
@@ -63,24 +65,33 @@ mod posting;
 mod projections;
 mod sweep;
 
+pub use awaiting::{Awaiting, AwaitingEvent};
 pub use card::{Card, CardEvent, SAVES_CARDS, token_key};
+pub use checkout::{Checkout, Landing, Line, Place, Shopper};
 pub use commands::{
-    Attempt, Collection, PaymentsError, SavedCard, Transfer, fail_in, forget_card_in,
-    record_payout_in, refund_in, request_in, retain_in, save_card_in, settle_in, start_in, void_in,
+    Attempt, Collection, PaymentsError, SavedCard, Transfer, awaited_refunds, fail_in,
+    forget_card_in, record_payout_in, refund_in, refuse_refund_in, request_in, request_refund_in,
+    retain_in, save_card_in, settle_in, start_in, void_in,
 };
+/// The trait every sweep takes, re-exported so a caller that holds a client
+/// can name what it holds without depending on the vendor crate.
+pub use erp_payments::Gateway;
 pub use gateways::{Credentials, GatewayConfigError, PROVIDERS, configure, credentials};
-pub use payment::{Advance, Buyer, Collects, Payment, PaymentEvent, Stage, deposit_invoice};
+pub use payment::{
+    Advance, Buyer, Collects, Payment, PaymentEvent, RefundRequest, Stage, deposit_invoice,
+};
 pub use payout::{Payout, PayoutEvent};
 pub use posting::{
     PostingAccounts, Retention, Settlement, entry_for_fee, entry_for_forfeit, entry_for_payout,
 };
 pub use projections::{
-    Awaiting, CardRow, Collected, Kept, PaymentRow, Payments, PayoutRow, against, awaiting_payout,
-    by_gateway_id, card, cards, payment, payouts, projections,
+    AwaitedRefund, AwaitingPayout, CardRow, Collected, Kept, PaymentRow, Payments, PayoutRow,
+    RefundRow, against, awaited_for, awaiting_payout, awaiting_refunds, by_gateway_id, card, cards,
+    payment, payouts, projections, refunds_of, settled_advances,
 };
 pub use sweep::{
-    Attempted, Doorbell, Swept, Waiting, charge_requested, collect_awaited, configured, doorbells,
-    pending, requested, settle_pending,
+    Attempted, Doorbell, Refunding, Swept, Waiting, charge_requested, collect_awaited, configured,
+    doorbells, open_checkouts, pending, refund_requested, requested, settle_pending,
 };
 
 use erp_i18n::StaticCatalog;
@@ -153,6 +164,7 @@ pub fn upcasters() -> &'static erp_eventlog::Upcasters {
             .iter()
             .chain(PayoutEvent::NAMES.iter())
             .chain(CardEvent::NAMES.iter())
+            .chain(AwaitingEvent::NAMES.iter())
             .fold(erp_eventlog::Upcasters::new(), |u, n| {
                 u.declare(&name(n), VERSION_1)
             })
@@ -185,12 +197,14 @@ mod tests {
             .iter()
             .chain(PayoutEvent::NAMES.iter())
             .chain(CardEvent::NAMES.iter())
+            .chain(AwaitingEvent::NAMES.iter())
         {
             let _ = name(literal);
         }
         let _ = domain("payments_payment");
         let _ = domain("payments_payout");
         let _ = domain("payments_card");
+        let _ = domain("payments_awaiting");
         let _ = module_id();
         let _ = upcasters();
     }

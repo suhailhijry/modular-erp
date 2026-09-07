@@ -60,7 +60,7 @@ impl SessionToken {
     }
 
     /// What is stored. See `0004_authentication.sql` for why this is not slow.
-    fn digest(token: &str) -> Vec<u8> {
+    pub fn digest(token: &str) -> Vec<u8> {
         use sha2::Digest;
         sha2::Sha256::digest(token.as_bytes()).to_vec()
     }

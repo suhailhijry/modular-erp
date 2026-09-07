@@ -72,10 +72,12 @@ impl Projection for Invoices {
                 discounts,
                 totals,
                 prepayment,
+                prepaid,
                 note,
             } => {
                 let invoice = NewInvoice {
                     prepayment,
+                    prepaid_number: prepaid.map(|p| p.number),
                     // Issued before this system numbered anything: the number
                     // *was* the client-chosen id, and that is the number on the
                     // copy the customer holds.
@@ -185,6 +187,8 @@ struct NewInvoice {
     discounts: Vec<crate::invoice::Discount>,
     totals: crate::vat::Totals,
     prepayment: bool,
+    /// The prepayment invoice this one deducts, by number, when it does.
+    prepaid_number: Option<String>,
     note: String,
 }
 
@@ -199,8 +203,8 @@ async fn write_issued(
     sqlx::query(
         "INSERT INTO invoice
              (id, number, customer, customer_vat, customer_id, issued_on, due_on,
-              currency, net, tax, gross, discount, prepayment, note, recorded_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+              currency, net, tax, gross, discount, prepayment, note, recorded_at, prepaid_number)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(id)
     .bind(&invoice.number)
@@ -224,6 +228,7 @@ async fn write_issued(
     .bind(&invoice.note)
     // The event's time, never the wall clock (L2).
     .bind(ctx.event_time())
+    .bind(&invoice.prepaid_number)
     .execute(&mut *conn)
     .await?;
 
@@ -264,6 +269,7 @@ async fn write_issued(
         .bind(band.basis_points)
         .bind(band.net.minor())
         .bind(band.tax.minor())
+        .bind(&invoice.prepaid_number)
         .execute(&mut *conn)
         .await?;
     }
@@ -436,6 +442,9 @@ pub struct InvoiceSummary {
     /// When a credit note cancelled it, and which one.
     pub cancelled_on: Option<Timestamp>,
     pub credit_note: Option<String>,
+    /// The prepayment invoice this one deducted, when it is the final invoice
+    /// after a deposit.
+    pub prepaid_number: Option<String>,
     pub customer: String,
     pub customer_vat: Option<String>,
     /// The `crm` record this was matched to, when there is one.
@@ -516,7 +525,7 @@ pub async fn invoices(
                   net as "net!", tax as "tax!", gross as "gross!",
                   paid as "paid!", outstanding as "outstanding!",
                   payments as "payments!", note as "note!",
-                  cancelled_on, credit_note
+                  cancelled_on, credit_note, prepaid_number
              FROM proj_sales.invoice_row
             WHERE $2::timestamptz IS NULL OR (issued_on, id) < ($2, $3)
             ORDER BY issued_on DESC, id DESC
@@ -548,6 +557,7 @@ pub async fn invoices(
                 note: row.note,
                 cancelled_on: row.cancelled_on,
                 credit_note: row.credit_note,
+                prepaid_number: row.prepaid_number,
             })
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()
@@ -579,6 +589,42 @@ fn resume(after: Option<&Cursor>) -> Result<(Option<Timestamp>, Option<String>),
     Ok((Some(issued_on), Some(id)))
 }
 
+/// **What an invoice declared, per band** — what a final invoice after a
+/// deposit deducts. Read from the projection rather than the aggregate, so a
+/// route or a worker may ask (L7).
+pub async fn bands_of(
+    conn: &mut sqlx::PgConnection,
+    invoice: &str,
+) -> Result<Vec<crate::vat::TaxBand>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT t.vat_category as "category!", t.vat_rate_bp as "basis_points!",
+                  t.net as "net!", t.tax as "tax!", i.currency as "currency!"
+             FROM proj_sales.invoice_tax t
+             JOIN proj_sales.invoice i ON i.id = t.invoice_id
+            WHERE t.invoice_id = $1
+            ORDER BY t.vat_category, t.vat_rate_bp"#,
+        invoice,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter()
+        .map(|r| {
+            let currency =
+                CurrencyCode::new(&r.currency).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+            let category: ledger::VatCategory = r
+                .category
+                .parse()
+                .map_err(|e: String| sqlx::Error::Decode(e.into()))?;
+            Ok(crate::vat::TaxBand {
+                category,
+                basis_points: r.basis_points,
+                net: Money::from_minor(r.net, currency),
+                tax: Money::from_minor(r.tax, currency),
+            })
+        })
+        .collect()
+}
+
 /// One invoice with its lines, tax bands and payments. `None` if there is no
 /// such invoice — or if the projection has not caught up with it yet, which is
 /// what `?consistent_after=` is for.
@@ -599,7 +645,7 @@ pub async fn invoice(
                   net as "net!", tax as "tax!", gross as "gross!",
                   paid as "paid!", outstanding as "outstanding!",
                   payments as "payments!", note as "note!",
-                  cancelled_on, credit_note
+                  cancelled_on, credit_note, prepaid_number
              FROM proj_sales.invoice_row
             WHERE id = $1"#,
         id,
@@ -663,6 +709,7 @@ pub async fn invoice(
             note: header.note,
             cancelled_on: header.cancelled_on,
             credit_note: header.credit_note,
+            prepaid_number: header.prepaid_number,
         },
         lines: lines
             .into_iter()

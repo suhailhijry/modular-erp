@@ -22,6 +22,11 @@ pub enum AppendError {
     },
     #[error("cannot append an empty batch")]
     Empty,
+    /// The tenant's calendar could not be read to stamp onto the event. A
+    /// setting this build cannot decode stops the write (L6) rather than
+    /// recording events under a clock nobody chose.
+    #[error(transparent)]
+    Config(#[from] crate::config::ConfigError),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
@@ -29,6 +34,7 @@ pub enum AppendError {
 impl erp_i18n::Localize for AppendError {
     fn message(&self) -> erp_i18n::Message {
         match self {
+            Self::Config(e) => e.message(),
             // A conflict is retryable and worth saying so — the user changed
             // something someone else had already changed.
             Self::Conflict { .. } => erp_i18n::Message::new(messages::CONCURRENT_MODIFICATION),
@@ -99,7 +105,18 @@ pub async fn append(
         .map(|e| i16::try_from(e.schema_version.get()).unwrap_or(i16::MAX))
         .collect();
     let payloads: Vec<serde_json::Value> = events.iter().map(|e| e.payload.clone()).collect();
-    let metadata_json = serde_json::to_value(metadata).unwrap_or_else(|_| serde_json::json!({}));
+    // **Every event carries the clock it was written under.** The caller may
+    // say which (a replay, a test); otherwise it is the tenant's setting at
+    // this moment, read in this transaction — one indexed lookup, beside the
+    // position lock this statement is about to take anyway.
+    let metadata_json = if metadata.calendar.is_some() {
+        serde_json::to_value(metadata)
+    } else {
+        let mut stamped = metadata.clone();
+        stamped.calendar = Some(crate::config::calendar(&mut *conn).await?);
+        serde_json::to_value(&stamped)
+    }
+    .unwrap_or_else(|_| serde_json::json!({}));
 
     // One statement: reserve a contiguous block of positions and write the
     // events into it. `WITH ORDINALITY` preserves input order, so event i gets

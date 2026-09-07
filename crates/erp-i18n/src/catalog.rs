@@ -4,15 +4,37 @@ use std::collections::BTreeMap;
 
 use crate::{Locale, Message, MessageArg, MessageCode, Plural};
 
-/// Unicode bidi isolation, wrapped around Latin-script arguments in RTL text.
+/// Unicode bidi isolation, wrapped around an argument whose direction is not
+/// the sentence's.
 ///
 /// Without these, an Arabic sentence containing `1000` or `acme-corp` renders
 /// with the surrounding words in the wrong order — the classic symptom being
 /// punctuation jumping to the far end of the line. `FIRST STRONG ISOLATE` opens
 /// a run whose direction is taken from its first strong character; `POP
 /// DIRECTIONAL ISOLATE` closes it.
+///
+/// **The argument decides, not the locale.** An English sentence carrying an
+/// Arabic customer's name — every "no such customer" with a name in it — has
+/// the same problem the other way round, so an argument with strong
+/// right-to-left characters is isolated whatever language surrounds it. In an
+/// RTL sentence every argument is isolated, because a number is what usually
+/// goes wrong there and digits have no strong direction of their own.
 const FSI: char = '\u{2068}';
 const PDI: char = '\u{2069}';
+
+/// Whether a string carries a character that is strongly right-to-left.
+///
+/// Read off the Unicode Character Database rather than from a list of script
+/// blocks, so Hebrew, Syriac, Thaana and N'Ko are as isolated as Arabic.
+fn has_strong_rtl(text: &str) -> bool {
+    use unicode_bidi::BidiClass;
+    text.chars().any(|c| {
+        matches!(
+            unicode_bidi::bidi_class(c),
+            BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
+        )
+    })
+}
 
 /// A message in one language.
 ///
@@ -183,9 +205,9 @@ fn interpolate(template: &str, args: &BTreeMap<String, MessageArg>, locale: Loca
 fn format_arg(arg: &MessageArg, locale: Locale) -> String {
     match arg {
         MessageArg::Text(text) => {
-            if locale.is_rtl() {
-                // Latin-script identifiers embedded in Arabic need isolating or
-                // they reorder the text around them.
+            if locale.is_rtl() || has_strong_rtl(text) {
+                // A run whose direction is not the sentence's reorders the
+                // text around it, whichever way round the two are.
                 format!("{FSI}{text}{PDI}")
             } else {
                 text.clone()
@@ -373,10 +395,41 @@ mod tests {
             rendered.contains(&format!("{FSI}4000.01{PDI}")),
             "the Latin run must be isolated, got: {rendered:?}"
         );
-        // And English must not carry the marks — they would be noise in logs
-        // and in any consumer that does not expect them.
+        // And English must not carry the marks around a Latin argument — they
+        // would be noise in logs and in any consumer that does not expect them.
         let english = catalog().render(Locale::English, &msg).unwrap();
         assert!(!english.contains(FSI));
+    }
+
+    /// The same problem the other way round: an Arabic name dropped into an
+    /// English sentence drags the punctuation after it to the wrong end.
+    #[test]
+    fn arabic_arguments_are_bidi_isolated_in_english() {
+        let msg = Message::new(GREETING).with("code", MessageArg::text("شركة الرياض"));
+        let rendered = catalog().render(Locale::English, &msg).unwrap();
+        assert!(
+            rendered.contains(&format!("{FSI}شركة الرياض{PDI}")),
+            "the Arabic run must be isolated, got: {rendered:?}"
+        );
+
+        // Hebrew is as right-to-left as Arabic, and a script list would have
+        // missed it.
+        let hebrew = Message::new(GREETING).with("code", MessageArg::text("שלום"));
+        assert!(
+            catalog()
+                .render(Locale::English, &hebrew)
+                .unwrap()
+                .contains(FSI)
+        );
+
+        // A number in English is left alone: digits have no strong direction.
+        let number = Message::new(GREETING).with("code", MessageArg::Int(4000));
+        assert!(
+            !catalog()
+                .render(Locale::English, &number)
+                .unwrap()
+                .contains(FSI)
+        );
     }
 
     #[test]

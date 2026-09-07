@@ -72,6 +72,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // seals, so a rotation can find what it has not re-sealed yet — generate one
     // with `openssl rand -hex 32`.
     let mut state = AppState::on(control, &domain);
+    // **Only behind a proxy you run.** Set when a load balancer this deployment
+    // controls terminates connections and appends the client to
+    // `X-Forwarded-For`; with it on and no proxy, every caller is whoever they
+    // say. See `erp_web::extract::caller_address`.
+    let trust_forwarded = std::env::var("TRUST_X_FORWARDED_FOR")
+        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
+    if trust_forwarded {
+        tracing::info!("trusting the last hop of X-Forwarded-For as the client address");
+    } else {
+        tracing::info!(
+            "rate limiting by socket peer address; set TRUST_X_FORWARDED_FOR behind a proxy"
+        );
+    }
+    state = state.trusting_forwarded_for(trust_forwarded);
     if let Ok(configured) = std::env::var("SEALING_KEY") {
         let key = erp_eventlog::SealingKey::parse(&configured)?;
         tracing::info!(key = key.id(), "sealing key loaded");
@@ -110,12 +124,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // requests finish. A request killed mid-transaction rolls back, so this
     // costs latency rather than correctness — but a 502 to a customer mid-deploy
     // is still a 502.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
-        })
-        .await?;
+    // `with_connect_info` is what gives the rate limiter a peer address when no
+    // trusted proxy supplies one. Without it every caller shares one bucket.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutting down");
+    })
+    .await?;
 
     Ok(())
 }

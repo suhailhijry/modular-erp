@@ -9,6 +9,8 @@ pub const INVALID_REGISTRATION: MessageCode = MessageCode::new("tax_sa.invalid_r
 pub const INVALID_DOCUMENT: MessageCode = MessageCode::new("tax_sa.invalid_document");
 pub const NOT_REGISTERED: MessageCode = MessageCode::new("tax_sa.not_registered");
 pub const NO_SUCH_DOCUMENT: MessageCode = MessageCode::new("tax_sa.no_such_document");
+pub const NO_INDUSTRY: MessageCode = MessageCode::new("tax_sa.no_industry");
+pub const ALREADY_LIVE: MessageCode = MessageCode::new("tax_sa.already_live");
 
 pub static CODES: &[MessageCode] = &[
     EMPTY_PERIOD,
@@ -18,6 +20,8 @@ pub static CODES: &[MessageCode] = &[
     INVALID_DOCUMENT,
     NOT_REGISTERED,
     NO_SUCH_DOCUMENT,
+    NO_INDUSTRY,
+    ALREADY_LIVE,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -102,5 +106,33 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_DOCUMENT,
         Locale::Arabic,
         Template::Simple("لا يوجد مستند برقم {document}."),
+    ),
+    (
+        NO_INDUSTRY,
+        Locale::English,
+        Template::Simple(
+            "The registration has no industry, and ZATCA's certificate names one. Add the industry to the registration first.",
+        ),
+    ),
+    (
+        NO_INDUSTRY,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يتضمن التسجيل مجال النشاط، وشهادة هيئة الزكاة والضريبة والجمارك تذكره. أضِف مجال النشاط إلى التسجيل أولًا.",
+        ),
+    ),
+    (
+        ALREADY_LIVE,
+        Locale::English,
+        Template::Simple(
+            "This business is already live with ZATCA in {environment}. Onboarding again would replace the key its certificate is bound to; renew or replace the certificate through the manual onboarding route instead.",
+        ),
+    ),
+    (
+        ALREADY_LIVE,
+        Locale::Arabic,
+        Template::Simple(
+            "هذه المنشأة مفعّلة لدى هيئة الزكاة والضريبة والجمارك في بيئة {environment} بالفعل. إعادة التسجيل تستبدل المفتاح المرتبط بشهادتها؛ جدِّد الشهادة أو استبدلها عبر مسار التسجيل اليدوي.",
+        ),
     ),
 ];

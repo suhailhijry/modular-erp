@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tenant\n                SET worker_lease_owner = NULL,\n                    worker_lease_until = NULL,\n                    next_visit_at      = least(next_visit_at, now())\n              WHERE worker_lease_owner = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5fa1dc56a7b277a85d53504e479e04def614722252a842487736f5a56e21d1c4"
+}

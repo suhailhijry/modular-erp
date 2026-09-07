@@ -201,7 +201,12 @@ async fn rebuild_into<G: ProjectionGroup>(
             if envelope.position > target {
                 break;
             }
-            let ctx = ProjectionCtx::new(envelope.position, envelope.recorded_at, upcasters);
+            let ctx = ProjectionCtx::new(
+                envelope.position,
+                envelope.recorded_at,
+                envelope.metadata.calendar.unwrap_or_default(),
+                upcasters,
+            );
             for projection in projections {
                 projection
                     .apply(&ctx, envelope, &mut tx)
@@ -454,7 +459,12 @@ async fn catch_up<G: ProjectionGroup>(
         if envelope.position > head {
             break;
         }
-        let ctx = ProjectionCtx::new(envelope.position, envelope.recorded_at, upcasters);
+        let ctx = ProjectionCtx::new(
+            envelope.position,
+            envelope.recorded_at,
+            envelope.metadata.calendar.unwrap_or_default(),
+            upcasters,
+        );
         for projection in projections {
             projection
                 .apply(&ctx, envelope, &mut *tx)

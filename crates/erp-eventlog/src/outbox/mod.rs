@@ -31,4 +31,7 @@ mod effect;
 pub use dispatch::{
     DeliveryError, DispatchError, Dispatched, Dispatcher, EffectHandler, RetryPolicy, Settlement,
 };
-pub use effect::{Effect, EnqueueError, OutboxHealth, PendingEffect, enqueue, outbox_health};
+pub use effect::{
+    DeadLetter, Effect, EnqueueError, OutboxHealth, PendingEffect, dead_letters, enqueue,
+    outbox_health, requeue, sweep_delivered, sweep_webhook_events,
+};

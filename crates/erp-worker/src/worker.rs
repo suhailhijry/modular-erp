@@ -197,6 +197,7 @@ impl Worker {
                     jobs: Arc::clone(&self.jobs),
                     max_ticks: self.config.max_ticks_per_visit,
                     schedule: self.config.schedule,
+                    owner: self.config.name.clone(),
                     tenant: claim.tenant.id,
                     // How many consecutive visits have already found nothing.
                     // The backoff is computed from it, which is what makes a
@@ -294,6 +295,10 @@ async fn sleep_or_cancel(cancel: &CancellationToken, pause: Duration) -> bool {
 struct Work {
     worked: bool,
     failed: bool,
+    /// The lease lapsed under the visit. Whoever holds the tenant now — or
+    /// claims it when it is next due — is responsible for it; this visit must
+    /// not reschedule it and must not keep working beside them.
+    lost: bool,
 }
 
 /// One tenant, one slot, until it runs out of work or its ticks.
@@ -302,6 +307,8 @@ struct Visit {
     jobs: Arc<Vec<Arc<dyn Job>>>,
     max_ticks: usize,
     schedule: WorkSchedule,
+    /// The worker's name, which is what the lease is held under.
+    owner: String,
     tenant: TenantId,
     idle_visits: i32,
     cancel: CancellationToken,
@@ -322,15 +329,63 @@ impl Visit {
             }
         };
 
-        let Work { worked, failed } = self.work(&db).await;
+        let Work {
+            worked,
+            failed,
+            lost,
+        } = self.work(&db).await;
+        if lost {
+            // Not ours to reschedule: `claim_tenants` already pushed
+            // `next_visit_at` past the lease, and whoever claims it next owns
+            // the decision. Rescheduling here would move a tenant somebody
+            // else may be working on.
+            return false;
+        }
         self.reschedule(worked).await;
         !failed
+    }
+
+    /// Extends the lease before a job runs, and says whether it is still ours.
+    ///
+    /// A visit is as long as its jobs take, and the lease is thirty seconds.
+    /// Without this a slow gateway pushes one tick past the lease, another
+    /// worker legitimately claims the tenant, and two visits run the same jobs
+    /// against the same rows — the fetch-before-charge guard in the payment
+    /// sweep is a read followed by an act, and two of them can both act.
+    async fn still_ours(&self) -> bool {
+        match self
+            .control
+            .renew_lease(self.tenant, &self.owner, self.schedule.lease)
+            .await
+        {
+            Ok(true) => true,
+            Ok(false) => {
+                tracing::warn!(
+                    tenant = %self.tenant,
+                    owner = %self.owner,
+                    "the lease lapsed mid-visit; stopping so whoever holds it now works alone"
+                );
+                false
+            }
+            Err(e) => {
+                // Cannot tell. Treating "unknown" as "lost" is the safe reading:
+                // the cost is a visit cut short and resumed at the next claim;
+                // the alternative is two visits on one tenant.
+                tracing::warn!(
+                    tenant = %self.tenant,
+                    error = %e,
+                    "could not renew the lease; stopping this visit"
+                );
+                false
+            }
+        }
     }
 
     /// Runs every job in turn until a full round finds nothing, ticks run out,
     /// or shutdown starts.
     async fn work(&self, db: &TenantDb) -> Work {
         let mut worked_at_all = false;
+        let mut failed = false;
 
         for _ in 0..self.max_ticks {
             let mut worked_this_round = false;
@@ -345,13 +400,25 @@ impl Visit {
                     );
                     return Work {
                         worked: worked_at_all,
-                        failed: false,
+                        failed,
+                        lost: false,
                     };
                 }
 
                 // A module this tenant declined costs it nothing.
                 if job.module().is_some_and(|m| !db.has_module(&m)) {
                     continue;
+                }
+
+                // **The lease, renewed before every job.** A job is the unit of
+                // time this visit cannot be interrupted in, so it is the unit
+                // the lease has to cover.
+                if !self.still_ours().await {
+                    return Work {
+                        worked: worked_at_all,
+                        failed,
+                        lost: true,
+                    };
                 }
 
                 match job.tick(db).await {
@@ -361,21 +428,21 @@ impl Visit {
                     }
                     Ok(Activity::Idle) => {}
                     Err(e) => {
-                        // L6: this tenant's work stops. It does not degrade into
-                        // skipping the event and carrying on, and it does not
-                        // take the worker down — the other tenants are fine and
-                        // the projection-lag health check is what escalates
-                        // this one.
+                        // L6, at the granularity of **this job**: it does not
+                        // degrade into skipping the event and carrying on, and
+                        // it is retried on the next visit until somebody fixes
+                        // it. The first version stopped every job for the tenant
+                        // here, which meant a Tabby secret that no longer parsed
+                        // stopped hold expiry, reminders and ZATCA submission —
+                        // none of which had anything to do with Tabby. The
+                        // other jobs run; this one stays stalled and loud.
                         tracing::error!(
                             tenant = %self.tenant,
                             job = job.name(),
                             error = %e,
-                            "job failed; this tenant is stalled until it is fixed"
+                            "job failed; it is stalled until it is fixed, and the other jobs go on"
                         );
-                        return Work {
-                            worked: worked_at_all,
-                            failed: true,
-                        };
+                        failed = true;
                     }
                 }
             }
@@ -387,7 +454,8 @@ impl Visit {
 
         Work {
             worked: worked_at_all,
-            failed: false,
+            failed,
+            lost: false,
         }
     }
 

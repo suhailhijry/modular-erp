@@ -9,7 +9,7 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use erp_links::{Link, LinkError, New, StoreError, follow, link, shorten};
+use erp_links::{Link, LinkError, New, StoreError, follow, link, shorten, sweep};
 use erp_testkit::{Schema, Template, TestDb};
 use erp_types::Timestamp;
 
@@ -244,4 +244,81 @@ async fn only_one_of_two_people_racing_for_a_single_use_link_gets_it() {
 
 fn unwrapped(read: Result<Option<Link>, sqlx::Error>) -> Link {
     read.expect("reads").expect("the link exists")
+}
+
+/// **A dead link is forgotten; a live one never is.** Expired links and spent
+/// single-use links go once the grace period is past; a permanent link and a
+/// link that has not yet expired stay. The first version had no sweep and the
+/// table grew with every text sent.
+#[tokio::test]
+async fn expired_and_spent_links_are_swept_and_live_ones_are_not() {
+    let db = tenant_db().await;
+    let mut conn = db.pool().acquire().await.expect("connection");
+
+    let expired = shorten(
+        &mut conn,
+        &New {
+            expires_at: Some(at("2026-05-02")),
+            ..reminder("expired")
+        },
+    )
+    .await
+    .expect("shortens");
+    let spent = shorten(
+        &mut conn,
+        &New {
+            single_use: true,
+            ..reminder("spent")
+        },
+    )
+    .await
+    .expect("shortens");
+    follow(&mut conn, &spent, at("2026-05-03"))
+        .await
+        .expect("is followed once");
+    let unspent = shorten(
+        &mut conn,
+        &New {
+            single_use: true,
+            ..reminder("unspent")
+        },
+    )
+    .await
+    .expect("shortens");
+    let live_until_june = shorten(
+        &mut conn,
+        &New {
+            expires_at: Some(at("2026-06-30")),
+            ..reminder("june")
+        },
+    )
+    .await
+    .expect("shortens");
+    let permanent = shorten(&mut conn, &reminder("permanent"))
+        .await
+        .expect("shortens");
+
+    assert_eq!(
+        sweep(&mut conn, at("2026-05-01")).await.expect("sweeps"),
+        0,
+        "nothing had died before the cut-off"
+    );
+    assert_eq!(
+        sweep(&mut conn, at("2026-06-01")).await.expect("sweeps"),
+        2,
+        "the expired one and the spent one"
+    );
+    for (token, kept) in [
+        (&expired, false),
+        (&spent, false),
+        (&unspent, true),
+        (&live_until_june, true),
+        (&permanent, true),
+    ] {
+        assert_eq!(
+            link(&mut conn, token).await.expect("reads").is_some(),
+            kept,
+            "{token} kept={kept}"
+        );
+    }
 }

@@ -8,8 +8,11 @@
 // integration test is an ordinary crate.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::sync::Arc;
+
 use erp_control::{
-    Actor, ClusterRegistry, ControlPlane, Lane, PoolConfig, Scope, TenantPools, TenantStatus,
+    AccessError, Actor, ClusterRegistry, ControlPlane, Lane, PoolConfig, Scope, TenantPools,
+    TenantStatus,
 };
 use erp_testkit::{Schema, Template};
 use erp_types::{IdentityId, ModuleId, TenantId};
@@ -27,8 +30,48 @@ static TENANT: Schema = Schema::sql(
 
 struct Fixture {
     control: ControlPlane,
-    _db: erp_testkit::TestDb,
+    db: erp_testkit::TestDb,
     tenant_databases: Vec<String>,
+    prover: Arc<FakeProver>,
+}
+
+/// TXT records the tests choose to publish, standing in for the world's DNS.
+#[derive(Debug, Default)]
+struct FakeProver {
+    records: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+}
+
+impl FakeProver {
+    fn publish(&self, name: &str, value: &str) {
+        self.records
+            .lock()
+            .expect("not poisoned")
+            .entry(name.to_owned())
+            .or_default()
+            .push(value.to_owned());
+    }
+}
+
+impl erp_control::DomainProver for FakeProver {
+    fn txt_records<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<String>, erp_control::ProofError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let found = self
+            .records
+            .lock()
+            .expect("not poisoned")
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        Box::pin(async move { Ok(found) })
+    }
 }
 
 impl Fixture {
@@ -48,7 +91,9 @@ impl Fixture {
             .with_url("primary", &erp_testkit::database_url())
             .expect("the test database URL parses");
 
-        let control = ControlPlane::new(db.pool().clone(), TenantPools::new(clusters, config));
+        let prover = Arc::new(FakeProver::default());
+        let control = ControlPlane::new(db.pool().clone(), TenantPools::new(clusters, config))
+            .with_prover(Arc::clone(&prover) as Arc<dyn erp_control::DomainProver>);
         // Tenants are now foreign-keyed to a cluster, so one has to exist.
         control
             .register_cluster(
@@ -64,7 +109,8 @@ impl Fixture {
 
         Self {
             control,
-            _db: db,
+            prover,
+            db,
             tenant_databases: Vec::new(),
         }
     }
@@ -909,6 +955,149 @@ async fn the_audit_trail_is_still_append_only_for_everything_else() {
             .is_err(),
         "an audit entry was deleted"
     );
+
+    fixture.cleanup().await;
+}
+
+/// **An expired session is forgotten.** The row is an index entry that grows
+/// with every sign-in, and the first version swept it never; expiry was only
+/// ever checked on the way in.
+#[tokio::test]
+async fn expired_sessions_are_swept_and_live_ones_are_not() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let identity = fixture.member_of(tenant).await;
+
+    let (live, _) = fixture
+        .control
+        .start_session(identity)
+        .await
+        .expect("a session starts");
+    let (expired, _) = fixture
+        .control
+        .start_session(identity)
+        .await
+        .expect("another starts");
+    sqlx::query("UPDATE session SET expires_at = now() - interval '1 hour' WHERE token_hash = $1")
+        .bind(erp_control::SessionToken::digest(expired.expose()))
+        .execute(fixture.db.pool())
+        .await
+        .expect("winds one back");
+
+    assert_eq!(
+        fixture.control.sweep_sessions().await.expect("sweeps"),
+        1,
+        "the expired one"
+    );
+    assert!(
+        fixture.control.session(live.expose()).await.is_ok(),
+        "the live session still signs in"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM session")
+        .fetch_one(fixture.db.pool())
+        .await
+        .expect("counts");
+    assert_eq!(rows, 1);
+
+    fixture.cleanup().await;
+}
+
+/// **A domain is proved by DNS, not by asking.** `verify_domain` reads the
+/// record the claim named; the wrong value or none is a refusal that says what
+/// to publish, and the right one is a proof that then licenses every host under
+/// the domain.
+#[tokio::test]
+async fn a_domain_is_proved_by_the_record_it_was_told_to_publish() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+
+    let unclaimed = fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await;
+    assert!(
+        matches!(unclaimed, Err(AccessError::DomainNotClaimed(_))),
+        "{unclaimed:?}"
+    );
+
+    let token = fixture
+        .control
+        .claim_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("claims");
+
+    let unpublished = fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await;
+    match unpublished {
+        Err(AccessError::DomainNotProved {
+            domain,
+            record,
+            expected,
+        }) => {
+            assert_eq!(domain, "salon.example");
+            assert_eq!(record, "_erp-challenge.salon.example");
+            assert_eq!(expected, format!("erp-verification={token}"));
+        }
+        other => panic!("an unpublished record proved a domain: {other:?}"),
+    }
+    assert!(
+        fixture
+            .control
+            .tenant_by_host("api.salon.example")
+            .await
+            .expect("asks")
+            .is_none(),
+        "an unproved domain reaches nobody"
+    );
+
+    fixture.prover.publish(
+        "_erp-challenge.salon.example",
+        "erp-verification=not-this-one",
+    );
+    assert!(matches!(
+        fixture
+            .control
+            .verify_domain(tenant, "salon.example", Actor::system())
+            .await,
+        Err(AccessError::DomainNotProved { .. })
+    ));
+
+    fixture.prover.publish(
+        "_erp-challenge.salon.example",
+        &format!("erp-verification={token}"),
+    );
+    fixture
+        .control
+        .verify_domain(tenant, "salon.example", Actor::system())
+        .await
+        .expect("the published record proves it");
+
+    for host in [
+        "salon.example",
+        "api.salon.example",
+        "Book.Salon.Example:443",
+    ] {
+        let found = fixture
+            .control
+            .tenant_by_host(host)
+            .await
+            .expect("asks")
+            .map(|t| t.id);
+        assert_eq!(found, Some(tenant), "{host}");
+    }
+    for host in ["salon.example.attacker.test", "notsalon.example", "example"] {
+        assert!(
+            fixture
+                .control
+                .tenant_by_host(host)
+                .await
+                .expect("asks")
+                .is_none(),
+            "{host} reached a tenant"
+        );
+    }
 
     fixture.cleanup().await;
 }

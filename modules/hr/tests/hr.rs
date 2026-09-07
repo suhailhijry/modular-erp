@@ -1175,7 +1175,8 @@ async fn the_rota_reads_the_tenant_clock_and_not_a_module_s() {
     erp_eventlog::configuration::set(
         &mut conn,
         erp_recurrence::Calendar::KEY,
-        &erp_recurrence::Calendar::try_from(0).expect("UTC is an offset"),
+        &erp_recurrence::Calendar::UTC,
+        None,
         None,
     )
     .await

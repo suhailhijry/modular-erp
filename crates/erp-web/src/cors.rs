@@ -50,7 +50,15 @@ use crate::AppState;
 /// Listed rather than reflected: echoing `Access-Control-Request-Headers` back
 /// makes the allowlist whatever the caller asked for, which is not an
 /// allowlist. `Authorization` is **not** here — this surface has no session.
-const ALLOWED_HEADERS: &str = "content-type, accept-language, idempotency-key";
+/// What a tenant's own web app sends: the session, the branch it is acting in,
+/// the settings version it read, the idempotency key on every write, and the
+/// API version it was built against. **The whole API, not the public half**:
+/// an origin on this list is under a domain the tenant has proved, and the
+/// tenant's own app on its own domain calls everything.
+const ALLOWED_HEADERS: &str = "authorization, content-type, accept, accept-language, idempotency-key, if-match, x-branch, x-api-version";
+/// What the browser may read back: the settings version, and which API version
+/// answered.
+const EXPOSED_HEADERS: &str = "etag, x-api-version, x-api-current, x-api-minimum";
 
 /// How long a browser may skip the preflight. Ten minutes: long enough that a
 /// site is not preflighting every click, short enough that revoking an origin
@@ -102,9 +110,8 @@ async fn allows(state: &AppState, headers: &axum::http::HeaderMap, origin: &str)
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    let slug = crate::extract::tenant_label(host, &state.domain)?;
 
-    let tenant = state.control.tenant_by_slug(&slug).await.ok()??;
+    let tenant = crate::extract::tenant_of_host(state, host).await.ok()??;
     state
         .control
         .allows_origin(tenant.id, origin)
@@ -126,7 +133,11 @@ fn preflight(origin: Option<&str>) -> Response {
     };
 
     stamp(headers, origin);
-    insert(headers, header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST");
+    insert(
+        headers,
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        "GET, POST, PUT, PATCH, DELETE",
+    );
     insert(
         headers,
         header::ACCESS_CONTROL_ALLOW_HEADERS,
@@ -139,6 +150,14 @@ fn preflight(origin: Option<&str>) -> Response {
 fn stamp(headers: &mut axum::http::HeaderMap, origin: &str) {
     vary(headers);
     insert(headers, header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    // The session cookie rides along for the tenant's own app. Safe to say
+    // because the origin is never `*` — it is one proved host, echoed back.
+    insert(headers, header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
+    insert(
+        headers,
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        EXPOSED_HEADERS,
+    );
 }
 
 fn vary(headers: &mut axum::http::HeaderMap) {

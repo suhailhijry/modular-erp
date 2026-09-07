@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM webhook_event WHERE received_at < $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9da86ed0e9f0efd9bbbd574c0edbf365fd8f8dc015ce74e550643ad9aa79ea41"
+}

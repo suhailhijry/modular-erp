@@ -27,6 +27,14 @@ pub struct Metadata {
     /// The configuration snapshot this command resolved against (L5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_version: Option<i64>,
+    /// **The tenant's clock when this was written.** Stamped by `append` when
+    /// the caller left it empty, so a projection turning this event's instants
+    /// into days reads the calendar the event was written under, not today's
+    /// — which is what lets a rebuild reproduce what was live (L2) after the
+    /// setting changes. `None` only on events from before this field existed;
+    /// readers treat that as the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<erp_types::Calendar>,
     /// Anything a module wants to record without earning a field.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra: serde_json::Map<String, serde_json::Value>,

@@ -65,6 +65,13 @@ pub struct Registration {
     /// The number in that register — the commercial registration, usually.
     pub identifier: String,
     pub address: Address,
+    /// The business's industry, as ZATCA's certificate request names it in
+    /// `businessCategory` — `Consulting`, `Retail`. Optional in the type
+    /// because registrations recorded before it existed have none; required
+    /// by the registration route, because no certificate can be asked for
+    /// without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub industry: Option<String>,
 }
 
 /// The other register a business is identified in, besides VAT.
@@ -187,6 +194,13 @@ impl Registration {
             return Err(InvalidRegistration::Missing {
                 field: "identifier",
             });
+        }
+        if self
+            .industry
+            .as_deref()
+            .is_some_and(|industry| industry.trim().is_empty())
+        {
+            return Err(InvalidRegistration::Missing { field: "industry" });
         }
         self.address.check()
     }
@@ -317,12 +331,30 @@ pub(crate) mod tests {
                 postal_code: "12211".to_owned(),
                 country: "SA".to_owned(),
             },
+            industry: Some("Consulting".to_owned()),
         }
     }
 
     #[test]
     fn a_well_formed_registration_is_accepted() {
         assert_eq!(registration().check(), Ok(()));
+    }
+
+    /// **An industry, once given, cannot be blank.** It goes in the certificate
+    /// request as the business category, and ZATCA refuses an empty one after
+    /// the OTP has been spent. A registration recorded before the field existed
+    /// has none, and still checks.
+    #[test]
+    fn an_industry_given_empty_is_refused() {
+        let mut registration = registration();
+        registration.industry = Some("  ".to_owned());
+        assert_eq!(
+            registration.check(),
+            Err(InvalidRegistration::Missing { field: "industry" })
+        );
+
+        registration.industry = None;
+        assert_eq!(registration.check(), Ok(()));
     }
 
     #[test]

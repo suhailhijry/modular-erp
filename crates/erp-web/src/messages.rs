@@ -55,6 +55,16 @@ pub const TOO_MANY_REQUESTS: MessageCode = MessageCode::new("request.too_many_re
 pub const UNKNOWN_VAT_CATEGORY: MessageCode = MessageCode::new("request.unknown_vat_category");
 pub const NO_SUCH_INVOICE: MessageCode = MessageCode::new("request.no_such_invoice");
 pub const NO_SUCH_BILL: MessageCode = MessageCode::new("request.no_such_bill");
+/// A requeue named an outbox row that is not dead.
+pub const NO_SUCH_DEAD_LETTER: MessageCode = MessageCode::new("request.no_such_dead_letter");
+/// A calendar that is not a name in the IANA zone database.
+pub const NOT_A_ZONE: MessageCode = MessageCode::new("request.not_a_zone");
+/// An `If-Match` header that does not name a version.
+pub const NOT_A_VERSION: MessageCode = MessageCode::new("request.not_a_version");
+/// A path this API does not serve.
+pub const NO_SUCH_ROUTE: MessageCode = MessageCode::new("request.no_such_route");
+/// A path this API serves, with a method it does not.
+pub const METHOD_NOT_ALLOWED: MessageCode = MessageCode::new("request.method_not_allowed");
 /// A module cannot be turned off while another is standing on it.
 pub const MODULE_IN_USE: MessageCode = MessageCode::new("request.module_in_use");
 /// A module still in the build, no longer offered to anybody new.
@@ -110,6 +120,11 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_VAT_CATEGORY,
     NO_SUCH_INVOICE,
     NO_SUCH_BILL,
+    NO_SUCH_DEAD_LETTER,
+    NO_SUCH_ROUTE,
+    METHOD_NOT_ALLOWED,
+    NOT_A_VERSION,
+    NOT_A_ZONE,
     MODULE_IN_USE,
     MODULE_DEPRECATED,
     UNUSABLE_VAT_RATE,
@@ -580,6 +595,72 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_INVOICE,
         Locale::Arabic,
         Template::Simple("لا توجد فاتورة {invoice}."),
+    ),
+    (
+        NO_SUCH_DEAD_LETTER,
+        Locale::English,
+        Template::Simple(
+            "There is no dead letter {id}; it was already requeued, or never given up on.",
+        ),
+    ),
+    (
+        NO_SUCH_DEAD_LETTER,
+        Locale::Arabic,
+        Template::Simple(
+            "لا توجد رسالة متوقفة {id}؛ أُعيدت إلى الطابور من قبل، أو لم يُتخلَّ عنها أصلًا.",
+        ),
+    ),
+    (
+        NO_SUCH_ROUTE,
+        Locale::English,
+        Template::Simple(
+            "There is nothing at this address. The routes this API serves are listed at /v1/openapi.json.",
+        ),
+    ),
+    (
+        NO_SUCH_ROUTE,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يوجد شيء على هذا العنوان. المسارات التي تخدمها هذه الواجهة مذكورة في /v1/openapi.json.",
+        ),
+    ),
+    (
+        METHOD_NOT_ALLOWED,
+        Locale::English,
+        Template::Simple("This address does not answer to that method."),
+    ),
+    (
+        METHOD_NOT_ALLOWED,
+        Locale::Arabic,
+        Template::Simple("هذا العنوان لا يستجيب لهذه الطريقة."),
+    ),
+    (
+        NOT_A_VERSION,
+        Locale::English,
+        Template::Simple(
+            "If-Match must carry the ETag a GET of this setting answered with; {if_match} is not one.",
+        ),
+    ),
+    (
+        NOT_A_VERSION,
+        Locale::Arabic,
+        Template::Simple(
+            "يجب أن يحمل If-Match قيمة ETag التي أجاب بها GET لهذا الإعداد؛ و{if_match} ليست كذلك.",
+        ),
+    ),
+    (
+        NOT_A_ZONE,
+        Locale::English,
+        Template::Simple(
+            "{zone} is not a timezone. Use a name from the IANA database, such as Asia/Riyadh or Europe/Berlin.",
+        ),
+    ),
+    (
+        NOT_A_ZONE,
+        Locale::Arabic,
+        Template::Simple(
+            "{zone} ليست منطقة زمنية. استخدم اسمًا من قاعدة بيانات IANA، مثل Asia/Riyadh أو Europe/Berlin.",
+        ),
     ),
     (
         MODULE_IN_USE,

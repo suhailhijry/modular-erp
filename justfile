@@ -98,6 +98,9 @@ prepare:
 # Every module enabled, filled through the public API. `just check` builds the
 # same thing on a throwaway database and asserts it works; this one leaves it
 # behind so a person can sign in.
+#
+# `SEALING_KEY` comes from the environment, and should be the API's: the demo
+# saves a card sealed under it. See RUNNING.md.
 demo password:
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
       DEMO_PASSWORD="{{password}}" cargo run --quiet --bin demo
@@ -117,10 +120,6 @@ reap:
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
       cargo run --quiet --bin reaper
 
-# Regenerate the error-code reference from the message catalog.
-# `just check` fails when `docs/ERRORS.md` no longer matches.
-errors:
-    REGENERATE_DOCS=1 cargo test --quiet -p erp-api --test errors
 
 # Regenerate the OpenAPI document from the router that serves the requests.
 # `just check` fails when `docs/openapi.json` no longer matches.

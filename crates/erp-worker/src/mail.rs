@@ -235,6 +235,7 @@ mod tests {
             attempts: 1,
             caused_by: None,
             enqueued_at: chrono::Utc::now(),
+            lease: String::new(),
         }
     }
 

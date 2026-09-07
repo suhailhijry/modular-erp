@@ -30,7 +30,7 @@ use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Problem;
 use erp_web::bad_request;
-use erp_web::{Allowed, Language, ManageTenant};
+use erp_web::{Allowed, Anonymous, Language, ManageTenant};
 
 /// Matches signup. A password chosen through an invitation is the same kind of
 /// password as one chosen at signup, so the rule is the same one.
@@ -284,9 +284,11 @@ async fn revoke_invitation(
     responses(
         (status = OK, body = PendingView),
         (status = NOT_FOUND, description = "No such token, or a spent or expired one — the same answer for all three", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
     ),
 )]
 async fn show_invitation(
+    _anonymous: Anonymous,
     State(state): State<AppState>,
     Language(locale): Language,
     Path(token): Path<String>,
@@ -325,14 +327,19 @@ async fn show_invitation(
         (status = UNAUTHORIZED, description = "The invitation was real; the password for the existing account was not", body = Problem),
         (status = NOT_FOUND, description = "No such token, or a spent or expired one", body = Problem),
         (status = CONFLICT, description = "Already a member there", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
     ),
 )]
 async fn accept_invitation(
+    anonymous: Anonymous,
     State(state): State<AppState>,
     Language(locale): Language,
     Path(token): Path<String>,
     Json(body): Json<Acceptance>,
 ) -> Result<(StatusCode, Json<AcceptedView>), Problem> {
+    // The token names one invitation and therefore one account; guessing at its
+    // password is bounded per token the way a login is per handle.
+    anonymous.charge_for_handle(&state, &token).await?;
     // Checked before the token is looked up, so a short password is the same
     // answer whether or not the invitation was real.
     if body.password.chars().count() < MIN_PASSWORD {

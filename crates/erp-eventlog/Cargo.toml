@@ -11,6 +11,8 @@ description = "The tenant event log: gapless, commit-ordered append and ordered 
 workspace = true
 
 [dependencies]
+# The outbox heartbeat: a timer beside a running delivery, and `select!`.
+tokio = { workspace = true }
 erp-types = { workspace = true, features = ["sqlx"] }
 erp-i18n = { workspace = true }
 async-trait = { workspace = true }

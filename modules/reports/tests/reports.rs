@@ -179,6 +179,7 @@ impl Fixture {
             &code(id),
             &sales::Draft {
                 prepayment: false,
+                prepaid: None,
                 customer: sales::Customer {
                     id: None,
                     name: "زبون".to_owned(),
@@ -201,6 +202,67 @@ impl Fixture {
         )
         .await
         .unwrap_or_else(|e| panic!("{id} is issued: {e:?}"));
+    }
+
+    async fn chair(&self, id: &str) {
+        booking::declare_resource(
+            &self.db,
+            &code(id),
+            &booking::Details {
+                name: "كرسي".to_owned(),
+                name_latin: None,
+                kind: booking::Kind::Place,
+                capacity: 1,
+                rate: None,
+                branch: None,
+                employee: None,
+            },
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("declares");
+    }
+
+    async fn reserve(&self, id: &str, lines: Vec<booking::DraftLine>, taken_on: &str) {
+        booking::reserve(
+            &self.db,
+            &code(id),
+            &booking::Draft {
+                customer: booking::Customer {
+                    id: None,
+                    name: "نورة".to_owned(),
+                    phone: None,
+                },
+                lines,
+                note: String::new(),
+                at: on(taken_on),
+            },
+            &Metadata::default(),
+        )
+        .await
+        .expect("reserves");
+    }
+
+    /// Walks the booking to completed on `day`, the way a diary does.
+    async fn complete(&self, id: &str, day: &str) {
+        for stage in [
+            booking::Stage::Confirmed,
+            booking::Stage::Arrived,
+            booking::Stage::InService,
+            booking::Stage::Completed,
+        ] {
+            booking::move_to(
+                &self.db,
+                &code(id),
+                stage,
+                "",
+                on(day),
+                &Metadata::default(),
+            )
+            .await
+            .expect("moves");
+        }
     }
 
     async fn cleanup(self) {
@@ -372,6 +434,172 @@ async fn a_figure_that_disagrees_with_the_books_is_a_failure() {
     fixture.cleanup().await;
 }
 
+/// **A partial credit takes its lines out, and its posting is checked.**
+///
+/// A credit note for part of an invoice is a document in its own right, with
+/// its own entry; the revenue report has to take its figures out and the
+/// reconciliation has to compare that entry with the document — which it did
+/// for cancellations and not for these, so a credit whose posting disagreed
+/// with its document passed the invariant.
+#[tokio::test]
+async fn a_partial_credit_leaves_revenue_and_reconciles_like_a_document() {
+    let fixture = Fixture::new("part-credit").await;
+
+    fixture.invoice("INV-1", riyals(1_000), "2026-01-05").await;
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code("INV-1"),
+        &sales::CreditNote {
+            reference: "part-1".to_owned(),
+            lines: vec![sales::CreditLine {
+                against: 0,
+                net: riyals(300),
+            }],
+            reason: "ساعة أقل".to_owned(),
+            on: on("2026-02-10"),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("credits part");
+
+    fixture.project().await;
+    assert!(
+        fixture.discrepancies().await.is_empty(),
+        "{:?}",
+        fixture.discrepancies().await
+    );
+
+    // January kept the whole invoice; February took three hundred back and
+    // counts the credit note it issued.
+    let rows = fixture.revenue().await;
+    let january = rows
+        .iter()
+        .find(|r| r.period == "2026-01")
+        .expect("january");
+    assert_eq!(january.net, riyals(1_000));
+    assert_eq!(january.credited, 0);
+    let february = rows
+        .iter()
+        .find(|r| r.period == "2026-02")
+        .expect("february");
+    assert_eq!(february.net, riyals(-300), "the credited lines left");
+    assert_eq!(february.tax, riyals(-45), "and their tax with them");
+    assert_eq!(february.documents, 0);
+    assert_eq!(february.credited, 1, "a credit note is a document issued");
+
+    // **The falsification.** The credit's entry is compared with the credit's
+    // own figures, so a credit that came to more than it posted is found.
+    sqlx::query("UPDATE proj_reports.credited SET net = net * 2")
+        .execute(&fixture.pool)
+        .await
+        .expect("tampers");
+    let found = fixture.discrepancies().await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        matches!(&found[0], reports::Discrepancy::Mismatched { document, .. } if document.starts_with("CN")),
+        "expected the credit note's mismatch, got {found:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A rescheduled booking is counted where it moved to.** Booked in March,
+/// moved to April: March shows no booking and April shows one, with the notice
+/// measured from the move — otherwise April completes work nobody booked and
+/// March books work that never happened.
+#[tokio::test]
+async fn a_rescheduled_booking_moves_its_count_to_the_month_it_went_to() {
+    let fixture = Fixture::new("reschedule").await;
+    fixture.chair("CHAIR-1").await;
+
+    let line = |day: &str| booking::DraftLine {
+        what: "قص".to_owned(),
+        span: erp_occupancy::Span::new(on(day), on(day) + chrono::Duration::hours(1))
+            .expect("a valid span"),
+        takes: vec![booking::Held::one(code("CHAIR-1"))],
+        charge: None,
+    };
+    fixture
+        .reserve("BK-1", vec![line("2026-03-10")], "2026-03-01")
+        .await;
+    booking::reschedule(
+        &fixture.db,
+        &code("BK-1"),
+        &[line("2026-04-10")],
+        on("2026-03-05"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("moves");
+    fixture.complete("BK-1", "2026-04-10").await;
+
+    fixture.project().await;
+
+    let rows = fixture.utilisation().await;
+    let march = rows
+        .iter()
+        .find(|r| r.period == "2026-03")
+        .expect("march row");
+    assert_eq!(march.booked, 0, "march gave the booking back: {march:?}");
+    assert_eq!(march.lead_minutes, 0, "and the notice it was counted with");
+    assert_eq!(march.completed, 0);
+
+    let april = rows.iter().find(|r| r.period == "2026-04").expect("april");
+    assert_eq!(april.booked, 1, "{april:?}");
+    assert_eq!(april.completed, 1, "{april:?}");
+    // Moved on the 5th of March for the 10th of April: 36 days of notice.
+    assert_eq!(april.average_lead_minutes(), 36 * 24 * 60);
+    assert_eq!(april.minutes, 60);
+
+    fixture.cleanup().await;
+}
+
+/// **Two services on one stylist are one booking with both lines' minutes.**
+/// The old row replaced the first line's minutes with the second's and counted
+/// the visit twice on the way in, once on the way out.
+#[tokio::test]
+async fn two_lines_on_one_resource_are_one_booking_with_both_lines_minutes() {
+    let fixture = Fixture::new("two-lines").await;
+    fixture.chair("CHAIR-1").await;
+
+    let line = |from: &str, until: &str| booking::DraftLine {
+        what: "خدمة".to_owned(),
+        span: erp_occupancy::Span::new(
+            format!("2026-03-10T{from}:00Z")
+                .parse()
+                .expect("an instant"),
+            format!("2026-03-10T{until}:00Z")
+                .parse()
+                .expect("an instant"),
+        )
+        .expect("a valid span"),
+        takes: vec![booking::Held::one(code("CHAIR-1"))],
+        charge: None,
+    };
+    fixture
+        .reserve(
+            "BK-1",
+            vec![line("09:00", "09:45"), line("09:45", "10:15")],
+            "2026-03-01",
+        )
+        .await;
+    fixture.complete("BK-1", "2026-03-10").await;
+
+    fixture.project().await;
+
+    let rows = fixture.utilisation().await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].booked, 1, "one visit, however many services");
+    assert_eq!(rows[0].completed, 1);
+    assert_eq!(
+        rows[0].minutes, 75,
+        "both lines' minutes, not the last one's"
+    );
+
+    fixture.cleanup().await;
+}
+
 /// A booking walked through its stages is one completion, not three.
 ///
 /// `reserved → confirmed → completed` is the ordinary path, and a report that
@@ -388,6 +616,7 @@ async fn a_booking_that_walks_its_stages_completes_once() {
             name_latin: None,
             kind: booking::Kind::Place,
             capacity: 1,
+            rate: None,
             branch: None,
             employee: None,
         },
@@ -653,7 +882,7 @@ async fn only_an_approved_payroll_run_is_a_cost() {
     .await
     .expect("redrafts");
 
-    payroll::approve_run(&fixture.db, &run, &Metadata::default())
+    payroll::approve_run(&fixture.db, &run, on("2026-06-30"), &Metadata::default())
         .await
         .expect("approves");
 

@@ -248,7 +248,7 @@ async fn a_delivery_whose_record_is_lost_happens_again_with_the_same_key() {
     let claimed = dispatcher.claim(&mut conn, 10).await.expect("claims");
     assert_eq!(claimed.len(), 1);
 
-    let settlement = dispatcher.deliver(&claimed[0]).await;
+    let settlement = dispatcher.deliver(&claimed[0], || async { Ok(true) }).await;
     assert_eq!(settlement, erp_eventlog::Settlement::Delivered);
 
     kill_connection(&mut conn).await.expect("kills");

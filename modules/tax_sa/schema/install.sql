@@ -79,7 +79,17 @@ CREATE TABLE IF NOT EXISTS onboarding (
     -- As the certificate states it, in its own format. See `onboarded.rs`.
     not_after   TEXT NOT NULL,
     issued_at   TIMESTAMPTZ NOT NULL,
-    recorded_at TIMESTAMPTZ NOT NULL
+    recorded_at TIMESTAMPTZ NOT NULL,
+    -- **The worker's half.** Which compliance certificate's samples all passed,
+    -- and what ZATCA last refused. A new compliance certificate clears them:
+    -- checks passed for one certificate are no evidence for the next.
+    checks_serial     TEXT,
+    checks_submitted  INTEGER,
+    checks_passed_at  TIMESTAMPTZ,
+    refused_step      TEXT,
+    refused_detail    TEXT,
+    refused_version   TEXT,
+    refused_at        TIMESTAMPTZ
 );
 
 -- **The document ZATCA sees, and where it stands with them.**

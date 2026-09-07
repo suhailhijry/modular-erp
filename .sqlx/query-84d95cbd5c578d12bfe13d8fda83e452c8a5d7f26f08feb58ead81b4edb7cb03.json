@@ -1,0 +1,167 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, kind as \"kind!\",\n                  capacity as \"capacity!\", availability as \"availability!\",\n                  branch, employee, rate_minor, rate_currency,\n                  (withdrawn_at IS NOT NULL) as \"withdrawn!\", withdrawn_why,\n                  declared_on as \"declared_on!\"\n             FROM proj_booking.resource WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name_latin",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "name_latin"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "capacity!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "capacity"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "availability!",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "availability"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "employee",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "employee"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "rate_minor",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "rate_minor"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "rate_currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "rate_currency"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "withdrawn!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "withdrawn_why",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "withdrawn_why"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "declared_on!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_booking.resource",
+            "name": "declared_on"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      null,
+      true,
+      false
+    ]
+  },
+  "hash": "84d95cbd5c578d12bfe13d8fda83e452c8a5d7f26f08feb58ead81b4edb7cb03"
+}

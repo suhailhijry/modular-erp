@@ -26,7 +26,7 @@
 use erp_types::{CurrencyCode, Money, Timestamp};
 use ledger::VatCategory;
 
-use super::csr::{Issues, Unit};
+use super::csr::Issues;
 use super::{Band, Buyer, Document, Kind, Line, Link, Reference, Totals, TypeCode, document_uuid};
 use crate::taxpayer::Registration;
 
@@ -42,14 +42,14 @@ const TAX: i64 = 15;
 /// genesis value. Submitting them out of order is submitting a broken chain.
 pub fn compliance_documents(
     registration: &Registration,
-    unit: &Unit,
+    issues: Issues,
     at: Timestamp,
 ) -> Vec<Document> {
     let mut kinds: Vec<Kind> = Vec::new();
-    if unit.issues.standard {
+    if issues.standard {
         kinds.push(Kind::Standard);
     }
-    if unit.issues.simplified {
+    if issues.simplified {
         kinds.push(Kind::Simplified);
     }
 
@@ -91,6 +91,7 @@ fn sample(
         uuid: document_uuid(&registration.vat_number, &number),
         number,
         issued_at: at,
+        calendar: erp_types::Calendar::default(),
         currency,
         seller: registration.clone(),
         // A standard document needs a buyer with a VAT number — it is what
@@ -145,6 +146,7 @@ fn sample(
                 issued_at: at,
             }),
         },
+        prepaid: None,
         note: match type_code {
             TypeCode::Invoice | TypeCode::Prepayment => String::new(),
             TypeCode::CreditNote => "إرجاع للاختبار".to_owned(),
@@ -161,18 +163,11 @@ mod tests {
         "2026-01-01T00:00:00Z".parse().expect("a valid instant")
     }
 
-    fn unit(issues: Issues) -> Unit {
-        Unit {
-            issues,
-            ..crate::zatca::csr::tests::unit()
-        }
-    }
-
     #[test]
     fn a_unit_that_issues_both_kinds_has_six_documents_to_prove_it() {
         let documents = compliance_documents(
             &crate::taxpayer::tests::registration(),
-            &unit(Issues::both()),
+            Issues::both(),
             at(),
         );
         assert_eq!(documents.len(), 6);
@@ -197,11 +192,8 @@ mod tests {
             standard: true,
             simplified: false,
         };
-        let documents = compliance_documents(
-            &crate::taxpayer::tests::registration(),
-            &unit(standard_only),
-            at(),
-        );
+        let documents =
+            compliance_documents(&crate::taxpayer::tests::registration(), standard_only, at());
         assert_eq!(documents.len(), 3);
         assert!(documents.iter().all(|d| d.kind == Kind::Standard));
         assert_eq!(documents.len(), expected(standard_only));
@@ -212,7 +204,7 @@ mod tests {
     fn every_note_references_an_invoice() {
         let documents = compliance_documents(
             &crate::taxpayer::tests::registration(),
-            &unit(Issues::both()),
+            Issues::both(),
             at(),
         );
         for document in &documents {
@@ -241,7 +233,7 @@ mod tests {
     #[test]
     fn the_samples_are_issued_by_the_business_being_onboarded() {
         let registration = crate::taxpayer::tests::registration();
-        let documents = compliance_documents(&registration, &unit(Issues::both()), at());
+        let documents = compliance_documents(&registration, Issues::both(), at());
         assert!(
             documents
                 .iter()
@@ -261,7 +253,7 @@ mod tests {
     fn the_buyer_matches_the_kind_being_proved() {
         let documents = compliance_documents(
             &crate::taxpayer::tests::registration(),
-            &unit(Issues::both()),
+            Issues::both(),
             at(),
         );
         for document in &documents {
@@ -287,7 +279,7 @@ mod tests {
     fn each_sample_has_its_own_uuid() {
         let documents = compliance_documents(
             &crate::taxpayer::tests::registration(),
-            &unit(Issues::both()),
+            Issues::both(),
             at(),
         );
         let mut uuids: Vec<_> = documents.iter().map(|d| d.uuid).collect();

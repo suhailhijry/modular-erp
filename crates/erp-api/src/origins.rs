@@ -58,12 +58,13 @@ struct NewDomain {
 #[derive(Debug, Serialize, ToSchema)]
 struct DomainClaimed {
     domain: String,
-    /// Publish this where only the domain's owner could — a `TXT` record on
-    /// `_erp-verification.<domain>`.
-    ///
     /// **The same token every time you ask.** A tenant who has already published
     /// one must not be told to publish a different one.
     verification_token: String,
+    /// Where to publish the proof: a DNS `TXT` record at this name…
+    record_name: String,
+    /// …with exactly this value. Then `POST /v1/domains/{domain}/verification`.
+    record_value: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -153,6 +154,8 @@ async fn claim_domain(
     Ok((
         StatusCode::CREATED,
         Json(DomainClaimed {
+            record_name: erp_control::record_name(&domain),
+            record_value: erp_control::record_value(&token),
             domain,
             verification_token: token,
         }),
@@ -174,7 +177,9 @@ async fn claim_domain(
         ("domain" = String, Path, description = "The claimed domain."),
     ),
     responses(
-        (status = NO_CONTENT, description = "Proved. Already-proved is the same answer."),
+        (status = NO_CONTENT, description = "Proved: the DNS record named at claim time was found. Already-proved is the same answer."),
+        (status = CONFLICT, description = "The record is not published, or says something else. `args` carries the record to publish.", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "DNS could not be asked. Retryable.", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, description = "This tenant has not claimed that domain", body = Problem),
@@ -210,8 +215,9 @@ async fn verify_domain(
     params(("Host" = String, Header, description = "The tenant's subdomain."),),
     request_body = NewOrigin,
     responses(
-        (status = NO_CONTENT, description = "Licensed. It answers once the domain is proved."),
-        (status = BAD_REQUEST, description = "Not an origin, or a domain this tenant has not claimed", body = Problem),
+        (status = NO_CONTENT, description = "Licensed. Browsers on this origin may now call the API — the whole API, with the session — for this tenant."),
+        (status = BAD_REQUEST, description = "Not `https://<host>[:port]`, or a host that is not under the domain", body = Problem),
+        (status = CONFLICT, description = "The domain has not been proved yet", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),

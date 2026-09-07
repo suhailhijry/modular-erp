@@ -197,7 +197,12 @@ pub async fn run_once_in<G: ProjectionGroup>(
     // 3. Apply, in order.
     let mut to = from;
     for envelope in &batch {
-        let ctx = ProjectionCtx::new(envelope.position, envelope.recorded_at, upcasters);
+        let ctx = ProjectionCtx::new(
+            envelope.position,
+            envelope.recorded_at,
+            envelope.metadata.calendar.unwrap_or_default(),
+            upcasters,
+        );
         for projection in projections {
             projection
                 .apply(&ctx, envelope, &mut *conn)

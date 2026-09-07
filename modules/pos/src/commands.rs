@@ -337,15 +337,19 @@ pub async fn sell(
     contended(shift)
 }
 
-/// A sale handed back.
+/// A sale handed back, in whole or in part.
 #[derive(Debug, Clone)]
 pub struct Return {
     /// The caller's key. Returning the same one twice is a no-op (L8).
     pub reference: String,
-    /// What the customer is given back, and how. Must come to the whole sale:
-    /// this credits the document, and a partial credit note is not something
-    /// `sales` can write.
+    /// What the customer is given back, and how. Must come to what is being
+    /// credited: the whole sale when `lines` is empty, those lines otherwise.
     pub tenders: Vec<Tender>,
+    /// **Which lines are coming back**, by position on the sale, and how much
+    /// of each. Empty means the whole sale. The first version could only do
+    /// that, and a customer returning one of two items had the whole
+    /// transaction rolled back or nothing.
+    pub lines: Vec<sales::CreditLine>,
     pub why: String,
     pub at: Timestamp,
 }
@@ -396,6 +400,12 @@ pub async fn take_back(
                     if loaded.aggregate.has_return(&returning.reference) {
                         return Ok(Decision::nothing());
                     }
+                    // **The same door `pay_out` has.** A refund after the shift
+                    // closed would change the drawer's expected cash after the
+                    // variance was posted, and the variance is never revisited.
+                    if !loaded.aggregate.is_open() {
+                        return Err(PosError::Closed(shift.to_string()));
+                    }
                     let total =
                         Money::checked_sum(returning.tenders.iter().map(|t| t.amount), currency)?;
                     Ok(Decision::one(ShiftEvent::Refunded {
@@ -412,16 +422,7 @@ pub async fn take_back(
 
             if committed.at.is_some() {
                 give_the_money_back(&mut *conn, sale, returning, metadata).await?;
-                sales::credit_in(
-                    &mut *conn,
-                    sale,
-                    &returning.reference,
-                    &returning.why,
-                    returning.at,
-                    metadata,
-                )
-                .await
-                .map_err(lift)?;
+                credit_the_sale(&mut *conn, sale, returning, currency, metadata).await?;
             }
             Ok(committed)
         }
@@ -432,6 +433,59 @@ pub async fn take_back(
         }
     }
     contended(shift)
+}
+
+/// The credit note behind a return: the whole sale when no lines are named,
+/// the named lines otherwise.
+///
+/// **A partial return's tenders must come to what the lines credit.** The
+/// gross of a line is the sale's business — its rate, its allowances — so it
+/// is read off the credit note `sales` just issued rather than recomputed
+/// here, and a mismatch rolls the whole return back: a customer handed more
+/// than was credited leaves a receivable, and one handed less is owed money the
+/// till has no record of.
+async fn credit_the_sale(
+    conn: &mut sqlx::PgConnection,
+    sale: &AggregateId,
+    returning: &Return,
+    currency: erp_types::CurrencyCode,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<PosError>> {
+    if returning.lines.is_empty() {
+        sales::credit_in(
+            &mut *conn,
+            sale,
+            &returning.reference,
+            &returning.why,
+            returning.at,
+            metadata,
+        )
+        .await
+        .map_err(lift)?;
+        return Ok(());
+    }
+    let note = sales::CreditNote {
+        reference: returning.reference.clone(),
+        lines: returning.lines.clone(),
+        reason: returning.why.clone(),
+        on: returning.at,
+    };
+    let credited = sales::credit_part_in(&mut *conn, sale, &note, metadata)
+        .await
+        .map_err(lift)?;
+    let gross = credited.committed.events.iter().find_map(|e| match e {
+        sales::InvoiceEvent::Credited { totals, .. } => Some(totals.gross),
+        _ => None,
+    });
+    let tendered = Money::checked_sum(returning.tenders.iter().map(|t| t.amount), currency)
+        .map_err(|e| ExecuteError::Rejected(PosError::Money(e)))?;
+    if gross != Some(tendered) {
+        return Err(ExecuteError::Rejected(PosError::TendersDoNotMatch {
+            tendered: tendered.to_string(),
+            total: gross.map_or_else(|| "nothing credited".to_owned(), |g| g.to_string()),
+        }));
+    }
+    Ok(())
 }
 
 /// One `sales` refund per tender, out of the account its method settles in.
@@ -660,6 +714,7 @@ fn draft_from(basket: &Basket) -> sales::Draft {
         // A till sells a thing and bills for it in one breath; there is never
         // money taken ahead of the supply here.
         prepayment: false,
+        prepaid: None,
         customer: basket.customer.clone(),
         // **The tax point is the moment of the sale**, which at a counter is
         // also the moment of payment and the moment of handover.

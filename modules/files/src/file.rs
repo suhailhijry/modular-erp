@@ -44,6 +44,27 @@ pub enum OwnerKind {
 }
 
 impl OwnerKind {
+    /// The event-log domain a record of this kind lives in, or `None` for the
+    /// tenant itself, which always exists.
+    ///
+    /// **Strings, not crate dependencies.** `files` attaches documents to every
+    /// other module's records and depends on none of them; the domain name is
+    /// the one fact about those records it needs, and the workspace test
+    /// `every_owner_kind_names_the_domain_its_module_uses` pins each one to the
+    /// aggregate that owns it.
+    #[must_use]
+    pub const fn domain(self) -> Option<&'static str> {
+        match self {
+            Self::Invoice => Some("sales_invoice"),
+            Self::Bill => Some("purchases_bill"),
+            Self::Reservation => Some("booking_reservation"),
+            Self::Customer => Some("crm_customer"),
+            Self::Employee => Some("hr_employee"),
+            Self::Entry => Some("ledger_entry"),
+            Self::Tenant => None,
+        }
+    }
+
     pub const ALL: [Self; 7] = [
         Self::Invoice,
         Self::Bill,

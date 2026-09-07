@@ -197,6 +197,11 @@ pub struct PendingEffect {
     /// Log position of the command that promised it.
     pub caused_by: Option<LogPosition>,
     pub enqueued_at: Timestamp,
+    /// **The token this claim holds the row under.** Minted by the database at
+    /// claim time; renewing the lease and settling the effect both say
+    /// `WHERE leased_by = <this>`, so a dispatcher that lost the row cannot
+    /// extend or overwrite what the next one is doing with it.
+    pub lease: String,
 }
 
 impl PendingEffect {
@@ -207,6 +212,111 @@ impl PendingEffect {
 }
 
 /// Counts an operator, and the per-tenant health check, cares about.
+/// An effect this system promised and gave up on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadLetter {
+    pub id: i64,
+    pub kind: EffectKind,
+    pub idempotency_key: String,
+    pub attempts: i32,
+    pub last_error: Option<String>,
+    pub enqueued_at: Timestamp,
+    pub dead_at: Timestamp,
+}
+
+/// Everything given up on, oldest first.
+///
+/// The first version counted these and nothing else: a provider outage longer
+/// than the retry schedule dead-lettered every effect promised during it, and
+/// the only way back was hand-written SQL. This is the list somebody reads, and
+/// [`requeue`] is the way back.
+pub async fn dead_letters(
+    conn: &mut PgConnection,
+    limit: i64,
+) -> Result<Vec<DeadLetter>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id, kind, idempotency_key, attempts, last_error, enqueued_at,
+                  dead_at as "dead_at!"
+             FROM outbox
+            WHERE dead_at IS NOT NULL
+            ORDER BY dead_at ASC, id
+            LIMIT $1"#,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            Some(DeadLetter {
+                id: r.id,
+                kind: EffectKind::new(r.kind).ok()?,
+                idempotency_key: r.idempotency_key,
+                attempts: r.attempts,
+                last_error: r.last_error,
+                enqueued_at: r.enqueued_at,
+                dead_at: r.dead_at,
+            })
+        })
+        .collect())
+}
+
+/// **Puts a dead letter back in the queue**, due now, with its attempts reset.
+///
+/// `false` when there was no dead letter with that id — already requeued, or
+/// never dead. The idempotency key travels with it, so a delivery that in fact
+/// succeeded before the effect was given up on is still not performed twice by
+/// a handler that honours the key.
+pub async fn requeue(conn: &mut PgConnection, id: i64) -> Result<bool, sqlx::Error> {
+    let touched = sqlx::query!(
+        "UPDATE outbox
+            SET dead_at = NULL, attempts = 0, next_attempt_at = now(),
+                leased_until = NULL, last_error = NULL
+          WHERE id = $1 AND dead_at IS NOT NULL",
+        id,
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(touched == 1)
+}
+
+/// Deletes delivered effects older than `before`.
+///
+/// A delivered row is a receipt, and receipts are kept for a while and not for
+/// ever: the partial index keeps the queue fast whatever this table holds, but
+/// the table itself is cloned and backed up with every tenant database.
+pub async fn sweep_delivered(
+    conn: &mut PgConnection,
+    before: Timestamp,
+) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query!(
+        "DELETE FROM outbox WHERE delivered_at IS NOT NULL AND delivered_at < $1",
+        before,
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected())
+}
+
+/// Deletes recorded provider callbacks older than `before`.
+///
+/// The table is `migrations/tenant/0011_webhooks.sql` — kernel-level, like the
+/// outbox, and written by the API's hook route. A callback is a doorbell that
+/// has been answered; keeping its payload for ninety days is for the argument
+/// with the provider, not for ever.
+pub async fn sweep_webhook_events(
+    conn: &mut PgConnection,
+    before: Timestamp,
+) -> Result<u64, sqlx::Error> {
+    Ok(
+        sqlx::query!("DELETE FROM webhook_event WHERE received_at < $1", before,)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected(),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutboxHealth {
     /// Promised, not yet delivered, not yet given up on.

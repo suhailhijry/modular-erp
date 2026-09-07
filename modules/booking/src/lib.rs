@@ -64,18 +64,18 @@ pub mod verification;
 pub use bars::{BarEvent, Bars};
 pub use commands::{
     Amendment, Booking as Draft, BookingError, CUSTOMER_PREFIX, Details, amend_resource, assign,
-    customer_resource, declare_resource, fit_out, lift_bar, move_to, raise_bar, reschedule,
-    reserve, restore_resource, schedule_resource, secure_in, withdraw_resource,
+    bill_in, customer_resource, declare_resource, fit_out, lapse, lift_bar, move_to, raise_bar,
+    reschedule, reserve, restore_resource, schedule_resource, secure_in, withdraw_resource,
 };
-pub use erp_recurrence::{Availability, BadRule, Calendar, NotAnOffset, any_covers};
+pub use erp_recurrence::{Availability, BadRule, Calendar, NotAZone, any_covers};
 pub use pricing::{
-    Allowance, Applied, Band, Charge, Charged, PriceError, PublicBooking, Tariff, price,
+    Allowance, Applied, Band, Billing, Charge, Charged, PriceError, PublicBooking, Tariff, price,
 };
 pub use projections::{
     Bar, Barred, Booking, Lapsed, Performed, ReservationDetail, ReservationLine,
     ReservationSummary, Reservations, ResourceDetail, ResourceSummary, Resources, awaiting_deposit,
     bars, lapsed_holds, performed, projections, reservation, reservations, resource, resources,
-    stages,
+    stages, unbilled_completions, unsecured_among,
 };
 pub use reservation::{
     Customer, Deposit, DraftLine, Held, Line, Reservation, ReservationEvent, Stage, UnknownStage,

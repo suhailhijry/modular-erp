@@ -31,6 +31,11 @@ pub const NO_CAPACITY: MessageCode = MessageCode::new("provisioning.no_capacity"
 /// has no business mentioning how our clusters are doing.
 pub const CLUSTERS_AT_LIMIT: MessageCode = MessageCode::new("ops.clusters_at_limit");
 pub const SLUG_TAKEN: MessageCode = MessageCode::new("provisioning.slug_taken");
+pub const DOMAIN_NOT_CLAIMED: MessageCode = MessageCode::new("domains.not_claimed");
+pub const DOMAIN_NOT_PROVED: MessageCode = MessageCode::new("domains.not_proved");
+pub const DOMAIN_PROOF_UNAVAILABLE: MessageCode = MessageCode::new("domains.proof_unavailable");
+pub const NOT_AN_ORIGIN: MessageCode = MessageCode::new("origins.not_an_origin");
+pub const ORIGIN_OUTSIDE_DOMAIN: MessageCode = MessageCode::new("origins.outside_domain");
 /// Wrong handle, wrong password, unknown handle, suspended identity — one
 /// message for all four, for the same reason `NoSuchTenant` and `NotAMember`
 /// share one.
@@ -88,6 +93,11 @@ pub const INVITATION_SUBJECT: MessageCode = MessageCode::new("mail.invitation_su
 pub const INVITATION_BODY: MessageCode = MessageCode::new("mail.invitation_body");
 
 pub static CODES: &[MessageCode] = &[
+    DOMAIN_NOT_CLAIMED,
+    DOMAIN_NOT_PROVED,
+    DOMAIN_PROOF_UNAVAILABLE,
+    NOT_AN_ORIGIN,
+    ORIGIN_OUTSIDE_DOMAIN,
     INVITATION_SUBJECT,
     INVITATION_BODY,
     NO_SUCH_IDENTITY,
@@ -124,6 +134,70 @@ pub static CODES: &[MessageCode] = &[
 // ---------------------------------------------------------------------------
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        DOMAIN_NOT_CLAIMED,
+        Locale::English,
+        Template::Simple(
+            "{domain} has not been claimed by this business. Claim it first, then publish the record you are given.",
+        ),
+    ),
+    (
+        DOMAIN_NOT_CLAIMED,
+        Locale::Arabic,
+        Template::Simple(
+            "لم يطالب هذا النشاط بالنطاق {domain}. طالب به أولًا، ثم انشر السجل الذي ستحصل عليه.",
+        ),
+    ),
+    (
+        DOMAIN_NOT_PROVED,
+        Locale::English,
+        Template::Simple(
+            "{domain} is not proved yet. Publish a DNS TXT record at {record} with the value {expected}, then try again.",
+        ),
+    ),
+    (
+        DOMAIN_NOT_PROVED,
+        Locale::Arabic,
+        Template::Simple(
+            "لم يُثبَت النطاق {domain} بعد. انشر سجل DNS من نوع TXT على {record} بالقيمة {expected}، ثم أعد المحاولة.",
+        ),
+    ),
+    (
+        DOMAIN_PROOF_UNAVAILABLE,
+        Locale::English,
+        Template::Simple("The domain could not be looked up right now. Try again shortly."),
+    ),
+    (
+        DOMAIN_PROOF_UNAVAILABLE,
+        Locale::Arabic,
+        Template::Simple("تعذّر الاستعلام عن النطاق الآن. أعد المحاولة بعد قليل."),
+    ),
+    (
+        NOT_AN_ORIGIN,
+        Locale::English,
+        Template::Simple(
+            "{origin} is not an origin: it must be https:// followed by a host and, optionally, a port — nothing else.",
+        ),
+    ),
+    (
+        NOT_AN_ORIGIN,
+        Locale::Arabic,
+        Template::Simple(
+            "{origin} ليس مصدرًا صالحًا: يجب أن يكون https:// متبوعًا بالمضيف، وبالمنفذ اختياريًا، ولا شيء غير ذلك.",
+        ),
+    ),
+    (
+        ORIGIN_OUTSIDE_DOMAIN,
+        Locale::English,
+        Template::Simple(
+            "{origin} is not under {domain}. An origin is licensed by the proved domain it belongs to.",
+        ),
+    ),
+    (
+        ORIGIN_OUTSIDE_DOMAIN,
+        Locale::Arabic,
+        Template::Simple("{origin} ليس ضمن {domain}. يُرخَّص المصدر بالنطاق المُثبَت الذي ينتمي إليه."),
+    ),
     // -- one-time codes ----------------------------------------------------
     // **Short on purpose.** An SMS is billed per 160 characters, or per 70 in
     // Arabic — see `messaging::channel` — and a code text that runs to two

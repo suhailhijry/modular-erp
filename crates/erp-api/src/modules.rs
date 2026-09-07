@@ -24,7 +24,7 @@ use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Json;
 use erp_web::Problem;
-use erp_web::{Allowed, Language, ManageTenant, Read};
+use erp_web::{Allowed, Anonymous, Language, ManageTenant, Read};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
@@ -331,9 +331,12 @@ struct Enable {
     path = "/v1/catalogue",
     tag = "modules",
     security(),
-    responses((status = OK, body = Vec<CatalogueView>)),
+    responses(
+        (status = OK, body = Vec<CatalogueView>),
+        (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
+    ),
 )]
-async fn catalogue() -> Json<Vec<CatalogueView>> {
+async fn catalogue(_anonymous: Anonymous) -> Json<Vec<CatalogueView>> {
     Json(
         available()
             .into_iter()

@@ -15,7 +15,9 @@ use std::time::Duration;
 use erp_control::{Actor, ClusterRegistry, ControlPlane, PoolConfig, TenantDb, TenantPools};
 use erp_testkit::{Schema, TestDb};
 use erp_types::{ModuleId, TenantId};
-use erp_worker::{Activity, BoxError, Finding, HealthJob, Invariant, Job};
+use erp_worker::{
+    Activity, BoxError, Finding, HealthJob, Invariant, Job, Retention, Worker, WorkerConfig,
+};
 
 static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
 static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
@@ -446,5 +448,239 @@ async fn an_invitation_is_promised_by_the_control_plane_and_delivered_by_the_wor
         "the same invitation was emailed twice"
     );
 
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// One visit at a time, and one job's failure is one job's
+// ---------------------------------------------------------------------------
+
+/// A job that measures how many copies of itself are running at once.
+struct Overlapping {
+    in_flight: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    ticks: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Job for Overlapping {
+    fn name(&self) -> &'static str {
+        "overlapping"
+    }
+    async fn tick(&self, _db: &TenantDb) -> Result<Activity, BoxError> {
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        // Long enough that a second visit of the same tenant, if the worker
+        // spawned one, would overlap this one.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.ticks.fetch_add(1, Ordering::SeqCst);
+        // Always "worked", so the tenant is due again the moment a visit ends
+        // — the shape that made the old claim loop hand a tenant back to
+        // itself.
+        Ok(Activity::Worked)
+    }
+}
+
+/// **A tenant is visited by one visit at a time, however many slots the
+/// worker has.**
+///
+/// The first version of `claim_tenants` handed a worker its own in-flight
+/// tenants again on the next loop, so one due tenant filled every slot with
+/// visits of itself and jobs ran N-fold concurrently against the same rows.
+/// With four slots and one tenant, the peak has to be one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tenant_is_visited_by_one_visit_at_a_time() {
+    let mut fixture = Fixture::new().await;
+    fixture.tenant("solo").await;
+
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let worker = Worker::new(
+        Arc::clone(&fixture.control),
+        WorkerConfig {
+            name: "eager".to_owned(),
+            schedule: erp_control::WorkSchedule {
+                lease: Duration::from_secs(30),
+                idle_interval: Duration::from_millis(10),
+                jitter: Duration::ZERO,
+                max_idle_interval: Duration::from_secs(1),
+            },
+            tenants_per_claim: 8,
+            concurrency: 4,
+            // One tick per visit, so the tenant is rescheduled — and
+            // re-claimable — as often as possible.
+            max_ticks_per_visit: 1,
+            empty_claim_pause: Duration::from_millis(2),
+            ..WorkerConfig::default()
+        },
+    )
+    .with_job(Arc::new(Overlapping {
+        in_flight: Arc::clone(&in_flight),
+        peak: Arc::clone(&peak),
+        ticks: Arc::clone(&ticks),
+    }));
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let run = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.run(cancel).await })
+    };
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    cancel.cancel();
+    let shutdown = run.await.expect("joins");
+
+    assert!(
+        ticks.load(Ordering::SeqCst) >= 3,
+        "the tenant was visited {} times in 600ms; the loop is not re-claiming a worked tenant",
+        ticks.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        1,
+        "{} visits of one tenant ran at once",
+        peak.load(Ordering::SeqCst)
+    );
+    assert!(shutdown.drained);
+    fixture.cleanup().await;
+}
+
+struct AlwaysFails;
+
+#[async_trait::async_trait]
+impl Job for AlwaysFails {
+    fn name(&self) -> &'static str {
+        "always-fails"
+    }
+    async fn tick(&self, _db: &TenantDb) -> Result<Activity, BoxError> {
+        Err("upstream is on fire".into())
+    }
+}
+
+/// **One job's failure stalls that job, not the tenant.**
+///
+/// The first version returned on the first `Err`, so a Tabby secret that no
+/// longer parsed stopped hold expiry, reminders and ZATCA submission for the
+/// tenant — none of which had anything to do with Tabby. The failing job stays
+/// failed and loud; the ones after it in the list still run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_failing_job_does_not_stall_the_others() {
+    let mut fixture = Fixture::new().await;
+    fixture.tenant("resilient").await;
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let worker = Worker::new(
+        Arc::clone(&fixture.control),
+        WorkerConfig {
+            name: "steady".to_owned(),
+            schedule: erp_control::WorkSchedule {
+                lease: Duration::from_secs(30),
+                idle_interval: Duration::from_millis(10),
+                jitter: Duration::ZERO,
+                max_idle_interval: Duration::from_secs(1),
+            },
+            empty_claim_pause: Duration::from_millis(2),
+            ..WorkerConfig::default()
+        },
+    )
+    // The failing job first, so the one after it is what proves the point.
+    .with_job(Arc::new(AlwaysFails))
+    .with_job(Arc::new(Counter {
+        module: None,
+        ticks: Arc::clone(&ticks),
+    }));
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let run = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.run(cancel).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    cancel.cancel();
+    let shutdown = run.await.expect("joins");
+
+    assert!(
+        ticks.load(Ordering::SeqCst) > 0,
+        "the job after the failing one never ran"
+    );
+    assert!(
+        shutdown.failed_visits > 0,
+        "the failure must still be counted, not swallowed"
+    );
+    fixture.cleanup().await;
+}
+
+/// **What the system forgets, and what it keeps.** One receipt of each kind
+/// older than its window, one younger; the sweep takes the old and leaves the
+/// young, and never touches anything pending. The first version swept nothing.
+#[tokio::test]
+async fn retention_forgets_old_receipts_and_keeps_young_ones_and_open_promises() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.tenant("forgetful").await;
+    let db = fixture.db(tenant).await;
+    let mut conn = db.acquire().await.expect("connection");
+
+    for statement in [
+        // Delivered effects: one at forty days, one at twenty, and one that
+        // was never delivered and is older than everything.
+        "INSERT INTO outbox (idempotency_key, kind, payload, enqueued_at, delivered_at)
+         VALUES ('old', 'email.send', '{}', now() - interval '40 days', now() - interval '40 days'),
+                ('young', 'email.send', '{}', now() - interval '20 days', now() - interval '20 days'),
+                ('pending', 'email.send', '{}', now() - interval '400 days', NULL)",
+        "INSERT INTO webhook_event (provider, event_id, payload, received_at)
+         VALUES ('stripe', 'evt-old', '{}', now() - interval '100 days'),
+                ('stripe', 'evt-young', '{}', now() - interval '80 days')",
+        "INSERT INTO occupancy_resource (id, capacity) VALUES ('chair', 1)",
+        "INSERT INTO occupancy_claim (resource, owner, starts_at, ends_at, quantity)
+         VALUES ('chair', 'res-old', now() - interval '200 days', now() - interval '200 days' + interval '1 hour', 1),
+                ('chair', 'res-young', now() - interval '100 days', now() - interval '100 days' + interval '1 hour', 1)",
+        "INSERT INTO short_link (key, target, created_at, expires_at)
+         VALUES ('old', '/x', now() - interval '60 days', now() - interval '40 days'),
+                ('young', '/x', now() - interval '60 days', now() - interval '20 days'),
+                ('forever', '/x', now() - interval '600 days', NULL)",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .unwrap_or_else(|e| panic!("{statement}: {e}"));
+    }
+
+    let gone = Retention::sweep(&db, erp_types::Timestamp::from(chrono::Utc::now()))
+        .await
+        .expect("sweeps");
+    assert_eq!(gone, 4, "one old receipt of each kind");
+
+    let outbox: Vec<String> = sqlx::query_scalar("SELECT idempotency_key FROM outbox ORDER BY 1")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("reads");
+    assert_eq!(
+        outbox,
+        ["pending", "young"],
+        "the young receipt and the open promise stay"
+    );
+    let webhooks: Vec<String> = sqlx::query_scalar("SELECT event_id FROM webhook_event ORDER BY 1")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("reads");
+    assert_eq!(webhooks, ["evt-young"]);
+    let claims: Vec<String> = sqlx::query_scalar("SELECT owner FROM occupancy_claim ORDER BY 1")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("reads");
+    assert_eq!(claims, ["res-young"]);
+    let links: Vec<String> = sqlx::query_scalar("SELECT key FROM short_link ORDER BY 1")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("reads");
+    assert_eq!(
+        links,
+        ["forever", "young"],
+        "a permanent link is never swept"
+    );
+
+    drop(conn);
+    drop(db);
     fixture.cleanup().await;
 }

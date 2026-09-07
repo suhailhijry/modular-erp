@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO configuration (key, value, version, set_by)\n           VALUES ($1, $2, nextval('configuration_version'), $3)\n           ON CONFLICT (key) DO UPDATE\n              SET value   = EXCLUDED.value,\n                  version = nextval('configuration_version'),\n                  set_at  = now(),\n                  set_by  = EXCLUDED.set_by\n            WHERE $4::bigint IS NULL OR configuration.version = $4\n         RETURNING version",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "configuration",
+            "name": "version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b47a219b9a32dfe198e5b1c295bad02581c674d659a0d3e7344f4393b1fc5153"
+}

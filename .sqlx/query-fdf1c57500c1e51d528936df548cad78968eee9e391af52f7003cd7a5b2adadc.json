@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM occupancy_claim WHERE ends_at < $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fdf1c57500c1e51d528936df548cad78968eee9e391af52f7003cd7a5b2adadc"
+}

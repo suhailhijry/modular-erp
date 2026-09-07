@@ -7,10 +7,12 @@ pub const NO_SUCH_FILE: MessageCode = MessageCode::new("files.no_such_file");
 pub const ALREADY_REMOVED: MessageCode = MessageCode::new("files.already_removed");
 pub const UNKNOWN_OWNER: MessageCode = MessageCode::new("files.unknown_owner");
 pub const NO_STORAGE: MessageCode = MessageCode::new("files.no_storage");
+pub const NO_SUCH_OWNER: MessageCode = MessageCode::new("files.no_such_owner");
 pub const NOT_A_MEDIA_TYPE: MessageCode = MessageCode::new("files.not_a_media_type");
 pub const DATABASE: MessageCode = MessageCode::new("files.database");
 
 pub const CODES: &[MessageCode] = &[
+    NO_SUCH_OWNER,
     NO_NAME,
     NO_SUCH_FILE,
     ALREADY_REMOVED,
@@ -21,6 +23,16 @@ pub const CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NO_SUCH_OWNER,
+        Locale::English,
+        Template::Simple("There is no {kind} {id} to attach this to."),
+    ),
+    (
+        NO_SUCH_OWNER,
+        Locale::Arabic,
+        Template::Simple("لا يوجد {kind} {id} لإرفاق هذا به."),
+    ),
     (
         NO_NAME,
         Locale::English,

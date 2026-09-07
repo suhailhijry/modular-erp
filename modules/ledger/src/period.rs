@@ -95,8 +95,31 @@ pub async fn close(
     by: Option<&str>,
 ) -> Result<Books, ConfigError> {
     let books = Books { closed_before };
-    erp_eventlog::configuration::set(conn, Books::KEY, &books, by).await?;
+    erp_eventlog::configuration::set(conn, Books::KEY, &books, by, None).await?;
     Ok(books)
+}
+
+/// **Closes the books through `until`, and never reopens them.**
+///
+/// What a filed return calls: the period it declared may not change under it,
+/// so the watermark moves forward to the end of that period — and only
+/// forward. A return filed for an earlier period after a later one was filed
+/// must not pull the watermark back and reopen the later one. `close` is for a
+/// person deciding where the books stand; this is for a fact that has already
+/// left the building.
+pub async fn close_through(
+    conn: &mut sqlx::PgConnection,
+    until: Timestamp,
+    by: Option<&str>,
+) -> Result<Books, ConfigError> {
+    let current = books(&mut *conn).await?;
+    if current
+        .closed_before
+        .is_some_and(|already| already >= until)
+    {
+        return Ok(current);
+    }
+    close(conn, Some(until), by).await
 }
 
 #[cfg(test)]

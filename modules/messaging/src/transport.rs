@@ -164,6 +164,7 @@ pub fn handlers(transports: Vec<Arc<dyn Transport>>) -> Vec<Arc<dyn EffectHandle
 /// |---|---|
 /// | `2xx` | Sent, or accepted for sending |
 /// | `410 Gone` | The address is dead — a retired push token. Never retried |
+/// | `408`, `429` | Busy. Worth another go — see [`worth_retrying`] |
 /// | any other `4xx` | Will never work. Dead-lettered |
 /// | `5xx`, timeout, refused | Worth another go |
 pub struct Relay {
@@ -244,16 +245,33 @@ impl Transport for Relay {
         // Read the body for the message, and cap it: a relay that answers with
         // a megabyte of HTML should not put a megabyte of HTML in a dead letter.
         let said = response.text().await.unwrap_or_default();
-        let said: String = said.chars().take(500).collect();
-
-        if status == reqwest::StatusCode::GONE {
-            return Err(TransportError::AddressRetired(said));
-        }
-        if status.is_client_error() {
-            return Err(TransportError::Refused(format!("{status}: {said}")));
-        }
-        Err(TransportError::Unreachable(format!("{status}: {said}")))
+        Err(verdict(status, &said.chars().take(500).collect::<String>()))
     }
+}
+
+/// What a relay's refusal means for the message.
+fn verdict(status: reqwest::StatusCode, said: &str) -> TransportError {
+    if status == reqwest::StatusCode::GONE {
+        return TransportError::AddressRetired(said.to_owned());
+    }
+    if worth_retrying(status) {
+        return TransportError::Unreachable(format!("{status}: {said}"));
+    }
+    TransportError::Refused(format!("{status}: {said}"))
+}
+
+/// **Whether a status is the provider being busy rather than saying no.**
+///
+/// A `5xx` is theirs; `408 Request Timeout` and `429 Too Many Requests` are the
+/// two `4xx`s that describe the moment rather than the message, and a text
+/// dead-lettered on a busy minute is a reminder nobody gets. Every transport in
+/// this module answers its own status through this, so the three cannot
+/// disagree about what busy looks like.
+#[must_use]
+pub(crate) fn worth_retrying(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
 #[cfg(test)]
@@ -266,6 +284,29 @@ mod tests {
         assert!(Relay::new(Channel::Sms, "http://localhost:9000/send", "t").is_ok());
         assert!(Relay::new(Channel::Sms, "http://relay.test/send", "t").is_err());
         assert!(Relay::new(Channel::Sms, "ftp://relay.test", "t").is_err());
+    }
+
+    /// **Busy is not no.** A rate-limited or timed-out relay is retried; a
+    /// relay that has made up its mind is not; a dead address is written down.
+    #[test]
+    fn a_busy_relay_is_retried_and_a_refusing_one_is_not() {
+        let status = |code: u16| reqwest::StatusCode::from_u16(code).expect("a status");
+        for busy in [408, 429, 500, 502, 503, 504] {
+            assert!(
+                matches!(verdict(status(busy), ""), TransportError::Unreachable(_)),
+                "{busy} is worth another go"
+            );
+        }
+        for permanent in [400, 401, 403, 404, 413, 422] {
+            assert!(
+                matches!(verdict(status(permanent), ""), TransportError::Refused(_)),
+                "{permanent} will refuse again"
+            );
+        }
+        assert!(matches!(
+            verdict(status(410), "gone"),
+            TransportError::AddressRetired(_)
+        ));
     }
 
     /// The token is the one thing that must never reach a log line.

@@ -151,30 +151,17 @@ impl Transport for Taqnyat {
 
 /// A phone number as Taqnyat wants it: digits, no `+`, no leading `00`.
 ///
-/// Returns `None` for anything that is not one, so a number this client cannot
-/// fix is refused before it is sent rather than after — the documented failure
-/// (`Mobile(s) number(s) is not specified or incorrect`) is permanent either
-/// way, and a local refusal says which number and why.
-///
-/// The upper bound is E.164's fifteen digits, which is also what keeps this
-/// inside a `u64`.
+/// **The kernel's rule, not a second one.** This used to have its own parser,
+/// which refused the dashes `booking`'s verification and the control plane's
+/// one-time codes strip — so a number accepted at the door was dead-lettered
+/// at the gateway. Now the number that reaches here is read by the same
+/// function that read it on the way in ([`erp_types::phone`]), and a number
+/// this client cannot send is refused before the request rather than after:
+/// the documented failure (`Mobile(s) number(s) is not specified or
+/// incorrect`) is permanent either way, and a local refusal says which number.
 #[must_use]
 pub fn msisdn(number: &str) -> Option<u64> {
-    let digits: String = number.chars().filter(|c| !c.is_whitespace()).collect();
-    let digits = digits.strip_prefix('+').unwrap_or(&digits);
-    let digits = digits.strip_prefix("00").unwrap_or(digits);
-
-    if digits.len() < 8 || digits.len() > 15 || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    // **A leading zero is a national number.** No country calling code begins
-    // with one, so `0500000000` is a Saudi number written the way a Saudi
-    // person writes it — and parsing it as an integer would drop the zero and
-    // send to `500000000`, which is a different number that might exist.
-    if digits.starts_with('0') {
-        return None;
-    }
-    digits.parse().ok()
+    erp_types::phone::msisdn(number)
 }
 
 /// Whether a `201` actually took the message.
@@ -244,7 +231,7 @@ fn refusal(status: reqwest::StatusCode, body: &str) -> TransportError {
     // text carries its own typos (`Sender Name is expierd`), which says these
     // strings are edited, and an exact match would silently become a
     // never-retried outage the day one is corrected.
-    if said.contains(TRY_AGAIN) || status.is_server_error() {
+    if said.contains(TRY_AGAIN) || crate::transport::worth_retrying(status) {
         return TransportError::Unreachable(format!("{status}: {said}"));
     }
     TransportError::Refused(format!("{status}: {said}"))
@@ -272,12 +259,21 @@ mod tests {
         }
     }
 
+    /// **The number the door accepted is the number the gateway is given.**
+    /// Every spelling `erp_types::phone::normalise` reads, this sends — the
+    /// dashed one is the case that used to be accepted at booking and
+    /// dead-lettered here.
     #[test]
     fn a_number_reaches_taqnyat_the_way_it_documents_them() {
         assert_eq!(msisdn("+966500000000"), Some(966_500_000_000));
         assert_eq!(msisdn("00966500000000"), Some(966_500_000_000));
-        assert_eq!(msisdn("966500000000"), Some(966_500_000_000));
         assert_eq!(msisdn("+966 50 000 0000"), Some(966_500_000_000));
+        assert_eq!(msisdn("+966-50-000-0000"), Some(966_500_000_000));
+        assert_eq!(
+            msisdn(&erp_types::phone::normalise("+966 (50) 000-0000").expect("a number")),
+            Some(966_500_000_000),
+            "what verification stored is what the transport sends"
+        );
     }
 
     /// Refused here rather than at the gateway, where it is permanent anyway
@@ -286,11 +282,10 @@ mod tests {
     fn something_that_is_not_a_number_never_leaves_this_process() {
         assert_eq!(msisdn(""), None);
         assert_eq!(msisdn("0500000000"), None, "national, not international");
-        assert_eq!(
-            msisdn("+966-50-000-0000"),
-            None,
-            "punctuation is not a digit"
-        );
+        // Bare digits are ambiguous — national or international? — and the
+        // rest of the system refuses them at the door, so nothing stored
+        // looks like this.
+        assert_eq!(msisdn("966500000000"), None, "no prefix is no country");
         assert_eq!(msisdn("not a number"), None);
         assert_eq!(msisdn("9665000000001234567"), None, "past E.164");
     }
@@ -372,7 +367,7 @@ mod tests {
         }
     }
 
-    /// A wrong token is permanent; the gateway being down is not.
+    /// A wrong token is permanent; the gateway being down or busy is not.
     #[test]
     fn credentials_are_permanent_and_an_outage_is_not() {
         assert!(matches!(
@@ -381,6 +376,16 @@ mod tests {
                 r#"{"statusCode":401,"message":"invalid credentials information"}"#
             ),
             TransportError::Refused(_)
+        ));
+        // Rate limited on a busy minute is the gateway's moment, not the
+        // message's fault.
+        assert!(matches!(
+            refusal(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down"),
+            TransportError::Unreachable(_)
+        ));
+        assert!(matches!(
+            refusal(reqwest::StatusCode::REQUEST_TIMEOUT, ""),
+            TransportError::Unreachable(_)
         ));
         assert!(matches!(
             refusal(

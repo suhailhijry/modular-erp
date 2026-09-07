@@ -9,8 +9,10 @@
 
 use std::sync::Arc;
 
-use erp_control::{Actor, ClusterRegistry, ControlPlane, PoolConfig, TenantDb, TenantPools};
-use erp_eventlog::Metadata;
+use erp_control::{
+    Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
+};
+use erp_eventlog::{ExecuteError, Metadata};
 use erp_projection::{Projection, ensure_group_schema, run_to_head};
 use erp_storage::{Local, Storage, StorageError};
 use erp_testkit::{Schema, TestDb};
@@ -126,8 +128,42 @@ impl Fixture {
             .expect("projects");
     }
 
+    /// **Puts the record a document goes on into the log**, so `attach` finds
+    /// it. One planted event under the owner's stream is all `files` asks for:
+    /// it checks that the record exists, not what state it is in.
+    async fn plant(&self, owner: &Owner) {
+        let Some(domain) = owner.kind.domain() else {
+            return;
+        };
+        sqlx::query(
+            "WITH taken AS (
+                 UPDATE event_log_position SET next_position = next_position + 1
+                 RETURNING next_position - 1 AS position
+             )
+             INSERT INTO event (position, stream_domain, stream_id, sequence, event_name,
+                                schema_version, payload)
+             SELECT position, $1, $2, 1, 'test.planted', 1, '{}'::jsonb FROM taken
+              WHERE NOT EXISTS (
+                  SELECT 1 FROM event WHERE stream_domain = $1 AND stream_id = $2
+              )",
+        )
+        .bind(domain)
+        .bind(owner.id.as_str())
+        .execute(&self.pool)
+        .await
+        .expect("plants");
+    }
+
+    async fn stored(&self, id: &str, owner: &Owner, bytes: &[u8]) -> erp_storage::Stored {
+        let key = files::key_for(self.db.tenant(), owner, id);
+        erp_storage::store(&self.storage, &key, bytes, "application/pdf")
+            .await
+            .expect("stores")
+    }
+
     /// Stores bytes and records them, in the order a handler does it.
     async fn upload(&self, id: &str, owner: &Owner, name: &str, bytes: &[u8]) {
+        self.plant(owner).await;
         let key = files::key_for(self.db.tenant(), owner, id);
         let stored = erp_storage::store(&self.storage, &key, bytes, "application/pdf")
             .await
@@ -307,10 +343,11 @@ async fn uploading_the_same_document_twice_records_it_once() {
     }
 
     assert_eq!(fixture.attached(&owner).await.len(), 1);
-    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM event")
-        .fetch_one(&fixture.pool)
-        .await
-        .expect("counts");
+    let events: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM event WHERE event_name <> 'test.planted'")
+            .fetch_one(&fixture.pool)
+            .await
+            .expect("counts");
     assert_eq!(events, 1, "three uploads, one event");
 
     fixture.cleanup().await;
@@ -362,6 +399,77 @@ async fn a_rebuild_reproduces_the_records_without_reading_a_file() {
         "a rebuild does not reproduce what is live: {:?}",
         report.differences()
     );
+
+    fixture.cleanup().await;
+}
+
+/// **A document goes on a record that exists.** Filed under an id that parses
+/// but names nothing, it would appear on no page and be erased by no request —
+/// which is what the first version allowed, because `files` checked nothing
+/// about the owner it was handed.
+#[tokio::test]
+async fn a_document_cannot_be_attached_to_a_record_that_does_not_exist() {
+    let fixture = Fixture::new("owner").await;
+    let missing = invoice("INV-404");
+    let stored = fixture.stored("DOC-1", &missing, b"%PDF-1.7").await;
+
+    let refused = files::attach(
+        &fixture.db,
+        &code("DOC-1"),
+        "contract.pdf",
+        &missing,
+        &stored,
+        on("2026-05-01"),
+        &Metadata::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                files::FileError::NoSuchOwner(kind, id)
+            ))) if kind == "invoice" && id == "INV-404"
+        ),
+        "attached to a record that does not exist: {refused:?}"
+    );
+    fixture.project().await;
+    assert!(
+        fixture.attached(&missing).await.is_empty(),
+        "nothing was recorded"
+    );
+
+    // The tenant itself always exists.
+    let tenant = Owner {
+        kind: OwnerKind::Tenant,
+        id: code("self"),
+    };
+    let stored = fixture.stored("DOC-2", &tenant, b"%PDF-1.7 licence").await;
+    files::attach(
+        &fixture.db,
+        &code("DOC-2"),
+        "licence.pdf",
+        &tenant,
+        &stored,
+        on("2026-05-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a tenant document needs no record to hang on");
+
+    // And once the invoice is in the log, so can its document.
+    fixture.plant(&missing).await;
+    let stored = fixture.stored("DOC-1", &missing, b"%PDF-1.7").await;
+    files::attach(
+        &fixture.db,
+        &code("DOC-1"),
+        "contract.pdf",
+        &missing,
+        &stored,
+        on("2026-05-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("attaches once the record exists");
 
     fixture.cleanup().await;
 }

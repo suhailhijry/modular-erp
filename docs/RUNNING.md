@@ -281,7 +281,14 @@ just demo correct-horse-battery-staple
 Builds a tenant with every module on, filled through the public API: six
 invoices (one credited, one discounted), four bills, three payments, a filed VAT
 return, and a colleague with narrower permissions. It prints the slug, the
-sign-in address and the tenant id.
+sign-in address, the tenant id, and the colleague's own password — minted for
+this demo, because the owner's is the one on the screen while the permissions
+model is being shown.
+
+Export the same `SEALING_KEY` the API and the worker have before running it:
+the demo saves a card and asks for it to be charged, and the card is sealed
+under that key. Without one the demo mints a key for its own run and warns,
+and the card it saved is readable by nobody else.
 
 ## Start the API
 
@@ -364,9 +371,11 @@ cannot drift. The API serves it too:
 curl -s $API/openapi.json | python3 -m json.tool | head -40
 ```
 
-`docs/ERRORS.md` lists every `code` the API can answer with. **Branch on the
-code, never on `detail`** — the detail is prose in whichever language was asked
-for.
+Every refusal is `application/problem+json` with a stable `code`. **Branch on
+the code, never on `detail`** — the detail is prose in whichever language was
+asked for. The codes are the module catalogs (`erp_api::CATALOG` is their
+union), and every code has an English and an Arabic rendering, which a test
+enforces.
 
 ## ZATCA, end to end
 
@@ -377,17 +386,18 @@ The whole flow, from OTP to a tenant that can clear invoices:
 # 1. Who the business is. Every document is stamped with this.
 curl -s -X PUT $API/v1/tax_sa/registration -H "$H" -H "$A" -H 'content-type: application/json' -d '{
   "vat_number":"310122393500003","name":"روابي للاستشارات","scheme":"crn",
-  "identifier":"1010101010",
+  "identifier":"1010101010","industry":"Consulting",
   "address":{"street":"طريق الملك فهد","building":"2322","district":"العليا",
              "city":"الرياض","postal_code":"12211","country":"SA"}}'
 
-# 2. Key pair, CSR, OTP, compliance checks, production certificate — four calls
-#    to ZATCA, one request.
+# 2. The OTP. This request generates the key, buys the compliance certificate
+#    and answers 202; the worker submits the six samples and obtains the
+#    production certificate on its next visit.
 curl -s -X POST $API/v1/tax_sa/zatca/onboarding/activate -H "$H" -H "$A" -H 'content-type: application/json' -d '{
-  "environment":"simulation","otp":"123456","branch":"الفرع الرئيسي",
-  "common_name":"EGS1-886431145","serial":"DEV001","industry":"Consulting"}'
+  "environment":"simulation","otp":"123456"}'
 
-# 3. Where it stands.
+# 3. Where it stands. `state` goes checking -> live; `refusal` says what ZATCA
+#    refused, if anything.
 curl -s $API/v1/tax_sa/zatca/onboarding -H "$H" -H "$A"
 curl -s $API/v1/tax_sa/zatca           -H "$H" -H "$A"
 curl -s $API/v1/tax_sa/zatca/documents -H "$H" -H "$A"

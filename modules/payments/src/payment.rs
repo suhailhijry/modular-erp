@@ -190,6 +190,14 @@ pub enum PaymentEvent {
         /// one that raises a 3-D Secure challenge does not, and this is where
         /// that lands. See `crate::charge_requested`.
         callback_url: String,
+        /// **What a hosted checkout is told**, when the provider hosts one.
+        /// `None` is a card, or a charge the customer's browser creates
+        /// against this system's id. See [`crate::Checkout`].
+        ///
+        /// Boxed for the reason `sales::InvoiceEvent::Issued` boxes its
+        /// customer: it is the heavy variant, and `Box<T>` serialises as `T`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkout: Option<Box<crate::Checkout>>,
         requested_at: Timestamp,
     },
     /// A charge was created at the gateway. **Nobody has paid anything yet.**
@@ -211,6 +219,12 @@ pub enum PaymentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         advance: Option<Advance>,
         amount: Money,
+        /// **Where the customer goes to pay**, when the provider hosts the
+        /// page: a checkout the worker opened, or a 3-D Secure challenge a
+        /// saved-card charge raised. `None` when there is nowhere to send
+        /// them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pay_at: Option<String>,
         started_at: Timestamp,
     },
     /// The gateway confirmed the money moved.
@@ -251,7 +265,36 @@ pub enum PaymentEvent {
         why: String,
         failed_at: Timestamp,
     },
-    /// Money given back, in full or in part.
+    /// **Somebody asked for money to go back**, and the gateway has not been
+    /// told yet.
+    ///
+    /// The first version of the refund route recorded [`Self::Refunded`]
+    /// directly — the books, the credit note, everything — and never spoke to
+    /// the gateway, on the instruction that the operator would refund there
+    /// first. Nothing enforced the order, and a refund recorded before the
+    /// gateway agreed is a set of books saying money went back when it did
+    /// not. So a refund is now a request the worker carries out, the same shape
+    /// as a saved-card charge: this is the intent, `crate::refund_requested` is
+    /// the outbound call, and [`Self::Refunded`] is written only from what the
+    /// gateway confirmed.
+    RefundRequested {
+        /// The caller's own reference. A retry with the same one is a retry,
+        /// and it becomes the credit note's key.
+        reference: String,
+        amount: Money,
+        /// Why, in the customer's language; printed on the credit note.
+        reason: String,
+        requested_at: Timestamp,
+    },
+    /// **The gateway would not give it back**, and will say the same again. A
+    /// dead card, a payment too old to refund, an amount the provider will not
+    /// split — the reason is theirs, kept for whoever has to explain it.
+    RefundRefused {
+        reference: String,
+        why: String,
+        refused_at: Timestamp,
+    },
+    /// Money given back, in full or in part — **as the gateway confirmed it**.
     ///
     /// Carries what the posting needs, for the reason [`Self::Settled`] does.
     Refunded {
@@ -274,6 +317,14 @@ pub enum PaymentEvent {
         /// What was kept — everything that had not been given back, including
         /// the tax that was declared on it when it arrived.
         amount: Money,
+        /// **The part of `amount` that was never tax**, at the rate the
+        /// prepayment invoice actually carried. Worked out here, from the
+        /// deposit's own net and gross, rather than from whatever the standard
+        /// rate is on the day somebody decides to keep the money — a rate
+        /// change between the two would otherwise move the wrong figure out of
+        /// revenue (L5). `None` on events written before this was carried.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net: Option<Money>,
         /// **Whether keeping it counts as a sale.** The tenant's decision, from
         /// `crate::Retention`, recorded on the event rather than looked up
         /// later: a setting changed next year must not restate what the books
@@ -289,7 +340,7 @@ pub enum PaymentEvent {
 }
 
 impl PaymentEvent {
-    pub const NAMES: [&'static str; 7] = [
+    pub const NAMES: [&'static str; 9] = [
         "payments.payment.requested",
         "payments.payment.started",
         "payments.payment.settled",
@@ -297,6 +348,8 @@ impl PaymentEvent {
         "payments.payment.refunded",
         "payments.payment.retained",
         "payments.payment.voided",
+        "payments.payment.refund_requested",
+        "payments.payment.refund_refused",
     ];
 }
 
@@ -310,6 +363,8 @@ impl DomainEvent for PaymentEvent {
             Self::Refunded { .. } => Self::NAMES[4],
             Self::Retained { .. } => Self::NAMES[5],
             Self::Voided { .. } => Self::NAMES[6],
+            Self::RefundRequested { .. } => Self::NAMES[7],
+            Self::RefundRefused { .. } => Self::NAMES[8],
         })
     }
 
@@ -394,6 +449,21 @@ pub struct Payment {
     /// says the money is all back, not that *this* request is the one that did
     /// it. `pos` learned the same lesson from a drawer that went down twice.
     pub refunds: Vec<String>,
+    /// **Refunds asked for and not yet carried out** at the gateway. Their
+    /// amounts are spoken for: a second request cannot take them, and nothing
+    /// may be kept while one is open.
+    pub awaited_refunds: Vec<RefundRequest>,
+    /// References the gateway refused. Kept so a retry of one is the same
+    /// answer and not a second attempt.
+    pub refused_refunds: Vec<String>,
+}
+
+/// One refund asked for and not yet confirmed by the gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefundRequest {
+    pub reference: String,
+    pub amount: Money,
+    pub reason: String,
 }
 
 impl Payment {
@@ -403,17 +473,28 @@ impl Payment {
         self.refunds.iter().any(|seen| seen == reference)
     }
 
-    /// Whether the money has arrived and not all of it has gone back.
+    /// The open request under this reference, if there is one.
     #[must_use]
-    pub fn is_collected(&self) -> bool {
-        matches!(self.stage, Stage::Settled)
+    pub fn refund_awaited(&self, reference: &str) -> Option<&RefundRequest> {
+        self.awaited_refunds
+            .iter()
+            .find(|r| r.reference == reference)
     }
 
-    /// What could still be given back.
-    ///
-    /// `None` once the business has kept it: a retained deposit is theirs, and
-    /// refunding one afterwards would hand back money that has already been
-    /// recognised — as revenue, and possibly on a filed return.
+    /// Whether the gateway already refused this reference.
+    #[must_use]
+    pub fn refund_refused(&self, reference: &str) -> bool {
+        self.refused_refunds.iter().any(|seen| seen == reference)
+    }
+
+    /// What every open request adds up to.
+    fn awaited_minor(&self) -> i64 {
+        self.awaited_refunds.iter().map(|r| r.amount.minor()).sum()
+    }
+
+    /// What could still be given back **to a new request** — after what has
+    /// gone back and after what is already spoken for. `None` before the money
+    /// arrived, and once the business has kept it.
     #[must_use]
     pub fn refundable(&self) -> Option<Money> {
         let amount = self.amount?;
@@ -421,9 +502,27 @@ impl Payment {
             return None;
         }
         Some(Money::from_minor(
-            amount.minor() - self.refunded_minor,
+            amount.minor() - self.refunded_minor - self.awaited_minor(),
             amount.currency(),
         ))
+    }
+
+    /// What may go back **under this reference**: what is left, plus what this
+    /// very request already reserved for itself — so the worker completing an
+    /// awaited refund is not refused for the amount it is completing.
+    #[must_use]
+    pub fn refundable_for(&self, reference: &str) -> Option<Money> {
+        let left = self.refundable()?;
+        let reserved = self
+            .refund_awaited(reference)
+            .map_or(0, |r| r.amount.minor());
+        Some(Money::from_minor(left.minor() + reserved, left.currency()))
+    }
+
+    /// Whether the money has arrived and not all of it has gone back.
+    #[must_use]
+    pub fn is_collected(&self) -> bool {
+        matches!(self.stage, Stage::Settled)
     }
 }
 
@@ -475,9 +574,28 @@ impl Aggregate for Payment {
                 self.amount = Some(*amount);
             }
             PaymentEvent::Failed { .. } => self.stage = Stage::Failed,
+            PaymentEvent::RefundRequested {
+                reference,
+                amount,
+                reason,
+                ..
+            } => {
+                if self.refund_awaited(reference).is_none() {
+                    self.awaited_refunds.push(RefundRequest {
+                        reference: reference.clone(),
+                        amount: *amount,
+                        reason: reason.clone(),
+                    });
+                }
+            }
+            PaymentEvent::RefundRefused { reference, .. } => {
+                self.awaited_refunds.retain(|r| r.reference != *reference);
+                self.refused_refunds.push(reference.clone());
+            }
             PaymentEvent::Refunded {
                 amount, reference, ..
             } => {
+                self.awaited_refunds.retain(|r| r.reference != *reference);
                 self.refunded_minor += amount.minor();
                 self.refunds.push(reference.clone());
                 if let Some(total) = self.amount
@@ -510,6 +628,7 @@ mod tests {
 
     fn started() -> PaymentEvent {
         PaymentEvent::Started {
+            pay_at: None,
             provider: "moyasar".to_owned(),
             gateway_id: "pay_1".to_owned(),
             invoice: Some(id("INV-1")),
@@ -607,6 +726,7 @@ mod tests {
     fn every_event_has_a_name_and_they_are_all_different() {
         let events = [
             PaymentEvent::Requested {
+                checkout: None,
                 card: Some(id("card-1")),
                 provider: "moyasar".to_owned(),
                 invoice: Some(id("INV-1")),
@@ -626,10 +746,22 @@ mod tests {
                 amount: sar(1),
                 supply: true,
                 advance_for: id("BOOK-1"),
+                net: None,
                 retained_at: Timestamp::from(chrono::Utc::now()),
             },
             PaymentEvent::Voided {
                 voided_at: Timestamp::from(chrono::Utc::now()),
+            },
+            PaymentEvent::RefundRequested {
+                reference: "refund-1".to_owned(),
+                amount: sar(1),
+                reason: "changed their mind".to_owned(),
+                requested_at: Timestamp::from(chrono::Utc::now()),
+            },
+            PaymentEvent::RefundRefused {
+                reference: "refund-1".to_owned(),
+                why: "too old".to_owned(),
+                refused_at: Timestamp::from(chrono::Utc::now()),
             },
         ];
         let names: Vec<_> = events.iter().map(|e| e.event_name().to_string()).collect();

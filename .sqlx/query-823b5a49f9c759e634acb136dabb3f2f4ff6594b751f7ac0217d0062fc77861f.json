@@ -1,0 +1,113 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.payment_id as \"payment!\", p.provider as \"provider!\",\n                  p.gateway_id as \"gateway_id!\", r.reference as \"reference!\",\n                  r.amount_minor as \"amount_minor!\", r.currency as \"currency!\",\n                  r.reason as \"reason!\", p.refunded_minor as \"refunded_minor!\"\n             FROM proj_payments.refund_request r\n             JOIN proj_payments.payment p ON p.id = r.payment_id\n            WHERE r.outcome IS NULL AND p.provider = $1\n            ORDER BY r.requested_at ASC LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payment!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "payment_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "provider!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "gateway_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "gateway_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "reference!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "reference"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "amount_minor!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "amount_minor"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "reason!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.refund_request",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "refunded_minor!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "refunded_minor"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "823b5a49f9c759e634acb136dabb3f2f4ff6594b751f7ac0217d0062fc77861f"
+}

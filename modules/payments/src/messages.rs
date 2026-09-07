@@ -18,10 +18,22 @@ pub const NOT_A_CARD: MessageCode = MessageCode::new("payments.not_a_card");
 
 pub const NOT_A_DEPOSIT: MessageCode = MessageCode::new("payments.not_a_deposit");
 pub const NOTHING_TO_RETAIN: MessageCode = MessageCode::new("payments.nothing_to_retain");
+pub const ALREADY_AWAITED: MessageCode = MessageCode::new("payments.already_awaited");
+pub const REFUND_AWAITED: MessageCode = MessageCode::new("payments.refund_awaited");
+pub const REFUND_REFUSED: MessageCode = MessageCode::new("payments.refund_refused");
+pub const PROVIDER_NOT_OFFERED: MessageCode = MessageCode::new("payments.provider_not_offered");
+pub const LENDER_NEEDS: MessageCode = MessageCode::new("payments.lender_needs");
+pub const LANDING_NOT_ALLOWED: MessageCode = MessageCode::new("payments.landing_not_allowed");
 
 pub static CODES: &[MessageCode] = &[
     NOT_A_DEPOSIT,
     NOTHING_TO_RETAIN,
+    ALREADY_AWAITED,
+    REFUND_AWAITED,
+    REFUND_REFUSED,
+    PROVIDER_NOT_OFFERED,
+    LENDER_NEEDS,
+    LANDING_NOT_ALLOWED,
     NOT_STARTED,
     ALREADY_STARTED,
     WRONG_AMOUNT,
@@ -206,5 +218,72 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOTHING_TO_RETAIN,
         Locale::Arabic,
         Template::Simple("لم يتبق من {id} ما يمكن الاحتفاظ به."),
+    ),
+    (
+        ALREADY_AWAITED,
+        Locale::English,
+        Template::Simple("{against} already has a deposit in flight: {payment}."),
+    ),
+    (
+        ALREADY_AWAITED,
+        Locale::Arabic,
+        Template::Simple("{against} لديه دفعة مقدمة قيد التحصيل بالفعل: {payment}."),
+    ),
+    (
+        REFUND_AWAITED,
+        Locale::English,
+        Template::Simple(
+            "Payment {id} has a refund in flight; it cannot be kept until that is settled.",
+        ),
+    ),
+    (
+        REFUND_AWAITED,
+        Locale::Arabic,
+        Template::Simple(
+            "عملية الدفع {id} لديها استرداد قيد التنفيذ؛ لا يمكن الاحتفاظ بها حتى يُسوَّى.",
+        ),
+    ),
+    (
+        REFUND_REFUSED,
+        Locale::English,
+        Template::Simple("The gateway refused refund {reference} of payment {payment}: {why}"),
+    ),
+    (
+        REFUND_REFUSED,
+        Locale::Arabic,
+        Template::Simple("رفضت بوابة الدفع الاسترداد {reference} لعملية الدفع {payment}: {why}"),
+    ),
+    // **The three refusals a public payment form can act on.** Which provider
+    // a business takes is not a secret — the form shows the choices — so
+    // naming it costs nothing and saves a stranger guessing.
+    (
+        PROVIDER_NOT_OFFERED,
+        Locale::English,
+        Template::Simple("This business does not take payment through {provider}."),
+    ),
+    (
+        PROVIDER_NOT_OFFERED,
+        Locale::Arabic,
+        Template::Simple("هذا النشاط لا يقبل الدفع عبر {provider}."),
+    ),
+    (
+        LENDER_NEEDS,
+        Locale::English,
+        Template::Simple("Paying through {provider} needs {what}."),
+    ),
+    (
+        LENDER_NEEDS,
+        Locale::Arabic,
+        Template::Simple("الدفع عبر {provider} يتطلب {what}."),
+    ),
+    (
+        LANDING_NOT_ALLOWED,
+        Locale::English,
+        Template::Simple("{url} is not on a site this business has allowed."),
+    ),
+    (
+        LANDING_NOT_ALLOWED,
+        Locale::Arabic,
+        Template::Simple("{url} ليس على موقع سمح به هذا النشاط."),
     ),
 ];

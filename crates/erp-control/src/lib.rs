@@ -24,6 +24,7 @@
 
 mod auth;
 mod cache;
+pub mod domains;
 mod fleet;
 mod invitations;
 mod keys;
@@ -91,6 +92,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use cache::TtlCache;
+pub use domains::{DnsProver, DomainProver, NoResolver, ProofError, record_name, record_value};
 use erp_types::{IdentityId, MembershipId, ModuleId, TenantId};
 use sqlx::PgPool;
 
@@ -131,6 +133,26 @@ pub enum AccessError {
     /// exist, which is a free enumeration oracle.
     #[error("no membership for this identity in this tenant")]
     NotAMember,
+    /// A domain this tenant has not claimed.
+    #[error("{0} has not been claimed by this tenant")]
+    DomainNotClaimed(String),
+    /// The record that proves the domain is not published, or says something
+    /// else. Carries what to publish.
+    #[error("{domain} is not proved: publish {record} TXT {expected}")]
+    DomainNotProved {
+        domain: String,
+        record: String,
+        expected: String,
+    },
+    /// The resolver could not be asked. A retry, not a refusal.
+    #[error("the domain could not be looked up: {0}")]
+    DomainProofUnavailable(String),
+    /// Not `https://<host>[:port]`.
+    #[error("{0} is not an origin this API licenses")]
+    NotAnOrigin(String),
+    /// An origin whose host is not the domain it was claimed under.
+    #[error("{origin} is not under {domain}")]
+    OriginOutsideDomain { origin: String, domain: String },
     #[error(transparent)]
     Pool(#[from] PoolError),
     #[error(transparent)]
@@ -194,6 +216,13 @@ pub struct ControlPlane {
     /// database every time would put CORS on the hot path of the very surface
     /// that is expected to be flooded.
     origins: TtlCache<TenantId, Arc<[String]>>,
+    /// Which tenant a custom host names, by the host. Cleared whenever any
+    /// tenant's domains change; hosts are few and the lookup is on every
+    /// request to one.
+    hosts: TtlCache<String, Option<Tenant>>,
+    /// How a domain is proved. The system's DNS in production; a test's
+    /// stand-in otherwise.
+    prover: Arc<dyn DomainProver>,
     /// The caches every node shares, when this deployment has any.
     ///
     /// `None` is a supported shape and means exactly the behaviour this system
@@ -220,6 +249,14 @@ impl ControlPlane {
             platform: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             entitlements: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             origins: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            hosts: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            prover: match DnsProver::from_system() {
+                Ok(dns) => Arc::new(dns),
+                Err(e) => {
+                    tracing::warn!(error = %e, "no DNS resolver; domains cannot be proved here");
+                    Arc::new(NoResolver)
+                }
+            },
             shared: None,
             entry_hits: AtomicU64::new(0),
             entry_misses: AtomicU64::new(0),
@@ -231,6 +268,14 @@ impl ControlPlane {
     #[must_use]
     pub fn sharing(mut self, shared: crate::shared::Shared) -> Self {
         self.shared = Some(shared);
+        self
+    }
+
+    /// How domains are proved. Tests hand in a resolver that answers what they
+    /// say; a deployment keeps the system's DNS.
+    #[must_use]
+    pub fn with_prover(mut self, prover: Arc<dyn DomainProver>) -> Self {
+        self.prover = prover;
         self
     }
 
@@ -250,7 +295,10 @@ impl ControlPlane {
             }
             Invalidate::Platform(id) => self.platform.invalidate(&id),
             Invalidate::Entitlements(id) => self.entitlements.invalidate(&id),
-            Invalidate::Origins(id) => self.origins.invalidate(&id),
+            Invalidate::Origins(id) => {
+                self.origins.invalidate(&id);
+                self.hosts.clear();
+            }
         }
         if let Some(shared) = &self.shared {
             shared.publish(&what).await;
@@ -269,7 +317,10 @@ impl ControlPlane {
             }
             Invalidate::Platform(id) => self.platform.invalidate(id),
             Invalidate::Entitlements(id) => self.entitlements.invalidate(id),
-            Invalidate::Origins(id) => self.origins.invalidate(id),
+            Invalidate::Origins(id) => {
+                self.origins.invalidate(id);
+                self.hosts.clear();
+            }
         }
     }
 
@@ -618,50 +669,73 @@ impl ControlPlane {
         Ok(token)
     }
 
-    /// Marks a domain proved, which is what makes its origins live.
+    /// **Proves a claimed domain by the record the tenant was told to publish.**
     ///
-    /// **This does not do the proving.** Reaching out to DNS or to a well-known
-    /// URL is an effect, and effects are values in the outbox (D9) — so what
-    /// checks the world is a handler, and this is what it writes when the check
-    /// came back yes.
+    /// Looks up `_erp-challenge.<domain>` and compares; only a match sets
+    /// `verified_at`. Already-proved is the same answer. An absent or wrong
+    /// record is [`AccessError::DomainNotProved`], which carries the record to
+    /// publish; a resolver that cannot answer is
+    /// [`AccessError::DomainProofUnavailable`], which is a retry, not a refusal.
+    /// The first version set `verified_at` on request and checked nothing.
     pub async fn verify_domain(
         &self,
         tenant_id: TenantId,
         domain: &str,
         actor: Actor,
-    ) -> Result<bool, AccessError> {
+    ) -> Result<(), AccessError> {
         let domain = domain.trim().to_lowercase();
-        let updated = sqlx::query!(
+        let claimed = sqlx::query!(
+            r#"SELECT verification_token as "token!", verified_at
+                 FROM tenant_domain WHERE tenant = $1 AND domain = $2"#,
+            tenant_id.as_uuid(),
+            domain,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AccessError::DomainNotClaimed(domain.clone()))?;
+        if claimed.verified_at.is_some() {
+            return Ok(());
+        }
+        let name = record_name(&domain);
+        let records = self
+            .prover
+            .txt_records(&name)
+            .await
+            .map_err(|e| AccessError::DomainProofUnavailable(e.to_string()))?;
+        if !domains::proves(&records, &claimed.token) {
+            return Err(AccessError::DomainNotProved {
+                domain,
+                record: name,
+                expected: record_value(&claimed.token),
+            });
+        }
+        sqlx::query!(
             "UPDATE tenant_domain SET verified_at = now()
               WHERE tenant = $1 AND domain = $2 AND verified_at IS NULL",
             tenant_id.as_uuid(),
             domain,
         )
         .execute(&self.pool)
-        .await?
-        .rows_affected();
-
-        if updated > 0 {
-            self.forget(crate::shared::Invalidate::Origins(tenant_id))
-                .await;
-            self.record(
-                actor,
-                "tenant.domain_verified",
-                "tenant",
-                &tenant_id.to_string(),
-                serde_json::json!({ "domain": domain }),
-            )
-            .await?;
-        }
-        Ok(updated > 0)
+        .await?;
+        self.forget(crate::shared::Invalidate::Origins(tenant_id))
+            .await;
+        self.record(
+            actor,
+            "tenant.domain_verified",
+            "tenant",
+            &tenant_id.to_string(),
+            serde_json::json!({ "domain": domain, "record": name }),
+        )
+        .await
     }
 
-    /// Licenses one origin under a domain this tenant has claimed.
+    /// **Licenses an origin under a proved domain.**
     ///
-    /// Refused if the domain is not this tenant's: the foreign key says so, and
-    /// the error it raises is the honest one. It is deliberately allowed before
-    /// the domain is verified — the row exists and licenses nothing until the
-    /// proof lands, which is one fewer step to forget.
+    /// The origin has to be `https://<host>[:port]` and nothing else, the host
+    /// has to be the domain or under it, and the domain has to be this tenant's
+    /// and proved. The first version lowercased the string and stored it; once
+    /// CORS serves authenticated routes an entry here is the whole tenant, so
+    /// every one of those is checked.
     pub async fn allow_origin(
         &self,
         tenant_id: TenantId,
@@ -671,6 +745,26 @@ impl ControlPlane {
     ) -> Result<(), AccessError> {
         let domain = domain.trim().to_lowercase();
         let origin = origin.trim().to_lowercase();
+        let host = domains::origin_host(&origin)
+            .ok_or_else(|| AccessError::NotAnOrigin(origin.clone()))?;
+        if !domains::is_under(&host, &domain) {
+            return Err(AccessError::OriginOutsideDomain { origin, domain });
+        }
+        let claimed = sqlx::query_scalar!(
+            "SELECT verified_at FROM tenant_domain WHERE tenant = $1 AND domain = $2",
+            tenant_id.as_uuid(),
+            domain,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AccessError::DomainNotClaimed(domain.clone()))?;
+        if claimed.is_none() {
+            return Err(AccessError::DomainNotProved {
+                domain: domain.clone(),
+                record: record_name(&domain),
+                expected: format!("{}<token>", domains::RECORD_PREFIX),
+            });
+        }
         sqlx::query!(
             "INSERT INTO tenant_origin (tenant, origin, domain)
              VALUES ($1, $2, $3)
@@ -681,7 +775,6 @@ impl ControlPlane {
         )
         .execute(&self.pool)
         .await?;
-
         self.forget(crate::shared::Invalidate::Origins(tenant_id))
             .await;
         self.record(
@@ -734,8 +827,18 @@ impl ControlPlane {
     /// from by the lease expiring — there is nothing to detect and nothing to
     /// rebalance.
     ///
-    /// A tenant this worker already holds is re-claimable, so renewing and
-    /// claiming are the same call.
+    /// # A claimed tenant is not due again until its lease lapses
+    ///
+    /// `next_visit_at` is pushed to the end of the lease **here**, not at the end
+    /// of the visit. The first version left it where it was and let a worker
+    /// re-claim tenants it already held, on the argument that renewing and
+    /// claiming could be one call. What that actually did was hand the worker's
+    /// own in-flight tenants straight back to it on the next loop — `next_visit_at`
+    /// was still in the past and the lease was its own — so one due tenant filled
+    /// every concurrency slot with visits of itself, and two of those visits
+    /// could both `fetch` a saved-card charge, both see nothing, and both charge.
+    /// Renewing is [`Self::renew_lease`] now, an explicit call from inside the
+    /// visit, and a claim is a claim.
     pub async fn claim_tenants(
         &self,
         owner: &str,
@@ -748,15 +851,14 @@ impl ControlPlane {
             r#"
             UPDATE tenant
                SET worker_lease_owner = $1,
-                   worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond')
+                   worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond'),
+                   next_visit_at      = now() + ($3::BIGINT * INTERVAL '1 millisecond')
              WHERE id IN (
                  SELECT id
                    FROM tenant
                   WHERE status = 'active'
                     AND next_visit_at <= now()
-                    AND (worker_lease_until IS NULL
-                         OR worker_lease_until <= now()
-                         OR worker_lease_owner = $1)
+                    AND (worker_lease_until IS NULL OR worker_lease_until <= now())
                   ORDER BY next_visit_at
                   LIMIT $2
                     FOR UPDATE SKIP LOCKED
@@ -801,6 +903,38 @@ impl ControlPlane {
     /// and the streak is what the next delay is computed from. Written in the
     /// same statement as `next_visit_at`, because a count that disagreed with
     /// the schedule it produced would be worse than no count at all.
+    /// **Keeps hold of a tenant this worker is still working on.**
+    ///
+    /// Called between jobs inside a visit. Extends both the lease and
+    /// `next_visit_at` by one lease length, and only if this owner still holds
+    /// the tenant: `false` means the lease lapsed and somebody else may have it,
+    /// and the right answer to that is to stop rather than to keep going beside
+    /// them. A visit that outlives its lease without renewing is exactly the
+    /// concurrent-visit race `claim_tenants` describes, from the other side.
+    pub async fn renew_lease(
+        &self,
+        tenant_id: TenantId,
+        owner: &str,
+        lease: Duration,
+    ) -> Result<bool, AccessError> {
+        let lease_millis = i64::try_from(lease.as_millis()).unwrap_or(i64::MAX);
+        let renewed = sqlx::query!(
+            "UPDATE tenant
+                SET worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond'),
+                    next_visit_at      = now() + ($3::BIGINT * INTERVAL '1 millisecond')
+              WHERE id = $1
+                AND worker_lease_owner = $2
+                AND worker_lease_until > now()",
+            tenant_id.as_uuid(),
+            owner,
+            lease_millis,
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(renewed == 1)
+    }
+
     pub async fn schedule_next_visit(
         &self,
         tenant_id: TenantId,
@@ -845,16 +979,20 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Drops every lease this worker holds, without changing when the tenants
-    /// are next due.
+    /// Drops every lease this worker holds and makes those tenants due now.
     ///
     /// Called on the way out. Nothing depends on it — the leases would lapse
     /// anyway — but releasing them means a rolling deploy hands work over in
-    /// milliseconds instead of one lease interval.
+    /// milliseconds instead of one lease interval. A claim pushes
+    /// `next_visit_at` to the end of the lease, so a release has to pull it back
+    /// or the handover would wait out the lease after all; a visit cut short by
+    /// shutdown is due immediately, which is what `Visit::reschedule` says too.
     pub async fn release_leases(&self, owner: &str) -> Result<u64, AccessError> {
         let released = sqlx::query!(
             "UPDATE tenant
-                SET worker_lease_owner = NULL, worker_lease_until = NULL
+                SET worker_lease_owner = NULL,
+                    worker_lease_until = NULL,
+                    next_visit_at      = least(next_visit_at, now())
               WHERE worker_lease_owner = $1",
             owner,
         )
@@ -1348,6 +1486,58 @@ impl ControlPlane {
         .transpose()
     }
 
+    /// **The tenant a custom host names**, if that host is under a domain a
+    /// tenant has proved. `api.salon.example` reaches the tenant that proved
+    /// `salon.example`; the longest proved domain wins when one is under
+    /// another. `None` for a host nobody has proved — including every host that
+    /// merely resembles one. Cached by host and cleared on any domain change.
+    pub async fn tenant_by_host(&self, host: &str) -> Result<Option<Tenant>, AccessError> {
+        let host = host
+            .split(':')
+            .next()
+            .unwrap_or(host)
+            .trim()
+            .trim_end_matches('.')
+            .to_lowercase();
+        if host.is_empty() {
+            return Ok(None);
+        }
+        if let Some(hit) = self.hosts.get(&host) {
+            self.hit();
+            return Ok(hit);
+        }
+        self.miss();
+        let row = sqlx::query!(
+            r#"SELECT t.id as "id: TenantId", t.slug, t.display_name, t.status, t.cluster,
+                      t.database_name, t.demo_expires_at, t.created_at
+                 FROM tenant_domain d
+                 JOIN tenant t ON t.id = d.tenant
+                WHERE d.verified_at IS NOT NULL
+                  AND ($1 = d.domain OR $1 LIKE '%.' || d.domain)
+                ORDER BY length(d.domain) DESC
+                LIMIT 1"#,
+            host,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let tenant = row
+            .map(|row| {
+                tenant_from_row(
+                    row.id,
+                    row.slug,
+                    row.display_name,
+                    &row.status,
+                    row.cluster,
+                    row.database_name,
+                    row.demo_expires_at,
+                    row.created_at,
+                )
+            })
+            .transpose()?;
+        self.hosts.put(host, tenant.clone());
+        Ok(tenant)
+    }
+
     pub async fn tenant_by_slug(&self, slug: &str) -> Result<Option<Tenant>, AccessError> {
         let row = sqlx::query!(
             r#"SELECT id as "id: TenantId", slug, display_name, status, cluster,
@@ -1798,6 +1988,24 @@ impl Localize for AccessError {
                 TenantStatus::Provisioning => Message::new(messages::TENANT_PROVISIONING),
                 _ => Message::new(messages::TENANT_UNAVAILABLE),
             },
+            Self::DomainNotClaimed(domain) => Message::new(messages::DOMAIN_NOT_CLAIMED)
+                .with("domain", MessageArg::text(domain.clone())),
+            Self::DomainNotProved {
+                domain,
+                record,
+                expected,
+            } => Message::new(messages::DOMAIN_NOT_PROVED)
+                .with("domain", MessageArg::text(domain.clone()))
+                .with("record", MessageArg::text(record.clone()))
+                .with("expected", MessageArg::text(expected.clone())),
+            Self::DomainProofUnavailable(_) => Message::new(messages::DOMAIN_PROOF_UNAVAILABLE),
+            Self::NotAnOrigin(origin) => Message::new(messages::NOT_AN_ORIGIN)
+                .with("origin", MessageArg::text(origin.clone())),
+            Self::OriginOutsideDomain { origin, domain } => {
+                Message::new(messages::ORIGIN_OUTSIDE_DOMAIN)
+                    .with("origin", MessageArg::text(origin.clone()))
+                    .with("domain", MessageArg::text(domain.clone()))
+            }
             Self::Pool(e) => e.message(),
             // Deliberately says nothing about clusters: a signup form has no
             // business reporting our capacity. The count reaches operators

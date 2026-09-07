@@ -299,6 +299,26 @@ fn check(new: &New) -> Result<(), LinkError> {
     Ok(())
 }
 
+/// Deletes links that can no longer be followed and stopped being followable
+/// before `before`: expired ones, and single-use ones that were used.
+///
+/// A link with no expiry that is not single-use is a permanent address and is
+/// kept. `before` is a grace period rather than "now" so a link somebody tapped
+/// a moment after it died still answers `410`-shaped rather than `404`-shaped
+/// for a while — and so a table nobody deletes from does not grow for the life
+/// of the tenant, which is what the first version did.
+pub async fn sweep(conn: &mut PgConnection, before: Timestamp) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query!(
+        "DELETE FROM short_link
+          WHERE (expires_at IS NOT NULL AND expires_at < $1)
+             OR (single_use AND visits > 0 AND last_visit_at < $1)",
+        before,
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

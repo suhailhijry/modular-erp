@@ -11,8 +11,15 @@ pub const INTERNAL: MessageCode = MessageCode::new("eventlog.internal_error");
 /// different things were given one name, and the second is refused rather than
 /// silently dropped.
 pub const ALREADY_EXISTS: MessageCode = MessageCode::new("eventlog.already_exists");
+/// A conditional settings write found the setting changed under it.
+pub const CONFIGURATION_CONFLICT: MessageCode = MessageCode::new("eventlog.configuration_conflict");
 
-pub static CODES: &[MessageCode] = &[CONCURRENT_MODIFICATION, INTERNAL, ALREADY_EXISTS];
+pub static CODES: &[MessageCode] = &[
+    CONCURRENT_MODIFICATION,
+    INTERNAL,
+    ALREADY_EXISTS,
+    CONFIGURATION_CONFLICT,
+];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
     // Retryable, and worth telling the user so: someone else changed the same
@@ -29,6 +36,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Locale::Arabic,
         Template::Simple(
             "قام شخص آخر بتعديل هذا أثناء عملك عليه. يُرجى المراجعة والمحاولة مرة أخرى.",
+        ),
+    ),
+    (
+        CONFIGURATION_CONFLICT,
+        Locale::English,
+        Template::Simple(
+            "Somebody else changed this setting since you loaded it. Reload to see their change, then make yours.",
+        ),
+    ),
+    (
+        CONFIGURATION_CONFLICT,
+        Locale::Arabic,
+        Template::Simple(
+            "غيّر شخص آخر هذا الإعداد منذ أن حمّلته. أعد التحميل لترى تغييره، ثم أجرِ تغييرك.",
         ),
     ),
     (

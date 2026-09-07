@@ -346,6 +346,7 @@ async fn metadata_round_trips() {
         on_behalf_of: None,
         correlation_id: Some("req-42".into()),
         config_version: Some(7),
+        calendar: Some(erp_types::Calendar::UTC),
         extra: serde_json::Map::new(),
     };
 
@@ -507,4 +508,53 @@ async fn the_naive_implementation_really_does_lose_events() {
         .await
         .expect("reads");
     assert_eq!(total, 2);
+}
+
+/// **Every event carries the clock it was written under.** Left empty by the
+/// caller, the calendar is the tenant's setting at the moment of the append;
+/// changing the setting afterwards changes new events and not old ones, which
+/// is what lets a projection turn an old event's instants into the days they
+/// were on when it happened.
+#[tokio::test]
+async fn an_event_is_stamped_with_the_tenants_calendar_at_the_moment_it_is_written() {
+    let db = tenant_db().await;
+    let mut conn = db.pool().acquire().await.expect("connection");
+
+    append(
+        &mut conn,
+        &stream("1000"),
+        Sequence::ZERO,
+        &[event("a")],
+        &Metadata::default(),
+    )
+    .await
+    .expect("appends");
+
+    let utc = erp_types::Calendar::UTC;
+    erp_eventlog::configuration::set(&mut conn, erp_types::Calendar::KEY, &utc, None, None)
+        .await
+        .expect("sets the clock");
+    append(
+        &mut conn,
+        &stream("1000"),
+        Sequence::new(1).expect("valid"),
+        &[event("b")],
+        &Metadata::default(),
+    )
+    .await
+    .expect("appends");
+
+    let events = read_stream(&mut conn, &stream("1000"))
+        .await
+        .expect("reads");
+    assert_eq!(
+        events[0].metadata.calendar,
+        Some(erp_types::Calendar::RIYADH),
+        "written under the default"
+    );
+    assert_eq!(
+        events[1].metadata.calendar,
+        Some(utc),
+        "written after the change, under the new clock"
+    );
 }

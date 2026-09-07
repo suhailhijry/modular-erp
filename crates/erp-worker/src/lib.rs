@@ -29,11 +29,15 @@ mod health;
 mod job;
 mod jobs;
 pub mod mail;
+mod retention;
 mod worker;
 
 pub use health::{Finding, HealthJob, Invariant};
 pub use job::{Activity, BoxError, Job, PlatformJob};
 pub use jobs::{OutboxJob, PlatformOutboxJob, ProjectionJob};
+pub use retention::{
+    DELIVERED_EFFECTS, OCCUPANCY_CLAIMS, Retention, SHORT_LINKS, SweepSessions, WEBHOOK_EVENTS,
+};
 pub use worker::{Shutdown, Worker, WorkerConfig};
 
 use tokio_util::sync::CancellationToken;

@@ -51,7 +51,10 @@
 use erp_types::Money;
 use serde::Deserialize;
 
-use crate::{CallbackError, Charge, Charged, Gateway, GatewayError, Source, Status, secrets_match};
+use crate::{
+    Callback, CallbackError, Charge, Charged, Gateway, GatewayError, Source, Status, clipped,
+    secrets_match,
+};
 
 /// Live and test are the same host; the key prefix decides which.
 const LIVE: &str = "https://api.moyasar.com";
@@ -127,7 +130,13 @@ impl Moyasar {
             .basic_auth(&self.secret, Some(""))
     }
 
-    async fn read(&self, response: reqwest::Response) -> Result<Charged, GatewayError> {
+    /// Reads a payment back. `about` is the payment the request named, so a
+    /// `404` can be the absence it is — see [`crate::refusal`].
+    async fn read(
+        &self,
+        response: reqwest::Response,
+        about: Option<&str>,
+    ) -> Result<Charged, GatewayError> {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
@@ -136,7 +145,7 @@ impl Moyasar {
                 .map_err(|e| GatewayError::Unreadable(format!("{e}: {}", clipped(&body))))?;
             return payment.into_charged();
         }
-        Err(refusal(status, &body))
+        Err(refusal(status, &body, about))
     }
 
     /// An amount only when there is one — Moyasar reads a missing `amount` as
@@ -155,7 +164,7 @@ impl Moyasar {
             .send()
             .await
             .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
-        self.read(response).await
+        self.read(response, Some(id)).await
     }
 }
 
@@ -207,7 +216,7 @@ impl Gateway for Moyasar {
             .await
             .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
 
-        self.read(response).await
+        self.read(response, None).await
     }
 
     async fn fetch(&self, id: &str) -> Result<Charged, GatewayError> {
@@ -218,18 +227,28 @@ impl Gateway for Moyasar {
             .send()
             .await
             .map_err(|e| GatewayError::Unreachable(e.to_string()))?;
-
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(GatewayError::NoSuchPayment(id.to_owned()));
-        }
-        self.read(response).await
+        self.read(response, Some(id)).await
     }
 
-    async fn capture(&self, id: &str, amount: Option<Money>) -> Result<Charged, GatewayError> {
+    /// **No idempotency key on a capture or a refund.** Moyasar's `given_id`
+    /// exists on creating a payment and nowhere else, so `_reference` has no
+    /// field to go in; what stands in for it is the fetch-first the caller does
+    /// before either call.
+    async fn capture(
+        &self,
+        id: &str,
+        _reference: &str,
+        amount: Option<Money>,
+    ) -> Result<Charged, GatewayError> {
         self.act(id, "capture", amount).await
     }
 
-    async fn refund(&self, id: &str, amount: Option<Money>) -> Result<Charged, GatewayError> {
+    async fn refund(
+        &self,
+        id: &str,
+        _reference: &str,
+        amount: Option<Money>,
+    ) -> Result<Charged, GatewayError> {
         self.act(id, "refund", amount).await
     }
 
@@ -245,7 +264,7 @@ impl Gateway for Moyasar {
 /// header. What arrives is a `secret_token` field *inside the JSON*, holding
 /// the shared secret configured when the webhook was registered. So the token
 /// is compared in constant time, and then **only the payment id** is returned.
-pub(crate) fn authenticate(secret: &[u8], body: &[u8]) -> Result<String, CallbackError> {
+pub(crate) fn authenticate(secret: &[u8], body: &[u8]) -> Result<Callback, CallbackError> {
     // **Parsed leniently, on purpose.** Anything that is not a JSON object
     // carrying the right token is `NotAuthentic` and not `Unreadable`: a caller
     // who can tell "your JSON is malformed" from "your secret is wrong" has an
@@ -263,14 +282,28 @@ pub(crate) fn authenticate(secret: &[u8], body: &[u8]) -> Result<String, Callbac
         return Err(CallbackError::NotAuthentic);
     }
 
-    // Authenticated. **And now only the id** — everything this body says about
-    // money is discarded, and `Gateway::fetch` is asked instead.
-    event
-        .get("data")
-        .and_then(|data| data.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| CallbackError::Unreadable("no payment id in the event".to_owned()))
+    // Authenticated. **And now only the ids** — everything this body says
+    // about money is discarded, and `Gateway::fetch` is asked instead.
+    let text = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let payment = text(event.get("data").and_then(|data| data.get("id")))
+        .ok_or_else(|| CallbackError::Unreadable("no payment id in the event".to_owned()))?;
+    let kind = text(event.get("type"));
+    // Moyasar numbers its events; an older shape without one is keyed on the
+    // payment and what was said about it.
+    let event = text(event.get("id")).unwrap_or_else(|| match &kind {
+        Some(kind) => format!("{payment}.{kind}"),
+        None => payment.clone(),
+    });
+    Ok(Callback {
+        payment,
+        event,
+        kind,
+    })
 }
 
 /// Moyasar's payment object, as much of it as this system reads.
@@ -335,8 +368,9 @@ impl Payment {
     }
 }
 
-/// What a non-2xx means for this payment.
-fn refusal(status: reqwest::StatusCode, body: &str) -> GatewayError {
+/// Moyasar's refusal, in its own words where it gave any. What the status
+/// means is decided once for every provider — see [`crate::refusal`].
+fn refusal(status: reqwest::StatusCode, body: &str, about: Option<&str>) -> GatewayError {
     #[derive(Deserialize)]
     struct Failure {
         #[serde(default)]
@@ -347,17 +381,7 @@ fn refusal(status: reqwest::StatusCode, body: &str) -> GatewayError {
         .and_then(|f| f.message)
         .unwrap_or_else(|| clipped(body));
 
-    match status {
-        // The account, not the card. The one that should page somebody.
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-            GatewayError::Unauthenticated
-        }
-        // Moyasar's own documented rate limit answer, and a real outage. Both
-        // are worth another go.
-        reqwest::StatusCode::TOO_MANY_REQUESTS => GatewayError::Unreachable(said),
-        _ if status.is_server_error() => GatewayError::Unreachable(format!("{status}: {said}")),
-        _ => GatewayError::Refused(said),
-    }
+    crate::refusal(status, said, about)
 }
 
 /// Whether a string is a UUID, in the only sense Moyasar cares about: the
@@ -374,10 +398,6 @@ fn is_uuid(value: &str) -> bool {
         }
     }
     parts.next().is_none()
-}
-
-fn clipped(body: &str) -> String {
-    body.chars().take(500).collect()
 }
 
 #[cfg(test)]
@@ -399,6 +419,7 @@ mod tests {
                 success: "https://bassat.erp.com/paid".to_owned(),
                 cancel: "https://bassat.erp.com/cancelled".to_owned(),
                 failure: "https://bassat.erp.com/declined".to_owned(),
+                notification: None,
             },
             source: Source::Token {
                 token: "token_qbmmXzo97AESrZLS6KpWvof6uK2hAKcQGfEcKg".to_owned(),
@@ -549,22 +570,23 @@ mod tests {
     #[test]
     fn the_accounts_problem_and_the_cards_problem_are_different_answers() {
         assert_eq!(
-            refusal(reqwest::StatusCode::UNAUTHORIZED, "{}"),
+            refusal(reqwest::StatusCode::UNAUTHORIZED, "{}", None),
             GatewayError::Unauthenticated
         );
         assert!(matches!(
             refusal(
                 reqwest::StatusCode::BAD_REQUEST,
-                r#"{"message":"Card declined"}"#
+                r#"{"message":"Card declined"}"#,
+                None
             ),
             GatewayError::Refused(_)
         ));
         assert!(matches!(
-            refusal(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down"),
+            refusal(reqwest::StatusCode::TOO_MANY_REQUESTS, "slow down", None),
             GatewayError::Unreachable(_)
         ));
         assert!(matches!(
-            refusal(reqwest::StatusCode::BAD_GATEWAY, "oops"),
+            refusal(reqwest::StatusCode::BAD_GATEWAY, "oops", None),
             GatewayError::Unreachable(_)
         ));
     }
@@ -577,10 +599,12 @@ mod tests {
                  "live":true,"data":{}}}"#,
             paid("paid")
         );
-        assert_eq!(
-            authenticate(b"shhh", body.as_bytes()).expect("authentic"),
-            "pay_1"
-        );
+        let read = authenticate(b"shhh", body.as_bytes()).expect("authentic");
+        assert_eq!(read.payment, "pay_1");
+        // Moyasar numbers its events, and that number is what makes a resend
+        // a resend.
+        assert_eq!(read.event, "evt_1");
+        assert_eq!(read.kind.as_deref(), Some("payment_paid"));
     }
 
     /// Anybody can reach the URL. The secret is the whole credential.
@@ -636,10 +660,13 @@ mod tests {
         let moyasar = Moyasar::new("sk_test_x").expect("built").at(&server.url());
 
         moyasar
-            .capture("pay_1", Some(sar(3_000)))
+            .capture("pay_1", "pay_1.capture-1", Some(sar(3_000)))
             .await
             .expect("captures");
-        moyasar.capture("pay_1", None).await.expect("captures");
+        moyasar
+            .capture("pay_1", "pay_1.capture-2", None)
+            .await
+            .expect("captures");
 
         let sent = server.seen().await;
         let (partial, full) = sent.split_once("\n===\n").expect("two requests");

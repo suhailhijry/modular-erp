@@ -17,6 +17,9 @@ pub enum FileError {
     NoSuchFile(String),
     #[error("{0} has already been taken off")]
     AlreadyRemoved(String),
+    /// The record this would go on is not in the log.
+    #[error("there is no {0} {1} to attach this to")]
+    NoSuchOwner(String, String),
     #[error(transparent)]
     Storage(#[from] erp_storage::StorageError),
 }
@@ -31,6 +34,9 @@ impl Localize for FileError {
             Self::AlreadyRemoved(id) => {
                 Message::new(crate::messages::ALREADY_REMOVED).with("id", MessageArg::text(id))
             }
+            Self::NoSuchOwner(kind, id) => Message::new(crate::messages::NO_SUCH_OWNER)
+                .with("kind", MessageArg::text(kind))
+                .with("id", MessageArg::text(id)),
             Self::Storage(e) => e.message(),
         }
     }
@@ -68,6 +74,26 @@ pub async fn attach(
         return Err(erp_tenant::CommandError::Execute(
             erp_eventlog::ExecuteError::Rejected(FileError::NoName),
         ));
+    }
+    // **The record it goes on has to exist.** Filed under an id that parses but
+    // names nothing, a document would appear on no page and be erased by no
+    // request. Checked against the log, the way every other command that names
+    // another module's record checks — and here rather than only in the HTTP
+    // handler, because this is the function every caller goes through.
+    {
+        let mut conn = db.acquire().await?;
+        if !owner_exists(&mut conn, owner).await.map_err(|e| {
+            erp_tenant::CommandError::Execute(erp_eventlog::ExecuteError::Load(
+                erp_eventlog::LoadError::Read(e),
+            ))
+        })? {
+            return Err(erp_tenant::CommandError::Execute(
+                erp_eventlog::ExecuteError::Rejected(FileError::NoSuchOwner(
+                    owner.kind.as_str().to_owned(),
+                    owner.id.to_string(),
+                )),
+            ));
+        }
     }
     let owner = owner.clone();
     let stored = stored.clone();
@@ -120,4 +146,20 @@ pub async fn detach(
         }))
     })
     .await
+}
+
+/// Whether the record an attachment names is in the log.
+///
+/// A stream with at least one event is a record that was created; `files` does
+/// not know or care what state it is in — a document can go on a cancelled
+/// invoice, and often should. The tenant itself always exists.
+pub async fn owner_exists(
+    conn: &mut sqlx::PgConnection,
+    owner: &Owner,
+) -> Result<bool, erp_eventlog::ReadError> {
+    let Some(domain) = owner.kind.domain() else {
+        return Ok(true);
+    };
+    let stream = erp_types::StreamId::new(crate::domain(domain), owner.id.clone());
+    Ok(!erp_eventlog::read_stream(conn, &stream).await?.is_empty())
 }

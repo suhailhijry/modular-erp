@@ -136,8 +136,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     worker = worker
         .with_job(Arc::new(BookingReminders))
         .with_job(Arc::new(ExpireUnpaidHolds))
+        .with_job(Arc::new(BillCompletedBookings))
         .with_job(Arc::new(RetirePushTokens))
-        .with_platform_job(Arc::new(SweepOneTimeCodes));
+        .with_platform_job(Arc::new(SweepOneTimeCodes))
+        // **What this system forgets.** See `erp_worker::Retention`.
+        .with_job(Arc::new(erp_worker::Retention))
+        .with_platform_job(Arc::new(erp_worker::SweepSessions));
 
     // **The ZATCA sweeps, and only with a sealing key.** They read a tenant's
     // private key to sign with, so without one there is nothing to read and the
@@ -718,6 +722,42 @@ const HOLD_BATCH: i64 = 100;
 /// That ordering is deliberate and it only fails safe. `Secured` is written
 /// before this looks, so the worst case is a booking released a tick after its
 /// deadline rather than one released after it was paid for.
+/// **Bills completed bookings**, for a business that asked for that.
+///
+/// The composition is `erp_api::billing::bill_completions` — `booking` says
+/// what was done, `payments` which prepayment invoice the deposit raised,
+/// `sales` raises the final invoice with it deducted — and it runs here for
+/// the same reason the deposit join does: neither module may name the other,
+/// and the worker depends on all of them. Off until `PUT /v1/booking/billing`
+/// turns it on; the desk can always bill on demand.
+struct BillCompletedBookings;
+
+#[async_trait::async_trait]
+impl erp_worker::Job for BillCompletedBookings {
+    fn name(&self) -> &'static str {
+        "booking.bill_completed"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(booking::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        // A tenant with booking and no sales cannot raise an invoice, and
+        // that is not a failure of this job.
+        if !db.has_module(&sales::module_id()) {
+            return Ok(Activity::Idle);
+        }
+        let billed =
+            erp_api::billing::bill_completions(db, chrono::Utc::now(), &by_the_platform()).await?;
+        Ok(if billed > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
+
 struct ExpireUnpaidHolds;
 
 #[async_trait::async_trait]
@@ -744,22 +784,20 @@ impl erp_worker::Job for ExpireUnpaidHolds {
         for hold in &lapsed {
             // Each on its own, because one booking refusing to move must not
             // roll back the ten before it that were fine.
-            match booking::move_to(
-                db,
-                &hold.id,
-                booking::Stage::Cancelled,
-                "the deposit was not paid in time",
-                now,
-                &by_the_platform(),
-            )
-            .await
-            {
-                Ok(_) => released += 1,
+            //
+            // **`lapse`, not `move_to(Cancelled)`.** The list above came from
+            // the projection, and a deposit that settled since it was written
+            // is exactly the case that must not be cancelled. `lapse` re-asks
+            // the log and refuses a paid booking; this job never overrides that
+            // answer, it only reports it.
+            match booking::lapse(db, &hold.id, now, &by_the_platform()).await {
+                Ok(committed) if committed.at.is_some() => released += 1,
+                Ok(_) => {}
                 Err(e) => tracing::warn!(
                     tenant = %db.tenant(),
                     reservation = %hold.id,
                     error = %e,
-                    "an unpaid hold could not be released"
+                    "an unpaid hold was not released"
                 ),
             }
         }
@@ -1066,6 +1104,70 @@ impl erp_worker::Job for SubmitToZatca {
     }
 }
 
+/// **Finishes an onboarding the route started.** A tenant holding a compliance
+/// certificate is due six sample documents and a production certificate, and
+/// nothing about either needs the taxpayer. `finish` records what ZATCA refused
+/// and leaves what it did not answer for the next pass.
+struct FinishOnboarding {
+    sealing: erp_eventlog::SealingKey,
+}
+
+#[async_trait::async_trait]
+impl erp_worker::Job for FinishOnboarding {
+    fn name(&self) -> &'static str {
+        "tax_sa.onboard"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(tax_sa::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        // The read model says whether anything is due (L7), and reading it is
+        // all an idle tenant costs: never onboarded, live, or waiting on a
+        // refusal this build cannot change.
+        let mut conn = db.read().await?;
+        let onboarded = tax_sa::onboarding(&mut conn).await?;
+        drop(conn);
+        let Some(onboarded) = onboarded else {
+            return Ok(Activity::Idle);
+        };
+        if tax_sa::zatca::finish::due(&onboarded).is_none() {
+            return Ok(Activity::Idle);
+        }
+        let environment: tax_sa::zatca::csr::Environment = onboarded
+            .environment
+            .parse()
+            .map_err(erp_worker::BoxError::from)?;
+
+        let zatca = tax_sa::zatca::http::Fatoora::new(environment)?;
+        let finished = tax_sa::zatca::finish::finish(
+            db,
+            &self.sealing,
+            &zatca,
+            chrono::Utc::now(),
+            &by_the_platform(),
+        )
+        .await?;
+
+        if let Some(step) = finished.refused {
+            tracing::warn!(
+                tenant = %db.tenant(),
+                step = step.as_str(),
+                "ZATCA refused an onboarding step; waiting for a new build or a new OTP"
+            );
+        }
+        if finished.production.is_some() {
+            tracing::info!(tenant = %db.tenant(), "ZATCA onboarding finished; the tenant is live");
+        }
+        Ok(if finished.did_something() {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
+
 /// **The sweeps that talk to ZATCA**, in one list.
 ///
 /// A function rather than two `with_job` calls in `main` for the same reason
@@ -1078,6 +1180,9 @@ fn zatca_jobs(sealing: &erp_eventlog::SealingKey) -> Vec<Arc<dyn erp_worker::Job
             sealing: sealing.clone(),
         }),
         Arc::new(SubmitToZatca {
+            sealing: sealing.clone(),
+        }),
+        Arc::new(FinishOnboarding {
             sealing: sealing.clone(),
         }),
     ]
@@ -1135,103 +1240,34 @@ impl erp_worker::Job for SettleGatewayPayments {
 
         let mut resolved = 0;
         for gateway in &gateways {
-            // **Charge first.** What this starts, the sweep below settles on
-            // the same tick.
-            let attempted = payments::charge_requested(
-                db,
-                gateway.as_ref(),
-                &self.sealing,
-                chrono::Utc::now(),
-                PAYMENT_BATCH,
-                &by_the_platform(),
-            )
-            .await?;
-            resolved += attempted.started + attempted.refused;
+            resolved += sweep_gateway(db, gateway.as_ref(), &self.sealing).await?;
+        }
 
-            if let Some(stopped) = &attempted.stopped {
-                tracing::warn!(
-                    tenant = %db.tenant(),
-                    provider = gateway.provider(),
-                    error = %stopped,
-                    started = attempted.started,
-                    "the saved-card charge pass stopped early; the rest stay requested"
-                );
-            }
-
-            // **And the ones the customer pays themselves.** A deposit's
-            // payment is created in their browser, against the id this system
-            // already chose; nothing here charges it, and the only question is
-            // whether they have.
-            let awaited = payments::collect_awaited(
-                db,
-                gateway.as_ref(),
-                chrono::Utc::now(),
-                PAYMENT_BATCH,
-                &by_the_platform(),
-            )
-            .await?;
-            resolved += awaited.started;
-
-            let swept = payments::settle_pending(
-                db,
-                gateway.as_ref(),
-                chrono::Utc::now(),
-                PAYMENT_BATCH,
-                &by_the_platform(),
-            )
-            .await?;
-            resolved += swept.resolved;
-
-            // **Loudly.** A tenant whose payments are not resolving has
-            // customers who have been charged and invoices that say otherwise,
-            // and nothing else in the system will say so.
-            if let Some(stopped) = &swept.stopped {
-                tracing::warn!(
-                    tenant = %db.tenant(),
-                    provider = gateway.provider(),
-                    error = %stopped,
-                    resolved = swept.resolved,
-                    "the payment sweep stopped early; the rest stay pending"
-                );
-            }
-
-            // **The join, and it lives here because neither module may make
-            // it.** `payments` cannot name `booking` and `booking` cannot name
-            // `payments`: `requires` is a hard AND, so one direction forces a
-            // diary on every shop that takes a card and the other forces a
-            // gateway on every salon. The worker depends on both, so it is
-            // where "this deposit settled, so that slot is paid for" belongs.
-            //
-            // **Not in the settling transaction**, and it cannot be — they are
-            // different modules' aggregates and the money must commit whatever
-            // the diary says. So this is a repair rather than a step: it runs
-            // for anything settled on this pass, and `secure_in` is a no-op on
-            // a booking already told. A failure here leaves a paid deposit on a
-            // booking that still looks unpaid, which the next tick fixes and
-            // the hold-expiry job is told to leave alone.
-            for (reservation, payment) in &swept.secured {
-                let mut tx = db.begin().await?;
-                match booking::secure_in(
-                    &mut tx,
-                    reservation,
-                    payment,
-                    chrono::Utc::now(),
-                    &by_the_platform(),
-                )
-                .await
-                {
-                    Ok(_) => tx.commit().await?,
-                    Err(e) => {
-                        tx.rollback().await?;
-                        // Loudly: somebody has paid for a slot the diary does
-                        // not know is paid for, and nothing else says so.
-                        tracing::error!(
-                            tenant = %db.tenant(),
-                            %reservation,
-                            %payment,
-                            error = %e,
-                            "a settled deposit could not be recorded against its booking"
-                        );
+        // **And the repair, from what is durable.** The first version told
+        // the diary only about what *this pass* settled, so a `secure_in`
+        // that failed — pool overloaded, a contended stream — was never
+        // retried: the payment was no longer pending, no later pass saw it,
+        // and the hold-expiry job cancelled a booking somebody had paid for.
+        // This asks `payments` for every deposit that ever arrived and asks
+        // `booking` which of them it has not heard about, and tells it. Both
+        // are projection reads, so this lags a tick behind the fast path
+        // above — and `secure_in` is idempotent, so telling a booking twice
+        // is nothing.
+        if db.has_module(&booking::module_id()) {
+            let arrived = {
+                let mut conn = db.read().await?;
+                payments::settled_advances(&mut conn, REPAIR_BATCH).await?
+            };
+            if !arrived.is_empty() {
+                let ids: Vec<String> = arrived.iter().map(|(r, _)| r.to_string()).collect();
+                let untold = {
+                    let mut conn = db.read().await?;
+                    booking::unsecured_among(&mut conn, &ids).await?
+                };
+                for (reservation, payment) in &arrived {
+                    if untold.contains(reservation) {
+                        secure(db, reservation, payment).await?;
+                        resolved += 1;
                     }
                 }
             }
@@ -1243,6 +1279,178 @@ impl erp_worker::Job for SettleGatewayPayments {
             Activity::Idle
         })
     }
+}
+
+/// How many settled deposits the repair pass looks back over per tick.
+const REPAIR_BATCH: i64 = 200;
+/// One provider's passes, in the order they have to run: charge what was asked
+/// of a saved card, refund what was asked back, open the checkouts a lender
+/// hosts, find the deposits customers paid themselves, and settle everything
+/// pending — then tell the diary what settled. Answers how many payments
+/// reached an ending.
+async fn sweep_gateway(
+    db: &erp_control::TenantDb,
+    gateway: &dyn payments::Gateway,
+    sealing: &erp_eventlog::SealingKey,
+) -> Result<usize, erp_worker::BoxError> {
+    let mut resolved = 0;
+    // **Charge first.** What this starts, the sweep below settles on
+    // the same tick.
+    let attempted = payments::charge_requested(
+        db,
+        gateway,
+        sealing,
+        chrono::Utc::now(),
+        PAYMENT_BATCH,
+        &by_the_platform(),
+    )
+    .await?;
+    resolved += attempted.started + attempted.refused;
+
+    if let Some(stopped) = &attempted.stopped {
+        tracing::warn!(
+            tenant = %db.tenant(),
+            provider = gateway.provider(),
+            error = %stopped,
+            started = attempted.started,
+            "the saved-card charge pass stopped early; the rest stay requested"
+        );
+    }
+
+    // **Refunds somebody asked for.** The same shape as a charge: the
+    // request was recorded by the route, the outbound call is made
+    // here, and the books follow what the gateway confirmed.
+    let refunding = payments::refund_requested(
+        db,
+        gateway,
+        chrono::Utc::now(),
+        PAYMENT_BATCH,
+        &by_the_platform(),
+    )
+    .await?;
+    resolved += refunding.refunded + refunding.refused;
+    if let Some(stopped) = &refunding.stopped {
+        tracing::warn!(
+            tenant = %db.tenant(),
+            provider = gateway.provider(),
+            error = %stopped,
+            refunded = refunding.refunded,
+            "the refund pass stopped early; the rest stay awaited"
+        );
+    }
+
+    // **The checkouts a lender hosts.** A buy-now-pay-later provider
+    // has to be told about the order before there is anywhere to send
+    // the customer; that is an outbound call, so it is made here and
+    // the page it answers with is recorded for the public read to hand
+    // on.
+    let opened = payments::open_checkouts(
+        db,
+        gateway,
+        chrono::Utc::now(),
+        PAYMENT_BATCH,
+        &by_the_platform(),
+    )
+    .await?;
+    resolved += opened.started + opened.refused;
+    if let Some(stopped) = &opened.stopped {
+        tracing::warn!(
+            tenant = %db.tenant(),
+            provider = gateway.provider(),
+            error = %stopped,
+            opened = opened.started,
+            "the checkout pass stopped early; the rest stay requested"
+        );
+    }
+
+    // **And the ones the customer pays themselves.** A deposit's
+    // payment is created in their browser, against the id this system
+    // already chose; nothing here charges it, and the only question is
+    // whether they have.
+    let awaited = payments::collect_awaited(
+        db,
+        gateway,
+        chrono::Utc::now(),
+        PAYMENT_BATCH,
+        &by_the_platform(),
+    )
+    .await?;
+    resolved += awaited.started;
+
+    let swept = payments::settle_pending(
+        db,
+        gateway,
+        chrono::Utc::now(),
+        PAYMENT_BATCH,
+        &by_the_platform(),
+    )
+    .await?;
+    resolved += swept.resolved;
+
+    // **Loudly.** A tenant whose payments are not resolving has
+    // customers who have been charged and invoices that say otherwise,
+    // and nothing else in the system will say so.
+    if let Some(stopped) = &swept.stopped {
+        tracing::warn!(
+            tenant = %db.tenant(),
+            provider = gateway.provider(),
+            error = %stopped,
+            resolved = swept.resolved,
+            "the payment sweep stopped early; the rest stay pending"
+        );
+    }
+
+    // **The join, and it lives here because neither module may make
+    // it.** `payments` cannot name `booking` and `booking` cannot name
+    // `payments`: `requires` is a hard AND, so one direction forces a
+    // diary on every shop that takes a card and the other forces a
+    // gateway on every salon. The worker depends on both, so it is
+    // where "this deposit settled, so that slot is paid for" belongs.
+    //
+    // **Not in the settling transaction**, and it cannot be — they are
+    // different modules' aggregates and the money must commit whatever
+    // the diary says. What settled on this pass is told at once, so a
+    // paid slot is paid in the diary on the same tick.
+    for (reservation, payment) in &swept.secured {
+        secure(db, reservation, payment).await?;
+    }
+    Ok(resolved)
+}
+
+/// Tells the diary one deposit arrived. Its own transaction, its own failure.
+///
+/// A failure is logged and swallowed rather than returned: the repair pass
+/// will find this pair again on the next tick, and one booking refusing must
+/// not stop the rest being told. **Loudly**, because a customer has paid for a
+/// slot the diary does not yet know is paid for.
+async fn secure(
+    db: &erp_control::TenantDb,
+    reservation: &erp_types::AggregateId,
+    payment: &erp_types::AggregateId,
+) -> Result<(), erp_worker::BoxError> {
+    let mut tx = db.begin().await?;
+    match booking::secure_in(
+        &mut tx,
+        reservation,
+        payment,
+        chrono::Utc::now(),
+        &by_the_platform(),
+    )
+    .await
+    {
+        Ok(_) => tx.commit().await?,
+        Err(e) => {
+            tx.rollback().await?;
+            tracing::error!(
+                tenant = %db.tenant(),
+                %reservation,
+                %payment,
+                error = %e,
+                "a settled deposit could not be recorded against its booking; will retry"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Which ZATCA a tenant onboarded into.
@@ -1586,6 +1794,7 @@ mod tests {
 
         assert!(names.contains(&"tax_sa.sign"), "{names:?}");
         assert!(names.contains(&"tax_sa.submit"), "{names:?}");
+        assert!(names.contains(&"tax_sa.onboard"), "{names:?}");
         assert!(
             zatca_jobs(&sealing)
                 .iter()

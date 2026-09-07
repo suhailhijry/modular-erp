@@ -16,12 +16,14 @@ pub const UNKNOWN_CHANNEL: MessageCode = MessageCode::new("messaging.unknown_cha
 pub const UNKNOWN_TOPIC: MessageCode = MessageCode::new("messaging.unknown_topic");
 pub const UNKNOWN_AUDIENCE: MessageCode = MessageCode::new("messaging.unknown_audience");
 pub const UNKNOWN_PLATFORM: MessageCode = MessageCode::new("messaging.unknown_platform");
+pub const NO_SUCH_RECIPIENT: MessageCode = MessageCode::new("messaging.no_such_recipient");
 pub const NEGATIVE_BUDGET: MessageCode = MessageCode::new("messaging.negative_budget");
 pub const NOT_A_MONTH: MessageCode = MessageCode::new("messaging.not_a_month");
 pub const UNKNOWN_LANGUAGE: MessageCode = MessageCode::new("messaging.unknown_language");
 pub const DATABASE: MessageCode = MessageCode::new("messaging.database");
 
 pub const CODES: &[MessageCode] = &[
+    NO_SUCH_RECIPIENT,
     NOT_A_NAME,
     UNKNOWN_BINDING,
     WRONG_AUDIENCE,
@@ -43,6 +45,18 @@ pub const CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NO_SUCH_RECIPIENT,
+        Locale::English,
+        Template::Simple(
+            "{recipient} is not an employee or a customer, so no device can belong to them.",
+        ),
+    ),
+    (
+        NO_SUCH_RECIPIENT,
+        Locale::Arabic,
+        Template::Simple("{recipient} ليس موظفًا ولا عميلًا، فلا يمكن أن يملك جهازًا."),
+    ),
     (
         NOT_A_NAME,
         Locale::English,

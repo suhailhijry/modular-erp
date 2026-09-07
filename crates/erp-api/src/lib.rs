@@ -37,9 +37,12 @@
 //!
 //! `ETag`/`If-Match`. It needs a conflict real enough to shape it.
 
+pub mod billing;
+mod calendar;
 mod catalog;
 mod codes;
 mod deposits;
+mod effects;
 mod hooks;
 mod invitations;
 mod keys;

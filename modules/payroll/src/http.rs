@@ -24,6 +24,7 @@ use erp_web::AppState;
 use erp_web::Problem;
 use erp_web::{After, Allowed, Language, ManageAccounts, Paged, PostEntries, Read};
 use erp_web::{Consistency, nudge};
+use erp_web::{IfMatch, Versioned, config_problem};
 use erp_web::{Json, Query, bad_request, metadata, parse_id, require_module};
 
 use crate::{PayrollError, Period};
@@ -383,7 +384,7 @@ async fn approve_run(
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let run = parse_id(&id, locale)?;
 
-    let committed = crate::approve_run(&tenant.db, &run, &metadata(&tenant))
+    let committed = crate::approve_run(&tenant.db, &run, chrono::Utc::now(), &metadata(&tenant))
         .await
         .map_err(|e| problem_for(&e, locale))?;
 
@@ -401,7 +402,7 @@ async fn approve_run(
     tag = "payroll",
     params(("Host" = String, Header, description = "The tenant's subdomain."),),
     responses(
-        (status = OK, body = Accounts),
+        (status = OK, body = Accounts, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -411,18 +412,24 @@ async fn approve_run(
 async fn payroll_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<Accounts>, Problem> {
+) -> Result<Versioned<Accounts>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::PostingAccounts::KEY)
+        .await
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
     let accounts = crate::PostingAccounts::resolve(&mut conn)
         .await
-        .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+        .map_err(|e| config_problem(&e, locale, &CATALOG))?;
 
-    Ok(Json(Accounts {
-        expense: accounts.expense.to_string(),
-        payable: accounts.payable.to_string(),
-        withheld: accounts.withheld.to_string(),
-    }))
+    Ok(Versioned(
+        version,
+        Accounts {
+            expense: accounts.expense.to_string(),
+            payable: accounts.payable.to_string(),
+            withheld: accounts.withheld.to_string(),
+        },
+    ))
 }
 
 /// Choose them.
@@ -430,10 +437,11 @@ async fn payroll_accounts(
     put,
     path = "/v1/payroll/posting-accounts",
     tag = "payroll",
-    params(("Host" = String, Header, description = "The tenant's subdomain."),),
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally."), ("Host" = String, Header, description = "The tenant's subdomain."),),
     request_body = Accounts,
     responses(
         (status = NO_CONTENT, description = "Stored."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "An unusable account code", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -444,6 +452,7 @@ async fn payroll_accounts(
 async fn set_payroll_accounts(
     tenant: Allowed<ManageAccounts>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<Accounts>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -459,9 +468,10 @@ async fn set_payroll_accounts(
         crate::PostingAccounts::KEY,
         &accounts,
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
-    .map_err(|e| Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &CATALOG))?;
+    .map_err(|e| config_problem(&e, locale, &CATALOG))?;
 
     Ok(StatusCode::NO_CONTENT)
 }

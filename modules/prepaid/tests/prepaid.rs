@@ -229,6 +229,7 @@ impl Fixture {
                 }],
             },
             None,
+            None,
         )
         .await
         .expect("the scheme is set");
@@ -1538,4 +1539,27 @@ async fn a_rebuild_reproduces_what_is_held() {
 #[test]
 fn the_catalog_is_complete() {
     erp_i18n::testing::assert_complete(&prepaid::CATALOG);
+}
+
+/// **A package with nothing in it is refused.** The money would be deferred
+/// and could never be recognised — `draw` refuses `left < wanted` with
+/// `wanted >= 1` — so it sat there until somebody revoked the grant.
+#[tokio::test]
+async fn a_package_with_no_uses_is_refused() {
+    let fixture = Fixture::new().await;
+
+    let refused = grant(
+        &fixture.db,
+        &code("PKG-0"),
+        &package(0, 5_000),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("zero uses is a package nobody can open");
+    assert!(
+        matches!(rejection(&refused), Some(PrepaidError::NoUses)),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
 }

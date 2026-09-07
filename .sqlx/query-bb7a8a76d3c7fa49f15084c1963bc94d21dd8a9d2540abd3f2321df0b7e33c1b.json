@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE outbox\n                SET leased_until = now() + ($2::BIGINT * INTERVAL '1 millisecond')\n              WHERE id = $1 AND leased_by = $3\n                AND delivered_at IS NULL AND dead_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bb7a8a76d3c7fa49f15084c1963bc94d21dd8a9d2540abd3f2321df0b7e33c1b"
+}

@@ -1,0 +1,158 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT stage as \"stage!\", environment as \"environment!\", serial as \"serial!\",\n                  not_after as \"not_after!\", issued_at as \"issued_at!\",\n                  checks_serial, checks_submitted, checks_passed_at,\n                  refused_step, refused_detail, refused_version, refused_at\n             FROM proj_tax_sa.onboarding\n            WHERE id = 'self'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stage!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "stage"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "environment!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "environment"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "serial!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "serial"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "not_after!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "not_after"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "issued_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "issued_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "checks_serial",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "checks_serial"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "checks_submitted",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "checks_submitted"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "checks_passed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "checks_passed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "refused_step",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "refused_step"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "refused_detail",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "refused_detail"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "refused_version",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "refused_version"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "refused_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_tax_sa.onboarding",
+            "name": "refused_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "84062073fa6d3fe4092ab26df32a1e70638afb7ca7ff14368b15225ac1eea406"
+}

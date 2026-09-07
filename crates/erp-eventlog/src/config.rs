@@ -33,15 +33,34 @@ pub enum ConfigError {
     /// has a problem nobody will notice until the month end.
     #[error("configuration {key} is not usable: {reason}")]
     Invalid { key: String, reason: String },
+    /// **Somebody else wrote this key since the caller read it.** The caller
+    /// said "only if it is still version `expected`", and it is not.
+    ///
+    /// The first version had no way to say that: every settings screen was
+    /// last-write-wins when two people edited at once, and the loser was never
+    /// told.
+    #[error("configuration {key} is at version {found}, not {expected}")]
+    Conflict {
+        key: String,
+        expected: i64,
+        found: i64,
+    },
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
 
 impl erp_i18n::Localize for ConfigError {
     fn message(&self) -> erp_i18n::Message {
-        // Both are ours: a corrupt row, or a database that is unwell. Neither
-        // is something a user did.
-        erp_i18n::Message::new(crate::messages::INTERNAL)
+        match self {
+            Self::Conflict { .. } => {
+                erp_i18n::Message::new(crate::messages::CONFIGURATION_CONFLICT)
+            }
+            // Both are ours: a corrupt row, or a database that is unwell.
+            // Neither is something a user did.
+            Self::Invalid { .. } | Self::Database(_) => {
+                erp_i18n::Message::new(crate::messages::INTERNAL)
+            }
+        }
     }
 }
 
@@ -88,17 +107,28 @@ pub async fn get<T: DeserializeOwned>(
 /// Takes `&T` rather than raw JSON: the only way into this table is through the
 /// type that gives the value meaning, so a reader's decode cannot be the first
 /// thing to notice a mistake.
+///
+/// **`expected` is the version the caller read**, or `None` to write whatever
+/// is there. With `Some(n)`, the write happens only if the key is still at
+/// version `n` — `0` meaning "nothing was set" — and is otherwise refused with
+/// [`ConfigError::Conflict`], which is how the second of two people editing the
+/// same screen finds out they were second. The check and the write are one
+/// statement, so there is no window between them.
 pub async fn set<T: Serialize>(
     conn: &mut PgConnection,
     key: &str,
     value: &T,
     set_by: Option<&str>,
+    expected: Option<i64>,
 ) -> Result<i64, ConfigError> {
     let encoded = serde_json::to_value(value).map_err(|e| ConfigError::Invalid {
         key: key.to_owned(),
         reason: e.to_string(),
     })?;
 
+    // A fresh key is at version zero, so `expected = Some(0)` lets the insert
+    // through and refuses the update; `expected = Some(n)` refuses the update
+    // unless the row is at `n`. `NULL` is the unconditional write.
     let version = sqlx::query_scalar!(
         r#"INSERT INTO configuration (key, value, version, set_by)
            VALUES ($1, $2, nextval('configuration_version'), $3)
@@ -107,15 +137,54 @@ pub async fn set<T: Serialize>(
                   version = nextval('configuration_version'),
                   set_at  = now(),
                   set_by  = EXCLUDED.set_by
+            WHERE $4::bigint IS NULL OR configuration.version = $4
          RETURNING version"#,
         key,
         encoded,
         set_by,
+        expected,
     )
-    .fetch_one(&mut *conn)
+    .fetch_optional(&mut *conn)
     .await?;
 
-    Ok(version)
+    match (version, expected) {
+        (Some(version), _) => Ok(version),
+        (None, Some(expected)) => Err(ConfigError::Conflict {
+            key: key.to_owned(),
+            expected,
+            found: version_of(&mut *conn, key).await?,
+        }),
+        // Cannot happen: an unconditional upsert always returns a row.
+        (None, None) => Err(ConfigError::Invalid {
+            key: key.to_owned(),
+            reason: "the write returned nothing".to_owned(),
+        }),
+    }
+}
+
+/// The generation one key is at, or zero when it has never been set.
+///
+/// What a settings screen hands back as its `ETag`, and what it sends back as
+/// `If-Match` — see [`set`]. Zero is a real answer: "nothing is set, and I know
+/// it" is a state somebody can be second to change.
+pub async fn version_of(conn: &mut PgConnection, key: &str) -> Result<i64, ConfigError> {
+    Ok(sqlx::query_scalar!(
+        r#"SELECT COALESCE(max(version), 0) as "version!" FROM configuration WHERE key = $1"#,
+        key,
+    )
+    .fetch_one(&mut *conn)
+    .await?)
+}
+
+/// **The tenant's clock**, or Riyadh when nobody has set one.
+///
+/// Read by every command that turns an instant into a day, and by `append`,
+/// which stamps it onto each event's metadata so a projection reads the clock
+/// the event was written under — see `erp_types::Calendar`.
+pub async fn calendar(conn: &mut PgConnection) -> Result<erp_types::Calendar, ConfigError> {
+    Ok(get::<erp_types::Calendar>(conn, erp_types::Calendar::KEY)
+        .await?
+        .map_or_else(erp_types::Calendar::default, |configured| configured.value))
 }
 
 /// The generation of a tenant's configuration as a whole.

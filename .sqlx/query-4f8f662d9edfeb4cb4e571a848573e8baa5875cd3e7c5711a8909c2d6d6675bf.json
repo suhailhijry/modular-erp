@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", gateway_id as \"gateway_id!\",\n                  amount_minor as \"amount_minor!\", currency as \"currency!\"\n             FROM proj_payments.payment\n            WHERE stage = 'pending' AND provider = $1\n            ORDER BY started_at ASC LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "gateway_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "gateway_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount_minor!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "amount_minor"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "currency"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4f8f662d9edfeb4cb4e571a848573e8baa5875cd3e7c5711a8909c2d6d6675bf"
+}

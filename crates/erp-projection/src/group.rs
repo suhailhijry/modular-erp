@@ -61,6 +61,7 @@ const DERIVED_ID_NAMESPACE: Uuid = Uuid::from_bytes([
 pub struct ProjectionCtx<'a> {
     position: LogPosition,
     event_time: Timestamp,
+    calendar: erp_types::Calendar,
     upcasters: &'a Upcasters,
 }
 
@@ -68,13 +69,24 @@ impl<'a> ProjectionCtx<'a> {
     pub(crate) const fn new(
         position: LogPosition,
         event_time: Timestamp,
+        calendar: erp_types::Calendar,
         upcasters: &'a Upcasters,
     ) -> Self {
         Self {
             position,
             event_time,
+            calendar,
             upcasters,
         }
+    }
+
+    /// **The tenant's clock when this event was written.** The only calendar a
+    /// projection may read: turning an instant into a day by any other clock
+    /// makes the rebuild disagree with what was live the moment the setting
+    /// changes (L2).
+    #[must_use]
+    pub const fn calendar(&self) -> erp_types::Calendar {
+        self.calendar
     }
 
     /// Where this event sits in the log. Stable across replays.
@@ -185,6 +197,7 @@ mod tests {
         ProjectionCtx::new(
             LogPosition::new(position).expect("valid"),
             chrono::DateTime::from_timestamp(0, 0).expect("valid"),
+            erp_types::Calendar::default(),
             upcasters,
         )
     }

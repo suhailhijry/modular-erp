@@ -23,7 +23,7 @@ use utoipa_axum::routes;
 
 use erp_web::AppState;
 use erp_web::Problem;
-use erp_web::{Allowed, Language, ManageTenant, PostEntries, Read};
+use erp_web::{Allowed, IfMatch, Language, ManageTenant, PostEntries, Read, Versioned};
 use erp_web::{Json, Query, bad_request, parse_id, require_module};
 
 use crate::audience::{Audience, Subject, Topic};
@@ -360,25 +360,11 @@ async fn put_template(
     template.check(&name).map_err(|e| refused(&e, locale))?;
 
     let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
-    // Read-modify-write, in one connection. Two people editing two different
-    // templates at the same instant is the only race, and it is a settings
-    // screen — `configuration` is one row per key and the loser's edit is the
-    // one they are looking at.
-    let mut templates = config::get::<Templates>(&mut conn, crate::template::KEY)
-        .await
-        .map_err(|e| unavailable(&e, locale))?
-        .map(|c| c.value)
-        .unwrap_or_default();
-    templates.entries.insert(name, template);
-
-    config::set(
-        &mut conn,
-        crate::template::KEY,
-        &templates,
-        Some(&tenant.session.identity.to_string()),
-    )
-    .await
-    .map_err(|e| unavailable(&e, locale))?;
+    amend_templates(&mut conn, &tenant, locale, |templates| {
+        templates.entries.insert(name.clone(), template.clone());
+        true
+    })
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -410,23 +396,10 @@ async fn delete_template(
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
-
-    let mut templates = config::get::<Templates>(&mut conn, crate::template::KEY)
-        .await
-        .map_err(|e| unavailable(&e, locale))?
-        .map(|c| c.value)
-        .unwrap_or_default();
-
-    if templates.entries.remove(&name).is_some() {
-        config::set(
-            &mut conn,
-            crate::template::KEY,
-            &templates,
-            Some(&tenant.session.identity.to_string()),
-        )
-        .await
-        .map_err(|e| unavailable(&e, locale))?;
-    }
+    amend_templates(&mut conn, &tenant, locale, |templates| {
+        templates.entries.remove(&name).is_some()
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -437,7 +410,7 @@ async fn delete_template(
     tag = "messaging",
     params(("Host" = String, Header, description = "The tenant's subdomain.")),
     responses(
-        (status = OK, body = SettingsView),
+        (status = OK, body = SettingsView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.")), headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -447,19 +420,22 @@ async fn delete_template(
 async fn messaging_settings(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<SettingsView>, Problem> {
+) -> Result<Versioned<SettingsView>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
-    let settings = config::get::<Settings>(&mut conn, crate::settings::KEY)
+    let stored = config::get::<Settings>(&mut conn, crate::settings::KEY)
         .await
-        .map_err(|e| unavailable(&e, locale))?
-        .map(|c| c.value)
-        .unwrap_or_default();
+        .map_err(|e| unavailable(&e, locale))?;
+    let version = stored.as_ref().map_or(0, |c| c.version);
+    let settings = stored.map(|c| c.value).unwrap_or_default();
 
-    Ok(Json(SettingsView {
-        business: settings.business,
-        language: language_name(settings.language).to_owned(),
-    }))
+    Ok(Versioned(
+        version,
+        SettingsView {
+            business: settings.business,
+            language: language_name(settings.language).to_owned(),
+        },
+    ))
 }
 
 /// Choose them.
@@ -467,10 +443,11 @@ async fn messaging_settings(
     put,
     path = "/v1/messaging/settings",
     tag = "messaging",
-    params(("Host" = String, Header, description = "The tenant's subdomain.")),
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally."), ("Host" = String, Header, description = "The tenant's subdomain.")),
     request_body = SettingsView,
     responses(
         (status = NO_CONTENT, description = "Stored."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "Not a language this system speaks", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -481,6 +458,7 @@ async fn messaging_settings(
 async fn set_messaging_settings(
     tenant: Allowed<ManageTenant>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<SettingsView>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -495,6 +473,7 @@ async fn set_messaging_settings(
         crate::settings::KEY,
         &settings,
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
     .map_err(|e| unavailable(&e, locale))?;
@@ -509,7 +488,7 @@ async fn set_messaging_settings(
     tag = "messaging",
     params(("Host" = String, Header, description = "The tenant's subdomain.")),
     responses(
-        (status = OK, description = "`configured` says whether anybody chose these", body = BudgetView),
+        (status = OK, description = "`configured` says whether anybody chose these", body = BudgetView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -519,21 +498,25 @@ async fn set_messaging_settings(
 async fn messaging_budget(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<BudgetView>, Problem> {
+) -> Result<Versioned<BudgetView>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
-    let budget = config::get::<Budget>(&mut conn, crate::budget::KEY)
+    let stored = config::get::<Budget>(&mut conn, crate::budget::KEY)
         .await
-        .map_err(|e| unavailable(&e, locale))?
-        .map_or_else(Budget::default, |c| c.value);
+        .map_err(|e| unavailable(&e, locale))?;
+    let version = stored.as_ref().map_or(0, |c| c.version);
+    let budget = stored.map_or_else(Budget::default, |c| c.value);
 
-    Ok(Json(BudgetView {
-        sms: budget.sms,
-        whatsapp: budget.whatsapp,
-        email: budget.email,
-        push: budget.push,
-        configured: budget.configured,
-    }))
+    Ok(Versioned(
+        version,
+        BudgetView {
+            sms: budget.sms,
+            whatsapp: budget.whatsapp,
+            email: budget.email,
+            push: budget.push,
+            configured: budget.configured,
+        },
+    ))
 }
 
 /// Set it.
@@ -544,10 +527,11 @@ async fn messaging_budget(
     put,
     path = "/v1/messaging/budget",
     tag = "messaging",
-    params(("Host" = String, Header, description = "The tenant's subdomain.")),
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally."), ("Host" = String, Header, description = "The tenant's subdomain.")),
     request_body = BudgetView,
     responses(
         (status = NO_CONTENT, description = "Stored."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "A negative limit", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -558,6 +542,7 @@ async fn messaging_budget(
 async fn set_messaging_budget(
     tenant: Allowed<ManageTenant>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<BudgetView>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -590,6 +575,7 @@ async fn set_messaging_budget(
         crate::budget::KEY,
         &budget,
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
     .map_err(|e| unavailable(&e, locale))?;
@@ -622,22 +608,24 @@ async fn messaging_spend(
 ) -> Result<Json<Vec<SpendView>>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
 
-    let period = match month.period {
-        Some(period) => {
-            if period.len() != 7 || !period.is_char_boundary(4) {
-                return Err(bad_request(
-                    crate::messages::NOT_A_MONTH,
-                    "period",
-                    &period,
-                    locale,
-                ));
-            }
-            period
+    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    let period = if let Some(period) = month.period {
+        if period.len() != 7 || !period.is_char_boundary(4) {
+            return Err(bad_request(
+                crate::messages::NOT_A_MONTH,
+                "period",
+                &period,
+                locale,
+            ));
         }
-        None => crate::budget::period(now()),
+        period
+    } else {
+        let calendar = erp_eventlog::configuration::calendar(&mut conn)
+            .await
+            .map_err(|e| unavailable(&e, locale))?;
+        crate::budget::period(calendar, now())
     };
 
-    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
     let spent = crate::budget::spent(&mut conn, &period)
         .await
         .map_err(|e| sending_refused(&crate::SendError::Spend(e), locale))?;
@@ -679,7 +667,7 @@ async fn messaging_spend(
     ),
 )]
 async fn register_device(
-    tenant: Allowed<Read>,
+    tenant: Allowed<ManageTenant>,
     Language(locale): Language,
     Json(body): Json<NewDevice>,
 ) -> Result<StatusCode, Problem> {
@@ -698,6 +686,31 @@ async fn register_device(
         })?;
 
     let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+    // **The recipient has to be somebody.** A token bound to an id that names
+    // nobody is a device that receives nothing, silently; one bound to an id
+    // the caller typed is how a viewer used to receive another person's
+    // notifications — which is why this route is the owner's now, and still
+    // checks.
+    if !crate::audience::recipient_exists(&mut conn, &body.recipient)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "messaging could not read the log");
+            Problem::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &erp_i18n::Message::new(crate::messages::DATABASE),
+                locale,
+                &CATALOG,
+            )
+        })?
+    {
+        return Err(Problem::new(
+            StatusCode::NOT_FOUND,
+            &erp_i18n::Message::new(crate::messages::NO_SUCH_RECIPIENT)
+                .with("recipient", erp_i18n::MessageArg::text(&body.recipient)),
+            locale,
+            &CATALOG,
+        ));
+    }
     crate::push::register(&mut conn, &body.token, &body.recipient, platform, now())
         .await
         .map_err(|e| database(&e, locale))?;
@@ -806,6 +819,52 @@ async fn send_message(
 /// fixture date.
 fn now() -> Timestamp {
     chrono::Utc::now()
+}
+
+/// **Changes one template without losing another's.** Every template lives
+/// under one configuration key, so a per-template write is a read, a change and
+/// a write of the whole map — and two people saving different templates at once
+/// used to leave one of them with the other's work undone. The write is
+/// conditional on the version that was read and retried on a conflict; `amend`
+/// says whether anything changed, so a delete of nothing writes nothing.
+async fn amend_templates(
+    conn: &mut sqlx::PgConnection,
+    tenant: &erp_web::Allowed<ManageTenant>,
+    locale: Locale,
+    mut amend: impl FnMut(&mut Templates) -> bool,
+) -> Result<(), Problem> {
+    const ATTEMPTS: usize = 5;
+    let mut last = None;
+    for _ in 0..ATTEMPTS {
+        let stored = config::get::<Templates>(&mut *conn, crate::template::KEY)
+            .await
+            .map_err(|e| unavailable(&e, locale))?;
+        let version = stored.as_ref().map_or(0, |c| c.version);
+        let mut templates = stored.map(|c| c.value).unwrap_or_default();
+        if !amend(&mut templates) {
+            return Ok(());
+        }
+        match config::set(
+            &mut *conn,
+            crate::template::KEY,
+            &templates,
+            Some(&tenant.session.identity.to_string()),
+            Some(version),
+        )
+        .await
+        {
+            Ok(_) => return Ok(()),
+            Err(conflict @ ConfigError::Conflict { .. }) => last = Some(conflict),
+            Err(other) => return Err(unavailable(&other, locale)),
+        }
+    }
+    Err(unavailable(
+        &last.unwrap_or(ConfigError::Invalid {
+            key: crate::template::KEY.to_owned(),
+            reason: "gave up without a conflict".to_owned(),
+        }),
+        locale,
+    ))
 }
 
 async fn read(tenant: &erp_web::Allowed<Read>, locale: Locale) -> Result<Templates, Problem> {
@@ -956,7 +1015,7 @@ fn pool(error: &erp_tenant::PoolError, locale: Locale) -> Problem {
 }
 
 fn unavailable(error: &ConfigError, locale: Locale) -> Problem {
-    Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, error, locale, &CATALOG)
+    erp_web::config_problem(error, locale, &CATALOG)
 }
 
 fn database(error: &sqlx::Error, locale: Locale) -> Problem {

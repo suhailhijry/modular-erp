@@ -263,6 +263,7 @@ async fn a_stored_schedule_replaces_the_shipped_one() {
             ..Schedule::default()
         },
         None,
+        None,
     )
     .await
     .expect("stores");

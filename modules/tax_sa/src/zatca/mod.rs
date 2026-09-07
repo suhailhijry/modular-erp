@@ -47,6 +47,7 @@
 
 pub mod chain;
 pub mod csr;
+pub mod finish;
 pub mod http;
 pub mod onboarding;
 pub mod qr;
@@ -311,6 +312,46 @@ pub struct Reference {
     pub issued_at: Timestamp,
 }
 
+/// **The prepayment invoice a final invoice deducts**, and what it declared.
+///
+/// ZATCA's final invoice after a deposit shows the whole supply on its lines,
+/// a prepayment line naming the earlier document with what it declared per
+/// band, `PrepaidAmount` for what was paid up front, and tax totals for what
+/// is left to declare. This carries the earlier document's half of that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrepaidRef {
+    pub number: String,
+    pub issued_at: Timestamp,
+    /// What the prepayment invoice declared, per band.
+    pub bands: Vec<Band>,
+}
+
+impl PrepaidRef {
+    #[must_use]
+    pub fn net(&self, currency: CurrencyCode) -> Money {
+        self.bands
+            .iter()
+            .try_fold(Money::zero(currency), |sum, b| sum.checked_add(b.net))
+            .unwrap_or_else(|_| Money::zero(currency))
+    }
+
+    #[must_use]
+    pub fn tax(&self, currency: CurrencyCode) -> Money {
+        self.bands
+            .iter()
+            .try_fold(Money::zero(currency), |sum, b| sum.checked_add(b.tax))
+            .unwrap_or_else(|_| Money::zero(currency))
+    }
+
+    /// What was paid up front, tax included — `cbc:PrepaidAmount`.
+    #[must_use]
+    pub fn gross(&self, currency: CurrencyCode) -> Money {
+        self.net(currency)
+            .checked_add(self.tax(currency))
+            .unwrap_or_else(|_| Money::zero(currency))
+    }
+}
+
 /// A ZATCA document, ready to render.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Document {
@@ -325,6 +366,12 @@ pub struct Document {
     /// because `sales` records one date and inventing a second would be a
     /// difference nobody entered.
     pub issued_at: Timestamp,
+    /// **The clock `IssueDate` and `IssueTime` are read by.** An invoice
+    /// issued at 23:30 in Riyadh on the last day of the quarter is dated that
+    /// day, not the UTC day after; ZATCA sees the seller's calendar. From the
+    /// event that produced the document, so a rebuild renders the same XML.
+    #[serde(default)]
+    pub calendar: erp_types::Calendar,
     pub currency: CurrencyCode,
     pub seller: Registration,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -333,14 +380,64 @@ pub struct Document {
     /// What was taken off the whole document.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowances: Vec<Allowance>,
+    /// **What this document charges and declares.** For a final invoice after
+    /// a deposit that is the supply less the prepayment; the lines still show
+    /// the whole supply, and [`Self::prepaid`] says what came off.
     pub totals: Totals,
     pub link: Link,
     /// The invoice this credits, on a credit note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<Reference>,
+    /// The prepayment invoice deducted from this one, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepaid: Option<PrepaidRef>,
     /// Why, on a credit note. ZATCA requires a reason on one.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+}
+
+impl Document {
+    /// **What the whole supply came to before tax**, prepayment included:
+    /// `cbc:TaxExclusiveAmount`.
+    #[must_use]
+    pub fn supply_net(&self) -> Money {
+        match &self.prepaid {
+            Some(prepaid) => self
+                .totals
+                .net
+                .checked_add(prepaid.net(self.currency))
+                .unwrap_or(self.totals.net),
+            None => self.totals.net,
+        }
+    }
+
+    /// The whole supply, tax included: `cbc:TaxInclusiveAmount`, and what the
+    /// QR code calls the invoice total.
+    #[must_use]
+    pub fn supply_gross(&self) -> Money {
+        match &self.prepaid {
+            Some(prepaid) => self
+                .totals
+                .gross
+                .checked_add(prepaid.gross(self.currency))
+                .unwrap_or(self.totals.gross),
+            None => self.totals.gross,
+        }
+    }
+
+    /// What the lines came to, before document discounts and prepayment:
+    /// `cbc:LineExtensionAmount`, which ZATCA checks against the lines.
+    #[must_use]
+    pub fn lines_came_to(&self) -> Money {
+        match &self.prepaid {
+            Some(prepaid) => self
+                .totals
+                .lines_came_to()
+                .checked_add(prepaid.net(self.currency))
+                .unwrap_or_else(|_| self.totals.lines_came_to()),
+            None => self.totals.lines_came_to(),
+        }
+    }
 }
 
 /// ZATCA's per-document UUID, derived so a replay reproduces it.

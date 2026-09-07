@@ -15,6 +15,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 
 # Optional so the crate stays WASM-safe and frontend-shareable by default.
 sqlx = { workspace = true, optional = true }

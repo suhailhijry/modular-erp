@@ -26,8 +26,9 @@ use erp_eventlog::{Committed, Decision, ExecuteError, Metadata, try_execute};
 use erp_payments::{Charged, Status};
 use erp_types::{AggregateId, Money, Timestamp};
 
+use crate::awaiting::{Awaiting, AwaitingEvent};
 use crate::card::{Card, CardEvent, token_key};
-use crate::payment::{Collects, Payment, PaymentEvent, Stage};
+use crate::payment::{Collects, Payment, PaymentEvent, RefundRequest, Stage};
 use crate::payout::{Payout, PayoutEvent};
 use crate::posting::{
     PostingAccounts, Settlement, entry_for_fee, entry_for_forfeit, entry_for_payout,
@@ -46,6 +47,18 @@ pub enum PaymentsError {
     NotCollectable { id: String, stage: &'static str },
     #[error("{0} is more than is left to refund")]
     RefundTooLarge(Money),
+    /// Keeping a deposit while a refund of it is still being carried out. The
+    /// two would race for the same money; the refund finishes first.
+    #[error("payment {0} has a refund in flight; it cannot be kept until that is settled")]
+    RefundAwaited(String),
+    /// A refund the gateway already refused, asked for again under the same
+    /// reference. The answer does not change by asking.
+    #[error("the gateway refused refund {reference} of {payment}: {why}")]
+    RefundRefused {
+        payment: String,
+        reference: String,
+        why: String,
+    },
     /// Keeping an invoice payment. **Refused**: there is nothing to keep,
     /// because the supply it paid for already happened and was already
     /// invoiced. Retention is a deposit's question.
@@ -53,6 +66,13 @@ pub enum PaymentsError {
     NotADeposit(String),
     #[error("there is nothing left of {0} to keep")]
     NothingToRetain(String),
+    /// **A second deposit against something that already has one in flight.**
+    /// Refused rather than started: the customer who opened the payment page
+    /// twice would otherwise have two charges, and paying both is paying twice.
+    /// The payment named is the one that already exists, so a caller can offer
+    /// it instead.
+    #[error("{against} already has deposit {payment} in flight")]
+    AlreadyAwaited { against: String, payment: String },
     #[error("payout {0} has already been recorded")]
     PayoutRecorded(String),
     /// A payout naming payments this system has never settled. **Refused**: the
@@ -96,6 +116,8 @@ type Outcome = Result<Committed<PaymentEvent>, ExecuteError<PaymentsError>>;
 /// What a charge at a gateway was for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attempt {
+    /// Where the customer goes to pay, when the gateway named somewhere.
+    pub pay_at: Option<String>,
     /// `moyasar`, `tabby`, `tamara`.
     pub provider: String,
     /// **The gateway's own id.** What every callback names.
@@ -139,12 +161,20 @@ pub async fn start_in(
                 .clone()
                 .unwrap_or_else(|| attempt.collects.clone())
                 .split();
+            // **And the amount, for the same reason.** A pass that found the
+            // customer's own charge at the gateway hands over what the gateway
+            // says was created; if that replaced what was *asked for*, the
+            // settlement check below would be comparing the gateway to itself
+            // and a deposit paid short would settle as if it were whole. What
+            // was asked for is what this payment is for.
+            let amount = loaded.aggregate.amount.unwrap_or(attempt.amount);
             Ok(Decision::one(PaymentEvent::Started {
                 provider: attempt.provider.clone(),
                 gateway_id: attempt.gateway_id.clone(),
                 invoice,
                 advance,
-                amount: attempt.amount,
+                amount,
+                pay_at: attempt.pay_at.clone(),
                 started_at: at,
             }))
         },
@@ -346,6 +376,7 @@ async fn bill_the_deposit(
             // before the supply, which is a different tax point and a different
             // thing to report.
             prepayment: true,
+            prepaid: None,
             note: String::new(),
         },
         &format!("Deposit · {}", advance.against),
@@ -404,7 +435,7 @@ pub async fn fail_in(
     metadata: &Metadata,
 ) -> Outcome {
     let why = why.chars().take(500).collect::<String>();
-    try_execute::<Payment, _, PaymentsError>(
+    let committed = try_execute::<Payment, _, PaymentsError>(
         &mut *conn,
         id,
         crate::upcasters(),
@@ -427,7 +458,9 @@ pub async fn fail_in(
             }))
         },
     )
-    .await
+    .await?;
+    release_awaiting(&mut *conn, &committed, id, at, metadata).await?;
+    Ok(committed)
 }
 
 /// Records that it was cancelled before settling. Posts nothing.
@@ -437,7 +470,7 @@ pub async fn void_in(
     at: Timestamp,
     metadata: &Metadata,
 ) -> Outcome {
-    try_execute::<Payment, _, PaymentsError>(
+    let committed = try_execute::<Payment, _, PaymentsError>(
         &mut *conn,
         id,
         crate::upcasters(),
@@ -452,10 +485,66 @@ pub async fn void_in(
             Ok(Decision::one(PaymentEvent::Voided { voided_at: at }))
         },
     )
-    .await
+    .await?;
+    release_awaiting(&mut *conn, &committed, id, at, metadata).await?;
+    Ok(committed)
 }
 
-/// Records money given back, and posts it.
+/// **A deposit that will never arrive frees its booking for another try.**
+///
+/// Only when this call is the one that ended the payment, and only for a
+/// deposit: an invoice payment claims nothing. Same transaction as the ending,
+/// so a booking is never left with a dead claim on it.
+async fn release_awaiting(
+    conn: &mut sqlx::PgConnection,
+    committed: &Committed<PaymentEvent>,
+    payment: &AggregateId,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<PaymentsError>> {
+    if committed.events.is_empty() {
+        return Ok(());
+    }
+    // The aggregate was just loaded by the caller's `try_execute`, and what it
+    // collects is not on the ending event, so read it back (L7 permits it: this
+    // is still the command).
+    let loaded = erp_eventlog::load::<Payment>(&mut *conn, payment, crate::upcasters()).await?;
+    let Some(against) = loaded
+        .aggregate
+        .collects
+        .as_ref()
+        .and_then(Collects::advance)
+        .map(|advance| advance.against.clone())
+    else {
+        return Ok(());
+    };
+    try_execute::<Awaiting, _, PaymentsError>(
+        &mut *conn,
+        &against,
+        crate::upcasters(),
+        metadata,
+        |held| {
+            if held.aggregate.live.as_ref() != Some(payment) {
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(AwaitingEvent::Released {
+                payment: payment.clone(),
+                at,
+            }))
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Records money the gateway has given back, and posts it.
+///
+/// **The second half of a refund.** The first is [`request_refund_in`], which
+/// records that somebody asked; `crate::refund_requested` carries the request
+/// to the gateway and calls this with what the gateway confirmed. Nothing else
+/// should: a refund recorded here that the gateway never made is a set of books
+/// saying money went back when it did not — which is exactly what the first
+/// version of the refund route produced.
 ///
 /// The money comes **out of the account it went into** and back onto the
 /// receivable, which is `sales::refund_in`. The fee is not given back: a
@@ -493,7 +582,10 @@ pub async fn refund_in(
             if state.has_refund(reference) {
                 return Ok(Decision::nothing());
             }
-            let Some(refundable) = state.refundable() else {
+            // What is left, plus what this reference reserved for itself when
+            // it was requested — the worker completing an awaited refund must
+            // not be refused for the amount it is completing.
+            let Some(refundable) = state.refundable_for(reference) else {
                 return Err(PaymentsError::NotCollectable {
                     id: id.as_str().to_owned(),
                     stage: state.stage.as_str(),
@@ -552,9 +644,116 @@ pub async fn refund_in(
     // **And the document the money implies.** In the same transaction, because
     // a refund recorded without its credit note is a tax invoice overstating
     // what was sold, and nobody would find it.
-    credit_the_invoice(&mut *conn, invoice, reference, reason, at, metadata).await?;
+    credit_the_invoice(
+        &mut *conn, invoice, reference, *amount, reason, at, metadata,
+    )
+    .await?;
 
     Ok(committed)
+}
+
+/// **Asks for money to go back.** Records the intent and nothing else.
+///
+/// The worker carries it to the gateway — see `crate::refund_requested` — and
+/// [`refund_in`] is written from what the gateway confirms. So this posts
+/// nothing and issues no document; what it does is reserve the amount, so a
+/// second request cannot ask for the same riyals and nothing can keep them
+/// while the gateway is being asked.
+///
+/// Idempotent on the reference: the same one twice is a retry, whether the
+/// first is still awaited, already refunded, or already refused — the last
+/// answers with the gateway's refusal rather than trying again, because the
+/// gateway's answer does not change by asking.
+pub async fn request_refund_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    reference: &str,
+    amount: Money,
+    reason: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    if !amount.is_positive() {
+        return Err(ExecuteError::Rejected(PaymentsError::RefundTooLarge(
+            amount,
+        )));
+    }
+    let reason = reason.trim().to_owned();
+    try_execute::<Payment, _, PaymentsError>(
+        &mut *conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            let state = &loaded.aggregate;
+            if state.has_refund(reference) || state.refund_awaited(reference).is_some() {
+                return Ok(Decision::nothing());
+            }
+            if state.refund_refused(reference) {
+                return Err(PaymentsError::RefundRefused {
+                    payment: id.as_str().to_owned(),
+                    reference: reference.to_owned(),
+                    why: "already refused".to_owned(),
+                });
+            }
+            let Some(refundable) = state.refundable() else {
+                return Err(PaymentsError::NotCollectable {
+                    id: id.as_str().to_owned(),
+                    stage: state.stage.as_str(),
+                });
+            };
+            if amount.minor() > refundable.minor() {
+                return Err(PaymentsError::RefundTooLarge(amount));
+            }
+            Ok(Decision::one(PaymentEvent::RefundRequested {
+                reference: reference.to_owned(),
+                amount,
+                reason: reason.clone(),
+                requested_at: at,
+            }))
+        },
+    )
+    .await
+}
+
+/// Records that the gateway would not give it back. Posts nothing; the money
+/// never moved.
+pub async fn refuse_refund_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    reference: &str,
+    why: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    let why = why.chars().take(500).collect::<String>();
+    try_execute::<Payment, _, PaymentsError>(
+        &mut *conn,
+        id,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            let state = &loaded.aggregate;
+            if state.refund_awaited(reference).is_none() {
+                // Already refunded, already refused, or never asked: nothing to
+                // record either way.
+                return Ok(Decision::nothing());
+            }
+            Ok(Decision::one(PaymentEvent::RefundRefused {
+                reference: reference.to_owned(),
+                why: why.clone(),
+                refused_at: at,
+            }))
+        },
+    )
+    .await
+}
+
+/// What the gateway was asked for and has not yet answered, for
+/// `crate::refund_requested`.
+#[must_use]
+pub fn awaited_refunds(payment: &Payment) -> &[RefundRequest] {
+    &payment.awaited_refunds
 }
 
 /// Issues the credit note a refund owes, **if the invoice is now clear**.
@@ -594,13 +793,16 @@ async fn credit_the_invoice(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,
     reference: &str,
+    refunded: Money,
     reason: &str,
     at: Timestamp,
     metadata: &Metadata,
 ) -> Result<(), ExecuteError<PaymentsError>> {
-    sales::credit_what_is_clear(&mut *conn, invoice, reference, reason, at, metadata)
-        .await
-        .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))
+    sales::credit_what_is_clear(
+        &mut *conn, invoice, reference, refunded, reason, at, metadata,
+    )
+    .await
+    .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))
 }
 
 /// **Keeps a deposit the customer did not come back for.**
@@ -657,12 +859,28 @@ pub async fn retain_in(
                     PaymentsError::NotStarted(id.as_str().to_owned())
                 });
             };
+            if !state.awaited_refunds.is_empty() {
+                return Err(PaymentsError::RefundAwaited(id.as_str().to_owned()));
+            }
             let Some(left) = state.refundable().filter(|m| m.is_positive()) else {
                 return Err(PaymentsError::NothingToRetain(id.as_str().to_owned()));
             };
+            // **The net of what is kept, at the rate it was billed at.** The
+            // deposit carried its own net, and the prepayment invoice was
+            // raised for exactly that, so the share of the kept amount that was
+            // never tax is `kept × net / gross` — the deposit's own figures,
+            // not the standard rate on the day. Between settling and keeping,
+            // a rate can change; the return the tax was declared on cannot.
+            let gross = state
+                .amount
+                .ok_or_else(|| PaymentsError::NotStarted(id.as_str().to_owned()))?;
+            let net = left
+                .apportioned(advance.net.minor(), gross.minor())
+                .map_err(|e| PaymentsError::Unbalanced(ledger::Unbalanced::Money(e)))?;
 
             Ok(Decision::one(PaymentEvent::Retained {
                 amount: left,
+                net: Some(net),
                 supply: retention.supply,
                 advance_for: advance.against.clone(),
                 retained_at: at,
@@ -671,7 +889,13 @@ pub async fn retain_in(
     )
     .await?;
 
-    let Some(PaymentEvent::Retained { amount, supply, .. }) = committed.events.first() else {
+    let Some(PaymentEvent::Retained {
+        amount,
+        net,
+        supply,
+        ..
+    }) = committed.events.first()
+    else {
         return Ok(committed);
     };
 
@@ -685,12 +909,9 @@ pub async fn retain_in(
     // **Not a sale, so it moves out of revenue** — and only the revenue does.
     // The tax stays where it was declared: reclaiming it would be reversing a
     // prepayment the buyer never got back, which is the one thing the
-    // authority's guidance says not to do.
-    let net = amount
-        .checked_sub(tax_on_kept(&mut *conn, *amount).await?)
-        .map_err(|e| {
-            ExecuteError::Rejected(PaymentsError::Unbalanced(ledger::Unbalanced::Money(e)))
-        })?;
+    // authority's guidance says not to do. The net is the event's, worked out
+    // above from the deposit's own figures.
+    let net = net.unwrap_or(*amount);
     // Out of the account the prepayment invoice credited, which is `sales`' to
     // name — the same reason `settle_in` asks it where the receivable is.
     let revenue = sales::PostingAccounts::resolve(&mut *conn)
@@ -711,29 +932,6 @@ pub async fn retain_in(
     .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))?;
 
     Ok(committed)
-}
-
-/// The tax inside a kept deposit, at the rate its prepayment invoice carried.
-///
-/// Resolved rather than remembered because the reclassification is a fact about
-/// the money now, and the only thing it needs is how much of it was never
-/// revenue in the first place.
-async fn tax_on_kept(
-    conn: &mut sqlx::PgConnection,
-    gross: Money,
-) -> Result<Money, ExecuteError<PaymentsError>> {
-    let rates = ledger::Rates::resolve(&mut *conn)
-        .await
-        .map_err(|e| ExecuteError::Rejected(PaymentsError::Config(e)))?;
-    let bp = rates.of(sales::VatCategory::Standard);
-    let net = gross
-        .apportioned(10_000, i64::from(10_000 + bp))
-        .map_err(|e| {
-            ExecuteError::Rejected(PaymentsError::Unbalanced(ledger::Unbalanced::Money(e)))
-        })?;
-    gross.checked_sub(net).map_err(|e| {
-        ExecuteError::Rejected(PaymentsError::Unbalanced(ledger::Unbalanced::Money(e)))
-    })
 }
 
 /// The entry a retention posts under.
@@ -1051,6 +1249,10 @@ pub struct Collection {
     pub amount: Money,
     /// Where the gateway sends the customer if it decides it needs them.
     pub callback_url: String,
+    /// **Everything a provider that hosts its own checkout is told.** `Some`
+    /// makes this a checkout the worker opens; `None` is a card, or a charge
+    /// the customer's browser creates itself. See [`crate::Checkout`].
+    pub checkout: Option<crate::Checkout>,
 }
 
 /// Records that a saved card should be charged. **Charges nothing.**
@@ -1083,7 +1285,7 @@ pub async fn request_in(
     at: Timestamp,
     metadata: &Metadata,
 ) -> Outcome {
-    try_execute::<Payment, _, PaymentsError>(
+    let committed = try_execute::<Payment, _, PaymentsError>(
         &mut *conn,
         id,
         crate::upcasters(),
@@ -1103,9 +1305,42 @@ pub async fn request_in(
                 advance,
                 amount: collection.amount,
                 callback_url: collection.callback_url.clone(),
+                checkout: collection.checkout.clone().map(Box::new),
                 requested_at: at,
             }))
         },
     )
-    .await
+    .await?;
+
+    // **One deposit in flight per thing it is against.** Checked against the
+    // log, in this transaction, so two tabs a millisecond apart cannot both
+    // get a charge — see `crate::awaiting`. A retry (nothing written above)
+    // already holds its claim and is not asked again.
+    if let (false, Collects::Advance(advance)) = (committed.events.is_empty(), &collection.collects)
+    {
+        try_execute::<Awaiting, _, PaymentsError>(
+            &mut *conn,
+            &advance.against,
+            crate::upcasters(),
+            metadata,
+            |held| {
+                if let Some(other) = held.aggregate.blocks(id) {
+                    return Err(PaymentsError::AlreadyAwaited {
+                        against: advance.against.as_str().to_owned(),
+                        payment: other.as_str().to_owned(),
+                    });
+                }
+                if held.aggregate.live.as_ref() == Some(id) {
+                    return Ok(Decision::nothing());
+                }
+                Ok(Decision::one(AwaitingEvent::Claimed {
+                    payment: id.clone(),
+                    at,
+                }))
+            },
+        )
+        .await?;
+    }
+
+    Ok(committed)
 }

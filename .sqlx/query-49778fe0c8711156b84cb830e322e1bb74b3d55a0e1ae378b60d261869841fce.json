@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.vat_category as \"category!\", t.vat_rate_bp as \"basis_points!\",\n                  t.net as \"net!\", t.tax as \"tax!\", i.currency as \"currency!\"\n             FROM proj_sales.invoice_tax t\n             JOIN proj_sales.invoice i ON i.id = t.invoice_id\n            WHERE t.invoice_id = $1\n            ORDER BY t.vat_category, t.vat_rate_bp",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "category!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_tax",
+            "name": "vat_category"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "basis_points!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_tax",
+            "name": "vat_rate_bp"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "net!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_tax",
+            "name": "net"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "tax!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice_tax",
+            "name": "tax"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_sales.invoice",
+            "name": "currency"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "49778fe0c8711156b84cb830e322e1bb74b3d55a0e1ae378b60d261869841fce"
+}

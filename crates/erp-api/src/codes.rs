@@ -37,7 +37,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use erp_web::AppState;
-use erp_web::{Json, Language, Problem};
+use erp_web::{Anonymous, Json, Language, Problem};
 
 pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -99,15 +99,22 @@ struct SignedIn {
     responses(
         (status = ACCEPTED, description = "A code is on its way, if that number can receive one.", body = CodeSent),
         (status = BAD_REQUEST, description = "Not a phone number", body = Problem),
-        (status = TOO_MANY_REQUESTS, description = "One went moments ago. `args.seconds` says how long to wait.", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "One went to this number moments ago, this address has asked for too many, or the platform's hourly ceiling is reached. `args.seconds` says how long to wait.", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
 )]
 async fn request_code(
+    anonymous: Anonymous,
     State(state): State<AppState>,
     Language(locale): Language,
     Json(body): Json<CodeRequest>,
 ) -> Result<(StatusCode, Json<CodeSent>), Problem> {
+    // **Three bounds before a text costs anybody anything.** Per number (the
+    // control plane's own cooldown, below), per address, and per platform —
+    // the last is the breaker for a caller whose own premium numbers are the
+    // ones being texted.
+    anonymous.charge_for_handle(&state, &body.phone).await?;
+    anonymous.charge_for_a_code(&state).await?;
     let requested = state
         .control
         .request_code(&body.phone, locale)
@@ -139,14 +146,17 @@ async fn request_code(
         (status = CREATED, description = "Signed in. The token is in the body and in an `HttpOnly` cookie; they are the same session.", body = SignedIn),
         (status = BAD_REQUEST, description = "Not a phone number", body = Problem),
         (status = UNAUTHORIZED, description = "That code is not valid — one answer for every reason", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
 )]
 async fn sign_in_with_code(
+    anonymous: Anonymous,
     State(state): State<AppState>,
     Language(locale): Language,
     Json(body): Json<CodeVerification>,
 ) -> Result<impl IntoResponse, Problem> {
+    anonymous.charge_for_handle(&state, &body.phone).await?;
     let (token, session) = state
         .control
         .verify_code(&body.phone, &body.code)

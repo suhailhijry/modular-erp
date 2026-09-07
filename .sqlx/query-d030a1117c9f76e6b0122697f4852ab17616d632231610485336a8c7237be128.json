@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM short_link\n          WHERE (expires_at IS NOT NULL AND expires_at < $1)\n             OR (single_use AND visits > 0 AND last_visit_at < $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d030a1117c9f76e6b0122697f4852ab17616d632231610485336a8c7237be128"
+}

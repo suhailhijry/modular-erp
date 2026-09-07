@@ -43,6 +43,10 @@ pub enum PrepaidError {
     },
     #[error("an amount here must be more than nothing")]
     NotAValue,
+    /// A package with nothing in it. The money would be deferred and could
+    /// never be recognised: `draw` refuses `left < wanted` with `wanted >= 1`.
+    #[error("a package needs at least one use")]
+    NoUses,
     #[error("nobody paid for this, so it carries no value")]
     FreeGrantWithValue,
     #[error("an amount must either count uses or name what it is held against")]
@@ -100,6 +104,7 @@ impl erp_i18n::Localize for PrepaidError {
                 .with("left", MessageArg::text(left))
                 .with("wanted", MessageArg::text(wanted)),
             Self::NotAValue => Message::new(messages::NOT_A_VALUE),
+            Self::NoUses => Message::new(messages::NO_USES),
             Self::FreeGrantWithValue => Message::new(messages::FREE_GRANT_WITH_VALUE),
             Self::OpenValue => Message::new(messages::OPEN_VALUE),
             Self::NoSuchCard(id) => {
@@ -214,6 +219,11 @@ pub async fn grant(
 ) -> Outcome<EntitlementEvent> {
     if grant.value.is_negative() {
         return Err(rejected(PrepaidError::NotAValue));
+    }
+    // **Zero uses is a package nobody can open.** The first version took the
+    // money, deferred it, and left it there until somebody revoked the grant.
+    if grant.uses == Some(0) {
+        return Err(rejected(PrepaidError::NoUses));
     }
     // **A coupon is not a liability.** No consideration was received, so there
     // is nothing to defer — and a caller who put a number on one has misread

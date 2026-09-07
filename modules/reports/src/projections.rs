@@ -51,8 +51,10 @@ fn decode<E: serde::de::DeserializeOwned>(
 ///
 /// The month a report is read by, and it sorts correctly as text — which is why
 /// it is a string rather than two integers a query would have to reassemble.
-fn period(at: Timestamp) -> String {
-    at.format("%Y-%m").to_string()
+fn period(ctx: &ProjectionCtx<'_>, at: Timestamp) -> String {
+    // **The event's calendar, not today's**, so a rebuild files each sale in
+    // the month it was in when it happened (L2).
+    ctx.calendar().month(at)
 }
 
 /// The branch an event was written under, or the empty string.
@@ -94,7 +96,7 @@ impl Projection for Revenue {
             sales::InvoiceEvent::Issued {
                 issued_on, totals, ..
             } => {
-                let at = (period(issued_on), branch_of(envelope));
+                let at = (period(ctx, issued_on), branch_of(envelope));
                 remember(
                     conn,
                     envelope.stream.id.as_str(),
@@ -114,8 +116,15 @@ impl Projection for Revenue {
             // invoice's. A December invoice credited in January is December
             // revenue that January took back, and moving it would restate a
             // month somebody has already filed a return against.
+            // **A cancellation takes the whole document back.** `sales` refuses
+            // to cancel an invoice that has been partly credited — the rest is
+            // credited instead — so what `invoiced` remembered is exactly what
+            // comes out here, never a figure a partial credit already took.
             sales::InvoiceEvent::Cancelled {
-                on, credit_note, ..
+                on,
+                credit_note,
+                reference,
+                ..
             } => {
                 let Some((net, tax, branch)) = invoiced(conn, envelope.stream.id.as_str()).await?
                 else {
@@ -124,24 +133,49 @@ impl Projection for Revenue {
                     // would be worse than a gap somebody can explain.
                     return Ok(());
                 };
-                let back = |amount: Money| {
-                    amount.checked_neg().map_err(|e| {
-                        ProjectionError::Rejected(format!(
-                            "crediting {}: {e}",
-                            envelope.stream.id.as_str()
-                        ))
-                    })
-                };
-                credited(conn, envelope.stream.id.as_str(), &credit_note).await?;
-                // **The invoice's own branch**, not the crediting request's: a
-                // credit raised from head office still takes revenue out of the
-                // branch that earned it.
-                add_revenue(
+                take_back(
                     ctx,
                     conn,
-                    (&period(on), &branch),
-                    (back(net)?, back(tax)?),
-                    (0, 1),
+                    envelope,
+                    Note {
+                        number: &credit_note,
+                        // A cancellation written before the number and the
+                        // reference were separate named its entry by the one
+                        // field it had.
+                        reference: reference.as_deref().unwrap_or(&credit_note),
+                        on,
+                    },
+                    (net, tax),
+                    &branch,
+                )
+                .await
+            }
+            // **A partial credit takes its own lines out.** The event carries
+            // the credit note's totals, computed by `sales` from the invoice's
+            // own bands; those are what leave, in the period the credit was
+            // dated to, from the branch the invoice earned them in.
+            sales::InvoiceEvent::Credited {
+                credit_note,
+                reference,
+                totals,
+                on,
+                ..
+            } => {
+                let Some((_, _, branch)) = invoiced(conn, envelope.stream.id.as_str()).await?
+                else {
+                    return Ok(());
+                };
+                take_back(
+                    ctx,
+                    conn,
+                    envelope,
+                    Note {
+                        number: &credit_note,
+                        reference: &reference,
+                        on,
+                    },
+                    (totals.net, totals.tax),
+                    &branch,
                 )
                 .await
             }
@@ -151,6 +185,55 @@ impl Projection for Revenue {
             _ => Ok(()),
         }
     }
+}
+
+/// A credit note, as the two events that make one describe it.
+struct Note<'a> {
+    /// The statutory number, from the gapless series. The document's id.
+    number: &'a str,
+    /// The client's key for it — **what `sales` names the journal entry by**
+    /// (`cn.<invoice>.<reference>`). The number is minted inside the same
+    /// transaction the entry is posted in, so the entry cannot be named after
+    /// it; a report that looks for `cn.<invoice>.<number>` looks for an entry
+    /// that does not exist, which is what this module did until the
+    /// reconciliation started checking.
+    reference: &'a str,
+    on: Timestamp,
+}
+
+/// Takes a credit note's figures out of revenue and remembers the entry it
+/// posted, so the reconciliation can check it.
+///
+/// It lands in the period the *credit* was dated to, not the invoice's. A
+/// December invoice credited in January is December revenue that January took
+/// back, and moving it would restate a month somebody has already filed a
+/// return against. And it leaves **the invoice's own branch**, not the
+/// crediting request's: a credit raised from head office still takes revenue
+/// out of the branch that earned it.
+async fn take_back(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    envelope: &Envelope,
+    note: Note<'_>,
+    amounts: (Money, Money),
+    branch: &str,
+) -> Result<(), ProjectionError> {
+    let invoice = envelope.stream.id.as_str();
+    let (net, tax) = amounts;
+    let back = |amount: Money| {
+        amount
+            .checked_neg()
+            .map_err(|e| ProjectionError::Rejected(format!("crediting {invoice}: {e}")))
+    };
+    credited(conn, invoice, &note, (net, tax), ctx.position().get()).await?;
+    add_revenue(
+        ctx,
+        conn,
+        (&period(ctx, note.on), branch),
+        (back(net)?, back(tax)?),
+        (0, 1),
+    )
+    .await
 }
 
 /// Remembers what an invoice came to, so a credit can take out exactly that.
@@ -307,15 +390,31 @@ impl Projection for Diary {
 
         match decode::<booking::ReservationEvent>(ctx, envelope)? {
             booking::ReservationEvent::Reserved { lines, at, .. } => {
-                hold(ctx, conn, id, &lines, Taken::Now(at)).await
+                hold(ctx, conn, id, &lines, at).await
             }
-            // **Rescheduling replaces what is held.** A booking moved from
-            // March to April is April's, and leaving the March row would count
-            // it in both months — which is how a utilisation figure comes to
-            // add up to more than the diary has hours in it.
-            booking::ReservationEvent::Rescheduled { lines, .. } => {
-                release(conn, id).await?;
-                hold(ctx, conn, id, &lines, Taken::Already).await
+            // **Rescheduling moves the booking, counts and all.** A booking
+            // moved from March to April is April's: the March row gives back
+            // the `booked` it took and the notice it was counted with, and
+            // April takes them — with the notice measured from the move, which
+            // is the last time the diary was told when this work starts.
+            // Leaving March's count would show a booking that never happened
+            // there, and April a completion nobody booked.
+            booking::ReservationEvent::Rescheduled { lines, at } => {
+                for (resource, when, lead) in release(conn, id).await? {
+                    bump(
+                        ctx,
+                        conn,
+                        (&when, &resource),
+                        "booked",
+                        -1,
+                        Minutes {
+                            took: 0,
+                            lead: -lead,
+                        },
+                    )
+                    .await?;
+                }
+                hold(ctx, conn, id, &lines, at).await
             }
             booking::ReservationEvent::Moved { to, .. } => moved_to(ctx, conn, id, to).await,
             // Assigning a unit changes who does the work, not whether it
@@ -325,85 +424,104 @@ impl Projection for Diary {
             // A deposit arriving changes neither: the slot was held from the
             // moment it was booked, and utilisation is about the hours, not
             // about who has paid for them.
+            // And billing it changes nothing about the hours either.
             booking::ReservationEvent::Assigned { .. }
-            | booking::ReservationEvent::Secured { .. } => Ok(()),
+            | booking::ReservationEvent::Secured { .. }
+            | booking::ReservationEvent::Billed { .. } => Ok(()),
         }
     }
 }
 
-/// Whether this is the booking being taken, or one being moved.
+/// Records what a booking holds, and counts it as booked once per resource.
 ///
-/// The instant travels with it because **lead time is domain time to domain
+/// `at` is when the diary was told about this — the booking, or the move — and
+/// it travels with the event because **lead time is domain time to domain
 /// time**: `ctx.event_time()` is when the append committed, which for anything
 /// entered after the fact — an import, a backfill, a booking written up at the
 /// end of the day — would say a month's notice was none.
-#[derive(Debug, Clone, Copy)]
-enum Taken {
-    /// Newly booked, at this instant. Counts, and gives its notice.
-    Now(Timestamp),
-    /// Moved. The counts already happened and must not happen again.
-    Already,
-}
-
-/// Records what a booking holds, and counts it as booked if it is new.
+///
+/// **A booking is one booking however many lines it has.** Two services on
+/// one stylist are one row here with both lines' minutes and one `booked`;
+/// the alternative counted the visit twice on the way in and once on the way
+/// out, which is a utilisation figure that cannot add up.
 async fn hold(
     ctx: &ProjectionCtx<'_>,
     conn: &mut PgConnection,
     reservation: &str,
     lines: &[booking::Line],
-    taken: Taken,
+    at: Timestamp,
 ) -> Result<(), ProjectionError> {
+    // Per resource: the earliest start, and every line's minutes.
+    let mut by_resource: std::collections::BTreeMap<&str, (Timestamp, i64)> =
+        std::collections::BTreeMap::new();
     for line in lines {
-        let when = period(line.span.from());
         let minutes = (line.span.until() - line.span.from()).num_minutes();
-
         for held in &line.takes {
-            sqlx::query(
-                "INSERT INTO held (reservation, resource, period, minutes, stage)
-                 VALUES ($1,$2,$3,$4,'reserved')
-                 ON CONFLICT (reservation, resource) DO UPDATE
-                     SET period = EXCLUDED.period, minutes = EXCLUDED.minutes",
-            )
-            .bind(reservation)
-            .bind(held.resource.as_str())
-            .bind(&when)
-            .bind(minutes)
-            .execute(&mut *conn)
-            .await?;
-
-            if let Taken::Now(at) = taken {
-                // **How much notice this booking gave**, from the moment it was
-                // taken to the moment the work starts. Negative would mean a
-                // booking written down after it began — which happens, at a
-                // till, and is floored at zero rather than allowed to pull an
-                // average backwards.
-                let lead = (line.span.from() - at).num_minutes().max(0);
-                bump(
-                    ctx,
-                    conn,
-                    (&when, held.resource.as_str()),
-                    "booked",
-                    1,
-                    Minutes { took: 0, lead },
-                )
-                .await?;
-            }
+            let entry = by_resource
+                .entry(held.resource.as_str())
+                .or_insert((line.span.from(), 0));
+            entry.0 = entry.0.min(line.span.from());
+            entry.1 += minutes;
         }
+    }
+
+    for (resource, (starts, minutes)) in by_resource {
+        let when = period(ctx, starts);
+        // **How much notice this booking gave**, from the moment the diary was
+        // told to the moment the work starts. Negative would mean a booking
+        // written down after it began — which happens, at a till, and is
+        // floored at zero rather than allowed to pull an average backwards.
+        let lead = (starts - at).num_minutes().max(0);
+
+        sqlx::query(
+            "INSERT INTO held (reservation, resource, period, minutes, lead, stage)
+             VALUES ($1,$2,$3,$4,$5,'reserved')
+             ON CONFLICT (reservation, resource) DO UPDATE
+                 SET period = EXCLUDED.period, minutes = EXCLUDED.minutes,
+                     lead = EXCLUDED.lead",
+        )
+        .bind(reservation)
+        .bind(resource)
+        .bind(&when)
+        .bind(minutes)
+        .bind(lead)
+        .execute(&mut *conn)
+        .await?;
+
+        bump(
+            ctx,
+            conn,
+            (&when, resource),
+            "booked",
+            1,
+            Minutes { took: 0, lead },
+        )
+        .await?;
     }
     Ok(())
 }
 
-/// Forgets what a booking held, without touching the counts.
+/// Forgets what a booking held, and says what was still counted as booked —
+/// `(resource, period, lead)` — so the caller can take those counts back.
 ///
-/// **The counts stay.** A booking that moved from March to April was still
-/// booked in March, and un-counting it would rewrite a month somebody has
-/// already read.
-async fn release(conn: &mut PgConnection, reservation: &str) -> Result<(), ProjectionError> {
+/// A row already moved to a terminal stage is not returned: its completion or
+/// no-show was counted where it happened, and that stays.
+async fn release(
+    conn: &mut PgConnection,
+    reservation: &str,
+) -> Result<Vec<(String, String, i64)>, ProjectionError> {
+    let rows = sqlx::query_as::<_, (String, String, i64)>(
+        "DELETE FROM held WHERE reservation = $1 AND stage = 'reserved'
+         RETURNING resource, period, lead",
+    )
+    .bind(reservation)
+    .fetch_all(&mut *conn)
+    .await?;
     sqlx::query("DELETE FROM held WHERE reservation = $1")
         .bind(reservation)
         .execute(&mut *conn)
         .await?;
-    Ok(())
+    Ok(rows)
 }
 
 /// Counts a stage change against every resource the booking holds.
@@ -523,17 +641,35 @@ async fn bump(
     Ok(())
 }
 
-/// Records which entry credited a document, so the reconciliation can check it.
+/// Records what a credit note took back and which entry it posted, so the
+/// reconciliation checks the credit the way it checks the invoice.
 async fn credited(
     conn: &mut PgConnection,
     invoice: &str,
-    credit_note: &str,
+    note: &Note<'_>,
+    amounts: (Money, Money),
+    position: i64,
 ) -> Result<(), ProjectionError> {
-    sqlx::query("UPDATE invoiced SET credit_entry = $2 WHERE id = $1")
-        .bind(invoice)
-        .bind(sales::credit_entry_of(invoice, credit_note))
-        .execute(&mut *conn)
-        .await?;
+    let (net, tax) = amounts;
+    sqlx::query(
+        "INSERT INTO credited (id, invoice, net, tax, currency, entry, position)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (id) DO UPDATE
+             SET invoice = EXCLUDED.invoice, net = EXCLUDED.net, tax = EXCLUDED.tax,
+                 currency = EXCLUDED.currency, entry = EXCLUDED.entry,
+                 position = EXCLUDED.position",
+    )
+    .bind(note.number)
+    .bind(invoice)
+    .bind(net.minor())
+    .bind(tax.minor())
+    .bind(net.currency().to_string())
+    // **`sales` names its own entries**, for the reason `remember` says — and
+    // by the reference, not the number. See [`Note`].
+    .bind(sales::credit_entry_of(invoice, note.reference))
+    .bind(position)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -587,7 +723,7 @@ impl Projection for Counter {
                     add_takings(
                         ctx,
                         conn,
-                        (&period(at), &operator, tender.method),
+                        (&period(ctx, at), &operator, tender.method),
                         Took::taken(tender.amount),
                     )
                     .await?;
@@ -602,7 +738,7 @@ impl Projection for Counter {
                     add_takings(
                         ctx,
                         conn,
-                        (&period(at), &operator, tender.method),
+                        (&period(ctx, at), &operator, tender.method),
                         Took::refunded(tender.amount),
                     )
                     .await?;
@@ -618,7 +754,7 @@ impl Projection for Counter {
                 add_takings(
                     ctx,
                     conn,
-                    (&period(at), &operator, pos::Method::Cash),
+                    (&period(ctx, at), &operator, pos::Method::Cash),
                     Took::paid_out(amount),
                 )
                 .await
@@ -633,7 +769,7 @@ impl Projection for Counter {
                 add_takings(
                     ctx,
                     conn,
-                    (&period(at), &operator, pos::Method::Cash),
+                    (&period(ctx, at), &operator, pos::Method::Cash),
                     Took::closed(variance),
                 )
                 .await

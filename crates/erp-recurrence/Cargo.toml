@@ -15,6 +15,7 @@ workspace = true
 # the capacity engine. Nothing here claims anything.
 erp-occupancy = { workspace = true }
 erp-eventlog = { workspace = true }
+erp-types = { workspace = true }
 erp-i18n = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

@@ -589,6 +589,24 @@ async fn peak(conn: &mut PgConnection, resource: &str, span: Span) -> Result<i64
     .await
 }
 
+/// Deletes claims that ended before `before`.
+///
+/// A claim is the engine's answer to "does this fit"; once its span is in the
+/// past nothing can ask that about it, and what happened is in the owner's log.
+/// Kept for a while past the end rather than deleted at it, so a release for a
+/// booking that just finished still finds what it names.
+pub async fn sweep_ended_before(
+    conn: &mut PgConnection,
+    before: Timestamp,
+) -> Result<u64, OccupancyError> {
+    Ok(
+        sqlx::query!("DELETE FROM occupancy_claim WHERE ends_at < $1", before)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -46,8 +46,8 @@ use serde::Deserialize;
 
 use crate::decimal::{from_decimal, to_decimal};
 use crate::{
-    Basket, CallbackError, Charge, Charged, Gateway, GatewayError, SECRET_HEADER, Source, Status,
-    header, secrets_match,
+    Basket, Callback, CallbackError, Charge, Charged, Gateway, GatewayError, SECRET_HEADER, Source,
+    Status, clipped, header, secrets_match,
 };
 
 /// Saudi Arabia. Tabby pins the host to the region rather than the key, and
@@ -115,7 +115,13 @@ impl Tabby {
         self
     }
 
-    async fn send(&self, request: reqwest::RequestBuilder) -> Result<Charged, GatewayError> {
+    /// Sends, and reads a payment back. `about` is the payment the request
+    /// named, so a `404` can be the absence it is — see [`crate::refusal`].
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+        about: &str,
+    ) -> Result<Charged, GatewayError> {
         let response = request
             .bearer_auth(&self.secret)
             .send()
@@ -129,7 +135,7 @@ impl Tabby {
                 .map_err(|e| GatewayError::Unreadable(format!("{e}: {}", clipped(&body))))?
                 .into_charged();
         }
-        Err(refusal(status, &body))
+        Err(refusal(status, &body, Some(about)))
     }
 }
 
@@ -186,14 +192,25 @@ impl Gateway for Tabby {
                     },
                     "order": {
                         "reference_id": basket.reference,
+                        "tax_amount": to_decimal(basket.tax),
                         "items": items(basket),
                     },
-                    // Required by the schema and legitimately empty for a shop
-                    // that has not sold to this person before. Tabby's own
-                    // quick-start sends exactly this.
-                    "buyer_history": {},
+                    // **What Tabby's schema marks required, from what the
+                    // caller knows.** `registered_since` and `loyalty_level`
+                    // feed the scoring; an empty object here is a stranger.
+                    "buyer_history": {
+                        "registered_since": buyer.registered_since.to_rfc3339(),
+                        "loyalty_level": buyer.purchases,
+                    },
+                    // Legitimately empty: Tabby asks for the last few orders
+                    // and none is an honest answer for a first sale. The count
+                    // is in `loyalty_level`.
                     "order_history": [],
-                    "shipping_address": {},
+                    "shipping_address": {
+                        "address": basket.deliver_to.line,
+                        "city": basket.deliver_to.city,
+                        "zip": basket.deliver_to.postcode,
+                    },
                 },
             }))
             .bearer_auth(&self.secret)
@@ -204,7 +221,7 @@ impl Gateway for Tabby {
         let status = session.status();
         let body = session.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(refusal(status, &body));
+            return Err(refusal(status, &body, None));
         }
 
         let session: Session = serde_json::from_str(&body)
@@ -223,19 +240,26 @@ impl Gateway for Tabby {
     }
 
     async fn fetch(&self, id: &str) -> Result<Charged, GatewayError> {
-        let request = self
-            .client
-            .get(format!("{}/api/v2/payments/{id}", self.base));
-        match self.send(request).await {
-            Err(GatewayError::Refused(_)) => Err(GatewayError::NoSuchPayment(id.to_owned())),
-            other => other,
-        }
+        // **Only a `404` is an absence.** This used to read every refusal as
+        // "no such payment", which is the answer a sweep charges again on.
+        self.send(
+            self.client
+                .get(format!("{}/api/v2/payments/{id}", self.base)),
+            id,
+        )
+        .await
     }
 
-    async fn capture(&self, id: &str, amount: Option<Money>) -> Result<Charged, GatewayError> {
-        // **Both fields are required**, and `reference_id` is documented as the
-        // idempotency key — the only one Tabby has, and it exists on capture
-        // and refund and nowhere else.
+    /// **`reference_id` is the caller's reference**, which is Tabby's
+    /// idempotency key — the only one it has, and it exists on capture and
+    /// refund and nowhere else. It used to be derived from the amount, which
+    /// made two equal captures one capture replayed.
+    async fn capture(
+        &self,
+        id: &str,
+        reference: &str,
+        amount: Option<Money>,
+    ) -> Result<Charged, GatewayError> {
         let amount = amount.ok_or_else(|| {
             GatewayError::Refused(
                 "Tabby requires the amount on a capture; there is no 'all of it' form".to_owned(),
@@ -246,13 +270,20 @@ impl Gateway for Tabby {
                 .post(format!("{}/api/v2/payments/{id}/captures", self.base))
                 .json(&serde_json::json!({
                     "amount": to_decimal(amount),
-                    "reference_id": format!("cap-{id}-{}", amount.minor()),
+                    "reference_id": reference,
                 })),
+            id,
         )
         .await
     }
 
-    async fn refund(&self, id: &str, amount: Option<Money>) -> Result<Charged, GatewayError> {
+    /// The same key, for the same reason. See [`Tabby::capture`].
+    async fn refund(
+        &self,
+        id: &str,
+        reference: &str,
+        amount: Option<Money>,
+    ) -> Result<Charged, GatewayError> {
         let amount = amount.ok_or_else(|| {
             GatewayError::Refused(
                 "Tabby requires the amount on a refund; there is no 'all of it' form".to_owned(),
@@ -263,8 +294,9 @@ impl Gateway for Tabby {
                 .post(format!("{}/api/v2/payments/{id}/refunds", self.base))
                 .json(&serde_json::json!({
                     "amount": to_decimal(amount),
-                    "reference_id": format!("ref-{id}-{}", amount.minor()),
+                    "reference_id": reference,
                 })),
+            id,
         )
         .await
     }
@@ -279,6 +311,7 @@ impl Gateway for Tabby {
         self.send(
             self.client
                 .post(format!("{}/api/v2/payments/{id}/close", self.base)),
+            id,
         )
         .await
     }
@@ -298,32 +331,50 @@ pub(crate) fn authenticate(
     secret: &[u8],
     headers: &[(&str, &str)],
     body: &[u8],
-) -> Result<String, CallbackError> {
+) -> Result<Callback, CallbackError> {
     let offered = header(headers, SECRET_HEADER).unwrap_or_default();
     if !secrets_match(offered.as_bytes(), secret) {
         return Err(CallbackError::NotAuthentic);
     }
 
-    // Authenticated, and now only the id. The body's own `amount` and `status`
-    // are read by nothing.
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .as_ref()
-        .and_then(|v| v.get("id"))
+    // Authenticated, and now only the id. The body's own `amount` is read by
+    // nothing; the `status` names the delivery — Tabby's webhook is the
+    // payment object, and "authorized" and "closed" for one payment are two.
+    let body: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| CallbackError::Unreadable(format!("not JSON: {e}")))?;
+    let payment = body
+        .get("id")
         .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| CallbackError::Unreadable("no payment id in the callback".to_owned()))
+        .ok_or_else(|| CallbackError::Unreadable("no payment id in the callback".to_owned()))?;
+    let status = body
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase);
+    Ok(Callback {
+        event: match &status {
+            Some(status) => format!("{payment}.{status}"),
+            None => payment.clone(),
+        },
+        payment,
+        kind: status,
+    })
 }
 
 fn items(basket: &Basket) -> Vec<serde_json::Value> {
     basket
         .items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             serde_json::json!({
                 "title": item.title,
                 "quantity": item.quantity,
                 "unit_price": to_decimal(item.unit_price),
+                // Required on every line; it feeds the scoring.
+                "category": item.category,
+                "reference_id": format!("{}-{}", basket.reference, index + 1),
             })
         })
         .collect()
@@ -421,7 +472,14 @@ impl Payment {
         Ok(Charged {
             id: self.id,
             status,
-            amount,
+            // **Paid is the captured sum, not the authorisation.** A payment
+            // closed after capturing 60 of 100 is a receipt for 60; the
+            // authorised amount is the figure while the hold is still open.
+            amount: if matches!(status, Status::Paid | Status::Refunded) {
+                captured
+            } else {
+                amount
+            },
             refunded,
             // Tabby reports its cut on the settlement report rather than on the
             // payment. Claiming a zero here would post a fee that is not one.
@@ -436,7 +494,9 @@ fn read(value: &str, currency: CurrencyCode) -> Result<Money, GatewayError> {
     from_decimal(value, currency).map_err(|e| GatewayError::Unreadable(e.to_string()))
 }
 
-fn refusal(status: reqwest::StatusCode, body: &str) -> GatewayError {
+/// Tabby's refusal, in its own words where it gave any. What the status means
+/// is decided once for every provider — see [`crate::refusal`].
+fn refusal(status: reqwest::StatusCode, body: &str, about: Option<&str>) -> GatewayError {
     let said = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| {
@@ -446,26 +506,14 @@ fn refusal(status: reqwest::StatusCode, body: &str) -> GatewayError {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| clipped(body));
-
-    match status {
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-            GatewayError::Unauthenticated
-        }
-        reqwest::StatusCode::TOO_MANY_REQUESTS => GatewayError::Unreachable(said),
-        _ if status.is_server_error() => GatewayError::Unreachable(format!("{status}: {said}")),
-        _ => GatewayError::Refused(said),
-    }
-}
-
-fn clipped(body: &str) -> String {
-    body.chars().take(500).collect()
+    crate::refusal(status, said, about)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fake::OneRequest;
-    use crate::{Buyer, Item, Returns};
+    use crate::{Address, Buyer, Item, Returns};
 
     fn sar(minor: i64) -> Money {
         Money::from_minor(minor, "SAR".parse().expect("a currency"))
@@ -479,6 +527,7 @@ mod tests {
                 success: "https://bassat.erp.com/paid".to_owned(),
                 cancel: "https://bassat.erp.com/cancelled".to_owned(),
                 failure: "https://bassat.erp.com/declined".to_owned(),
+                notification: None,
             },
             source: Source::Hosted,
             description: "Invoice INV-1".to_owned(),
@@ -486,11 +535,21 @@ mod tests {
                 name: "Sara Al-Otaibi".to_owned(),
                 email: "sara@example.com".to_owned(),
                 phone: "+966500000001".to_owned(),
+                registered_since: "2024-01-01T00:00:00Z".parse().expect("an instant"),
+                purchases: 3,
             }),
             basket: Some(Basket {
                 reference: "INV-1".to_owned(),
+                deliver_to: Address {
+                    line: "King Fahd Road 12".to_owned(),
+                    city: "Riyadh".to_owned(),
+                    postcode: "12211".to_owned(),
+                    country: "SA".to_owned(),
+                },
+                tax: sar(4_435),
                 items: vec![Item {
                     title: "Deep tissue massage".to_owned(),
+                    category: "Services".to_owned(),
                     quantity: 1,
                     unit_price: sar(34_000),
                 }],
@@ -598,6 +657,20 @@ mod tests {
         assert!(sent.contains(r#""unit_price":"340.00""#), "{sent}");
         assert!(sent.contains(r#""merchant_code":"bassat""#), "{sent}");
         assert!(sent.contains(r#""phone":"+966500000001""#), "{sent}");
+        // **What the schema marks required is filled, not sent empty.**
+        assert!(
+            sent.contains(r#""buyer_history":{"loyalty_level":3,"registered_since":"2024-01-01T00:00:00+00:00"}"#),
+            "{sent}"
+        );
+        assert!(
+            sent.contains(r#""shipping_address":{"address":"King Fahd Road 12","city":"Riyadh","zip":"12211"}"#),
+            "{sent}"
+        );
+        assert!(sent.contains(r#""category":"Services""#), "{sent}");
+        assert!(sent.contains(r#""reference_id":"INV-1-1""#), "{sent}");
+        assert!(sent.contains(r#""tax_amount":"44.35""#), "{sent}");
+        assert!(!sent.contains(r#""buyer_history":{}"#), "{sent}");
+        assert!(!sent.contains(r#""shipping_address":{}"#), "{sent}");
     }
 
     /// **`CLOSED` is three endings**, and only one of them is money.
@@ -639,10 +712,38 @@ mod tests {
         assert_eq!(partly.refunded, sar(4_000));
 
         // A partial capture leaves it authorized, which is Tabby's own trap.
+        let held = read("AUTHORIZED", r#"[{"amount":"40.00"}]"#, "[]");
+        assert_eq!(held.status, Status::Authorized);
         assert_eq!(
-            read("AUTHORIZED", r#"[{"amount":"40.00"}]"#, "[]").status,
-            Status::Authorized
+            held.amount,
+            sar(34_000),
+            "nothing settled: the hold is the figure"
         );
+
+        // **Closed after a partial capture is paid for what was captured.**
+        // A receipt for the authorised 340 would be a receipt for money that
+        // never moved.
+        let part_paid = read("CLOSED", r#"[{"amount":"200.00"}]"#, "[]");
+        assert_eq!(part_paid.status, Status::Paid);
+        assert_eq!(part_paid.amount, sar(20_000));
+    }
+
+    /// **Only a `404` is an absence.** A `400` for an id Tabby cannot parse is
+    /// a refusal of this request, and reading it as "no such payment" is what
+    /// a sweep charges again on.
+    #[tokio::test]
+    async fn a_fetch_is_no_such_payment_only_on_a_404() {
+        let missing = OneRequest::answering(404, r#"{"error":"not found"}"#).await;
+        assert!(matches!(
+            built().at(&missing.url()).fetch("pay_x").await,
+            Err(GatewayError::NoSuchPayment(id)) if id == "pay_x"
+        ));
+
+        let refused = OneRequest::answering(400, r#"{"error":"invalid id"}"#).await;
+        assert!(matches!(
+            built().at(&refused.url()).fetch("pay_x").await,
+            Err(GatewayError::Refused(why)) if why == "invalid id"
+        ));
     }
 
     /// A webhook says `closed`; the API says `CLOSED`. Tabby's inconsistency,
@@ -675,13 +776,17 @@ mod tests {
     fn a_callback_is_believed_only_with_the_header_this_system_registered() {
         let body = br#"{"id":"pay_1","status":"closed","amount":"340.00"}"#;
 
-        assert_eq!(
-            authenticate(b"shhh", &[(SECRET_HEADER, "shhh")], body).expect("authentic"),
-            "pay_1"
-        );
+        let read = authenticate(b"shhh", &[(SECRET_HEADER, "shhh")], body).expect("authentic");
+        assert_eq!(read.payment, "pay_1");
+        // The delivery is the payment and what was said about it: the
+        // `authorized` and the `closed` webhooks for one payment are two.
+        assert_eq!(read.event, "pay_1.closed");
+        assert_eq!(read.kind.as_deref(), Some("closed"));
         // Capitalised differently by whatever proxy it came through.
         assert_eq!(
-            authenticate(b"shhh", &[("X-Erp-Webhook-Secret", "shhh")], body).expect("authentic"),
+            authenticate(b"shhh", &[("X-Erp-Webhook-Secret", "shhh")], body)
+                .expect("authentic")
+                .payment,
             "pay_1"
         );
 
@@ -701,13 +806,40 @@ mod tests {
     async fn a_capture_without_an_amount_is_refused_rather_than_guessed() {
         let tabby = built().at("http://127.0.0.1:1");
         assert!(matches!(
-            tabby.capture("pay_1", None).await,
+            tabby.capture("pay_1", "cap-1", None).await,
             Err(GatewayError::Refused(_))
         ));
         assert!(matches!(
-            tabby.refund("pay_1", None).await,
+            tabby.refund("pay_1", "ref-1", None).await,
             Err(GatewayError::Refused(_))
         ));
+    }
+
+    /// **The key is the caller's reference**, so two refunds of the same
+    /// amount on different days are two refunds and not one replayed.
+    #[tokio::test]
+    async fn a_refund_is_keyed_on_the_reference_and_not_on_the_amount() {
+        let server = OneRequest::answering(
+            200,
+            r#"{"id":"pay_1","status":"CLOSED","amount":"340.00","currency":"SAR",
+                "captures":[{"amount":"340.00"}],"refunds":[{"amount":"40.00"}]}"#,
+        )
+        .await;
+        built()
+            .at(&server.url())
+            .refund("pay_1", "pay_1.refund-2", Some(sar(4_000)))
+            .await
+            .expect("refunds");
+        let sent = server.seen().await;
+        assert!(
+            sent.starts_with("POST /api/v2/payments/pay_1/refunds "),
+            "{sent}"
+        );
+        assert!(
+            sent.contains(r#""reference_id":"pay_1.refund-2""#),
+            "{sent}"
+        );
+        assert!(!sent.contains("ref-pay_1-4000"), "{sent}");
     }
 
     #[tokio::test]
@@ -721,7 +853,7 @@ mod tests {
 
         let charged = built()
             .at(&server.url())
-            .capture("pay_1", Some(sar(34_000)))
+            .capture("pay_1", "pay_1.capture-1", Some(sar(34_000)))
             .await
             .expect("captures");
         assert_eq!(charged.status, Status::Paid);
@@ -732,6 +864,9 @@ mod tests {
             "{sent}"
         );
         assert!(sent.contains(r#""amount":"340.00""#), "{sent}");
-        assert!(sent.contains(r#""reference_id""#), "{sent}");
+        assert!(
+            sent.contains(r#""reference_id":"pay_1.capture-1""#),
+            "{sent}"
+        );
     }
 }

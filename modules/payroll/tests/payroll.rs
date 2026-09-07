@@ -265,9 +265,14 @@ async fn a_payroll_run_posts_and_the_books_balance() {
         "drafting posted to the ledger"
     );
 
-    approve_run(&fixture.db, &code("PAY-2026-05"), &Metadata::default())
-        .await
-        .expect("approves");
+    approve_run(
+        &fixture.db,
+        &code("PAY-2026-05"),
+        on("2026-06-30"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("approves");
 
     fixture.project().await;
 
@@ -333,9 +338,14 @@ async fn the_entry_lands_in_the_month_the_run_is_for() {
     )
     .await
     .expect("drafts");
-    approve_run(&fixture.db, &code("PAY-2026-02"), &Metadata::default())
-        .await
-        .expect("approves");
+    approve_run(
+        &fixture.db,
+        &code("PAY-2026-02"),
+        on("2026-06-30"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("approves");
 
     fixture.project().await;
 
@@ -349,8 +359,10 @@ async fn the_entry_lands_in_the_month_the_run_is_for() {
     .expect("the entry is there");
     drop(conn);
 
+    // Local midnight on the last day of the month, which is the evening before
+    // in UTC; the day is the tenant's day.
     assert_eq!(
-        entry.0.date_naive(),
+        erp_types::Calendar::RIYADH.day(entry.0),
         chrono::NaiveDate::from_ymd_opt(2026, 2, 28).expect("a real date"),
         "the entry landed in the month it was approved rather than the month it is for"
     );
@@ -407,9 +419,14 @@ async fn redrafting_replaces_the_previous_draft() {
     .await
     .expect("redrafts");
 
-    approve_run(&fixture.db, &code("PAY-1"), &Metadata::default())
-        .await
-        .expect("approves");
+    approve_run(
+        &fixture.db,
+        &code("PAY-1"),
+        on("2026-06-30"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("approves");
     fixture.project().await;
 
     assert_eq!(
@@ -445,9 +462,14 @@ async fn an_approved_run_cannot_be_changed() {
     )
     .await
     .expect("drafts");
-    approve_run(&fixture.db, &code("PAY-1"), &Metadata::default())
-        .await
-        .expect("approves");
+    approve_run(
+        &fixture.db,
+        &code("PAY-1"),
+        on("2026-06-30"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("approves");
 
     let error = draft_run(
         &fixture.db,
@@ -499,9 +521,14 @@ async fn a_retried_approval_posts_once() {
     .expect("drafts");
 
     for _ in 0..3 {
-        approve_run(&fixture.db, &code("PAY-1"), &Metadata::default())
-            .await
-            .expect("a retry is not an error");
+        approve_run(
+            &fixture.db,
+            &code("PAY-1"),
+            on("2026-06-30"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("a retry is not an error");
     }
 
     fixture.project().await;
@@ -650,9 +677,14 @@ async fn commission_is_computed_from_the_rate_on_the_record() {
     )
     .await
     .expect("drafts");
-    approve_run(&fixture.db, &code("PAY-1"), &Metadata::default())
-        .await
-        .expect("approves");
+    approve_run(
+        &fixture.db,
+        &code("PAY-1"),
+        on("2026-06-30"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("approves");
     fixture.project().await;
 
     let mut conn = fixture.db.acquire().await.expect("connection");

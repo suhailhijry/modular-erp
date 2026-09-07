@@ -14,7 +14,7 @@
 //! gapless number: the log is the record, the table is the working state.
 
 use erp_eventlog::{Aggregate, DomainEvent};
-use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Timestamp};
+use erp_types::{AggregateId, DomainName, EventName, Money, SchemaVersion, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use erp_recurrence::Availability;
@@ -78,6 +78,14 @@ pub enum ResourceEvent {
         name_latin: Option<String>,
         kind: Kind,
         capacity: u16,
+        /// **What booking this costs, before tax**, when the business publishes
+        /// a price for it. A stranger cannot send a price, so this is what a
+        /// public booking is priced at — and so what a deposit is a fraction
+        /// of. `None` is a business that bills elsewhere, or a resource nobody
+        /// books on its own; every resource declared before this existed
+        /// decodes as unpriced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rate: Option<Money>,
         /// **Where it is. Set once, like `kind`.**
         ///
         /// A chair does not move between branches — and if the physical one
@@ -111,6 +119,11 @@ pub enum ResourceEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name_latin: Option<String>,
         capacity: u16,
+        /// See [`Self::Declared`]. Absent on amendments written before it
+        /// existed, which is read as "unpriced" rather than "unchanged": a
+        /// price is part of what an amendment says, the way the name is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rate: Option<Money>,
         at: Timestamp,
     },
     /// The whole timetable, replaced.
@@ -177,6 +190,8 @@ pub struct Resource {
     /// What it is set to when it is in service. **Not** what the engine holds
     /// while it is withdrawn, which is zero — see [`Self::effective_capacity`].
     pub capacity: u16,
+    /// The published price, before tax. See [`ResourceEvent::Declared`].
+    pub rate: Option<Money>,
     pub availability: Vec<Availability>,
     pub withdrawn: bool,
 }
@@ -195,6 +210,7 @@ impl Aggregate for Resource {
                 name_latin,
                 kind,
                 capacity,
+                rate,
                 branch,
                 employee,
                 ..
@@ -204,6 +220,7 @@ impl Aggregate for Resource {
                 self.name_latin.clone_from(name_latin);
                 self.kind = Some(*kind);
                 self.capacity = *capacity;
+                self.rate = *rate;
                 self.branch.clone_from(branch);
                 self.employee.clone_from(employee);
             }
@@ -211,11 +228,13 @@ impl Aggregate for Resource {
                 name,
                 name_latin,
                 capacity,
+                rate,
                 ..
             } => {
                 self.name.clone_from(name);
                 self.name_latin.clone_from(name_latin);
                 self.capacity = *capacity;
+                self.rate = *rate;
             }
             ResourceEvent::Scheduled { availability, .. } => {
                 self.availability.clone_from(availability);

@@ -133,6 +133,7 @@ impl Projection for ZatcaDocuments {
                 discounts,
                 totals,
                 prepayment,
+                prepaid,
                 ..
             } => {
                 // An invoice from before this system numbered anything cannot be
@@ -148,6 +149,7 @@ impl Projection for ZatcaDocuments {
                     address: customer.address.clone(),
                 };
                 let built = Built {
+                    calendar: ctx.calendar(),
                     kind: Kind::of(customer.vat_number.as_ref()),
                     // **386, not 388, when it bills for money taken up front.**
                     // The authority reports the two differently because the tax
@@ -167,6 +169,10 @@ impl Projection for ZatcaDocuments {
                     allowances: discounts.iter().map(allowance).collect(),
                     totals: totals_of(&totals),
                     reference: None,
+                    // **The final invoice after a deposit** names the
+                    // prepayment invoice and what it declared; the totals
+                    // above are what is left. See `zatca::PrepaidRef`.
+                    prepaid: prepaid.as_ref().map(prepaid_ref),
                     note: String::new(),
                 };
                 write(conn, ctx.event_time(), &built).await
@@ -190,6 +196,7 @@ impl Projection for ZatcaDocuments {
                 };
 
                 let built = Built {
+                    calendar: ctx.calendar(),
                     kind: invoice.kind,
                     type_code: TypeCode::CreditNote,
                     number: credit_note,
@@ -206,6 +213,9 @@ impl Projection for ZatcaDocuments {
                         number: invoice.number.clone(),
                         issued_at: invoice.issued_at,
                     }),
+                    // A credit note reverses what the invoice charged, which
+                    // already left the prepayment out.
+                    prepaid: None,
                     note: reason,
                 };
                 write(conn, ctx.event_time(), &built).await
@@ -246,12 +256,15 @@ struct Built {
     number: String,
     source: String,
     issued_at: Timestamp,
+    /// The clock the source event was written under — see `Document::calendar`.
+    calendar: erp_types::Calendar,
     currency: CurrencyCode,
     buyer: Option<Buyer>,
     lines: Vec<Line>,
     allowances: Vec<crate::zatca::Allowance>,
     totals: Totals,
     reference: Option<Reference>,
+    prepaid: Option<crate::zatca::PrepaidRef>,
     note: String,
 }
 
@@ -275,6 +288,7 @@ async fn write(
         number: built.number.clone(),
         uuid: document_uuid(&seller.vat_number, &built.number),
         issued_at: built.issued_at,
+        calendar: built.calendar,
         currency: built.currency,
         seller,
         buyer: built.buyer.clone(),
@@ -283,6 +297,7 @@ async fn write(
         totals: built.totals.clone(),
         link,
         reference: built.reference.clone(),
+        prepaid: built.prepaid.clone(),
         note: built.note.clone(),
     };
 
@@ -299,7 +314,9 @@ async fn write(
         seller: &document.seller.name,
         vat_number: &document.seller.vat_number,
         issued_at: &document.issued_at.format(QR_TIME).to_string(),
-        total: &crate::zatca::amount(document.totals.gross),
+        // The whole supply on the QR, the way the document's own totals show
+        // it; what is still owed is the payable amount, not the invoice total.
+        total: &crate::zatca::amount(document.supply_gross()),
         tax: &crate::zatca::amount(document.totals.tax),
         // Phase two, and only with a certificate: the hash is known here, and a
         // QR carrying a hash but no signature is a QR that fails validation for
@@ -451,6 +468,7 @@ async fn credit_part(
     };
 
     let built = Built {
+        calendar: ctx.calendar(),
         kind: invoice.kind,
         type_code: TypeCode::CreditNote,
         number: credit_note.clone(),
@@ -472,6 +490,9 @@ async fn credit_part(
             number: invoice.number.clone(),
             issued_at: invoice.issued_at,
         }),
+        // Credits what the invoice charged, which already left any
+        // prepayment out.
+        prepaid: None,
         note: reason.clone(),
     };
     write(conn, ctx.event_time(), &built).await
@@ -502,6 +523,26 @@ async fn invoice_of(
             })
         })
         .transpose()
+}
+
+/// **The final invoice after a deposit** names the prepayment invoice and what
+/// it declared; the document's own totals are what is left. See
+/// `zatca::PrepaidRef`.
+fn prepaid_ref(prepaid: &sales::Prepaid) -> crate::zatca::PrepaidRef {
+    crate::zatca::PrepaidRef {
+        number: prepaid.number.clone(),
+        issued_at: prepaid.issued_on,
+        bands: prepaid
+            .bands
+            .iter()
+            .map(|band| Band {
+                category: band.category,
+                rate_bp: band.basis_points,
+                net: band.net,
+                tax: band.tax,
+            })
+            .collect(),
+    }
 }
 
 fn line(line: &InvoiceLine) -> Line {

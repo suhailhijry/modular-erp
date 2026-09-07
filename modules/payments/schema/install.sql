@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS payment (
     -- because a saved-card charge that raises a 3-D Secure challenge has to
     -- name somewhere for the customer to land.
     callback_url  TEXT,
+    -- **Everything a provider that hosts its own checkout is told**, frozen
+    -- when the charge was asked for — see `checkout.rs`. Kept here because the
+    -- worker opens the checkout on its next pass and may not load an
+    -- aggregate to learn what to say (L7). Null for a card, and for a charge
+    -- the customer's browser creates itself.
+    checkout      JSONB,
+    -- **Where the customer goes to pay**, once the gateway has said: the
+    -- checkout the worker opened, or the 3-D Secure page a card charge raised.
+    -- What the public read answers while a customer waits.
+    pay_at        TEXT,
 
     -- What the gateway kept. Null until it says, which for most providers is
     -- not until the payout.
@@ -170,3 +180,31 @@ CREATE TABLE IF NOT EXISTS card (
 -- "Which cards may I offer this customer" — the only question the list answers.
 CREATE INDEX IF NOT EXISTS card_by_customer
     ON card (customer, saved_at DESC) WHERE NOT forgotten;
+
+-- Refunds somebody asked for, and what the gateway said.
+--
+-- **Its own table because a refund is now two facts, not one.** The request is
+-- recorded here when it is made; the worker carries it to the gateway; and the
+-- outcome — refunded, or refused with the gateway's reason — lands on the same
+-- row. `payment.refunded_minor` still says how much has actually gone back;
+-- this says what is in flight and what was turned down, which is what a screen
+-- explaining "where is my refund" needs.
+CREATE TABLE IF NOT EXISTS refund_request (
+    payment_id    TEXT NOT NULL REFERENCES payment (id) ON DELETE CASCADE,
+    -- The caller's reference, which is also the credit note's key.
+    reference     TEXT NOT NULL,
+    amount_minor  BIGINT NOT NULL,
+    currency      TEXT NOT NULL CHECK (length(currency) = 3),
+    reason        TEXT NOT NULL,
+    requested_at  TIMESTAMPTZ NOT NULL,
+    -- NULL while the gateway has not answered.
+    outcome       TEXT CHECK (outcome IN ('refunded', 'refused')),
+    outcome_why   TEXT,
+    outcome_at    TIMESTAMPTZ,
+    position      BIGINT NOT NULL,
+    PRIMARY KEY (payment_id, reference)
+);
+
+-- What the refund pass works from: everything the gateway has not answered.
+CREATE INDEX IF NOT EXISTS refund_request_awaiting
+    ON refund_request (requested_at) WHERE outcome IS NULL;

@@ -241,6 +241,32 @@ fn gross() -> Money {
     money(1_725)
 }
 
+/// Two lines: the coffee, and a cake at 2 000 net. 4 025 gross.
+fn coffee_and_cake(tenders: Vec<Tender>) -> Basket {
+    let mut basket = coffee(tenders);
+    basket.lines.push(sales::DraftLine {
+        allowances: Vec::new(),
+        description: "كيك".to_owned(),
+        net: money(2_000),
+        category: ledger::VatCategory::Standard,
+    });
+    basket
+}
+
+/// Hands back the cake and nothing else: 2 000 net, 2 300 gross.
+fn cake_back(tendered: i64) -> pos::Return {
+    pos::Return {
+        reference: "RET-1".to_owned(),
+        tenders: vec![Tender::new(Method::Cash, money(tendered))],
+        lines: vec![sales::CreditLine {
+            against: 1,
+            net: money(2_000),
+        }],
+        why: "أعاد الكيك".to_owned(),
+        at: on("2026-04-01"),
+    }
+}
+
 async fn opened(fixture: &Fixture, id: &str, float: i64) {
     open_shift(
         &fixture.db,
@@ -713,6 +739,7 @@ async fn a_return_hands_the_money_back_and_credits_the_sale() {
         &pos::Return {
             reference: "RET-1".to_owned(),
             tenders: vec![Tender::new(Method::Cash, gross())],
+            lines: Vec::new(),
             why: "أعاد المنتج".to_owned(),
             at: on("2026-04-01"),
         },
@@ -774,6 +801,7 @@ async fn a_retried_return_is_harmless() {
             &pos::Return {
                 reference: "RET-1".to_owned(),
                 tenders: vec![Tender::new(Method::Cash, gross())],
+                lines: Vec::new(),
                 why: "أعاد".to_owned(),
                 at: on("2026-04-01"),
             },
@@ -805,6 +833,166 @@ async fn a_retried_return_is_harmless() {
         .find(|t| t.method == "cash")
         .expect("cash was taken");
     assert_eq!(cash.refunded, gross(), "the takings counted it three times");
+
+    fixture.cleanup().await;
+}
+
+/// **One item of two comes back, and only that item is credited.** The first
+/// version could only cancel the whole sale, and a partial return either rolled
+/// everything back or was refused with an error about payments.
+#[tokio::test]
+async fn a_return_of_one_line_credits_that_line_and_leaves_the_rest() {
+    let fixture = Fixture::new().await;
+    opened(&fixture, "SHIFT-1", 0).await;
+    sell(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-1"),
+        &coffee_and_cake(vec![Tender::new(Method::Cash, money(4_025))]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the sale rings");
+
+    take_back(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-1"),
+        &cake_back(2_300),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the cake comes back");
+    fixture.project().await;
+
+    let shift = fixture.shift("SHIFT-1").await.expect("there");
+    assert_eq!(
+        shift.expected,
+        money(1_725),
+        "the coffee's cash stays in the drawer"
+    );
+    assert_eq!(fixture.balance("1000").await, money(1_725), "cash on hand");
+    assert_eq!(
+        fixture.balance("4000").await,
+        money(-1_500),
+        "the coffee's revenue stands"
+    );
+    assert_eq!(fixture.balance("2100").await, money(-225), "and its VAT");
+    assert_eq!(
+        fixture.balance("1100").await,
+        money(0),
+        "the receivable is square"
+    );
+    let takings = fixture.takings("SHIFT-1").await;
+    let cash = takings.iter().find(|t| t.method == "cash").expect("cash");
+    assert_eq!(cash.taken, money(4_025));
+    assert_eq!(cash.refunded, money(2_300));
+
+    fixture.cleanup().await;
+}
+
+/// **The tenders must come to what the lines credit.** Handing back more leaves
+/// a receivable; handing back less leaves the customer owed money the till has
+/// no record of. Either is refused whole, and the sale is untouched.
+#[tokio::test]
+async fn a_partial_return_whose_tenders_do_not_match_its_lines_is_refused() {
+    let fixture = Fixture::new().await;
+    opened(&fixture, "SHIFT-1", 0).await;
+    sell(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-1"),
+        &coffee_and_cake(vec![Tender::new(Method::Cash, money(4_025))]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the sale rings");
+
+    let refused = take_back(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-1"),
+        &cake_back(2_000),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("2 000 is the cake's net, not its gross");
+    assert!(
+        matches!(
+            rejection(&refused),
+            Some(PosError::TendersDoNotMatch { .. })
+        ),
+        "{refused:?}"
+    );
+    fixture.project().await;
+
+    let shift = fixture.shift("SHIFT-1").await.expect("there");
+    assert_eq!(shift.expected, money(4_025), "nothing left the drawer");
+    assert_eq!(
+        fixture.balance("4000").await,
+        money(-3_500),
+        "nothing was credited"
+    );
+    assert_eq!(
+        fixture.balance("1000").await,
+        money(4_025),
+        "nothing was refunded"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A closed till refuses a return**, the way it refuses a sale and a pay-out.
+/// A refund after the count would change what the drawer should hold after the
+/// variance has been posted, and the variance is never revisited.
+#[tokio::test]
+async fn a_closed_till_refuses_a_return() {
+    let fixture = Fixture::new().await;
+    opened(&fixture, "SHIFT-1", 0).await;
+    sell(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-1"),
+        &coffee(vec![Tender::new(Method::Cash, gross())]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the sale rings");
+    close_shift(
+        &fixture.db,
+        &code("SHIFT-1"),
+        gross(),
+        on("2026-04-02"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("closes level");
+
+    let refused = take_back(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-1"),
+        &pos::Return {
+            reference: "RET-1".to_owned(),
+            tenders: vec![Tender::new(Method::Cash, gross())],
+            lines: Vec::new(),
+            why: "أعاد المنتج".to_owned(),
+            at: on("2026-04-02"),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("the till is shut");
+    assert!(
+        matches!(rejection(&refused), Some(PosError::Closed(_))),
+        "{refused:?}"
+    );
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("4000").await,
+        money(-1_500),
+        "the sale was not credited behind a closed till"
+    );
 
     fixture.cleanup().await;
 }

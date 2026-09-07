@@ -16,11 +16,13 @@
 //!   from here on, clearance and reporting authenticate with the production CSID
 //! ```
 //!
-//! **Steps 2 and 4 are separate calls here, and separate on purpose.** Step 3
-//! sits between them, needs every sample document signed with the compliance
-//! certificate, and is the piece this build cannot finish — see
-//! [`ComplianceChecks`]. Hiding both certificate requests inside one function
-//! would hide that.
+//! **Step 2 is the route's and steps 3 and 4 are the worker's.** The OTP is the
+//! taxpayer's proof of who they are for about an hour, and the one call that
+//! needs it is answered while they wait. Everything after needs only the
+//! compliance certificate sealed here, so [`finish`](super::finish) runs it from
+//! the worker, retrying what ZATCA did not answer and recording what it
+//! refused. [`Onboarder`] still exposes every step on its own, because the
+//! manual path and the tests drive them one at a time.
 //!
 //! # What is stored, and where
 //!
@@ -51,7 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use base64::Engine as _;
 
-use super::csr::{Environment, Generated, Unit};
+use super::csr::{Environment, Generated, Issues, Unit};
 use super::wire::Unanswered;
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
@@ -373,6 +375,10 @@ pub enum OnboardError {
     /// one to ask with.
     #[error("this tenant has no {0} certificate yet")]
     NotYet(&'static str),
+    /// The samples are issued by the business being onboarded, and there is
+    /// no business registered to issue them as.
+    #[error("this tenant has no ZATCA registration to sign the compliance samples as")]
+    NotRegistered,
     #[error(transparent)]
     Secret(#[from] erp_eventlog::SecretError),
     #[error(transparent)]
@@ -469,7 +475,7 @@ impl<'a> Onboarder<'a> {
     pub async fn pass_compliance_checks(
         &self,
         registration: &crate::taxpayer::Registration,
-        unit: &Unit,
+        issues: Issues,
         environment: Environment,
         at: Timestamp,
     ) -> Result<ComplianceChecks, OnboardError> {
@@ -490,7 +496,7 @@ impl<'a> Onboarder<'a> {
             failures: Vec::new(),
         };
 
-        for (number, submission) in compliance_submissions(registration, unit, &signer, at)? {
+        for (number, submission) in compliance_submissions(registration, issues, &signer, at)? {
             let verdict = self
                 .registrar
                 .check_compliance(environment, &compliance, &submission)
@@ -652,6 +658,9 @@ pub async fn accept_certificate(
         .ok_or(OnboardError::NotYet("key"))?;
     let issued = accept(csid, &key, stage, environment)?;
 
+    if stage == Stage::Compliance {
+        forget_another_environments_production(db, environment).await?;
+    }
     store(db, sealing, stage, csid).await?;
     record(db, &issued, at, metadata).await?;
     Ok(issued)
@@ -665,7 +674,7 @@ pub async fn accept_certificate(
 /// is the code that has to be right.
 pub fn compliance_submissions(
     registration: &crate::taxpayer::Registration,
-    unit: &Unit,
+    issues: Issues,
     signer: &super::signing::Signer,
     at: Timestamp,
 ) -> Result<Vec<(String, super::wire::Submission)>, OnboardError> {
@@ -675,7 +684,7 @@ pub fn compliance_submissions(
     // rendered.
     let mut previous: Option<(i64, String)> = None;
 
-    for mut document in super::samples::compliance_documents(registration, unit, at) {
+    for mut document in super::samples::compliance_documents(registration, issues, at) {
         document.link = match &previous {
             Some((icv, hash)) => super::Link::after(*icv, hash),
             None => super::Link::first(),
@@ -820,6 +829,32 @@ async fn store(
         .map_err(|e| OnboardError::Certificate(format!("storing credentials: {e}")))?;
     let mut conn = db.acquire().await?;
     erp_eventlog::secrets::put(&mut conn, sealing, stage.secret_key(), &encoded).await?;
+    drop(conn);
+    Ok(())
+}
+
+/// A compliance certificate for another environment makes the production
+/// credentials on file somebody else's: simulation's certificate cannot clear
+/// a real invoice, and the submit sweep would try. So they go before the new
+/// certificate is stored, and the tenant is at compliance until it earns
+/// production again. Read from the projection (L7), which describes the
+/// certificates this one is replacing.
+async fn forget_another_environments_production(
+    db: &TenantDb,
+    environment: Environment,
+) -> Result<(), OnboardError> {
+    let mut conn = db.read().await?;
+    let onboarded = crate::onboarding(&mut conn).await?;
+    drop(conn);
+    let Some(onboarded) = onboarded else {
+        return Ok(());
+    };
+    if onboarded.environment == environment.as_str() {
+        return Ok(());
+    }
+
+    let mut conn = db.acquire().await?;
+    erp_eventlog::secrets::forget(&mut conn, PRODUCTION_SECRET).await?;
     drop(conn);
     Ok(())
 }

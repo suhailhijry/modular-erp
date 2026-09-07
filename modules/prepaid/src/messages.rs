@@ -8,6 +8,7 @@ pub const NOT_LIVE: MessageCode = MessageCode::new("prepaid.not_live");
 pub const LAPSED: MessageCode = MessageCode::new("prepaid.lapsed");
 pub const NOTHING_LEFT: MessageCode = MessageCode::new("prepaid.nothing_left");
 pub const NOT_A_VALUE: MessageCode = MessageCode::new("prepaid.not_a_value");
+pub const NO_USES: MessageCode = MessageCode::new("prepaid.no_uses");
 pub const FREE_GRANT_WITH_VALUE: MessageCode = MessageCode::new("prepaid.free_grant_with_value");
 pub const OPEN_VALUE: MessageCode = MessageCode::new("prepaid.open_value");
 pub const NO_SUCH_SUBSCRIPTION: MessageCode = MessageCode::new("prepaid.no_such_subscription");
@@ -30,6 +31,7 @@ pub static CODES: &[MessageCode] = &[
     LAPSED,
     NOTHING_LEFT,
     NOT_A_VALUE,
+    NO_USES,
     FREE_GRANT_WITH_VALUE,
     OPEN_VALUE,
     NO_SUCH_SUBSCRIPTION,
@@ -143,6 +145,16 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_A_VALUE,
         Locale::English,
         Template::Simple("An amount here must be more than nothing."),
+    ),
+    (
+        NO_USES,
+        Locale::English,
+        Template::Simple("A package needs at least one use, or nobody could ever redeem it."),
+    ),
+    (
+        NO_USES,
+        Locale::Arabic,
+        Template::Simple("تحتاج الباقة إلى استخدام واحد على الأقل، وإلا فلن يستطيع أحد استردادها."),
     ),
     (
         NOT_A_VALUE,

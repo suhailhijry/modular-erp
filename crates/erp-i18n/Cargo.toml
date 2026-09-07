@@ -17,6 +17,7 @@ tracing = { workspace = true }
 # mirror of this enum in `erp-api` — is a second declaration that can disagree
 # with the first, which is the drift the generated document exists to prevent.
 utoipa = { workspace = true }
+unicode-bidi = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

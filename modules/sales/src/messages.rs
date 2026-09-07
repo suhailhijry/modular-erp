@@ -23,10 +23,12 @@ pub const CREDIT_WITHOUT_A_BAND: MessageCode = MessageCode::new("sales.credit_wi
 pub const CREDIT_TOO_LARGE: MessageCode = MessageCode::new("sales.credit_too_large");
 pub const ALREADY_CREDITED: MessageCode = MessageCode::new("sales.already_credited");
 pub const NOTHING_TO_CREDIT: MessageCode = MessageCode::new("sales.nothing_to_credit");
+pub const PREPAID_DOES_NOT_FIT: MessageCode = MessageCode::new("sales.prepaid_does_not_fit");
 
 pub const NO_SUCH_LINE: MessageCode = MessageCode::new("sales.no_such_line");
 
 pub static CODES: &[MessageCode] = &[
+    PREPAID_DOES_NOT_FIT,
     NO_SUCH_LINE,
     CREDIT_WITHOUT_A_BAND,
     CREDIT_TOO_LARGE,
@@ -50,6 +52,16 @@ pub static CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        PREPAID_DOES_NOT_FIT,
+        Locale::English,
+        Template::Simple("The prepayment cannot be deducted from this invoice: {why}"),
+    ),
+    (
+        PREPAID_DOES_NOT_FIT,
+        Locale::Arabic,
+        Template::Simple("لا يمكن خصم الدفعة المقدمة من هذه الفاتورة: {why}"),
+    ),
     (
         OVERREFUND,
         Locale::English,

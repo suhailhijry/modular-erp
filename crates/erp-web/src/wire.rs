@@ -6,9 +6,11 @@
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, FromRequestParts, Request};
+use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use erp_eventlog::Metadata;
+use erp_i18n::Localize as _;
 use erp_i18n::{Locale, Message, MessageArg, MessageCode};
 use erp_types::{AggregateId, CurrencyCode, ModuleId, Money};
 use serde::Deserialize;
@@ -68,6 +70,50 @@ impl<T: serde::Serialize> IntoResponse for Json<T> {
     fn into_response(self) -> Response {
         axum::Json(self.0).into_response()
     }
+}
+
+/// A settings body and the version it was read at, sent as `ETag`.
+///
+/// The other half of [`crate::IfMatch`]: a client that sends this back writes
+/// only if the setting is still at this version. Quoted, because an `ETag` is;
+/// strong, because two responses with the same version carry the same bytes.
+#[derive(Debug)]
+pub struct Versioned<T>(pub i64, pub T);
+
+impl<T: serde::Serialize> IntoResponse for Versioned<T> {
+    fn into_response(self) -> Response {
+        (
+            [(axum::http::header::ETAG, format!("\"{}\"", self.0))],
+            axum::Json(self.1),
+        )
+            .into_response()
+    }
+}
+
+/// **What a configuration failure is to the caller.**
+///
+/// One mapping for every settings route, so a conflict is `412` everywhere
+/// rather than whatever each module's mapper happened to say: a stale
+/// `If-Match` is the caller's condition failing, a row this build cannot read
+/// is ours, and a database that is unwell is retryable.
+pub fn config_problem(
+    error: &erp_eventlog::ConfigError,
+    locale: Locale,
+    catalog: &dyn erp_i18n::Catalog,
+) -> Problem {
+    use erp_eventlog::ConfigError;
+    let status = match error {
+        ConfigError::Conflict { .. } => StatusCode::PRECONDITION_FAILED,
+        ConfigError::Invalid { .. } => {
+            tracing::error!(error = %error, "a stored setting is unusable");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        ConfigError::Database(_) => {
+            tracing::warn!(error = %error, "a setting could not be read or written");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    };
+    Problem::new(status, &error.message(), locale, catalog)
 }
 
 /// `axum::extract::Query`, refusing in this API's shape. Same argument as

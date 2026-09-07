@@ -44,9 +44,12 @@ impl ApiError {
             // 404, not 403 — and the same 404 a genuinely missing tenant gets.
             // Distinguishing "exists but you may not" from "does not exist"
             // hands out a tenant-enumeration oracle for free.
-            Self::Access(AccessError::NoSuchTenant | AccessError::NotAMember) => {
-                StatusCode::NOT_FOUND
-            }
+            Self::Access(
+                AccessError::NoSuchTenant
+                | AccessError::NotAMember
+                | AccessError::DomainNotClaimed(_),
+            )
+            | Self::NotFound(_) => StatusCode::NOT_FOUND,
 
             // The tenant is real and the caller is entitled; it is simply not
             // serving right now. Retryable, so 503 rather than 403.
@@ -58,7 +61,9 @@ impl ApiError {
             // a record someone else changed first. Both mean "look at what is
             // there now and decide again".
             Self::Access(
-                AccessError::SlugTaken(_) | AccessError::Auth(AuthError::HandleTaken(_)),
+                AccessError::SlugTaken(_)
+                | AccessError::Auth(AuthError::HandleTaken(_))
+                | AccessError::DomainNotProved { .. },
             )
             | Self::Append(erp_eventlog::AppendError::Conflict { .. }) => StatusCode::CONFLICT,
 
@@ -67,8 +72,11 @@ impl ApiError {
             // answer a login gives, because it is the same question.
             Self::Access(AccessError::Auth(_)) => StatusCode::UNAUTHORIZED,
 
+            Self::Access(AccessError::DomainProofUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Access(AccessError::NotAnOrigin(_) | AccessError::OriginOutsideDomain { .. }) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
 
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }

@@ -1,0 +1,56 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.id as \"document!\", d.currency as \"currency!\",\n                  d.came_to as \"came_to!\", d.entry as \"entry!\",\n                  e.debits as \"posted?\"\n             FROM (SELECT id, currency, (net + tax)::BIGINT AS came_to, entry, position\n                     FROM proj_reports.invoiced\n                    UNION ALL\n                   SELECT id, currency, (net + tax)::BIGINT, entry, position\n                     FROM proj_reports.credited) d\n             LEFT JOIN proj_reports.entry e ON e.id = d.entry\n            WHERE d.position < $1\n              AND (e.id IS NULL OR e.debits <> d.came_to)\n              -- A document that came to nothing posts nothing, and the ledger\n              -- drops zero lines rather than writing an entry with no effect.\n              -- Reporting that as unposted would flag every zero-rated\n              -- placeholder a business ever issues.\n              AND d.came_to <> 0\n            ORDER BY d.id\n            LIMIT 100",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "document!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "came_to!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "entry!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "posted?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_reports.entry",
+            "name": "debits"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "bbff29f22cdf8e7dc0cff1535451a7c337b31cecaad89dba59d02cf0b74cb79f"
+}

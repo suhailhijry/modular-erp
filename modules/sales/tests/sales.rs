@@ -58,6 +58,7 @@ fn line(description: &str, net: Money, category: VatCategory) -> DraftLine {
 fn draft(lines: Vec<DraftLine>) -> Draft {
     Draft {
         prepayment: false,
+        prepaid: None,
         customer: Customer::new("Rawabi Trading").with_vat_number("310000000000003"),
         issued_on: when(),
         due_on: None,
@@ -914,6 +915,7 @@ async fn a_tenant_can_choose_which_accounts_a_sale_posts_to() {
             output_vat: code("VAT-OUT"),
         },
         Some("owner"),
+        None,
     )
     .await
     .expect("configures");
@@ -972,6 +974,7 @@ async fn changing_where_sales_post_leaves_earlier_invoices_alone() {
             output_vat: code("2100"),
         },
         Some("owner"),
+        None,
     )
     .await
     .expect("configures");
@@ -1042,6 +1045,7 @@ async fn a_command_stamps_the_configuration_it_resolved_against() {
         sales::PostingAccounts::KEY,
         &sales::PostingAccounts::conventional(),
         Some("owner"),
+        None,
     )
     .await
     .expect("configures");
@@ -1316,6 +1320,230 @@ async fn credited_invoices_replay_to_exactly_what_is_live() {
 // The VAT return
 // ---------------------------------------------------------------------------
 
+/// **The final invoice after a deposit charges and declares only the rest.**
+///
+/// A deposit is taxed when it is received, on its prepayment invoice. When the
+/// service is delivered the final invoice shows the whole supply, names the
+/// prepayment invoice, and deducts what it declared band by band — so the
+/// customer owes the remainder, the ledger posts the remainder, and the return
+/// declares the deposit's tax once. A deposit that does not fit the supply is
+/// refused rather than declared as a negative.
+#[expect(
+    clippy::too_many_lines,
+    reason = "a deposit, its final invoice and the two refusals in one story; splitting it \
+              would mean re-issuing the deposit in every half"
+)]
+#[tokio::test]
+async fn the_final_invoice_after_a_deposit_charges_and_declares_only_the_rest() {
+    let fixture = Fixture::new().await;
+
+    // The deposit: a fifth of the service, billed when it was paid.
+    let deposit = Draft {
+        prepayment: true,
+        issued_on: on("2026-01-05"),
+        ..draft(vec![line("Deposit", riyals(200), VatCategory::Standard)])
+    };
+    let numbered = issue_invoice(&fixture.db, &code("dep-1"), &deposit, &Metadata::default())
+        .await
+        .expect("the deposit is billed");
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let bands = sales::bands_of(&mut conn, "dep-1").await.expect("reads");
+    assert_eq!(bands.len(), 1);
+    assert_eq!(bands[0].net, riyals(200));
+    assert_eq!(bands[0].tax, riyals(30));
+    drop(conn);
+
+    let prepaid = sales::Prepaid {
+        invoice: code("dep-1"),
+        number: numbered.number.clone(),
+        issued_on: on("2026-01-05"),
+        bands,
+    };
+
+    // The service, delivered a month later, and billed with the deposit off.
+    let final_invoice = Draft {
+        issued_on: on("2026-02-10"),
+        prepaid: Some(prepaid.clone()),
+        ..draft(vec![line(
+            "Colour and cut",
+            riyals(1_000),
+            VatCategory::Standard,
+        )])
+    };
+    let numbered = issue_invoice(
+        &fixture.db,
+        &code("bk-1"),
+        &final_invoice,
+        &Metadata::default(),
+    )
+    .await
+    .expect("the final invoice is issued");
+    let Some(sales::InvoiceEvent::Issued {
+        totals,
+        lines,
+        prepaid: deducted,
+        ..
+    }) = numbered.committed.events.first()
+    else {
+        panic!("an invoice was issued");
+    };
+    assert_eq!(
+        lines[0].net,
+        riyals(1_000),
+        "the lines are the whole supply"
+    );
+    assert_eq!(totals.net, riyals(800), "the totals are what is left");
+    assert_eq!(totals.tax, riyals(120));
+    assert_eq!(totals.gross, riyals(920));
+    assert_eq!(
+        deducted.as_ref().map(|p| p.number.as_str()),
+        Some(prepaid.number.as_str())
+    );
+
+    fixture.project().await;
+    // The customer owes the rest, and the read model says which document
+    // took the deposit.
+    let read = fixture.invoice("bk-1").await.expect("read back");
+    assert_eq!(read.summary.gross, riyals(920));
+    assert_eq!(
+        read.summary.prepaid_number.as_deref(),
+        Some(prepaid.number.as_str())
+    );
+    // The books: the receivable is the deposit's 230 plus the remainder's
+    // 920, and revenue is the whole 1,000 recognised once.
+    assert_eq!(fixture.balance("1100").await, riyals(1_150));
+    assert_eq!(fixture.balance("4000").await, riyals(-1_000));
+    // The return declares the deposit's tax in January and the rest in
+    // February, and never the deposit's twice.
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let january = sales::vat_return(&mut conn, sar(), on("2026-01-01"), on("2026-02-01"))
+        .await
+        .expect("reads");
+    assert_eq!(january.tax, riyals(30));
+    let february = sales::vat_return(&mut conn, sar(), on("2026-02-01"), on("2026-03-01"))
+        .await
+        .expect("reads");
+    assert_eq!(february.tax, riyals(120));
+    drop(conn);
+
+    // **A deposit that does not fit is refused, not declared negative.**
+    let too_much = Draft {
+        prepaid: Some(sales::Prepaid {
+            bands: vec![sales::TaxBand {
+                net: riyals(500),
+                tax: riyals(75),
+                ..prepaid.bands[0]
+            }],
+            ..prepaid.clone()
+        }),
+        ..draft(vec![line("Trim", riyals(100), VatCategory::Standard)])
+    };
+    let refused = issue_invoice(&fixture.db, &code("bk-2"), &too_much, &Metadata::default()).await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Prepaid(sales::PrepaidError::MoreThanTheSupply { .. })
+            )))
+        ),
+        "{refused:?}"
+    );
+    let other_band = Draft {
+        prepaid: Some(prepaid.clone()),
+        ..draft(vec![line("Export", riyals(1_000), VatCategory::Zero)])
+    };
+    let refused = issue_invoice(
+        &fixture.db,
+        &code("bk-3"),
+        &other_band,
+        &Metadata::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Prepaid(sales::PrepaidError::NoSuchBand { .. })
+            )))
+        ),
+        "{refused:?}"
+    );
+}
+
+/// **A partial refund of a single-band invoice gets a credit note for the
+/// part**; one of a multi-band invoice still gets none, because how the refund
+/// divides across bands is not this system's to guess.
+#[tokio::test]
+async fn a_partial_refund_credits_the_part_when_the_invoice_has_one_band() {
+    let fixture = Fixture::new().await;
+
+    issue(
+        &fixture,
+        "INV-1",
+        vec![line("Cut", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    pay(&fixture, "INV-1", "card", riyals(115))
+        .await
+        .expect("paid in full");
+    refund(&fixture, "INV-1", "back-1", money(5_750))
+        .await
+        .expect("half back");
+    // And the same refund again, which is a retry.
+    refund(&fixture, "INV-1", "back-1", money(5_750))
+        .await
+        .expect("a retry is quiet");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let notes = sales::credit_notes(&mut conn, "INV-1")
+        .await
+        .expect("reads");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].reference, "back-1");
+    assert_eq!(notes[0].net, riyals(50));
+    assert_eq!(notes[0].tax, money(750));
+    assert_eq!(notes[0].gross, money(5_750));
+    drop(conn);
+
+    // Two bands: the refund could be either's, so no document.
+    issue(
+        &fixture,
+        "INV-2",
+        vec![
+            line("Cut", riyals(100), VatCategory::Standard),
+            line("Export", riyals(100), VatCategory::Zero),
+        ],
+    )
+    .await
+    .expect("issues");
+    pay(&fixture, "INV-2", "card", riyals(215))
+        .await
+        .expect("paid in full");
+    refund(&fixture, "INV-2", "back-2", riyals(50))
+        .await
+        .expect("some back");
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let notes = sales::credit_notes(&mut conn, "INV-2")
+        .await
+        .expect("reads");
+    assert!(notes.is_empty(), "a band was guessed: {notes:?}");
+
+    // A gross no net lands on at this rate — 10.00 at 15% — gets none either,
+    // rather than a document that is a halala off.
+    refund(&fixture, "INV-1", "back-3", riyals(10))
+        .await
+        .expect("some back");
+    fixture.project().await;
+    let notes = sales::credit_notes(&mut conn, "INV-1")
+        .await
+        .expect("reads");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
 fn on(day: &str) -> Timestamp {
     format!("{day}T00:00:00Z").parse().expect("a valid instant")
 }
@@ -1327,6 +1555,7 @@ async fn issue_on(fixture: &Fixture, id: &str, day: &str, lines: Vec<DraftLine>)
         &code(id),
         &Draft {
             prepayment: false,
+            prepaid: None,
             customer: Customer::new("Rawabi Trading"),
             issued_on: on(day),
             due_on: None,
@@ -2317,6 +2546,7 @@ async fn an_invoice_carries_the_rate_the_tenant_configured() {
         ledger::Rates::KEY,
         &ledger::Rates { standard: 500 },
         Some("the-accountant"),
+        None,
     )
     .await
     .expect("sets");
@@ -2375,6 +2605,7 @@ async fn changing_the_rate_leaves_earlier_invoices_alone() {
         ledger::Rates::KEY,
         &ledger::Rates { standard: 500 },
         Some("the-accountant"),
+        None,
     )
     .await
     .expect("sets");
@@ -2450,6 +2681,7 @@ async fn owe(
         &code(id),
         &Draft {
             prepayment: false,
+            prepaid: None,
             customer: Customer::new(customer),
             issued_on: on(issued),
             due_on: due.map(on),
@@ -2804,6 +3036,7 @@ async fn owe_customer(
         &code(id),
         &Draft {
             prepayment: false,
+            prepaid: None,
             customer: Customer::new(printed).of(code(reference)),
             issued_on: on(issued),
             due_on: Some(on(issued)),
@@ -3244,6 +3477,7 @@ async fn an_unmatched_buyer_can_be_matched_to_a_record_afterwards() {
             &code(id),
             &Draft {
                 prepayment: false,
+                prepaid: None,
                 customer: Customer::new(printed),
                 issued_on: on("2026-03-01"),
                 due_on: Some(on("2026-03-31")),
@@ -3978,6 +4212,7 @@ async fn a_line_allowance_and_a_document_discount_both_apply() {
         &code("INV-LA-2"),
         &Draft {
             prepayment: false,
+            prepaid: None,
             customer: sales::Customer::new("سارة"),
             issued_on: when(),
             due_on: None,
@@ -4107,6 +4342,7 @@ async fn the_band_cap_still_bites_when_a_document_discount_shrank_the_invoice() 
         &code("INV-PC-8"),
         &Draft {
             prepayment: false,
+            prepaid: None,
             customer: sales::Customer::new("سارة"),
             issued_on: when(),
             due_on: None,
@@ -4325,6 +4561,7 @@ async fn a_discounted_invoice_credited_to_its_band_refuses_the_line_room_left_ov
         &code("INV-PC-12"),
         &Draft {
             prepayment: false,
+            prepaid: None,
             customer: sales::Customer::new("سارة"),
             issued_on: when(),
             due_on: None,

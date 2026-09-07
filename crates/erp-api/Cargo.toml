@@ -52,6 +52,8 @@ utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
+# A test stands in for a lender, which is a trait with async methods.
+async-trait = { workspace = true }
 openssl = { workspace = true }
 base64 = { workspace = true }
 erp-testkit = { workspace = true }

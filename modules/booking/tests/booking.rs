@@ -82,6 +82,7 @@ fn person(name: &str) -> Details {
         name_latin: None,
         kind: Kind::Person,
         capacity: 1,
+        rate: None,
         branch: None,
         employee: None,
     }
@@ -93,6 +94,7 @@ fn place(name: &str, capacity: u16) -> Details {
         name_latin: None,
         kind: Kind::Place,
         capacity,
+        rate: None,
         branch: None,
         employee: None,
     }
@@ -1090,6 +1092,7 @@ async fn set_bands(fixture: &Fixture, bands: Vec<booking::Band>) {
         booking::Tariff::KEY,
         &booking::Tariff { bands },
         None,
+        None,
     )
     .await
     .expect("the tariff is set");
@@ -1359,6 +1362,7 @@ async fn a_stylist_with_her_own_chair(fixture: &Fixture) {
                 name_latin: None,
                 kind: Kind::Person,
                 capacity: 1,
+                rate: None,
                 branch: None,
                 employee: Some(code("EMP-1")),
             },
@@ -1492,9 +1496,15 @@ fn priced_line(what: &str, from: &str, until: &str, takes: &[&str], rate: Money)
 impl Fixture {
     async fn set_public(&self, settings: booking::PublicBooking) {
         let mut conn = self.db.acquire().await.expect("connection");
-        erp_eventlog::configuration::set(&mut conn, booking::PublicBooking::KEY, &settings, None)
-            .await
-            .expect("stores the setting");
+        erp_eventlog::configuration::set(
+            &mut conn,
+            booking::PublicBooking::KEY,
+            &settings,
+            None,
+            None,
+        )
+        .await
+        .expect("stores the setting");
     }
 
     async fn book_priced(&self, id: &str, rate: Money, from: &str, until: &str) -> AggregateId {
@@ -1507,6 +1517,159 @@ impl Fixture {
             .unwrap_or_else(|e| panic!("{id} should book: {e}"));
         code(id)
     }
+}
+
+/// **A booking is billed once, and only one that was supplied.** The invoice
+/// is whoever's called it; the diary records that it happened, refuses a
+/// cancelled or a no-show booking (nothing was supplied), refuses one with no
+/// priced line (nothing to raise a document from), and answers nothing the
+/// second time it is told.
+#[expect(
+    clippy::too_many_lines,
+    reason = "four bookings — billed, cancelled, unpriced, waiting — against one rule; \
+              splitting it would mean four fixtures for one story"
+)]
+#[tokio::test]
+async fn a_booking_is_billed_once_and_only_when_something_was_supplied() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+
+    let billed = fixture.book_priced("RES-B1", riyals(200), "10", "11").await;
+    for stage in [
+        Stage::Confirmed,
+        Stage::Arrived,
+        Stage::InService,
+        Stage::Completed,
+    ] {
+        booking::move_to(
+            &fixture.db,
+            &billed,
+            stage,
+            "",
+            at("11"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("moves");
+    }
+    let mut tx = fixture.db.begin().await.expect("transaction");
+    let first = booking::bill_in(
+        &mut tx,
+        &billed,
+        &code("bk-RES-B1"),
+        at("12"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("bills");
+    assert!(first.at.is_some(), "the billing was recorded");
+    let again = booking::bill_in(
+        &mut tx,
+        &billed,
+        &code("bk-other"),
+        at("12"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("a second telling is quiet");
+    assert!(again.at.is_none(), "billed twice");
+    tx.commit().await.expect("commits");
+
+    // Nothing supplied: refused.
+    let cancelled = fixture.book_priced("RES-B2", riyals(200), "12", "13").await;
+    booking::move_to(
+        &fixture.db,
+        &cancelled,
+        Stage::Cancelled,
+        "",
+        at("12"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("cancels");
+    let mut tx = fixture.db.begin().await.expect("transaction");
+    let refused = booking::bill_in(
+        &mut tx,
+        &cancelled,
+        &code("bk-RES-B2"),
+        at("13"),
+        &Metadata::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ExecuteError::Rejected(BookingError::Over { .. }))
+        ),
+        "{refused:?}"
+    );
+    tx.rollback().await.expect("rolls back");
+
+    // Nothing priced: refused.
+    let unpriced = code("RES-B3");
+    reserve(
+        &fixture.db,
+        &unpriced,
+        &booking_for(Some("CUST-1"), vec![line("قص", "14", "15", &["stylist-1"])]),
+        &Metadata::default(),
+    )
+    .await
+    .expect("books unpriced");
+    let mut tx = fixture.db.begin().await.expect("transaction");
+    let refused = booking::bill_in(
+        &mut tx,
+        &unpriced,
+        &code("bk-RES-B3"),
+        at("15"),
+        &Metadata::default(),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(ExecuteError::Rejected(BookingError::NothingToBill(_)))
+        ),
+        "{refused:?}"
+    );
+    tx.rollback().await.expect("rolls back");
+
+    // The read model says which booking was billed, and the worklist of
+    // completed, priced, unbilled bookings does not list it.
+    let completed_unbilled = fixture.book_priced("RES-B4", riyals(150), "16", "17").await;
+    for stage in [
+        Stage::Confirmed,
+        Stage::Arrived,
+        Stage::InService,
+        Stage::Completed,
+    ] {
+        booking::move_to(
+            &fixture.db,
+            &completed_unbilled,
+            stage,
+            "",
+            at("17"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("moves");
+    }
+    fixture.project().await;
+    let mut conn = fixture.db.read().await.expect("connection");
+    let detail = booking::reservation(&mut conn, billed.as_str())
+        .await
+        .expect("reads")
+        .expect("there");
+    assert_eq!(detail.summary.billed_by.as_deref(), Some("bk-RES-B1"));
+    let waiting = booking::unbilled_completions(&mut conn, 10)
+        .await
+        .expect("reads");
+    assert_eq!(
+        waiting,
+        vec![completed_unbilled],
+        "billed, cancelled and unpriced are not work"
+    );
+
+    fixture.cleanup().await;
 }
 
 /// **What holding the slot costs, worked out when the slot is taken.** A
@@ -2174,6 +2337,221 @@ async fn raising_a_bar_leaves_the_bookings_that_were_already_made() {
     .await
     .expect("a barred pair can still be cancelled");
     assert_eq!(fixture.free("noura", "10", "11").await, 1);
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Lapsing is a decision against the log, not against a read model
+// ---------------------------------------------------------------------------
+
+/// **A paid booking cannot lapse, whatever the read model says.**
+///
+/// The hold-expiry job decides *which* bookings to look at from the
+/// projection. The first version then cancelled through `move_to`, which does
+/// what it is told; a deposit that settled between the projection being read
+/// and the cancellation being written was cancelled anyway — with the money
+/// taken. `lapse` re-asks the log and refuses.
+#[tokio::test]
+async fn a_paid_hold_cannot_be_lapsed_even_by_a_job_that_thinks_it_is_unpaid() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+    fixture
+        .set_public(booking::PublicBooking {
+            verify_phone: false,
+            open: true,
+            deposit_bp: 2_000,
+            hold_minutes: 30,
+        })
+        .await;
+    let id = fixture.book_priced("RES-L1", riyals(200), "10", "11").await;
+
+    // Paid — but the projection has NOT been run, so a job reading it would
+    // still list this hold as unpaid and past due.
+    let mut tx = fixture.db.begin().await.expect("transaction");
+    booking::secure_in(&mut tx, &id, &code("pay-1"), at("09"), &Metadata::default())
+        .await
+        .expect("secures");
+    tx.commit().await.expect("commits");
+
+    let long_after = at("08") + chrono::Duration::hours(3);
+    let refused = booking::lapse(&fixture.db, &id, long_after, &Metadata::default())
+        .await
+        .expect_err("a paid booking was lapsed");
+    assert!(
+        matches!(rejection(&refused), Some(BookingError::Secured(_))),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fixture.free("stylist-1", "10", "11").await,
+        0,
+        "the paid slot was released"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A hold lapses only after its deadline, and only while it is a hold.**
+#[tokio::test]
+async fn a_hold_lapses_only_after_its_deadline() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+    fixture
+        .set_public(booking::PublicBooking {
+            verify_phone: false,
+            open: true,
+            deposit_bp: 2_000,
+            hold_minutes: 30,
+        })
+        .await;
+    let id = fixture.book_priced("RES-L2", riyals(200), "10", "11").await;
+
+    // Ten minutes in: not yet.
+    let too_early = at("08") + chrono::Duration::minutes(10);
+    let refused = booking::lapse(&fixture.db, &id, too_early, &Metadata::default())
+        .await
+        .expect_err("lapsed before the deadline");
+    assert!(
+        matches!(rejection(&refused), Some(BookingError::NotLapsed(_))),
+        "{refused:?}"
+    );
+    assert_eq!(fixture.free("stylist-1", "10", "11").await, 0);
+
+    // Past the deadline: released, reason written down, chair back.
+    let past_due = at("08") + chrono::Duration::hours(2);
+    let lapsed = booking::lapse(&fixture.db, &id, past_due, &Metadata::default())
+        .await
+        .expect("lapses");
+    assert!(lapsed.at.is_some());
+    assert_eq!(fixture.free("stylist-1", "10", "11").await, 1);
+
+    // And again is nothing: the booking is over.
+    let again = booking::lapse(&fixture.db, &id, past_due, &Metadata::default())
+        .await
+        .expect("quiet");
+    assert!(again.at.is_none());
+
+    fixture.project().await;
+    let detail = fixture.get("RES-L2").await.expect("there");
+    assert_eq!(detail.summary.stage, Stage::Cancelled.as_str());
+
+    fixture.cleanup().await;
+}
+
+/// A booking the business has **confirmed** is a promise the business made; a
+/// deposit that never arrived is then a conversation, not an automatic release.
+#[tokio::test]
+async fn a_confirmed_booking_does_not_lapse() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+    fixture
+        .set_public(booking::PublicBooking {
+            verify_phone: false,
+            open: true,
+            deposit_bp: 2_000,
+            hold_minutes: 30,
+        })
+        .await;
+    let id = fixture.book_priced("RES-L3", riyals(200), "10", "11").await;
+    move_to(
+        &fixture.db,
+        &id,
+        Stage::Confirmed,
+        "",
+        at("08"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("confirms");
+
+    let refused = booking::lapse(
+        &fixture.db,
+        &id,
+        at("08") + chrono::Duration::hours(2),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("a confirmed booking lapsed");
+    assert!(
+        matches!(rejection(&refused), Some(BookingError::NotLapsed(_))),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Money for a booking that is over is refused, not recorded.** The worker
+/// logs the refusal, which is the one place somebody will see that a customer
+/// paid for a booking they no longer have.
+#[tokio::test]
+async fn a_deposit_arriving_for_a_cancelled_booking_is_refused() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+    let id = fixture.book_priced("RES-L4", riyals(200), "10", "11").await;
+    move_to(
+        &fixture.db,
+        &id,
+        Stage::Cancelled,
+        "changed their mind",
+        at("09"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("cancels");
+
+    let mut tx = fixture.db.begin().await.expect("transaction");
+    let refused = booking::secure_in(
+        &mut tx,
+        &id,
+        &code("pay-late"),
+        at("10"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("a cancelled booking was marked paid");
+    tx.rollback().await.expect("rolls back");
+    assert!(
+        matches!(refused, ExecuteError::Rejected(BookingError::Over { .. })),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// The half of the durable repair that `booking` answers: of these bookings,
+/// which have not been told their deposit arrived.
+#[tokio::test]
+async fn unsecured_among_names_the_bookings_not_yet_told() {
+    let fixture = Fixture::new().await;
+    fixture.declare("stylist-1", &person("نورة")).await;
+    let told = fixture.book_priced("RES-L5", riyals(200), "10", "11").await;
+    let untold = fixture.book_priced("RES-L6", riyals(200), "12", "13").await;
+
+    let mut tx = fixture.db.begin().await.expect("transaction");
+    booking::secure_in(
+        &mut tx,
+        &told,
+        &code("pay-1"),
+        at("09"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("secures");
+    tx.commit().await.expect("commits");
+    fixture.project().await;
+
+    let mut conn = fixture.db.read().await.expect("connection");
+    let answer = booking::unsecured_among(
+        &mut conn,
+        &[told.to_string(), untold.to_string(), "RES-NOPE".to_owned()],
+    )
+    .await
+    .expect("reads");
+    assert_eq!(
+        answer,
+        vec![untold],
+        "only the untold one, and nothing that does not exist"
+    );
 
     fixture.cleanup().await;
 }

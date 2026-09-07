@@ -16,12 +16,25 @@
 //!
 //! Delivery is therefore **at least once**, and that is not fixable here — it is
 //! the standard two-generals problem between this process and whatever it is
-//! calling. It is fixed one level down instead: every [`PendingEffect`] carries a
+//! calling.
+//!
+//! # A slow delivery keeps its lease
+//!
+//! The lease is short, so a dispatcher that dies gives the row back quickly.
+//! That made a *slow* delivery indistinguishable from a dead dispatcher: an
+//! email through a congested relay outlived the lease and was claimed again
+//! while still in flight, and a text message has no idempotency key at the
+//! provider. So a claim mints a token per row (`leased_by`), and while a
+//! handler runs a heartbeat renews `leased_until` — only `WHERE leased_by` is
+//! ours — every third of the lease. A live dispatcher is never double-claimed
+//! however long the provider takes; a dead one's lease still lapses, because
+//! nothing renews it. It is fixed one level down instead: every [`PendingEffect`] carries a
 //! stable `idempotency_key`, and a handler that passes it to the downstream API
 //! makes the second delivery a no-op on the far side. A handler that ignores it
 //! is the thing that sends two emails, not this loop.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -88,9 +101,14 @@ impl Default for RetryPolicy {
             // minutes of total delay — long enough to ride out a deploy or a
             // brief upstream outage, short enough that a genuinely broken effect
             // shows up as a dead letter the same day.
-            max_attempts: 8,
+            // **Sixteen attempts with the backoff capped at an hour** is a
+            // little over four hours of trying. The first version gave up after
+            // eight attempts capped at a minute — about eight minutes — which
+            // meant a provider outage over lunch dead-lettered every email, text
+            // and payment callback promised during it, permanently.
+            max_attempts: 16,
             base_backoff: Duration::from_secs(1),
-            max_backoff: Duration::from_mins(1),
+            max_backoff: Duration::from_hours(1),
             lease: Duration::from_secs(30),
         }
     }
@@ -123,6 +141,9 @@ pub struct Dispatched {
     pub retrying: usize,
     /// Given up on: attempts exhausted, or a permanent failure.
     pub dead: usize,
+    /// Deliveries abandoned because the lease was found gone mid-flight. Zero
+    /// unless renewals were failing for longer than the lease.
+    pub lost: usize,
 }
 
 impl Dispatched {
@@ -138,6 +159,7 @@ impl Dispatched {
             Settlement::Delivered => self.delivered += 1,
             Settlement::Retrying { .. } => self.retrying += 1,
             Settlement::Dead { .. } => self.dead += 1,
+            Settlement::Lost => self.lost += 1,
             Settlement::Abandoned => {}
         }
     }
@@ -151,6 +173,11 @@ pub enum DispatchError {
     /// rather than guessing (L6).
     #[error("outbox row {id} is invalid: {reason}")]
     Corrupt { id: i64, reason: String },
+    /// The lease could not be renewed for a reason that is not the database
+    /// refusing — a connection could not be had. Logged and retried on the
+    /// next beat; the lease itself is still live until it lapses.
+    #[error("the lease could not be renewed: {0}")]
+    Lease(String),
 }
 
 impl erp_i18n::Localize for DispatchError {
@@ -247,8 +274,14 @@ impl Dispatcher {
         };
 
         for effect in claimed {
-            // No connection is held here. See the module docs.
-            let settlement = self.deliver(&effect).await;
+            // No connection is held here. See the module docs. The heartbeat
+            // takes one from the pool for each renewal and gives it back.
+            let settlement = self
+                .deliver(&effect, || async {
+                    let mut conn = pool.acquire().await?;
+                    self.renew(&mut conn, &effect).await
+                })
+                .await;
 
             let mut conn = pool.acquire().await?;
             self.settle(&mut conn, &effect, &settlement).await?;
@@ -279,6 +312,7 @@ impl Dispatcher {
             total.delivered += pass.delivered;
             total.retrying += pass.retrying;
             total.dead += pass.dead;
+            total.lost += pass.lost;
         }
     }
 
@@ -311,7 +345,8 @@ impl Dispatcher {
             r#"
             UPDATE outbox
                SET attempts      = attempts + 1,
-                   leased_until  = now() + ($2::BIGINT * INTERVAL '1 millisecond')
+                   leased_until  = now() + ($2::BIGINT * INTERVAL '1 millisecond'),
+                   leased_by     = gen_random_uuid()::text
              WHERE id IN (
                  SELECT id
                    FROM outbox
@@ -324,7 +359,8 @@ impl Dispatcher {
                   LIMIT $1
                     FOR UPDATE SKIP LOCKED
              )
-            RETURNING id, kind, payload, idempotency_key, attempts, caused_by, enqueued_at
+            RETURNING id, kind, payload, idempotency_key, attempts, caused_by, enqueued_at,
+                      leased_by as "lease!"
             "#,
             limit,
             lease_millis,
@@ -354,9 +390,34 @@ impl Dispatcher {
                         }
                     })?,
                     enqueued_at: r.enqueued_at,
+                    lease: r.lease,
                 })
             })
             .collect()
+    }
+
+    /// **Extends the lease on an effect this dispatcher holds.** `false` when
+    /// the row is no longer ours — settled, or claimed by somebody else after
+    /// the lease lapsed — which is the signal to stop and not settle.
+    pub async fn renew(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        effect: &PendingEffect,
+    ) -> Result<bool, DispatchError> {
+        let lease_millis = i64::try_from(self.policy.lease.as_millis()).unwrap_or(i64::MAX);
+        let touched = sqlx::query!(
+            "UPDATE outbox
+                SET leased_until = now() + ($2::BIGINT * INTERVAL '1 millisecond')
+              WHERE id = $1 AND leased_by = $3
+                AND delivered_at IS NULL AND dead_at IS NULL",
+            effect.id,
+            lease_millis,
+            effect.lease,
+        )
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        Ok(touched == 1)
     }
 
     /// Performs one claimed effect and decides what should be recorded.
@@ -368,7 +429,18 @@ impl Dispatcher {
     ///
     /// Never fails — a delivery that went wrong is a [`Settlement`], not an
     /// error, because "it failed" is information the outbox has to record.
-    pub async fn deliver(&self, effect: &PendingEffect) -> Settlement {
+    /// Performs one effect, renewing its lease while the handler runs.
+    ///
+    /// `renew` is how this dispatcher reaches the database for the heartbeat —
+    /// a pool or a tenant handle, whichever the caller has. It is called every
+    /// third of the lease; a renewal that finds the lease gone ends the delivery
+    /// as [`Settlement::Lost`], and one that fails for another reason is logged
+    /// and tried again on the next beat, the lease still being live.
+    pub async fn deliver<F, Fut>(&self, effect: &PendingEffect, renew: F) -> Settlement
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<bool, DispatchError>>,
+    {
         let Some(handler) = self.handlers.get(&effect.kind) else {
             // Unreachable via `claim`, which filters on exactly these kinds.
             // Leaving the lease to lapse beats a panic: the row returns to the
@@ -381,7 +453,39 @@ impl Dispatcher {
             return Settlement::Abandoned;
         };
 
-        match handler.deliver(effect).await {
+        let beat = (self.policy.lease / 3).max(Duration::from_millis(10));
+        let delivery = handler.deliver(effect);
+        tokio::pin!(delivery);
+        let mut ticks = tokio::time::interval(beat);
+        // The first tick of an interval is immediate; the lease was just taken.
+        ticks.tick().await;
+        // Labelled, because `select!` has a loop of its own for a bare `break`
+        // to land in.
+        let outcome = 'heartbeat: loop {
+            tokio::select! {
+                biased;
+                result = &mut delivery => break 'heartbeat result,
+                _ = ticks.tick() => match renew().await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::error!(
+                            id = effect.id,
+                            kind = %effect.kind,
+                            key = %effect.idempotency_key,
+                            "the lease on an effect was lost mid-delivery; not settling it"
+                        );
+                        return Settlement::Lost;
+                    }
+                    Err(e) => tracing::warn!(
+                        id = effect.id,
+                        kind = %effect.kind,
+                        error = %e,
+                        "could not renew an effect's lease; will try again on the next beat"
+                    ),
+                },
+            }
+        };
+        match outcome {
             Ok(()) => Settlement::Delivered,
             Err(failure) => {
                 let give_up = matches!(failure, DeliveryError::Permanent(_))
@@ -431,46 +535,69 @@ impl Dispatcher {
     ) -> Result<(), DispatchError> {
         match settlement {
             Settlement::Delivered => {
-                sqlx::query!(
+                let touched = sqlx::query!(
                     "UPDATE outbox
                         SET delivered_at = now(), leased_until = NULL, last_error = NULL
-                      WHERE id = $1",
+                      WHERE id = $1 AND leased_by = $2",
                     effect.id,
+                    effect.lease,
                 )
                 .execute(&mut *conn)
-                .await?;
+                .await?
+                .rows_affected();
+                not_ours(effect, touched);
             }
             Settlement::Retrying { delay, error } => {
                 let delay_millis = i64::try_from(delay.as_millis()).unwrap_or(i64::MAX);
-                sqlx::query!(
+                let touched = sqlx::query!(
                     "UPDATE outbox
                         SET next_attempt_at = now() + ($2::BIGINT * INTERVAL '1 millisecond'),
                             leased_until    = NULL,
                             last_error      = $3
-                      WHERE id = $1",
+                      WHERE id = $1 AND leased_by = $4",
                     effect.id,
                     delay_millis,
                     truncate(error),
+                    effect.lease,
                 )
                 .execute(&mut *conn)
-                .await?;
+                .await?
+                .rows_affected();
+                not_ours(effect, touched);
             }
             Settlement::Dead { error } => {
-                sqlx::query!(
+                let touched = sqlx::query!(
                     "UPDATE outbox
                         SET dead_at = now(), leased_until = NULL, last_error = $2
-                      WHERE id = $1",
+                      WHERE id = $1 AND leased_by = $3",
                     effect.id,
                     truncate(error),
+                    effect.lease,
                 )
                 .execute(&mut *conn)
-                .await?;
+                .await?
+                .rows_affected();
+                not_ours(effect, touched);
             }
             // Deliberately writes nothing: the lease lapses and the row returns
             // to the queue for a worker that can handle it.
-            Settlement::Abandoned => {}
+            Settlement::Abandoned | Settlement::Lost => {}
         }
         Ok(())
+    }
+}
+
+/// A settlement that found the row no longer ours. Not an error to the caller
+/// — the effect belongs to whoever holds it now — but loud, because it means a
+/// delivery may have happened twice.
+fn not_ours(effect: &PendingEffect, touched: u64) {
+    if touched == 0 {
+        tracing::error!(
+            id = effect.id,
+            kind = %effect.kind,
+            key = %effect.idempotency_key,
+            "settled an effect whose lease had moved on; the delivery may have been repeated"
+        );
     }
 }
 
@@ -488,6 +615,9 @@ pub enum Settlement {
     Dead {
         error: String,
     },
+    /// The lease was found gone while the handler ran. Nothing is written: the
+    /// row belongs to whoever holds it now.
+    Lost,
     /// No handler was registered. Nothing is recorded; the lease lapses.
     Abandoned,
 }

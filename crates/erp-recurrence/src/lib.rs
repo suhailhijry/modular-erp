@@ -38,10 +38,9 @@
 pub mod messages;
 
 mod availability;
-mod calendar;
 
 pub use availability::{Availability, BadRule, any_covers};
-pub use calendar::{Calendar, NotAnOffset};
+pub use erp_types::{Calendar, NotAZone};
 
 /// This crate's messages, in every supported language.
 pub static CATALOG: erp_i18n::StaticCatalog =

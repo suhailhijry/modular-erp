@@ -144,9 +144,25 @@ impl ControlPlane {
     ) -> Result<Requested, OtpError> {
         let handle = normalise(raw).ok_or_else(|| OtpError::NotANumber(raw.to_owned()))?;
 
-        // **The cooldown, in the database.** Per number and fleet-wide, so a
-        // second pod does not double the rate — the same shape signup's
-        // confirmation resend uses.
+        let code = mint()?;
+        let identity = self.identity_for(&handle).await?;
+
+        let id = uuid::Uuid::now_v7();
+        let mut tx = self.pool.begin().await.map_err(AccessError::Database)?;
+
+        // **The cooldown, in the database and serialised per number.** In the
+        // database so a second pod does not double the rate; under an advisory
+        // lock because a check followed by an insert is a race that two
+        // requests a millisecond apart both win. The lock is this number's
+        // alone and is released with the transaction.
+        sqlx::query!(
+            "SELECT pg_advisory_xact_lock(hashtext($1))",
+            format!("one_time_code:{handle}"),
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(AccessError::Database)?;
+
         let live = sqlx::query!(
             r#"SELECT EXTRACT(EPOCH FROM (now() - created_at))::BIGINT as "age!"
                  FROM one_time_code
@@ -155,7 +171,7 @@ impl ControlPlane {
                 LIMIT 1"#,
             handle,
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(AccessError::Database)?;
 
@@ -167,12 +183,6 @@ impl ControlPlane {
                 retry_in: REQUEST_INTERVAL_SECONDS - row.age,
             });
         }
-
-        let code = mint()?;
-        let identity = self.identity_for(&handle).await?;
-
-        let id = uuid::Uuid::now_v7();
-        let mut tx = self.pool.begin().await.map_err(AccessError::Database)?;
 
         let expires_at = sqlx::query_scalar!(
             r#"INSERT INTO one_time_code
@@ -253,8 +263,11 @@ impl ControlPlane {
             // A wrong guess against the live code, which is what the attempt
             // limit counts. **Only the live one**: incrementing every code for
             // the number would let one wrong guess kill a code that has not
-            // been sent yet.
-            let _ = sqlx::query!(
+            // been sent yet. **And it is counted or the guess is refused**: the
+            // first version discarded this update's result, so a database
+            // hiccup meant unlimited guessing exactly when the system was
+            // degraded.
+            sqlx::query!(
                 "UPDATE one_time_code
                     SET attempts = attempts + 1
                   WHERE id = (
@@ -266,7 +279,8 @@ impl ControlPlane {
                 handle,
             )
             .execute(&self.pool)
-            .await;
+            .await
+            .map_err(AccessError::Database)?;
 
             return Err(OtpError::NotValid);
         };
@@ -337,33 +351,8 @@ impl ControlPlane {
     }
 }
 
-/// A number, as E.164, or nothing.
-///
-/// Punctuation people type is stripped — spaces, dashes, brackets — and a
-/// leading `00` becomes `+`, because that is how the rest of the world writes an
-/// international prefix and refusing it is refusing a correct number.
-#[must_use]
-pub fn normalise(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    let cleaned: String = trimmed
-        .chars()
-        .filter(|c| !matches!(c, ' ' | '-' | '(' | ')' | '.' | '\u{a0}'))
-        .collect();
-
-    let digits = cleaned
-        .strip_prefix('+')
-        .or_else(|| cleaned.strip_prefix("00"))?;
-
-    if digits.len() < 8 || digits.len() > 15 || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    if digits.starts_with('0') {
-        // A country code never starts with zero, and `+0…` is somebody who
-        // pasted a national number after a plus.
-        return None;
-    }
-    Some(format!("+{digits}"))
-}
+/// A number, as E.164, or nothing. The kernel's rule — see [`erp_types::phone`].
+pub use erp_types::phone::normalise;
 
 /// Six digits, from the OS.
 fn mint() -> Result<String, AuthError> {
@@ -384,39 +373,6 @@ fn digest(code: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_number_is_normalised_the_way_people_write_one() {
-        assert_eq!(
-            normalise("+966 50 000 0000").as_deref(),
-            Some("+966500000000")
-        );
-        assert_eq!(
-            normalise("+966-50-000-0000").as_deref(),
-            Some("+966500000000")
-        );
-        assert_eq!(
-            normalise("00966500000000").as_deref(),
-            Some("+966500000000")
-        );
-        assert_eq!(
-            normalise(" +966500000000 ").as_deref(),
-            Some("+966500000000")
-        );
-    }
-
-    #[test]
-    fn what_is_not_a_number_is_refused() {
-        // A national number with no country code: the commonest mistake, and
-        // accepting it would sign somebody into the wrong country's account.
-        assert_eq!(normalise("0500000000"), None);
-        assert_eq!(normalise("+0500000000"), None);
-        assert_eq!(normalise("500000000"), None);
-        assert_eq!(normalise("+966"), None);
-        assert_eq!(normalise("+9665000000000000000"), None);
-        assert_eq!(normalise("+966abc0000000"), None);
-        assert_eq!(normalise(""), None);
-    }
 
     #[test]
     fn a_code_is_six_digits() {

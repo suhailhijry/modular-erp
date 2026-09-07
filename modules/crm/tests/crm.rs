@@ -644,7 +644,7 @@ fn text_field(key: &str, max: u16, required: bool) -> FieldDef {
 impl Fixture {
     async fn declare_fields(&self, fields: Vec<FieldDef>) {
         let mut conn = self.db.acquire().await.expect("connection");
-        erp_eventlog::configuration::set(&mut conn, Fields::KEY, &Fields { fields }, None)
+        erp_eventlog::configuration::set(&mut conn, Fields::KEY, &Fields { fields }, None, None)
             .await
             .expect("stores the field set");
     }

@@ -28,6 +28,14 @@
 //! [`erp_payments`] knows is authenticated its own way, and everything else
 //! falls back to the signed contract.
 //!
+//! The same split decides **what a delivery is called**. The signed contract
+//! carries an `id`; a gateway names its events its own way — Moyasar numbers
+//! them, Tabby posts the payment object, Tamara posts an order with either an
+//! `event_type` or an `order_status` — and only the adapter that read the body
+//! knows which. So a known provider's event id comes back from
+//! `erp_payments::authenticate` with the payment id, and this route never
+//! guesses at a gateway's body.
+//!
 //! The consequence is worth stating plainly: because those bodies are not
 //! signed, **a callback proves nothing about money**. It says which payment to
 //! go and look at. What actually happened is asked of the gateway over an
@@ -88,24 +96,27 @@ const PAGE: i64 = 200;
 /// a provider `erp_payments` knows is authenticated its own way, and everything
 /// else falls back to the signed contract.
 ///
-/// A gateway's answer is the **payment id to go and ask about** — never what
-/// the body claims happened — which is why it is discarded here. Acting on it
+/// A gateway's answer is the **payment id to go and ask about** and the
+/// delivery's own id — never what the body claims happened. Acting on it
 /// belongs to whichever module handles `webhook.<provider>`, over an
 /// authenticated connection to the gateway.
+///
+/// Answers what the adapter read for a known provider, and `None` for the
+/// signed contract, whose body this route reads itself.
 fn authenticated(
     provider: &str,
     secret: &[u8],
     headers: &HeaderMap,
     body: &[u8],
     locale: Locale,
-) -> Result<(), Problem> {
+) -> Result<Option<erp_payments::Callback>, Problem> {
     let arrived: Vec<(&str, &str)> = headers
         .iter()
         .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?)))
         .collect();
 
     match erp_payments::authenticate(provider, secret, &arrived, body) {
-        Ok(_) => Ok(()),
+        Ok(callback) => Ok(Some(callback)),
         Err(erp_payments::CallbackError::UnknownProvider(_)) => erp_web::webhook::verify(
             secret,
             header(headers, TIMESTAMP),
@@ -113,6 +124,7 @@ fn authenticated(
             header(headers, SIGNATURE),
             chrono::Utc::now().timestamp(),
         )
+        .map(|()| None)
         .map_err(|e| refused(&e, locale)),
         Err(erp_payments::CallbackError::NotAuthentic) => {
             Err(refused(&WebhookError::BadSignature, locale))
@@ -172,6 +184,13 @@ struct Accepted {
 /// The signed message is `<x-webhook-timestamp>.<body>`, HMAC-SHA256, hex, in
 /// `x-webhook-signature`. The timestamp is inside the signature, so a copy
 /// somebody kept cannot be re-sent with a fresh one.
+///
+/// A payment gateway this system integrates is authenticated its own way
+/// instead: `moyasar` by the `secret_token` inside its body, `tabby` by the
+/// `x-erp-webhook-secret` header registered with it, `tamara` by its
+/// `tamaraToken` (HS256, signed with the notification token) in
+/// `Authorization: Bearer`. Tamara's two bodies — a registered webhook's
+/// `event_type` and a checkout notification's `order_status` — both arrive here.
 #[utoipa::path(
     post,
     path = "/v1/hooks/{provider}",
@@ -179,8 +198,8 @@ struct Accepted {
     security(),
     params(
         ("Host" = String, Header, description = "The tenant's subdomain."),
-        ("provider" = String, Path, description = "Whose callback this is — the name the secret was stored under."),
-        ("x-webhook-signature" = String, Header, description = "HMAC-SHA256 of `<timestamp>.<body>`, hex."),
+        ("provider" = String, Path, description = "Whose callback this is — the name the secret was stored under. `moyasar`, `tabby` and `tamara` are authenticated the way each provider does it; anything else by the signed contract below."),
+        ("x-webhook-signature" = String, Header, description = "HMAC-SHA256 of `<timestamp>.<body>`, hex. The signed contract, for a provider this system does not know."),
         ("x-webhook-timestamp" = String, Header, description = "Unix seconds. Must be within five minutes, and it is inside the signature."),
     ),
     request_body(content = String, description = "The provider's own payload, verbatim.", content_type = "application/json"),
@@ -221,7 +240,7 @@ async fn receive_callback(
         })?
         .ok_or_else(|| unverifiable(&WebhookError::NoSecret, &provider, locale))?;
 
-    authenticated(&provider, &secret, &headers, &body, locale)?;
+    let callback = authenticated(&provider, &secret, &headers, &body, locale)?;
 
     // Only now is the body worth parsing.
     let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
@@ -232,19 +251,28 @@ async fn receive_callback(
             locale,
         )
     })?;
-    let event_id = event_id(&payload).ok_or_else(|| {
-        bad_request(
-            erp_web::messages::MALFORMED_BODY,
-            "reason",
-            "no id in the payload",
-            locale,
-        )
-    })?;
-    let kind = payload
-        .get("type")
-        .or_else(|| payload.get("event"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
+    // **The adapter that read a gateway's body names the delivery.** Tamara's
+    // has no `id` at all — an `order_id` and either an `event_type` or an
+    // `order_status` — and guessing here is how an authentic callback was once
+    // answered with "no id in the payload".
+    let (event_id, kind) = match callback {
+        Some(callback) => (callback.event, callback.kind),
+        None => (
+            event_id(&payload).ok_or_else(|| {
+                bad_request(
+                    erp_web::messages::MALFORMED_BODY,
+                    "reason",
+                    "no id in the payload",
+                    locale,
+                )
+            })?,
+            payload
+                .get("type")
+                .or_else(|| payload.get("event"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        ),
+    };
 
     // **The dedupe and the promise, in one transaction.** A row written whose
     // effect was not promised is a callback nothing will ever process, and the

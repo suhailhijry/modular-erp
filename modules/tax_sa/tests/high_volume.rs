@@ -86,6 +86,7 @@ fn registration() -> tax_sa::Registration {
             postal_code: "12211".to_owned(),
             country: "SA".to_owned(),
         },
+        industry: Some("Consulting".to_owned()),
     }
 }
 
@@ -223,6 +224,7 @@ impl Busy {
             &code(&format!("INV-{i:07}")),
             &Draft {
                 prepayment: false,
+                prepaid: None,
                 customer,
                 issued_on: on(&format!("2026-{month:02}-{day:02}")),
                 due_on: Some(on(&format!("2026-{month:02}-{day:02}"))),

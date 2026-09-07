@@ -23,6 +23,7 @@ use erp_web::{
 };
 use erp_web::{Allowed, IdempotencyKey, Language, ManageAccounts, ManageTenant, PostEntries, Read};
 use erp_web::{Consistency, nudge};
+use erp_web::{IfMatch, Versioned};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -510,6 +511,7 @@ async fn issue_invoice(
         // `payments` raises when a deposit settles; an ordinary caller issuing
         // one would be choosing a tax point.
         prepayment: false,
+        prepaid: None,
         customer,
         issued_on: body.issued_on,
         due_on: body.due_on,
@@ -1325,7 +1327,7 @@ struct ConfiguredAccounts {
     tag = "sales",
     params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     responses(
-        (status = OK, body = ConfiguredAccounts),
+        (status = OK, body = ConfiguredAccounts, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -1334,7 +1336,7 @@ struct ConfiguredAccounts {
 async fn posting_accounts(
     tenant: Allowed<Read>,
     Language(locale): Language,
-) -> Result<Json<ConfiguredAccounts>, Problem> {
+) -> Result<Versioned<ConfiguredAccounts>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let mut conn = tenant
@@ -1352,16 +1354,20 @@ async fn posting_accounts(
     drop(conn);
 
     let configured = stored.is_some();
+    let version = stored.as_ref().map_or(0, |c| c.version);
     let accounts = stored.map_or_else(crate::PostingAccounts::conventional, |c| c.value);
 
-    Ok(Json(ConfiguredAccounts {
-        accounts: AccountsView {
-            receivable: accounts.receivable.as_str().to_owned(),
-            revenue: accounts.revenue.as_str().to_owned(),
-            output_vat: accounts.output_vat.as_str().to_owned(),
+    Ok(Versioned(
+        version,
+        ConfiguredAccounts {
+            accounts: AccountsView {
+                receivable: accounts.receivable.as_str().to_owned(),
+                revenue: accounts.revenue.as_str().to_owned(),
+                output_vat: accounts.output_vat.as_str().to_owned(),
+            },
+            configured,
         },
-        configured,
-    }))
+    ))
 }
 
 /// Chooses what sales posts to.
@@ -1381,10 +1387,11 @@ async fn posting_accounts(
     put,
     path = "/v1/sales/posting-accounts",
     tag = "sales",
-    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally."), ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
     request_body = AccountsView,
     responses(
         (status = NO_CONTENT, description = "Stored. Applies to the next invoice, not to past ones."),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
         (status = BAD_REQUEST, description = "An unusable code, or one that is not an open account here", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -1394,6 +1401,7 @@ async fn posting_accounts(
 async fn set_posting_accounts(
     tenant: Allowed<ManageAccounts>,
     Language(locale): Language,
+    IfMatch(expected): IfMatch,
     Json(body): Json<AccountsView>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
@@ -1446,6 +1454,7 @@ async fn set_posting_accounts(
         crate::PostingAccounts::KEY,
         &accounts,
         Some(&tenant.session.identity.to_string()),
+        expected,
     )
     .await
     .map_err(|e| config_problem(&e, locale))?;
@@ -1454,13 +1463,7 @@ async fn set_posting_accounts(
 }
 
 fn config_problem(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem {
-    tracing::error!(error = %error, "configuration failed");
-    Problem::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &error.message(),
-        locale,
-        &CATALOG,
-    )
+    erp_web::config_problem(error, locale, &CATALOG)
 }
 
 // ---------------------------------------------------------------------------

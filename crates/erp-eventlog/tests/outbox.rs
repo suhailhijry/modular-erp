@@ -18,7 +18,7 @@ use std::time::Duration;
 use erp_eventlog::{
     Aggregate, Decision, DeliveryError, Dispatcher, DomainEvent, Effect, EffectHandler,
     EnqueueError, ExecuteError, Metadata, PendingEffect, RetryPolicy, Upcasters, append_events,
-    enqueue, execute, outbox_health,
+    dead_letters, enqueue, execute, outbox_health, requeue, sweep_delivered,
 };
 use erp_testkit::{Schema, Template, TestDb};
 use erp_types::{AggregateId, DomainName, EffectKind, EventName, SchemaVersion, Sequence};
@@ -834,4 +834,223 @@ async fn a_dispatcher_with_no_handlers_does_nothing_at_all() {
         1,
         "and leaves the work for someone else"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The way back from a dead letter
+// ---------------------------------------------------------------------------
+
+/// **A dead letter is a queue, not a grave.** The first version counted them
+/// in the health check and offered no way back but hand-written SQL, so a
+/// provider outage longer than the retry schedule was a permanent loss of
+/// every effect promised during it.
+#[tokio::test]
+async fn a_dead_letter_can_be_requeued_and_is_then_delivered_under_its_own_key() {
+    let db = tenant_db().await;
+    promise(
+        &db,
+        vec![Effect::new(kind("email.send"), serde_json::json!({}))],
+    )
+    .await;
+
+    let failing = Arc::new(Recorder::always(kind("email.send"), Outcome::Retryable));
+    let run = Dispatcher::new(fast_policy(1))
+        .register(failing.clone())
+        .dispatch_once(db.pool(), 10)
+        .await
+        .expect("runs");
+    assert_eq!(run.dead, 1);
+
+    let mut conn = db.pool().acquire().await.expect("connection");
+    let dead = dead_letters(&mut conn, 10).await.expect("reads");
+    assert_eq!(dead.len(), 1, "the dead letter is listed");
+    assert_eq!(dead[0].kind, kind("email.send"));
+    assert_eq!(dead[0].attempts, 1);
+    assert!(
+        dead[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("503")),
+        "the list says why"
+    );
+
+    // A real policy leaves a dead letter with hours of built-up backoff on it;
+    // the millisecond policy above does not, so put it there by hand.
+    sqlx::query("UPDATE outbox SET next_attempt_at = now() + interval '1 hour'")
+        .execute(db.pool())
+        .await
+        .expect("winds the backoff forward");
+
+    assert!(requeue(&mut conn, dead[0].id).await.expect("requeues"));
+    assert!(
+        !requeue(&mut conn, dead[0].id).await.expect("requeues"),
+        "a second requeue finds nothing dead, and says so"
+    );
+    let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM outbox")
+        .fetch_one(db.pool())
+        .await
+        .expect("reads");
+    assert_eq!(
+        attempts, 0,
+        "a requeued effect gets its whole schedule back"
+    );
+    assert!(
+        dead_letters(&mut conn, 10).await.expect("reads").is_empty(),
+        "a requeued effect is no longer dead"
+    );
+    assert_eq!(pending_count(&db).await, 1, "and is pending again");
+    assert!(
+        is_due(&db).await,
+        "due now, not after the backoff it had built up"
+    );
+    drop(conn);
+
+    let working = Arc::new(Recorder::always(kind("email.send"), Outcome::Succeed));
+    let run = Dispatcher::new(fast_policy(1))
+        .register(working.clone())
+        .dispatch_once(db.pool(), 10)
+        .await
+        .expect("runs");
+    assert_eq!(run.delivered, 1);
+    assert_eq!(
+        working.keys(),
+        failing.keys(),
+        "the idempotency key travels with the requeued effect"
+    );
+    assert_eq!(pending_count(&db).await, 0);
+}
+
+/// A delivered row is a receipt, kept for a while and not for ever. Nothing
+/// pending or dead is ever swept: those are promises still open.
+#[tokio::test]
+async fn delivered_effects_are_swept_and_open_ones_are_not() {
+    let db = tenant_db().await;
+    promise(
+        &db,
+        vec![
+            Effect::new(kind("email.send"), serde_json::json!({})),
+            Effect::new(kind("sms.send"), serde_json::json!({})),
+        ],
+    )
+    .await;
+
+    // One delivered; the other has no handler and stays pending.
+    Dispatcher::new(fast_policy(1))
+        .register(Arc::new(Recorder::always(
+            kind("email.send"),
+            Outcome::Succeed,
+        )))
+        .dispatch_once(db.pool(), 10)
+        .await
+        .expect("runs");
+
+    let mut conn = db.pool().acquire().await.expect("connection");
+    let now = erp_types::Timestamp::from(chrono::Utc::now());
+
+    let long_ago = now - chrono::Duration::hours(1);
+    assert_eq!(
+        sweep_delivered(&mut conn, long_ago).await.expect("sweeps"),
+        0,
+        "a receipt younger than the cut-off is kept"
+    );
+    let a_moment_from_now = now + chrono::Duration::seconds(1);
+    assert_eq!(
+        sweep_delivered(&mut conn, a_moment_from_now)
+            .await
+            .expect("sweeps"),
+        1,
+        "the delivered one goes"
+    );
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox")
+        .fetch_one(db.pool())
+        .await
+        .expect("counts");
+    assert_eq!(left, 1, "the pending one is never swept");
+    assert_eq!(pending_count(&db).await, 1);
+}
+
+// ---------------------------------------------------------------------------
+// A slow delivery keeps its lease
+// ---------------------------------------------------------------------------
+
+/// **A delivery slower than the lease is not delivered twice.** The first
+/// version fixed the lease at claim time, so an email through a congested relay
+/// outlived it and the next dispatcher claimed and sent it again — and a text
+/// message has no idempotency key at the provider. The heartbeat renews the
+/// lease while the handler runs; a second dispatcher polling the whole time
+/// never finds the row free.
+#[tokio::test]
+async fn a_delivery_slower_than_the_lease_is_renewed_and_not_claimed_again() {
+    let db = Arc::new(tenant_db().await);
+    promise(
+        &db,
+        vec![Effect::new(kind("sms.send"), serde_json::json!({}))],
+    )
+    .await;
+
+    // A lease of two seconds and a provider that takes five. The beat is a
+    // third of the lease, and a renewal is a commit: under a loaded test run —
+    // the throughput test is eight writers saturating fsync — one can take a
+    // while, and the lease has to outlast two late ones.
+    let policy = RetryPolicy {
+        max_attempts: 8,
+        base_backoff: Duration::from_millis(250),
+        max_backoff: Duration::from_millis(500),
+        lease: Duration::from_secs(2),
+    };
+    let slow = Arc::new(
+        Recorder::always(kind("sms.send"), Outcome::Succeed).with_latency(Duration::from_secs(5)),
+    );
+    let first = Dispatcher::new(policy).register(slow.clone());
+    let eager = Arc::new(Recorder::always(kind("sms.send"), Outcome::Succeed));
+    let second = Dispatcher::new(policy).register(eager.clone());
+
+    // The slow dispatcher claims first. Started together, `SKIP LOCKED` would
+    // hand the row to whichever claim landed first, which is the race a test
+    // about leases must not be about; the poller starts once the lease is held.
+    let first_task = {
+        let db = Arc::clone(&db);
+        tokio::spawn(async move { first.dispatch_once(db.pool(), 10).await })
+    };
+    let leased = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM outbox WHERE leased_until > now() AND delivered_at IS NULL",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("counts")
+            == 1
+    };
+    let claim_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !leased().await {
+        assert!(
+            tokio::time::Instant::now() < claim_deadline,
+            "the slow dispatcher never claimed the effect"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Poll past the original lease several times over while the first
+    // delivery is still in flight.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(5_500);
+    let mut stolen = 0;
+    while tokio::time::Instant::now() < deadline {
+        stolen += second
+            .dispatch_once(db.pool(), 10)
+            .await
+            .expect("runs")
+            .claimed;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let first_pass = first_task.await.expect("joins").expect("runs");
+
+    assert_eq!(first_pass.delivered, 1);
+    assert_eq!(first_pass.lost, 0, "the lease was renewed, not lost");
+    assert_eq!(
+        stolen, 0,
+        "the second dispatcher found the row leased the whole time (first pass: {first_pass:?})"
+    );
+    assert_eq!(slow.call_count(), 1);
+    assert_eq!(eager.call_count(), 0, "the text was sent once");
+    assert_eq!(pending_count(&db).await, 0);
 }
