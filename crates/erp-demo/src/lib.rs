@@ -1070,6 +1070,7 @@ async fn register_with_zatca(app: &axum::Router, slug: &str, token: &str) -> Res
             "name_latin": "Rawabi Consulting",
             "scheme": "crn",
             "identifier": "1010101010",
+            "industry": "Consulting",
             "address": {
                 "street": "طريق الملك فهد",
                 "building": "2322",

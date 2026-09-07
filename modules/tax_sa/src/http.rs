@@ -1275,9 +1275,16 @@ fn unit_for(
         .map(str::trim)
         .filter(|branch| !branch.is_empty())
         .unwrap_or(registration.name.as_str());
-    // The random tail of a v7 id: twelve hex characters, unique enough for the
-    // one unit a tenant has, and nothing a person has to think up.
-    let hex = uuid::Uuid::now_v7().simple().to_string();
+    // A stable EGS serial, **derived** from the unit's identity rather than
+    // minted, so a retried activation produces the same request instead of a
+    // second certificate (L8) — and nothing a person has to think up. Twelve
+    // hex characters is unique enough for the one unit a tenant has.
+    let hex = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("{}:{branch}", registration.vat_number).as_bytes(),
+    )
+    .simple()
+    .to_string();
     let serial = hex[hex.len() - 12..].to_owned();
 
     Ok(crate::zatca::csr::Unit {

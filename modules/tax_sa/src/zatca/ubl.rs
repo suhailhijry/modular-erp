@@ -755,7 +755,7 @@ fn prepayment_line(
     let _ = writeln!(
         out,
         "      <cbc:IssueDate>{}</cbc:IssueDate>",
-        document.calendar.day(prepaid.issued_at).format("%Y-%m-%d")
+        document.calendar.day(prepaid.issued_at)
     );
     let _ = writeln!(
         out,

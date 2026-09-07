@@ -780,15 +780,17 @@ pub fn awaited_refunds(payment: &Payment) -> &[RefundRequest] {
 /// ago (L3), and both are worse than one call on a path that runs when
 /// somebody hands money back.
 ///
-/// # What it does not do
+/// # What it credits
 ///
-/// **A partial refund gets no document**, and that is the deferral rather than
-/// a decision taken here: a credit note for part of an invoice carries bands of
-/// its own, and how a refund of an arbitrary amount divides across a
-/// standard-rated line and a zero-rated one is not something this system may
-/// guess. `sales` has recorded that as an open item since Phase 3d. Until it
-/// lands, a partly-refunded invoice is a tax invoice this system knows is
-/// overstated — named in the plan rather than silently looking like success.
+/// A partial refund of a **single-band** invoice issues a partial credit note
+/// for exactly what went back: `sales::credit_what_is_clear` finds the net
+/// that, taxed the way the invoice was, comes to the refund (§44), and a
+/// fully-refunded invoice ends credited by the sum of those parts. A refund
+/// that clears the invoice in one shot issues a whole-invoice credit note
+/// instead. A **multi-band** invoice is the one case still deferred: how an
+/// arbitrary refund divides across a standard-rated line and a zero-rated one
+/// is not something this system may guess, so it gets no document and the log
+/// says which invoice is, until then, overstated by the refund.
 async fn credit_the_invoice(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,

@@ -510,6 +510,10 @@ async fn release(
     conn: &mut PgConnection,
     reservation: &str,
 ) -> Result<Vec<(String, String, i64)>, ProjectionError> {
+    // projection-read: `held`, written by this projection on `Reserved`. This
+    // deletes what the booking held and returns it so the caller can take those
+    // counts back — the same working table `moved_to` reads, and the only place
+    // that remembers what a cancellation was holding.
     let rows = sqlx::query_as::<_, (String, String, i64)>(
         "DELETE FROM held WHERE reservation = $1 AND stage = 'reserved'
          RETURNING resource, period, lead",

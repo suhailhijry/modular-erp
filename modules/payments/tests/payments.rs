@@ -1878,13 +1878,12 @@ async fn a_full_refund_issues_the_credit_note_zatca_requires() {
     assert_eq!(fixture.balance("1150").await, money(0));
 }
 
-/// **A partial refund gets no credit note, deliberately.** One for part of an
-/// invoice carries bands of its own, and how an arbitrary amount divides across
-/// a standard-rated line and a zero-rated one is not something this system may
-/// guess. What it must not do is look like it succeeded — the money moves, the
-/// document does not, and the invoice still holds the rest.
+/// **A partial refund credits the part it gave back.** Since §44 a partial
+/// refund of a single-band invoice issues a partial credit note for exactly
+/// what went back — not a whole-invoice cancellation, and no longer nothing.
+/// A fully-refunded invoice is credited by the sum of those parts.
 #[tokio::test]
-async fn a_partial_refund_moves_money_and_issues_no_document() {
+async fn a_partial_refund_credits_the_part_it_gave_back() {
     let fixture = Fixture::new("part-refund").await;
     fixture.invoice("INV-1").await;
     fixture
@@ -1901,23 +1900,43 @@ async fn a_partial_refund_moves_money_and_issues_no_document() {
         .expect("refunds part");
     fixture.project().await;
 
+    // Not a whole-invoice cancellation: the invoice still stands, part-credited.
     assert_eq!(
         fixture.credit_note_on("INV-1").await,
         None,
-        "a partial refund invented a whole-invoice credit note"
+        "a partial refund cancelled the whole invoice"
     );
+    // A partial credit note for the 40 that went back: 34.78 net, 5.22 tax.
+    let mut conn = fixture.db.read().await.expect("connection");
+    let notes = sales::credit_notes(&mut conn, "INV-1")
+        .await
+        .expect("reads");
+    drop(conn);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].reference, "refund-1");
+    assert_eq!(notes[0].net, money(3_478));
+    assert_eq!(notes[0].tax, money(522));
     // The money did move, and the invoice is holding what is left.
     assert_eq!(fixture.balance("1150").await, riyals(75));
 
-    // And finishing the refund does issue one.
+    // Finishing the refund credits the rest — two parts that sum to the whole.
     fixture
         .refund("pay_1", "refund-2", riyals(75))
         .await
         .expect("refunds the rest");
     fixture.project().await;
-    assert!(
-        fixture.credit_note_on("INV-1").await.is_some(),
-        "the refund that cleared the invoice issued nothing"
+    let mut conn = fixture.db.read().await.expect("connection");
+    let notes = sales::credit_notes(&mut conn, "INV-1")
+        .await
+        .expect("reads");
+    drop(conn);
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    let net: i64 = notes.iter().map(|n| n.net.minor()).sum();
+    let tax: i64 = notes.iter().map(|n| n.tax.minor()).sum();
+    assert_eq!(
+        (net, tax),
+        (10_000, 1_500),
+        "the parts sum to the whole invoice"
     );
 }
 
@@ -1957,11 +1976,11 @@ async fn a_retried_refund_issues_one_credit_note() {
     assert_eq!(fixture.balance("1100").await, money(0));
 }
 
-/// Two payments against one invoice: a deposit and the balance. **Refunding the
-/// deposit alone credits nothing**, because the invoice is still holding the
-/// rest — and that is `sales`' answer, not a guess made here.
+/// **Refunding each payment credits its own part.** Two payments settle one
+/// invoice; refunding each gives its money back and issues a partial credit
+/// note for it, and the two parts sum to the whole once both are back.
 #[tokio::test]
-async fn refunding_one_of_two_payments_credits_nothing_until_both_are_back() {
+async fn refunding_each_payment_credits_its_own_part() {
     let fixture = Fixture::new("two-payments").await;
     fixture.invoice("INV-1").await;
     for (id, amount) in [("pay_1", riyals(40)), ("pay_2", riyals(75))] {
@@ -1977,10 +1996,21 @@ async fn refunding_one_of_two_payments_credits_nothing_until_both_are_back() {
         .await
         .expect("refunds the deposit");
     fixture.project().await;
+    // The whole invoice is not cancelled while it still holds the balance.
     assert_eq!(
         fixture.credit_note_on("INV-1").await,
         None,
-        "the invoice was credited while it still held the balance"
+        "the invoice was cancelled while it still held the balance"
+    );
+    let mut conn = fixture.db.read().await.expect("connection");
+    let notes = sales::credit_notes(&mut conn, "INV-1")
+        .await
+        .expect("reads");
+    drop(conn);
+    assert_eq!(
+        notes.len(),
+        1,
+        "the part that came back was credited: {notes:?}"
     );
 
     fixture
@@ -1988,7 +2018,19 @@ async fn refunding_one_of_two_payments_credits_nothing_until_both_are_back() {
         .await
         .expect("refunds the balance");
     fixture.project().await;
-    assert!(fixture.credit_note_on("INV-1").await.is_some());
+    let mut conn = fixture.db.read().await.expect("connection");
+    let notes = sales::credit_notes(&mut conn, "INV-1")
+        .await
+        .expect("reads");
+    drop(conn);
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    let net: i64 = notes.iter().map(|n| n.net.minor()).sum();
+    let tax: i64 = notes.iter().map(|n| n.tax.minor()).sum();
+    assert_eq!(
+        (net, tax),
+        (10_000, 1_500),
+        "the parts sum to the whole invoice"
+    );
     assert_eq!(fixture.balance("1100").await, money(0));
 }
 

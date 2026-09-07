@@ -5562,7 +5562,7 @@ async fn a_tenant_files_output_tax_less_input_tax() {
         .send(
             bearer(Request::get(
                 "/v1/tax_sa/vat-return\
-                 ?from=2026-07-01T00:00:00Z&until=2026-10-01T00:00:00Z&currency=SAR",
+                 ?from=2026-07-01&until=2026-10-01&currency=SAR",
             ))
             .body(Body::empty())
             .unwrap(),
@@ -5741,6 +5741,7 @@ async fn a_tenant_can_see_where_it_stands_with_zatca() {
             "name_latin": "Acme Trading",
             "scheme": "crn",
             "identifier": "1010101010",
+            "industry": "Consulting",
             "address": {
                 "street": "طريق الملك فهد",
                 "building": "2322",
