@@ -85,9 +85,9 @@ pub use posting::{
     PostingAccounts, Retention, Settlement, entry_for_fee, entry_for_forfeit, entry_for_payout,
 };
 pub use projections::{
-    AwaitedRefund, AwaitingPayout, CardRow, Collected, Kept, PaymentRow, Payments, PayoutRow,
-    RefundRow, against, awaited_for, awaiting_payout, awaiting_refunds, by_gateway_id, card, cards,
-    payment, payouts, projections, refunds_of, settled_advances,
+    AwaitedRefund, AwaitingPayout, CardRow, Collected, Finished, Kept, PaymentRow, Payments,
+    PayoutRow, RefundRow, against, awaited_for, awaiting_payout, awaiting_refunds, by_gateway_id,
+    card, cards, finished_since, payment, payouts, projections, refunds_of, settled_advances,
 };
 pub use sweep::{
     Attempted, Doorbell, Refunding, Swept, Waiting, charge_requested, collect_awaited, configured,

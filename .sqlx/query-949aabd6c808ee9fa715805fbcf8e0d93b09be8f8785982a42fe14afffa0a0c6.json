@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", stage as \"stage!\", invoice\n             FROM proj_payments.payment\n            WHERE stage IN ('settled', 'retained', 'failed')\n              AND COALESCE(settled_at, started_at) > $1\n            ORDER BY COALESCE(settled_at, started_at), id\n            LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "stage!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "stage"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "invoice",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_payments.payment",
+            "name": "invoice"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "949aabd6c808ee9fa715805fbcf8e0d93b09be8f8785982a42fe14afffa0a0c6"
+}

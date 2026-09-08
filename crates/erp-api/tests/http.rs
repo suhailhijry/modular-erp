@@ -2008,6 +2008,15 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("set_messaging_budget", &["owner"]),
     // Sending. A clerk texts a customer; that is the counter's job.
     ("send_message", &["owner", "accountant", "clerk"]),
+    // **The bell is everybody's, including the three routes that write.** A
+    // viewer must be able to clear their own inbox and say they do not want
+    // SMS: neither changes anything about the tenant, and nothing here can name
+    // somebody else — the recipient is always the session's own identity.
+    ("list_notifications", ALL_ROLES),
+    ("mark_read", ALL_ROLES),
+    ("mark_all_read", ALL_ROLES),
+    ("get_preferences", ALL_ROLES),
+    ("set_preferences", ALL_ROLES),
     // Documents. Reading what is attached is ordinary; attaching and taking
     // off is recording what happened, which is a clerk's job.
     ("list_attachments", ALL_ROLES),
@@ -2074,6 +2083,10 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("amend_employee", OWNER),
     ("reparent_employee", OWNER),
     ("transfer_employee", OWNER),
+    // Which login is which person grants nothing — but it decides who receives
+    // what, which is the owner's to say.
+    ("link_employee_login", OWNER),
+    ("unlink_employee_login", OWNER),
     ("record_leaving", OWNER),
     ("grant_claim", OWNER),
     ("revoke_claim", OWNER),
@@ -2310,8 +2323,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        217,
-        "expected two hundred and seventeen role-scoped operations"
+        224,
+        "expected two hundred and twenty-four role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -10677,6 +10690,231 @@ async fn the_deposit_status_waits_for_the_position_a_stream_named() {
         .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["code"], "request.not_caught_up");
+
+    fixture.cleanup().await;
+}
+
+/// **The bell rings on one screen and not the other**, and nobody polled.
+///
+/// Phase 13c's exit criterion, and the proof that a signal carrying a position
+/// rather than data is enough: both screens are told that the `notifications`
+/// group advanced, both re-fetch their own inbox, and only the person the
+/// notification was addressed to sees anything change.
+///
+/// It is also what stops the obvious mistake — putting the notification on the
+/// wire. A payload stream would have to decide who may see it, in a second
+/// dialect, and that decision is already made by the route.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the exit criterion: two logins, two streams, an announcement and \
+              four re-fetches are what the claim is made of"
+)]
+async fn a_bell_rings_on_one_screen_and_not_the_other() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let clerk = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.join_as(clerk, tenant, "clerk").await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, hr::setup()).await;
+    // Invoices, because what this tenant is told about is a document. Not for
+    // anything they issue — for the bindings the wording renders against.
+    fixture.enable_sales(tenant).await;
+    fixture.enable_module(tenant, messaging::setup()).await;
+    fixture.enable_module(tenant, notifications::setup()).await;
+
+    // The owner is somebody in the org chart, and that is what gives them an
+    // inbox. Nobody has linked the clerk to anything.
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    hr::hire(
+        &db,
+        &erp_types::AggregateId::new("EMP-1").expect("an id"),
+        &hr::Hire {
+            details: hr::Details {
+                name: "المديرة".to_owned(),
+                name_latin: None,
+                national_id: None,
+                email: Some("owner@acme.test".to_owned()),
+                phone: None,
+            },
+            reports_to: None,
+            branch: None,
+            at: chrono::Utc::now(),
+        },
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .expect("hired");
+    hr::link_login(
+        &db,
+        &erp_types::AggregateId::new("EMP-1").expect("an id"),
+        &owner.to_string(),
+        chrono::Utc::now(),
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .expect("links");
+    fixture
+        .project::<hr::Hr>(tenant, &hr::projections(), hr::upcasters())
+        .await;
+
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let clerk_token = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+
+    // Two screens, both watching.
+    let mut streams = Vec::new();
+    for token in [&owner_token, &clerk_token] {
+        let (status, body) = fixture
+            .open_stream(
+                Request::get("/v1/events")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        streams.push((body, String::new()));
+    }
+    for (body, buffer) in &mut streams {
+        let (event, data) = next_event(body, buffer, Duration::from_secs(2))
+            .await
+            .expect("ready");
+        assert_eq!(event, "ready");
+        let ready: serde_json::Value = serde_json::from_str(&data).expect("json");
+        assert!(
+            ready["groups"]
+                .as_object()
+                .expect("groups")
+                .contains_key("notifications"),
+            "the bell is not a group either screen is watching: {ready}"
+        );
+    }
+
+    // Both inboxes start empty.
+    for token in [&owner_token, &clerk_token] {
+        let (status, body, _) = fixture
+            .send(
+                Request::get("/v1/notifications")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["unread"], 0, "{body}");
+    }
+
+    // Something happens, and it is addressed to whoever runs the business.
+    let mut tx = db.begin().await.expect("transaction");
+    let announced = notifications::announce(
+        &mut tx,
+        &notifications::Announcing {
+            kind: notifications::Kind::TaxRefused,
+            subject: messaging::Subject::new(
+                messaging::Topic::Invoice,
+                erp_types::AggregateId::new("INV-1").expect("an id"),
+            ),
+            at: chrono::Utc::now(),
+        },
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .expect("announces");
+    tx.commit().await.expect("commits");
+    assert!(announced.announced);
+    fixture
+        .project::<notifications::Notifications>(
+            tenant,
+            &notifications::projections(),
+            notifications::upcasters(),
+        )
+        .await;
+
+    // The worker would publish this the moment the group advanced.
+    fixture
+        .hub
+        .publish(&advanced(tenant, "notifications", "notifications", 9, None));
+
+    // **Both screens hear it**, because a signal names a group and not a
+    // person — and re-fetching is what tells each of them whether it was
+    // theirs.
+    for (body, buffer) in &mut streams {
+        let (event, data) = next_event(body, buffer, Duration::from_secs(2))
+            .await
+            .expect("the bell signal");
+        assert_eq!(event, "advanced");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&data).expect("json"),
+            serde_json::json!({ "group": "notifications", "position": 9 })
+        );
+    }
+
+    let (_, mine, _) = fixture
+        .send(
+            Request::get("/v1/notifications?unread=true")
+                .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        mine["unread"], 1,
+        "the person it was addressed to was not told: {mine}"
+    );
+    assert_eq!(mine["items"][0]["kind"], "tax_refused", "{mine}");
+    assert!(
+        mine["items"][0]["title"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        "a notification with nothing to say: {mine}"
+    );
+
+    let (_, theirs, _) = fixture
+        .send(
+            Request::get("/v1/notifications")
+                .header(header::AUTHORIZATION, format!("Bearer {clerk_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(theirs["unread"], 0, "somebody else's bell rang: {theirs}");
+    assert_eq!(theirs["items"].as_array().expect("items").len(), 0);
+
+    // And clearing it is the reader's own act.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/notifications/read")
+                .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    fixture
+        .project::<notifications::Notifications>(
+            tenant,
+            &notifications::projections(),
+            notifications::upcasters(),
+        )
+        .await;
+    let (_, mine, _) = fixture
+        .send(
+            Request::get("/v1/notifications")
+                .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        mine["unread"], 0,
+        "clearing the bell left it ringing: {mine}"
+    );
 
     fixture.cleanup().await;
 }

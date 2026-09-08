@@ -23,10 +23,20 @@ pub enum Channel {
     Sms,
     Push,
     WhatsApp,
+    /// **The bell inside the product.** The only channel that never leaves this
+    /// system: it is a record in the tenant's own log, written by
+    /// `notifications`, and read back through the ordinary API.
+    InSystem,
 }
 
 impl Channel {
-    pub const ALL: [Self; 4] = [Self::Email, Self::Sms, Self::Push, Self::WhatsApp];
+    pub const ALL: [Self; 5] = [
+        Self::Email,
+        Self::Sms,
+        Self::Push,
+        Self::WhatsApp,
+        Self::InSystem,
+    ];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -35,35 +45,46 @@ impl Channel {
             Self::Sms => "sms",
             Self::Push => "push",
             Self::WhatsApp => "whatsapp",
+            Self::InSystem => "in_system",
         }
     }
 
-    /// The effect this channel's messages are enqueued under.
+    /// The effect this channel's messages are enqueued under, or `None` for one
+    /// that never leaves this system.
     ///
     /// One kind per channel, one handler per kind — so a worker deployed
     /// without an SMS gateway leaves SMS in the outbox for one that has it,
     /// rather than dead-lettering a tenant's reminders during a rollout. That
     /// is the dispatcher's existing behaviour and the reason a channel is a
     /// kind rather than a field.
+    ///
+    /// **In-system has no kind, and must not.** A bell is written as an event,
+    /// not promised as an effect; giving it a kind would leave outbox rows that
+    /// no handler will ever claim, ageing until the backlog check calls them a
+    /// finding.
     #[must_use]
-    pub fn kind(self) -> EffectKind {
-        EffectKind::new(match self {
+    pub fn kind(self) -> Option<EffectKind> {
+        let name = match self {
             Self::Email => "email.send",
             Self::Sms => "sms.send",
             Self::Push => "push.send",
             Self::WhatsApp => "whatsapp.send",
-        })
-        .unwrap_or_else(|_| unreachable!("a literal that satisfies EffectKind"))
+            Self::InSystem => return None,
+        };
+        Some(
+            EffectKind::new(name)
+                .unwrap_or_else(|_| unreachable!("a literal that satisfies EffectKind")),
+        )
     }
 
     /// Whether this channel has a subject line.
     ///
-    /// Email does; the other three are a body. A template that writes a subject
-    /// for SMS is one whose author expected it to appear somewhere, and it
-    /// would not.
+    /// Email does, and a bell has a title, which is the same field. The other
+    /// three are a body: a template that writes a subject for SMS is one whose
+    /// author expected it to appear somewhere, and it would not.
     #[must_use]
     pub const fn has_a_subject(self) -> bool {
-        matches!(self, Self::Email)
+        matches!(self, Self::Email | Self::InSystem)
     }
 
     /// What one message on this channel costs, in billable units.
@@ -250,15 +271,32 @@ mod tests {
         assert_eq!(Channel::WhatsApp.units(&long), 1);
     }
 
+    /// **Only what leaves this system is an effect.**
+    ///
+    /// A kind for the bell would put rows in the outbox that no handler claims:
+    /// they would never be delivered, never dead-lettered, and would age until
+    /// the backlog check called them a finding. A bell is an event, and
+    /// `notifications` writes it.
     #[test]
-    fn every_channel_has_its_own_effect_kind() {
-        let mut kinds: Vec<_> = Channel::ALL.iter().map(|c| c.kind()).collect();
+    fn only_the_channels_that_leave_the_system_are_effect_kinds() {
+        assert_eq!(
+            Channel::InSystem.kind(),
+            None,
+            "a bell would sit in the outbox for ever"
+        );
+
+        let mut kinds: Vec<_> = Channel::ALL.iter().filter_map(|c| c.kind()).collect();
+        let outbound = kinds.len();
+        assert_eq!(outbound, Channel::ALL.len() - 1);
         kinds.sort();
         kinds.dedup();
-        assert_eq!(kinds.len(), Channel::ALL.len(), "two channels share a kind");
+        assert_eq!(kinds.len(), outbound, "two channels share a kind");
 
         // The one that already exists keeps its name, or every email promised
         // by the control plane stops being delivered.
-        assert_eq!(Channel::Email.kind().as_str(), "email.send");
+        assert_eq!(
+            Channel::Email.kind().map(|k| k.as_str().to_owned()),
+            Some("email.send".to_owned())
+        );
     }
 }

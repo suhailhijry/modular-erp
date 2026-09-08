@@ -48,6 +48,9 @@ pub enum HrError {
     BackwardsLeave,
     #[error("what is taken off comes to more than what is paid")]
     DeductionsExceedPay,
+    /// One login is one person. The id names whoever already holds it.
+    #[error("employee {0} already logs in as that")]
+    LoginTaken(String),
     #[error(transparent)]
     Details(#[from] BadEmployee),
     #[error(transparent)]
@@ -74,6 +77,9 @@ impl erp_i18n::Localize for HrError {
             Self::NotADayOfWork => Message::new(messages::NOT_A_DAY_OF_WORK),
             Self::BackwardsLeave => Message::new(messages::BACKWARDS_LEAVE),
             Self::DeductionsExceedPay => Message::new(messages::DEDUCTIONS_EXCEED_PAY),
+            Self::LoginTaken(id) => {
+                Message::new(messages::LOGIN_TAKEN).with("employee", MessageArg::text(id))
+            }
             Self::Details(BadEmployee::NoName) => Message::new(messages::NO_NAME),
             Self::Details(BadEmployee::NoContact) => Message::new(messages::NO_CONTACT),
             Self::Claims(e) => e.message(),
@@ -390,6 +396,87 @@ pub async fn record_document(
             expires_on,
             at,
         }))
+    })
+    .await
+}
+
+/// Says which login is this person.
+///
+/// # What this is not
+///
+/// **Authorization.** Nothing that decides what somebody may do reads this
+/// field; 9c's decision stands, and a tenant's own org chart still does not
+/// feed the platform's role. What it answers is whose bell rings: an audience
+/// resolves to an employee and an inbox belongs to a login.
+///
+/// # Why "one login is one person" is refused here and not by an index
+///
+/// A unique index would live on a projection column, and a projection that can
+/// fail to apply is a projection that **stops** — one bad row would freeze the
+/// whole group for that tenant. So the check is a read of the read model before
+/// the write, which leaves a race: two owners linking the same login in the
+/// same second both succeed. The cost of that is a duplicate notification, not
+/// a wrong one, and it is the cheaper failure by a long way.
+///
+/// Linking the login somebody already has writes nothing.
+pub async fn link_login(
+    db: &TenantDb,
+    id: &AggregateId,
+    identity: &str,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    let identity = identity.trim().to_owned();
+    {
+        let mut conn = db.acquire().await?;
+        if let Some(held) = crate::employee_by_login(&mut conn, &identity)
+            .await
+            .map_err(|e| {
+                CommandError::Execute(ExecuteError::Load(erp_eventlog::LoadError::Read(
+                    erp_eventlog::ReadError::Database(e),
+                )))
+            })?
+            && held.id != id.as_str()
+        {
+            return Err(rejected(HrError::LoginTaken(held.id)));
+        }
+    }
+
+    db.execute::<Employee, _, HrError>(id, crate::upcasters(), metadata, move |loaded| {
+        let held = &loaded.aggregate;
+        if !held.exists() {
+            return Err(HrError::NoSuchEmployee(id.to_string()));
+        }
+        if held.identity.as_deref() == Some(identity.as_str()) {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(EmployeeEvent::LoginLinked {
+            identity: identity.clone(),
+            at,
+        }))
+    })
+    .await
+}
+
+/// Says this person no longer logs in as themselves.
+///
+/// Unlinking somebody who has no login is nothing, not an error: the caller
+/// wanted no link and there is none.
+pub async fn unlink_login(
+    db: &TenantDb,
+    id: &AggregateId,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Outcome {
+    db.execute::<Employee, _, HrError>(id, crate::upcasters(), metadata, move |loaded| {
+        let held = &loaded.aggregate;
+        if !held.exists() {
+            return Err(HrError::NoSuchEmployee(id.to_string()));
+        }
+        if held.identity.is_none() {
+            return Ok(Decision::nothing());
+        }
+        Ok(Decision::one(EmployeeEvent::LoginUnlinked { at }))
     })
     .await
 }

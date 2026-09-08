@@ -11,6 +11,7 @@ pub const MISSING_LANGUAGE: MessageCode = MessageCode::new("messaging.missing_la
 pub const EMPTY_TEMPLATE: MessageCode = MessageCode::new("messaging.empty_template");
 pub const NO_SUCH_TEMPLATE: MessageCode = MessageCode::new("messaging.no_such_template");
 pub const UNREACHABLE: MessageCode = MessageCode::new("messaging.unreachable");
+pub const NOT_SENDABLE: MessageCode = MessageCode::new("messaging.not_sendable");
 pub const OVER_BUDGET: MessageCode = MessageCode::new("messaging.over_budget");
 pub const UNKNOWN_CHANNEL: MessageCode = MessageCode::new("messaging.unknown_channel");
 pub const UNKNOWN_TOPIC: MessageCode = MessageCode::new("messaging.unknown_topic");
@@ -33,6 +34,7 @@ pub const CODES: &[MessageCode] = &[
     EMPTY_TEMPLATE,
     NO_SUCH_TEMPLATE,
     UNREACHABLE,
+    NOT_SENDABLE,
     OVER_BUDGET,
     UNKNOWN_CHANNEL,
     UNKNOWN_TOPIC,
@@ -148,6 +150,16 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         UNREACHABLE,
         Locale::Arabic,
         Template::Simple("لا يمكن الوصول إلى {audience} عبر {channel}."),
+    ),
+    (
+        NOT_SENDABLE,
+        Locale::English,
+        Template::Simple("{channel} is not a channel a message is sent on; it is announced."),
+    ),
+    (
+        NOT_SENDABLE,
+        Locale::Arabic,
+        Template::Simple("{channel} ليست قناة تُرسل عبرها الرسائل، بل تُعلن فيها."),
     ),
     (
         OVER_BUDGET,

@@ -1420,3 +1420,97 @@ async fn backwards_leave_is_refused() {
 
     fixture.cleanup().await;
 }
+
+/// **Which bell rings.**
+///
+/// An audience resolves to an employee; an inbox belongs to a login. Without
+/// this field the two never meet, and `notifications` has nobody to tell.
+///
+/// One login is one person, and the refusal is here rather than in an index —
+/// see [`hr::link_login`] for why a unique constraint on a projection column
+/// would be the more expensive failure.
+#[tokio::test]
+async fn a_login_belongs_to_one_employee() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+    fixture.hire("EMP-2", "عمر", None, None).await;
+    let login = "11111111-1111-1111-1111-111111111111";
+
+    hr::link_login(
+        &fixture.db,
+        &code("EMP-1"),
+        login,
+        on("2026-09-08"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("links");
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    assert_eq!(
+        hr::employee(&mut conn, "EMP-1")
+            .await
+            .expect("reads")
+            .expect("a row")
+            .identity
+            .as_deref(),
+        Some(login),
+        "the record does not say which login is this person"
+    );
+    assert_eq!(
+        hr::employee_by_login(&mut conn, login)
+            .await
+            .expect("reads")
+            .map(|e| e.id),
+        Some("EMP-1".to_owned())
+    );
+    drop(conn);
+
+    // The same login again is nothing, not a second event.
+    let again = hr::link_login(
+        &fixture.db,
+        &code("EMP-1"),
+        login,
+        on("2026-09-08"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("links again");
+    assert!(again.events.is_empty(), "the same login was recorded twice");
+
+    // Somebody else may not hold it.
+    let refused = hr::link_login(
+        &fixture.db,
+        &code("EMP-2"),
+        login,
+        on("2026-09-08"),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("one login reached two inboxes");
+    assert!(format!("{refused:?}").contains("LoginTaken"), "{refused:?}");
+
+    // Unlinking frees it.
+    hr::unlink_login(
+        &fixture.db,
+        &code("EMP-1"),
+        on("2026-09-08"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("unlinks");
+    fixture.project().await;
+
+    hr::link_login(
+        &fixture.db,
+        &code("EMP-2"),
+        login,
+        on("2026-09-08"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the login is free once nobody holds it");
+
+    fixture.cleanup().await;
+}

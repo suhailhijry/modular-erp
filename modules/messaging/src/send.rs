@@ -71,19 +71,20 @@ pub struct Outbound {
 }
 
 impl Outbound {
-    /// The effect that promises to send it.
+    /// The effect that promises to send it, or `None` for a channel that never
+    /// leaves this system.
     ///
     /// The key is the caller's, so a retried send promises one message rather
     /// than two (L8) — and it reaches the gateway as an idempotency key, so a
     /// delivery this dispatcher believes failed but which succeeded is not
     /// performed twice.
     #[must_use]
-    pub fn promised(&self, key: String) -> Effect {
-        Effect::with_key(
-            self.channel.kind(),
+    pub fn promised(&self, key: String) -> Option<Effect> {
+        Some(Effect::with_key(
+            self.channel.kind()?,
             key,
             serde_json::to_value(self).unwrap_or(serde_json::Value::Null),
-        )
+        ))
     }
 
     /// Reads one back out of an effect's payload.
@@ -155,6 +156,13 @@ pub enum SendError {
         id: String,
         channel: String,
     },
+    /// A message on a channel that never leaves this system.
+    ///
+    /// **An announcement is announced, not sent.** `notifications::announce`
+    /// writes a record in the tenant's log and this promises effects; a bell
+    /// promised as an effect would sit in the outbox for ever.
+    #[error("{channel} is not a channel a message is sent on")]
+    NotSendable { channel: String },
     #[error(transparent)]
     Spend(#[from] SpendError),
     #[error(transparent)]
@@ -173,6 +181,8 @@ impl Localize for SendError {
                 audience, channel, ..
             } => Message::new(crate::messages::UNREACHABLE)
                 .with("audience", MessageArg::text(audience))
+                .with("channel", MessageArg::text(channel)),
+            Self::NotSendable { channel } => Message::new(crate::messages::NOT_SENDABLE)
                 .with("channel", MessageArg::text(channel)),
             Self::Spend(SpendError::Refused(over)) => over.message(),
             Self::Spend(SpendError::Config(e)) | Self::Config(e) => e.message(),
@@ -239,6 +249,15 @@ pub async fn send(conn: &mut PgConnection, sending: &Sending) -> Result<Sent, Se
         .filter(|t| t.active)
         .ok_or_else(|| TemplateError::NoSuchTemplate(sending.template.clone()))?;
 
+    // **A bell is not sent.** A template on the in-system channel is wording
+    // for `notifications::announce`, which writes a record in the log; there is
+    // no effect to promise and nothing for a handler to claim.
+    if template.channel == Channel::InSystem {
+        return Err(SendError::NotSendable {
+            channel: template.channel.as_str().to_owned(),
+        });
+    }
+
     let settings = config::get::<Settings>(&mut *conn, crate::settings::KEY)
         .await?
         .map(|c| c.value)
@@ -270,26 +289,13 @@ pub async fn send(conn: &mut PgConnection, sending: &Sending) -> Result<Sent, Se
             platform: address.platform,
         };
 
-        // **No cause.** The key is the caller's, which is what an effect with
-        // no log position behind it needs — a reminder is not caused by an
-        // event, it is caused by a clock.
-        let effect = message.promised(format!("{}.{n}", sending.key));
-        if erp_eventlog::enqueue(conn, None, std::slice::from_ref(&effect)).await? == 0 {
+        if !deliver(conn, &message, format!("{}.{n}", sending.key), sending.at).await? {
             // Already promised under this key. Nothing was written, so nothing
             // is charged.
             continue;
         }
         promised += 1;
-        // **Charged per person**, because that is how a gateway bills: one
-        // audience that resolves to two managers is two messages and two
-        // segments each.
-        //
-        // `each`, and not the running total the meter hands back — adding the
-        // month's total per recipient would report a two-person send as having
-        // cost whatever the month has cost so far.
-        let each = template.channel.units(&body);
-        budget::charge(conn, template.channel, each, sending.at).await?;
-        units += each;
+        units += template.channel.units(&body);
     }
 
     Ok(Sent {
@@ -298,6 +304,46 @@ pub async fn send(conn: &mut PgConnection, sending: &Sending) -> Result<Sent, Se
         promised,
         units,
     })
+}
+
+/// Charges the meter and promises one message to one address.
+///
+/// **The tail of [`send`]**, for a caller that has already resolved a person —
+/// which is what announcing does: `notifications` finds the people once, then
+/// reaches each of them on the channels they asked for.
+///
+/// Returns whether anything was written. `false` means this key was already
+/// promised, and then nothing is charged: the outbox deduplicates on the key,
+/// and charging a repeat would let a five-minute job spend a month's budget on
+/// one reminder.
+///
+/// # No cause
+///
+/// The key is the caller's, which is what an effect with no log position behind
+/// it needs — a reminder is not caused by an event, it is caused by a clock.
+pub async fn deliver(
+    conn: &mut PgConnection,
+    message: &Outbound,
+    key: String,
+    at: Timestamp,
+) -> Result<bool, SendError> {
+    let Some(effect) = message.promised(key) else {
+        return Err(SendError::NotSendable {
+            channel: message.channel.as_str().to_owned(),
+        });
+    };
+    if erp_eventlog::enqueue(conn, None, std::slice::from_ref(&effect)).await? == 0 {
+        return Ok(false);
+    }
+    // **Charged per person**, because that is how a gateway bills: one audience
+    // that resolves to two managers is two messages and two segments each.
+    //
+    // `each`, and not the running total the meter hands back — adding the
+    // month's total per recipient would report a two-person send as having cost
+    // whatever the month has cost so far.
+    let each = message.channel.units(&message.body);
+    budget::charge(conn, message.channel, each, at).await?;
+    Ok(true)
 }
 
 /// Who this actually reaches, right now.

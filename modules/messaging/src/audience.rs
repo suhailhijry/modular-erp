@@ -193,7 +193,26 @@ pub async fn resolve(
     channel: Channel,
     operator: Option<&str>,
 ) -> Result<Vec<Address>, sqlx::Error> {
-    let people = match audience {
+    Ok(people(conn, audience, subject, operator)
+        .await?
+        .into_iter()
+        .filter_map(|person| person.reachable_on(channel))
+        .collect())
+}
+
+/// Who this reaches, as **people** rather than addresses.
+///
+/// [`resolve`] is this, filtered to one channel. Announcing needs the person:
+/// one recipient who gets a bell *and* a text is one person with one
+/// preference, and a list of addresses cannot say that — two entries in it
+/// might be two channels of one person or two people.
+pub async fn people(
+    conn: &mut PgConnection,
+    audience: Audience,
+    subject: &Subject,
+    operator: Option<&str>,
+) -> Result<Vec<Person>, sqlx::Error> {
+    Ok(match audience {
         Audience::Client => client_of(conn, subject).await?,
         Audience::Worker => worker_of(conn, subject).await?,
         Audience::BranchManager => managers_of(conn, subject).await?,
@@ -203,19 +222,18 @@ pub async fn resolve(
             Some(id) => employee(conn, id).await?.into_iter().collect(),
             None => Vec::new(),
         },
-    };
-
-    Ok(people
-        .into_iter()
-        .filter_map(|person| person.reachable_on(channel))
-        .collect())
+    })
 }
 
 /// Somebody, and the ways they can be reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Person {
-    email: Option<String>,
-    phone: Option<String>,
+pub struct Person {
+    /// **Which login is this person**, when somebody has said — `hr`'s
+    /// `identity`. `None` for anybody who does not log in, which is most of an
+    /// org chart and every customer.
+    pub identity: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
 }
 
 impl Person {
@@ -224,12 +242,18 @@ impl Person {
     /// **Push is deliberately not here.** A device token is not a property of a
     /// person in any read model — it arrives from a device and lives in
     /// `push_token` — so it is resolved separately, by [`crate::push::tokens`].
-    fn reachable_on(self, channel: Channel) -> Option<Address> {
+    #[must_use]
+    pub fn reachable_on(&self, channel: Channel) -> Option<Address> {
         let value = match channel {
-            Channel::Email => self.email,
+            Channel::Email => self.email.clone(),
             // WhatsApp is addressed by phone number, which is the whole reason
             // a business uses it rather than an app of its own.
-            Channel::Sms | Channel::WhatsApp => self.phone,
+            Channel::Sms | Channel::WhatsApp => self.phone.clone(),
+            // **A login, not a device and not an address.** An inbox belongs to
+            // whoever logs in as this person, and somebody nobody has linked is
+            // not reachable in-system at all — a fact, like a customer with no
+            // mobile number.
+            Channel::InSystem => self.identity.clone(),
             Channel::Push => None,
         }?;
         Some(Address {
@@ -261,6 +285,10 @@ async fn client_of(conn: &mut PgConnection, subject: &Subject) -> Result<Vec<Per
     Ok(crm::customer(conn, &id)
         .await?
         .map(|c| Person {
+            // **A customer has no login.** There is no customer portal, so
+            // `Audience::Client` reaches nobody in-system and a notification
+            // may not be addressed to one — see `notifications::Kind`.
+            identity: None,
             email: c.summary.email,
             phone: c.summary.phone,
         })
@@ -327,23 +355,42 @@ async fn assigned(
     Ok(None)
 }
 
-/// Whoever runs the branch a subject is at.
+/// Whoever runs the branch a subject is at — **or the business, when it is at
+/// no branch**.
 ///
 /// **From the org chart**, not from a field on a branch: a manager is whoever
 /// at that branch reports to nobody at that branch. `branches` models places,
 /// not who runs them, and adding a manager column there would be a second
 /// answer to a question `hr` already answers.
+///
+/// # Why a subject with no branch is the top of the chart
+///
+/// An invoice has no branch — it is a document, and where its postings landed
+/// is `ledger`'s and a different projection group. This used to resolve to
+/// nobody, which meant a template about an invoice addressed to a branch
+/// manager was accepted when it was saved and reached nobody for ever after.
+///
+/// The honest answer is the same rule applied at company scale: whoever reports
+/// to nobody **at all** runs the business, and something that happened to the
+/// business rather than to one of its places is theirs. A tenant with one
+/// branch gets the same person either way, which is most of this market.
 async fn managers_of(
     conn: &mut PgConnection,
     subject: &Subject,
 ) -> Result<Vec<Person>, sqlx::Error> {
-    let Some(branch) = branch_of(conn, subject).await? else {
-        return Ok(Vec::new());
+    let branch = match place_of(conn, subject).await? {
+        // **Nobody runs a record that is not there.** Falling through to the
+        // top of the chart would tell whoever runs the business about a booking
+        // that does not exist, in a sentence with holes where its details
+        // should be.
+        Place::Missing => return Ok(Vec::new()),
+        Place::Company => None,
+        Place::At(branch) => Some(branch),
     };
 
-    // A branch with more staff than this has an org chart nobody is reading off
-    // one page, and the manager is near the top of it either way.
-    let staff = hr::employees(conn, Some(&branch), false, 500, None)
+    // A business with more staff than this has an org chart nobody is reading
+    // off one page, and the manager is near the top of it either way.
+    let staff = hr::employees(conn, branch.as_deref(), false, 500, None)
         .await?
         .items;
     let here: std::collections::BTreeSet<&str> = staff.iter().map(|e| e.id.as_str()).collect();
@@ -356,25 +403,36 @@ async fn managers_of(
                 .is_none_or(|manager| !here.contains(manager))
         })
         .map(|e| Person {
+            identity: e.identity.clone(),
             email: e.email.clone(),
             phone: e.phone.clone(),
         })
         .collect())
 }
 
+/// Whose place a subject is, if it is anybody's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Place {
+    /// No such record. **Not the same as having no branch**: one is a question
+    /// with no answer, the other is an answer.
+    Missing,
+    /// The business itself, rather than one of its places — a document, or
+    /// somebody with a company-wide role.
+    Company,
+    At(String),
+}
+
 /// Which branch a subject is at.
-async fn branch_of(
-    conn: &mut PgConnection,
-    subject: &Subject,
-) -> Result<Option<String>, sqlx::Error> {
+async fn place_of(conn: &mut PgConnection, subject: &Subject) -> Result<Place, sqlx::Error> {
     Ok(match subject.topic {
-        Topic::Employee => hr::employee(conn, subject.id.as_str())
-            .await?
-            .and_then(|e| e.branch),
+        Topic::Employee => match hr::employee(conn, subject.id.as_str()).await? {
+            None => Place::Missing,
+            Some(employee) => employee.branch.map_or(Place::Company, Place::At),
+        },
         Topic::Reservation => {
             // A booking is at whichever branch its resources are at.
             let Some(detail) = booking::reservation(conn, subject.id.as_str()).await? else {
-                return Ok(None);
+                return Ok(Place::Missing);
             };
             let mut found = None;
             for line in &detail.lines {
@@ -387,17 +445,23 @@ async fn branch_of(
                     }
                 }
             }
-            found
+            found.map_or(Place::Company, Place::At)
         }
-        // An invoice's branch is on its postings, which is `ledger`'s and a
-        // different group. Not reached for; a template about an invoice
-        // addressed to a branch manager resolves to nobody and says so.
-        Topic::Invoice | Topic::Customer => None,
+        // **An invoice's branch is on its postings**, which is `ledger`'s and a
+        // different projection group. So a document is the business's rather
+        // than a place's — which is the honest answer anyway, and the one that
+        // stops a template about an invoice addressed to a branch manager from
+        // being accepted when it is saved and reaching nobody for ever after.
+        //
+        // Not checked for existence: an invoice this system has not projected
+        // yet is still the business's, and `bindings` says what it can about it.
+        Topic::Invoice | Topic::Customer => Place::Company,
     })
 }
 
 async fn employee(conn: &mut PgConnection, id: &str) -> Result<Option<Person>, sqlx::Error> {
     Ok(hr::employee(conn, id).await?.map(|e| Person {
+        identity: e.identity,
         email: e.email,
         phone: e.phone,
     }))
@@ -438,18 +502,51 @@ mod tests {
     #[test]
     fn a_person_is_reachable_only_where_they_have_an_address() {
         let both = Person {
+            identity: None,
             email: Some("a@b.test".to_owned()),
             phone: Some("+966500000000".to_owned()),
         };
-        assert!(both.clone().reachable_on(Channel::Email).is_some());
-        assert!(both.clone().reachable_on(Channel::Sms).is_some());
-        assert!(both.clone().reachable_on(Channel::WhatsApp).is_some());
+        assert!(both.reachable_on(Channel::Email).is_some());
+        assert!(both.reachable_on(Channel::Sms).is_some());
+        assert!(both.reachable_on(Channel::WhatsApp).is_some());
         assert!(both.reachable_on(Channel::Push).is_none());
 
         let letters_only = Person {
+            identity: None,
             email: Some("a@b.test".to_owned()),
             phone: None,
         };
         assert!(letters_only.reachable_on(Channel::Sms).is_none());
+    }
+
+    /// **A bell belongs to a login.**
+    ///
+    /// Somebody nobody has linked is not reachable in-system, and an email
+    /// address is not a substitute: an inbox is read by whoever logs in, and
+    /// there is nothing to log in as.
+    #[test]
+    fn in_system_reaches_a_linked_login_and_nobody_else() {
+        let login = "11111111-1111-1111-1111-111111111111";
+        let linked = Person {
+            identity: Some(login.to_owned()),
+            email: Some("sara@acme.test".to_owned()),
+            phone: None,
+        };
+        let address = linked
+            .reachable_on(Channel::InSystem)
+            .expect("a linked person has an inbox");
+        assert_eq!(address.value, login);
+        assert_eq!(address.channel, Channel::InSystem);
+
+        let unlinked = Person {
+            identity: None,
+            email: Some("sara@acme.test".to_owned()),
+            phone: Some("+966500000000".to_owned()),
+        };
+        assert!(
+            unlinked.reachable_on(Channel::InSystem).is_none(),
+            "an address is not a login"
+        );
+        assert!(unlinked.reachable_on(Channel::Email).is_some());
     }
 }

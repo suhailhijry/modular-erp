@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT e.id as \"id!\", e.name as \"name!\", e.name_latin, e.email, e.phone,\n                  e.reports_to, e.branch, e.hired_on as \"hired_on!\", e.left_at\n             FROM proj_hr.employee e\n            WHERE e.left_at IS NULL\n              AND (EXISTS (SELECT 1 FROM proj_hr.employee_skill s\n                            WHERE s.employee = e.id AND s.service = $1)\n               OR NOT EXISTS (SELECT 1 FROM proj_hr.employee_skill s\n                               WHERE s.employee = e.id))\n            ORDER BY e.name, e.id\n            LIMIT $2",
+  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, email, phone,\n                  reports_to, branch, identity, hired_on as \"hired_on!\", left_at\n             FROM proj_hr.employee\n            WHERE ($4 OR left_at IS NULL)\n              AND ($5::text IS NULL OR branch = $5)\n              AND ($2::text = '' OR (name, id) > ($2, $3))\n            ORDER BY name, id\n            LIMIT $1",
   "describe": {
     "columns": [
       {
@@ -82,6 +82,17 @@
       },
       {
         "ordinal": 7,
+        "name": "identity",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "identity"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "hired_on!",
         "type_info": "Timestamptz",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "left_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -105,8 +116,11 @@
     ],
     "parameters": {
       "Left": [
+        "Int8",
         "Text",
-        "Int8"
+        "Text",
+        "Bool",
+        "Text"
       ]
     },
     "nullable": [
@@ -117,9 +131,10 @@
       true,
       true,
       true,
+      true,
       false,
       true
     ]
   },
-  "hash": "d0234a66c4e1658832e51ea8525290af781dd5db5d893fc77982365438c0263b"
+  "hash": "f9f1d56311427da397f1b308c12c4521e0feda90f21f4d85a621eb9537312534"
 }

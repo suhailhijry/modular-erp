@@ -741,6 +741,36 @@ pub async fn performed(
 ///
 /// Both ends are optional, so the same read serves "everything from now on"
 /// and "this week".
+/// Bookings **made** since an instant, oldest first.
+///
+/// # Why when it was made and not when it starts
+///
+/// This is what an announcer sweeps, and a window on `starts_at` would announce
+/// every booking in the diary on the first tick after a tenant switches
+/// notifications on. A window on when it was *made* announces what is new,
+/// which is what somebody at a counter wants to be told about.
+///
+/// `reserved_on` is the event's own instant, so this is stable under a rebuild
+/// — unlike `recorded_at`, which moves.
+pub async fn reserved_since(
+    conn: &mut PgConnection,
+    since: Timestamp,
+    limit: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id as "id!"
+             FROM proj_booking.reservation
+            WHERE reserved_on > $1
+            ORDER BY reserved_on, id
+            LIMIT $2"#,
+        since,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.id).collect())
+}
+
 pub async fn reservations(
     conn: &mut PgConnection,
     from: Option<Timestamp>,

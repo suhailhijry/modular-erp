@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT kind as \"kind!\", channels as \"channels!\"\n             FROM proj_notifications.preference\n            WHERE identity = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_notifications.preference",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channels!",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "proj_notifications.preference",
+            "name": "channels"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "cb1bb8fe7bdde1fc2fab20ea72bf0720b06fa3a74e120bc7d147b8ab03ad6361"
+}

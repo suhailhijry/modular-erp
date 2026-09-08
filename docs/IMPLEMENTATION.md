@@ -651,6 +651,66 @@ the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
 
+### 47 · The bell: who a notification is for, and why no module may ring it
+
+**A notification had nowhere to live.** `messaging` reaches people well and
+records nothing: a reminder that went out at 09:00 exists in an outbox row and
+somebody else's gateway logs. So anything the system noticed and nobody was
+waiting for was lost — an iqama expiring in three weeks was logged as a *health
+finding*, at `error`, beside "the event log is not contiguous", because there
+was nowhere else to put it.
+
+**The two planes made "who" the hard part.** An audience resolves to an
+*employee*, which is tenant-plane; a bell is read by whoever *logs in*, which is
+a control-plane identity. 9c deliberately refused to bridge those for
+authorization, and that stands — nothing about what somebody may do reads this.
+What 13c adds is one optional field, `hr.employee.identity`, that answers a
+different question: **which bell rings**. It grants nothing, and the reader
+still needs the module role to see anything at all. Identity ids were already in
+the tenant log — `Metadata.actor` has carried one on every event a person caused
+since the log existed — so this crosses nothing that was not already crossed.
+
+**A domain module can never announce, and that is the dependency graph talking.**
+
+```text
+notifications  →  messaging  →  booking, crm, hr, sales
+        ↑
+erp-api, bin/worker.rs   (the composition roots)
+```
+
+Announcing resolves an audience, which is `messaging`'s work, which reads the
+domain modules' read models. `booking → notifications` would close that loop and
+cargo would refuse to build it. So announcements are raised from **above** the
+modules — worker jobs — which is where three of the four producers already were.
+It costs nothing in practice: a bell tells somebody about something they were
+*not* doing, and what a person did themselves needs no announcement.
+
+**Every producer is a scan that may run twice.** The notification's aggregate id
+is `Uuid::new_v5` over the kind and the subject, so announcing the same thing
+again loads an aggregate that exists and writes nothing. That single fact
+removes the queue this would otherwise need: no cursor, no checkpoint table, no
+exactly-once delivery to get wrong. Each producer sweeps a six-hour window every
+tick and announces all of it; the overlap is free.
+
+**A document belongs to the business, and that was a bug found by building on
+it.** `Audience::BranchManager` resolved through the branch a subject is at —
+and an invoice has no branch, because where its postings landed is `ledger`'s
+and a different projection group. So three of the five kinds would have resolved
+to nobody for ever, silently, and a template about an invoice addressed to a
+branch manager had *already* been in that state since Phase 11. `messaging` now
+reads a subject with no branch as the business itself: whoever reports to nobody
+at all. A record that is not there still resolves to nobody, which is the
+distinction that keeps the two apart.
+
+**What a person can say for themselves** is a grid of kind × channel, defaulting
+to the bell and nothing billable. A default that spends money is a default
+nobody chose.
+
+**The expiring-document finding stays.** It now has a bell as well, and that is
+not duplication: the finding is the operator's channel and the bell is the
+tenant's, and a tenant without the module — or with nobody linked to a login —
+would otherwise be told by nobody at all.
+
 ### 46 · The signal stream: two screens and a phone agree, and nobody polled
 
 **Every read was a poll, and the phase said so.** A booking from a phone had to
@@ -699,9 +759,11 @@ reads the reservation at that position. Beside it:
 runner's `an_advance_names_the_streams_it_touched`; the hub's four unit tests;
 and `an_advance_published_is_received_by_a_subscriber` over a real Redis.
 
-**Left by decision:** 13c notifications and 13d conversations, next in that
-order; `Last-Event-ID` replay; per-branch filtering; public streams for anything
-but a reservation, which the subject registry is ready for.
+**Left by decision:** 13d conversations; `Last-Event-ID` replay; per-branch
+filtering; public streams for anything but a reservation, which the subject
+registry is ready for. 13c is built — see §47, which rides on this one: a
+notification reaches a screen as *group `notifications` is queryable through N*
+and nothing else.
 
 ### 45 · The OTP is typed once, and the worker finishes the onboarding
 
@@ -3625,13 +3687,14 @@ three parts of it are not obvious.
 
 ### 13c · Notifications inside the system
 
-- [ ] A notification is a **durable record first** and a live signal second. One
+- [x] A notification is a **durable record first** and a live signal second. One
       that only existed on a socket did not happen for whoever was at lunch
-- [ ] Read state per person, and it survives a rebuild — so it is a projection of
+- [x] Read state per person, and it survives a rebuild — so it is a projection of
       an event, not a flag set on a row
-- [ ] The same audiences as Phase 11b: the client, the employee, the manager, an
+- [x] The same audiences as Phase 11b: the client, the employee, the manager, an
       operator. One audience model, four channels — in-system, email, SMS, push —
-      and a preference per person
+      and a preference per person. **The client is the exception and had to be**:
+      an inbox belongs to a login and a customer has none (§47)
 
 ### 13d · Conversations
 

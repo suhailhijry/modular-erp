@@ -158,6 +158,14 @@ const REGISTERED: &[Registered] = &[
         http: messaging::http::routes,
         catalog: &messaging::CATALOG,
     },
+    // After `messaging`, which it is built on: an audience is resolved there
+    // and a tenant's own wording for a kind is a template there.
+    Registered {
+        name: "notifications",
+        setup: notifications::setup,
+        http: notifications::http::routes,
+        catalog: &notifications::CATALOG,
+    },
     Registered {
         name: "files",
         setup: files::setup,

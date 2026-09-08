@@ -693,6 +693,7 @@ dependencies = [
  "hr_sa",
  "ledger",
  "messaging",
+ "notifications",
  "openssl",
  "payments",
  "payroll",
@@ -763,6 +764,7 @@ dependencies = [
  "hr_sa",
  "ledger",
  "messaging",
+ "notifications",
  "payments",
  "payroll",
  "pos",
@@ -992,6 +994,7 @@ dependencies = [
  "ledger",
  "lettre",
  "messaging",
+ "notifications",
  "payments",
  "payroll",
  "pos",
@@ -2068,6 +2071,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "notifications"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "booking",
+ "branches",
+ "chrono",
+ "crm",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-occupancy",
+ "erp-projection",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "hr",
+ "messaging",
+ "sales",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+ "uuid",
 ]
 
 [[package]]

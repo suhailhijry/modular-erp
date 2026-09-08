@@ -22,8 +22,8 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use erp_web::AppState;
-use erp_web::Problem;
 use erp_web::{After, Allowed, IdempotencyKey, Language, ManageTenant, Paged, PostEntries, Read};
+use erp_web::{ApiError, Problem};
 use erp_web::{Consistency, nudge};
 use erp_web::{Json, Query, bad_request, creating, metadata, parse_id, require_module};
 
@@ -36,6 +36,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get_employee, amend_employee))
         .routes(routes!(reparent_employee))
         .routes(routes!(transfer_employee))
+        .routes(routes!(link_employee_login, unlink_employee_login))
         .routes(routes!(record_leaving))
         .routes(routes!(list_claims, grant_claim))
         .routes(routes!(revoke_claim))
@@ -127,6 +128,16 @@ struct Transfer {
     /// Absent makes the role company-wide.
     #[serde(default)]
     branch: Option<String>,
+    #[serde(default)]
+    #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
+    at: Option<Timestamp>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "identity": "0192f0a1-0000-7000-8000-000000000001" }))]
+struct LinkLogin {
+    /// One of the identities from `GET /v1/members`.
+    identity: String,
     #[serde(default)]
     #[schema(value_type = Option<chrono::DateTime<chrono::Utc>>)]
     at: Option<Timestamp>,
@@ -768,6 +779,134 @@ async fn transfer_employee(
         &employee,
         branch.as_ref(),
         body.at.unwrap_or_else(chrono::Utc::now),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(HrAccepted {
+        id,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+/// Say which login is this person.
+///
+/// # What this does not do
+///
+/// **It grants nothing.** No capability check reads this field: what somebody
+/// may do is still their role in the tenant, decided in the control plane, and
+/// 9c's refusal to let an org chart feed that decision stands. What this
+/// answers is whose bell rings — an audience resolves to an employee and an
+/// inbox belongs to a login.
+///
+/// `ManageTenant` all the same, because deciding who receives what is the same
+/// authority as deciding who has access.
+///
+/// One login is one person: linking one another employee already holds is
+/// refused.
+#[utoipa::path(
+    put,
+    path = "/v1/hr/employees/{employee}/login",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+    ),
+    request_body = LinkLogin,
+    responses(
+        (status = OK, description = "Linked. The same login again is the same answer.", body = HrAccepted),
+        (status = BAD_REQUEST, description = "Not a member of this tenant", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "Another employee already logs in as that", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn link_employee_login(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(id): Path<String>,
+    Json(body): Json<LinkLogin>,
+) -> Result<Json<HrAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let employee = parse_id(&id, locale)?;
+
+    // **A login this tenant does not have is refused, not stored.** A field
+    // holding an identity that is nobody here would send notifications into a
+    // void, and the person waiting for them would have no way to find out why.
+    //
+    // Checked here rather than in the command because membership is
+    // control-plane and a command holds only a tenant connection — the same
+    // split every module lives with.
+    let members = state
+        .control
+        .members(tenant.db.tenant())
+        .await
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &CATALOG))?;
+    if !members
+        .iter()
+        .any(|m| m.identity.to_string() == body.identity)
+    {
+        return Err(ApiError::BadRequest(
+            erp_i18n::Message::new(crate::messages::NOT_A_MEMBER)
+                .with("identity", erp_i18n::MessageArg::text(body.identity)),
+        )
+        .into_problem(locale, &CATALOG));
+    }
+
+    let committed = crate::link_login(
+        &tenant.db,
+        &employee,
+        &body.identity,
+        body.at.unwrap_or_else(chrono::Utc::now),
+        &metadata(&tenant),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
+
+    nudge(&state, tenant.db.tenant()).await;
+    Ok(Json(HrAccepted {
+        id,
+        position: committed.at.map(erp_types::LogPosition::get),
+    }))
+}
+
+/// Say this person no longer logs in as themselves.
+///
+/// Unlinking somebody who has no login is the same answer, not an error.
+#[utoipa::path(
+    delete,
+    path = "/v1/hr/employees/{employee}/login",
+    tag = "hr",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain."),
+        ("employee" = String, Path, description = "Their id."),
+    ),
+    responses(
+        (status = OK, description = "Unlinked. Already-unlinked is the same answer.", body = HrAccepted),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn unlink_employee_login(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(id): Path<String>,
+) -> Result<Json<HrAccepted>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let employee = parse_id(&id, locale)?;
+
+    let committed = crate::unlink_login(
+        &tenant.db,
+        &employee,
+        chrono::Utc::now(),
         &metadata(&tenant),
     )
     .await

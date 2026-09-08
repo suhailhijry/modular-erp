@@ -128,6 +128,10 @@ impl Projection for EmployeeList {
             EmployeeEvent::Skilled { skills, .. } => {
                 skilled(ctx, conn, id, &skills).await?;
             }
+            EmployeeEvent::LoginLinked { identity, .. } => {
+                logged_in_as(ctx, conn, id, Some(&identity)).await?;
+            }
+            EmployeeEvent::LoginUnlinked { .. } => logged_in_as(ctx, conn, id, None).await?,
             EmployeeEvent::DocumentRecorded {
                 kind,
                 number,
@@ -483,6 +487,26 @@ async fn reparented(
 }
 
 /// Somebody moved branch.
+/// Which login is this person, or none of them.
+///
+/// One statement, so linking and unlinking are the same write with a different
+/// value — the record holds *the* login, never a history of them.
+async fn logged_in_as(
+    ctx: &ProjectionCtx<'_>,
+    conn: &mut PgConnection,
+    id: &str,
+    identity: Option<&str>,
+) -> Result<(), ProjectionError> {
+    sqlx::query("UPDATE employee SET identity = $2, recorded_at = $3, position = $4 WHERE id = $1")
+        .bind(id)
+        .bind(identity)
+        .bind(ctx.event_time())
+        .bind(ctx.position().get())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 async fn transferred(
     ctx: &ProjectionCtx<'_>,
     conn: &mut PgConnection,
@@ -519,6 +543,9 @@ pub struct EmployeeSummary {
     pub reports_to: Option<String>,
     /// Where they work. `None` for a company-wide role.
     pub branch: Option<String>,
+    /// Which login is this person, when somebody has said. `None` for most of
+    /// an org chart — a salon's stylists do not log in to anything.
+    pub identity: Option<String>,
     pub hired_on: Timestamp,
     pub left_at: Option<Timestamp>,
 }
@@ -534,6 +561,7 @@ macro_rules! summarise {
             phone: r.phone,
             reports_to: r.reports_to,
             branch: r.branch,
+            identity: r.identity,
             hired_on: r.hired_on,
             left_at: r.left_at,
         }
@@ -557,7 +585,7 @@ pub async fn employees(
     let (name, id) = resume(after);
     let rows = sqlx::query!(
         r#"SELECT id as "id!", name as "name!", name_latin, email, phone,
-                  reports_to, branch, hired_on as "hired_on!", left_at
+                  reports_to, branch, identity, hired_on as "hired_on!", left_at
              FROM proj_hr.employee
             WHERE ($4 OR left_at IS NULL)
               AND ($5::text IS NULL OR branch = $5)
@@ -587,9 +615,29 @@ pub async fn employee(
 ) -> Result<Option<EmployeeSummary>, sqlx::Error> {
     let row = sqlx::query!(
         r#"SELECT id as "id!", name as "name!", name_latin, email, phone,
-                  reports_to, branch, hired_on as "hired_on!", left_at
+                  reports_to, branch, identity, hired_on as "hired_on!", left_at
              FROM proj_hr.employee WHERE id = $1"#,
         id
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(row.map(|r| summarise!(r)))
+}
+
+/// Whose record a login belongs to, if anybody's.
+///
+/// What "one login is one person" is checked against before it is written, and
+/// what a screen showing the org chart uses to say which row is you.
+pub async fn employee_by_login(
+    conn: &mut PgConnection,
+    identity: &str,
+) -> Result<Option<EmployeeSummary>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"SELECT id as "id!", name as "name!", name_latin, email, phone,
+                  reports_to, branch, identity, hired_on as "hired_on!", left_at
+             FROM proj_hr.employee WHERE identity = $1"#,
+        identity
     )
     .fetch_optional(&mut *conn)
     .await?;
@@ -729,7 +777,7 @@ pub async fn who_can_perform(
 ) -> Result<Vec<EmployeeSummary>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"SELECT e.id as "id!", e.name as "name!", e.name_latin, e.email, e.phone,
-                  e.reports_to, e.branch, e.hired_on as "hired_on!", e.left_at
+                  e.reports_to, e.branch, e.identity, e.hired_on as "hired_on!", e.left_at
              FROM proj_hr.employee e
             WHERE e.left_at IS NULL
               AND (EXISTS (SELECT 1 FROM proj_hr.employee_skill s

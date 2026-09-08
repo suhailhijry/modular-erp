@@ -77,6 +77,10 @@ impl Budget {
             Channel::WhatsApp => self.whatsapp,
             Channel::Email => self.email,
             Channel::Push => self.push,
+            // **Nothing to cap.** A bell costs nothing to write and nobody
+            // bills for one, so a limit here would be a number with no meaning
+            // that could still refuse a notification.
+            Channel::InSystem => None,
         }
     }
 }

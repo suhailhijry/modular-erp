@@ -19,6 +19,11 @@ use erp_worker::{
 };
 
 #[tokio::main]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the composition root: every job this deployment runs is named here \
+              once, and splitting the list would hide what a worker does"
+)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -140,6 +145,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         worker = worker.with_job(job);
     }
     worker = worker
+        .with_job(Arc::new(AnnounceNewBookings))
+        .with_job(Arc::new(AnnounceExpiringDocuments))
         .with_job(Arc::new(BookingReminders))
         .with_job(Arc::new(ExpireUnpaidHolds))
         .with_job(Arc::new(BillCompletedBookings))
@@ -531,7 +538,12 @@ fn message_transports() -> Vec<Arc<dyn messaging::Transport>> {
         let gateway = match channel {
             messaging::Channel::Sms => taqnyat(),
             messaging::Channel::Push => fcm(),
-            messaging::Channel::Email | messaging::Channel::WhatsApp => None,
+            // **In-system has no gateway and never will**: a bell is a record
+            // in the tenant's own log, written by `notifications`, and it does
+            // not reach this loop at all.
+            messaging::Channel::Email
+            | messaging::Channel::WhatsApp
+            | messaging::Channel::InSystem => None,
         };
         if let Some(transport) = gateway {
             transports.push(transport);
@@ -1102,6 +1114,15 @@ impl erp_worker::Job for SubmitToZatca {
             );
         }
 
+        // **And tell somebody about a refusal.** A refused document is the
+        // tenant's problem to fix and nothing else in the system would say so
+        // — until now it sat in a read model waiting for somebody to open the
+        // right screen. Announced from here rather than from `tax_sa` because a
+        // module cannot announce: see the `notifications` crate docs.
+        if swept.refused > 0 {
+            announce_refusals(db).await;
+        }
+
         Ok(if swept.did_something() {
             Activity::Worked
         } else {
@@ -1279,6 +1300,12 @@ impl erp_worker::Job for SettleGatewayPayments {
             }
         }
 
+        // **And tell somebody money moved.** Announced from here rather than
+        // from `payments` because a module cannot announce — see the
+        // `notifications` crate docs — and here is where a settlement is
+        // already known to have happened.
+        announce_payments(db).await;
+
         Ok(if resolved > 0 {
             Activity::Worked
         } else {
@@ -1289,6 +1316,219 @@ impl erp_worker::Job for SettleGatewayPayments {
 
 /// How many settled deposits the repair pass looks back over per tick.
 const REPAIR_BATCH: i64 = 200;
+
+// ---------------------------------------------------------------------------
+// Announcing: four producers, one shape
+// ---------------------------------------------------------------------------
+
+/// How far back an announcer looks.
+///
+/// Wide enough to survive a worker restart or a rollout, narrow enough that a
+/// tenant switching notifications on does not get a week of history in their
+/// bell at once. Overlap costs nothing: the notification id is derived from the
+/// kind and the subject, so announcing the same thing again writes nothing.
+const ANNOUNCE_WINDOW: chrono::TimeDelta = chrono::TimeDelta::hours(6);
+
+/// How many rows one announcer reads per tick.
+const ANNOUNCE_BATCH: i64 = 100;
+
+/// Whether this tenant has a bell to ring at all.
+fn announces(db: &erp_control::TenantDb) -> bool {
+    db.has_module(&notifications::module_id())
+}
+
+fn announce_window(now: erp_types::Timestamp) -> erp_types::Timestamp {
+    now - ANNOUNCE_WINDOW
+}
+
+/// Turns a batch of finished payments into what to announce about each.
+///
+/// **Invoices only.** A deposit against a booking has no invoice and its
+/// subject would have to be the reservation — which is a different kind, and
+/// the diary already shows a paid deposit live (13a). Split out from the job so
+/// the mapping that decides *settled* from *failed* is a function a test can
+/// call.
+fn payments_to_announce(
+    finished: Vec<payments::Finished>,
+) -> Vec<(notifications::Kind, erp_types::AggregateId)> {
+    finished
+        .into_iter()
+        .filter_map(|payment| {
+            let invoice = erp_types::AggregateId::new(payment.invoice?).ok()?;
+            let kind = match payment.stage.as_str() {
+                "failed" => notifications::Kind::PaymentsFailed,
+                _ => notifications::Kind::PaymentsSettled,
+            };
+            Some((kind, invoice))
+        })
+        .collect()
+}
+
+/// Tells whoever runs the business what money did.
+async fn announce_payments(db: &erp_control::TenantDb) {
+    if !announces(db) {
+        return;
+    }
+    let now = chrono::Utc::now();
+    let finished = {
+        let Ok(mut conn) = db.read().await else {
+            return;
+        };
+        match payments::finished_since(&mut conn, announce_window(now), ANNOUNCE_BATCH).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "could not read what payments finished");
+                return;
+            }
+        }
+    };
+
+    for kind in [
+        notifications::Kind::PaymentsSettled,
+        notifications::Kind::PaymentsFailed,
+    ] {
+        let subjects: Vec<erp_types::AggregateId> = payments_to_announce(finished.clone())
+            .into_iter()
+            .filter(|(k, _)| *k == kind)
+            .map(|(_, invoice)| invoice)
+            .collect();
+        if let Err(error) = notifications::announce_all(db, kind, &subjects, now).await {
+            tracing::warn!(kind = kind.as_str(), %error, "could not announce");
+        }
+    }
+}
+
+/// Tells whoever runs the business that ZATCA refused a document.
+async fn announce_refusals(db: &erp_control::TenantDb) {
+    if !announces(db) {
+        return;
+    }
+    let now = chrono::Utc::now();
+    let refused = {
+        let Ok(mut conn) = db.read().await else {
+            return;
+        };
+        match tax_sa::refused_since(&mut conn, announce_window(now), ANNOUNCE_BATCH).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "could not read what ZATCA refused");
+                return;
+            }
+        }
+    };
+
+    // **The invoice, not the ZATCA document number.** What somebody has to open
+    // and correct is the source document.
+    let subjects: Vec<erp_types::AggregateId> = refused
+        .into_iter()
+        .filter_map(|source| erp_types::AggregateId::new(source).ok())
+        .collect();
+    if let Err(error) =
+        notifications::announce_all(db, notifications::Kind::TaxRefused, &subjects, now).await
+    {
+        tracing::warn!(%error, "could not announce a refusal");
+    }
+}
+
+/// **Tells the counter a booking arrived.**
+///
+/// A scan rather than a hook in `booking::reserve`, because a module cannot
+/// announce: announcing resolves an audience, which is `messaging`'s job, which
+/// reads `booking` — so `booking → notifications` would be a cycle. See the
+/// `notifications` crate docs.
+///
+/// No cursor: the window overlaps by design and the derived notification id
+/// makes a repeat free.
+#[derive(Debug)]
+struct AnnounceNewBookings;
+
+#[async_trait::async_trait]
+impl erp_worker::Job for AnnounceNewBookings {
+    fn name(&self) -> &'static str {
+        "notifications.bookings"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(booking::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        if !announces(db) {
+            return Ok(Activity::Idle);
+        }
+        let now = chrono::Utc::now();
+
+        let made = {
+            let mut conn = db.read().await?;
+            booking::reserved_since(&mut conn, announce_window(now), ANNOUNCE_BATCH).await?
+        };
+        let subjects: Vec<erp_types::AggregateId> = made
+            .into_iter()
+            .filter_map(|id| erp_types::AggregateId::new(id).ok())
+            .collect();
+
+        let swept =
+            notifications::announce_all(db, notifications::Kind::BookingReserved, &subjects, now)
+                .await?;
+
+        Ok(if swept.announced > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
+
+/// **Tells somebody a work document is running out.**
+///
+/// The same facts `WorkDocumentExpiry` reports as a health finding, told to the
+/// tenant instead of to an operator's log. **Both stay**, and that is not
+/// duplication: the finding is the operator's channel, and a tenant without
+/// this module — or without anybody linked to a login — would otherwise be told
+/// by nobody at all.
+#[derive(Debug)]
+struct AnnounceExpiringDocuments;
+
+#[async_trait::async_trait]
+impl erp_worker::Job for AnnounceExpiringDocuments {
+    fn name(&self) -> &'static str {
+        "notifications.documents"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(hr::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        if !announces(db) {
+            return Ok(Activity::Idle);
+        }
+        let now = chrono::Utc::now();
+
+        let expiring = {
+            let mut conn = db.read().await?;
+            hr::expiring(&mut conn, DOCUMENT_WARNING_DAYS, ANNOUNCE_BATCH).await?
+        };
+        // **One notification per person, not per document.** Somebody whose
+        // iqama and licence both lapse this month has one thing to do about it.
+        let mut subjects: Vec<erp_types::AggregateId> = expiring
+            .into_iter()
+            .filter_map(|document| erp_types::AggregateId::new(document.employee).ok())
+            .collect();
+        subjects.sort();
+        subjects.dedup();
+
+        let swept =
+            notifications::announce_all(db, notifications::Kind::DocumentExpiring, &subjects, now)
+                .await?;
+
+        Ok(if swept.announced > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
 /// One provider's passes, in the order they have to run: charge what was asked
 /// of a saved card, refund what was asked back, open the checkouts a lender
 /// hosts, find the deposits customers paid themselves, and settle everything
@@ -1505,6 +1745,15 @@ fn module_jobs(signals: Option<&Arc<dyn erp_worker::Signals>>) -> Vec<Arc<dyn er
             .signalling(signals.cloned()),
         ),
         Arc::new(
+            ProjectionJob::<notifications::Notifications>::new(
+                notifications::projections(),
+                Arc::new(notifications::upcasters().clone()),
+                200,
+            )
+            .for_module(notifications::module_id())
+            .signalling(signals.cloned()),
+        ),
+        Arc::new(
             ProjectionJob::<crm::Crm>::new(
                 crm::projections(),
                 Arc::new(crm::upcasters().clone()),
@@ -1699,8 +1948,54 @@ impl Invariant for NoOverpaidInvoice {
 
 #[cfg(test)]
 mod tests {
-    use super::{certificate_time, describe, module_jobs, zatca_jobs};
+    use super::{certificate_time, describe, module_jobs, payments_to_announce, zatca_jobs};
     use std::collections::BTreeSet;
+
+    fn finished(id: &str, stage: &str, invoice: Option<&str>) -> payments::Finished {
+        payments::Finished {
+            id: id.to_owned(),
+            stage: stage.to_owned(),
+            invoice: invoice.map(str::to_owned),
+        }
+    }
+
+    /// **"Your money arrived" and "your money did not" are different sentences.**
+    ///
+    /// One `stage` column decides which, and getting it backwards would tell a
+    /// business a failed payment settled — the one mistake in this producer
+    /// that nobody would notice until they reconciled.
+    #[test]
+    fn a_failed_payment_is_not_announced_as_a_settled_one() {
+        let announced = payments_to_announce(vec![
+            finished("PAY-1", "settled", Some("INV-1")),
+            finished("PAY-2", "retained", Some("INV-2")),
+            finished("PAY-3", "failed", Some("INV-3")),
+        ]);
+
+        assert_eq!(
+            announced,
+            vec![
+                (notifications::Kind::PaymentsSettled, code("INV-1")),
+                (notifications::Kind::PaymentsSettled, code("INV-2")),
+                (notifications::Kind::PaymentsFailed, code("INV-3")),
+            ]
+        );
+    }
+
+    /// **A deposit has no invoice, and is nobody's bell.**
+    ///
+    /// Its subject would have to be the reservation, which is a different kind
+    /// — and the diary already shows a paid deposit live. Announcing it under
+    /// an invoice's topic would resolve its bindings against an invoice that
+    /// does not exist.
+    #[test]
+    fn a_deposit_against_a_booking_is_not_announced_as_an_invoice() {
+        assert!(payments_to_announce(vec![finished("PAY-1", "settled", None)]).is_empty());
+    }
+
+    fn code(id: &str) -> erp_types::AggregateId {
+        erp_types::AggregateId::new(id).expect("a valid id")
+    }
 
     fn document(name: &str, days: i32) -> hr::Expiring {
         hr::Expiring {

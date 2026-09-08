@@ -915,7 +915,12 @@ async fn public_verification(
         locale,
         platform: None,
     };
-    erp_eventlog::enqueue(&mut tx, None, &[text.promised(key.id().to_string())])
+    let promise = text
+        .promised(key.id().to_string())
+        // SMS leaves this system, so it has an effect kind. Only the in-system
+        // channel does not, and this one is a literal.
+        .unwrap_or_else(|| unreachable!("a text message is promised as an effect"));
+    erp_eventlog::enqueue(&mut tx, None, &[promise])
         .await
         .map_err(|e| unavailable(&e, locale))?;
     tx.commit().await.map_err(|e| unavailable(&e, locale))?;

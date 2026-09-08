@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT notification as \"id!\"\n             FROM proj_notifications.inbox\n            WHERE recipient = $1 AND read_at IS NULL\n            ORDER BY announced_at DESC\n            LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_notifications.inbox",
+            "name": "notification"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4bbe134884ba6f6c08681c81bea231cadd122353a3e37697b94c9902d9eed869"
+}

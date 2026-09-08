@@ -55,8 +55,9 @@ mod projections;
 pub use claims::{Claim, ClaimError, Held, SEGREGATED, effective, holds, is_segregated};
 pub use commands::{
     Hire, HrError, amend_employee, eligible_for, exists, grant_claim, hire, is_working_at,
-    may_work_on, record_day, record_document, record_leave, record_leaving, record_salary,
-    record_shifts, record_skills, reparent, revoke_claim, salary_for, transfer,
+    link_login, may_work_on, record_day, record_document, record_leave, record_leaving,
+    record_salary, record_shifts, record_skills, reparent, revoke_claim, salary_for, transfer,
+    unlink_login,
 };
 pub use employee::{
     BadEmployee, Component, Details, Document, DocumentKind, Employee, EmployeeEvent, Leave,
@@ -64,8 +65,8 @@ pub use employee::{
 };
 pub use projections::{
     EmployeeList, EmployeeSummary, Expiring, Hr, LeaveTaken, PayDetails, WorkedDay, employee,
-    employees, expiring, leave, leave_taken, pay_details, projections, shifts, skills,
-    who_can_perform, worked,
+    employee_by_login, employees, expiring, leave, leave_taken, pay_details, projections, shifts,
+    skills, who_can_perform, worked,
 };
 
 use erp_i18n::StaticCatalog;

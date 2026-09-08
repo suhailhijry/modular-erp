@@ -299,6 +299,12 @@ async fn rebuild(
                 owned.iter().map(AsRef::as_ref).collect();
             rebuild_swap::<files::Files>(&pool, sql, &refs, upcasters, 500).await?
         }
+        "notifications" => {
+            let owned = notifications::projections();
+            let refs: Vec<&dyn Projection<Group = notifications::Notifications>> =
+                owned.iter().map(AsRef::as_ref).collect();
+            rebuild_swap::<notifications::Notifications>(&pool, sql, &refs, upcasters, 500).await?
+        }
         "reports" => {
             let owned = reports::projections();
             let refs: Vec<&dyn Projection<Group = reports::Reports>> =
@@ -455,6 +461,7 @@ mod tests {
             "tax_sa",
             "reports",
             "files",
+            "notifications",
             "payments",
         ];
 

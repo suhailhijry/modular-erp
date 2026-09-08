@@ -583,3 +583,40 @@ Streams end after ten minutes with `reconnect`; `EventSource` reconnects by
 itself and the fresh `ready` says what moved. Caps per business per server:
 `REALTIME_STAFF_STREAMS_PER_TENANT` (256) and
 `REALTIME_PUBLIC_STREAMS_PER_TENANT` (4096).
+
+## The bell
+
+`notifications` needs `messaging`, and a person only has an inbox once somebody
+says which login is theirs:
+
+```bash
+curl -X PUT $API/v1/hr/employees/EMP-1/login -H "$H" -H "$A" -H 'content-type: application/json' \
+  -d '{"identity":"<an identity from GET /v1/members>"}'
+```
+
+That grants nothing — no capability check reads it — and one login belongs to
+one employee. Then:
+
+```bash
+curl "$API/v1/notifications?unread=true" -H "$H" -H "$A"
+curl -X POST $API/v1/notifications/read -H "$H" -H "$A"
+```
+
+Every route here acts on the caller's own inbox; there is no way to name
+somebody else. `GET /v1/notifications/preferences` returns the whole grid with
+the defaults filled in — the bell on, every paid channel off — and `PUT` replaces
+it whole:
+
+```bash
+curl -X PUT $API/v1/notifications/preferences -H "$H" -H "$A" -H 'content-type: application/json' \
+  -d '{"entries":[{"kind":"booking_reserved","channels":["in_system","sms"]}]}'
+```
+
+The kinds are `booking_reserved`, `payments_settled`, `payments_failed`,
+`tax_refused` and `document_expiring`. A tenant that wants its own words for one
+saves a `messaging` template **named after the kind** on the `in_system`
+channel; its bindings are checked when it is saved, like every other template.
+
+The bell is a projection group like any other, so `advanced` names it on the
+staff stream and a screen re-fetches its own inbox — the signal carries a
+position and never the notification.

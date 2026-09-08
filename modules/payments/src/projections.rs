@@ -807,6 +807,54 @@ pub async fn refunds_of(
 ///
 /// `settled` and `retained`, not `refunded`: a deposit given back in full is not
 /// one a booking should be told arrived.
+/// A payment that has finished, one way or the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finished {
+    pub id: String,
+    /// `settled`, `retained` or `failed`.
+    pub stage: String,
+    /// The invoice it collected against, when it collects against one.
+    pub invoice: Option<String>,
+}
+
+/// Payments that settled or failed in a window, oldest first.
+///
+/// # What an announcer sweeps, and the one looseness in it
+///
+/// `settled_at` is when a settlement happened. **There is no `failed_at`**, so a
+/// failure is windowed on `started_at` instead — a payment that was started
+/// long ago and failed just now can fall outside the window and never be
+/// announced. Widening the window is free where it matters, because the derived
+/// notification id makes a repeat cost nothing; a column would be the honest
+/// fix and nothing but this needs it yet.
+pub async fn finished_since(
+    conn: &mut sqlx::PgConnection,
+    since: Timestamp,
+    limit: i64,
+) -> Result<Vec<Finished>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT id as "id!", stage as "stage!", invoice
+             FROM proj_payments.payment
+            WHERE stage IN ('settled', 'retained', 'failed')
+              AND COALESCE(settled_at, started_at) > $1
+            ORDER BY COALESCE(settled_at, started_at), id
+            LIMIT $2"#,
+        since,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| Finished {
+            id: r.id,
+            stage: r.stage,
+            invoice: r.invoice,
+        })
+        .collect())
+}
+
 pub async fn settled_advances(
     conn: &mut sqlx::PgConnection,
     limit: i64,

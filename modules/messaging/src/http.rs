@@ -995,9 +995,12 @@ fn sending_refused(error: &crate::SendError, locale: Locale) -> Problem {
         | crate::SendError::Config(_)
         | crate::SendError::Enqueue(_)
         | crate::SendError::Spend(_) => StatusCode::SERVICE_UNAVAILABLE,
-        crate::SendError::Template(_) | crate::SendError::Unreachable { .. } => {
-            StatusCode::BAD_REQUEST
-        }
+        crate::SendError::Template(_)
+        | crate::SendError::Unreachable { .. }
+        // Asking to *send* a bell is a request for the wrong verb: the
+        // template is fine and the channel is real, but announcing is
+        // `notifications`'s and this route does not do it.
+        | crate::SendError::NotSendable { .. } => StatusCode::BAD_REQUEST,
     };
     Problem::new(status, &error.message(), locale, &CATALOG)
 }

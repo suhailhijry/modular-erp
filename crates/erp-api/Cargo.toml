@@ -36,6 +36,7 @@ purchases = { workspace = true }
 tax_sa = { workspace = true }
 reports = { workspace = true }
 messaging = { workspace = true }
+notifications = { workspace = true }
 files = { workspace = true }
 erp-i18n = { workspace = true }
 erp-types = { workspace = true }
@@ -69,6 +70,7 @@ purchases = { workspace = true }
 tax_sa = { workspace = true }
 reports = { workspace = true }
 messaging = { workspace = true }
+notifications = { workspace = true }
 files = { workspace = true }
 erp-projection = { workspace = true }
 serde_json = { workspace = true }

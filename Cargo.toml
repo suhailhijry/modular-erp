@@ -38,6 +38,7 @@ payments = { path = "modules/payments" }
 hr_sa = { path = "modules/hr_sa" }
 reports = { path = "modules/reports" }
 messaging = { path = "modules/messaging" }
+notifications = { path = "modules/notifications" }
 files = { path = "modules/files" }
 crm = { path = "modules/crm" }
 ledger = { path = "modules/ledger" }

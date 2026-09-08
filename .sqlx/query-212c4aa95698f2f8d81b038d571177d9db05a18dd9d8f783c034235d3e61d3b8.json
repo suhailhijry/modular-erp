@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT identity as \"identity!\", channels as \"channels!\"\n             FROM proj_notifications.preference\n            WHERE identity = ANY($1) AND kind = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "identity!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_notifications.preference",
+            "name": "identity"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channels!",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "proj_notifications.preference",
+            "name": "channels"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "212c4aa95698f2f8d81b038d571177d9db05a18dd9d8f783c034235d3e61d3b8"
+}

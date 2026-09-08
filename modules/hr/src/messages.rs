@@ -18,6 +18,8 @@ pub const DEDUCTIONS_EXCEED_PAY: MessageCode = MessageCode::new("hr.deductions_e
 pub const NOT_A_DAY_OF_WORK: MessageCode = MessageCode::new("hr.not_a_day_of_work");
 pub const BACKWARDS_LEAVE: MessageCode = MessageCode::new("hr.backwards_leave");
 pub const UNKNOWN_LEAVE: MessageCode = MessageCode::new("hr.unknown_leave");
+pub const LOGIN_TAKEN: MessageCode = MessageCode::new("hr.login_taken");
+pub const NOT_A_MEMBER: MessageCode = MessageCode::new("hr.not_a_member");
 
 pub const CODES: &[MessageCode] = &[
     NO_NAME,
@@ -36,6 +38,8 @@ pub const CODES: &[MessageCode] = &[
     NOT_A_DAY_OF_WORK,
     BACKWARDS_LEAVE,
     UNKNOWN_LEAVE,
+    LOGIN_TAKEN,
+    NOT_A_MEMBER,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -198,5 +202,25 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_A_CLAIM,
         Locale::Arabic,
         Template::Simple("{claim} غير صالح كاسم صلاحية."),
+    ),
+    (
+        LOGIN_TAKEN,
+        Locale::English,
+        Template::Simple("Employee {employee} already logs in as that. One login is one person."),
+    ),
+    (
+        LOGIN_TAKEN,
+        Locale::Arabic,
+        Template::Simple("الموظف {employee} يسجّل الدخول بهذا الحساب. لكل حساب شخص واحد."),
+    ),
+    (
+        NOT_A_MEMBER,
+        Locale::English,
+        Template::Simple("{identity} is not a member of this tenant."),
+    ),
+    (
+        NOT_A_MEMBER,
+        Locale::Arabic,
+        Template::Simple("{identity} ليس عضوًا في هذه المنشأة."),
     ),
 ];

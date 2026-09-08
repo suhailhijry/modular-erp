@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, email, phone,\n                  reports_to, branch, hired_on as \"hired_on!\", left_at\n             FROM proj_hr.employee WHERE id = $1",
+  "query": "SELECT id as \"id!\", name as \"name!\", name_latin, email, phone,\n                  reports_to, branch, identity, hired_on as \"hired_on!\", left_at\n             FROM proj_hr.employee WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -82,6 +82,17 @@
       },
       {
         "ordinal": 7,
+        "name": "identity",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_hr.employee",
+            "name": "identity"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "hired_on!",
         "type_info": "Timestamptz",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "left_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -116,9 +127,10 @@
       true,
       true,
       true,
+      true,
       false,
       true
     ]
   },
-  "hash": "afdde0414efb933df811437339806e629c19a7a74f71f1a0a2f24e4395ba7900"
+  "hash": "d5a73396c45b2fe0afbe7e8c1d5994eeab4db89c425227bacc1d1f451aade369"
 }

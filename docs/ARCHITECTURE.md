@@ -199,6 +199,13 @@ commit on a Redis channel, API nodes fan it out to open server-sent-event
 streams, and a stream carries a signal — *group G is queryable through N* —
 never data and never a database connection. `pg_notify` stays refused.
 
+**A notification is not an exception to this.** The bell (`notifications`) is a
+projection group like any other: the record is an event in the tenant's log, the
+inbox and the read state are derived from it, and what reaches an open stream is
+the same *group `notifications` is queryable through N*. Nothing about a
+notification travels on the wire — which is what lets one signal serve every
+screen watching a tenant while only its recipient sees anything change.
+
 Kafka, if it appears, is an *outbound export* for consumers outside the system,
 fed from the outbox. Nothing internal ever consumes it.
 

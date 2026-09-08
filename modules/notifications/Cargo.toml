@@ -1,0 +1,50 @@
+[package]
+name = "notifications"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The bell inside the product: a durable record, addressed to a login, read per person."
+
+[lints]
+workspace = true
+
+[dependencies]
+# **One module dependency, and the arrow only points this way.** `messaging`
+# resolves an audience against `booking`, `crm`, `hr` and `sales`; this module
+# asks it who a notification reaches and renders the wording with its bindings.
+#
+# The consequence is the layering rule in the crate docs: a domain module can
+# never announce, because `booking → notifications → messaging → booking` is a
+# cycle cargo would refuse. Announcements are raised from above the modules.
+messaging = { workspace = true }
+erp-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+booking = { workspace = true }
+# The span a booking holds, for building one in a fixture.
+erp-occupancy = { workspace = true }
+branches = { workspace = true }
+crm = { workspace = true }
+hr = { workspace = true }
+sales = { workspace = true }
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

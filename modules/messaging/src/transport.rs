@@ -95,7 +95,13 @@ impl MessageHandler {
 #[async_trait::async_trait]
 impl EffectHandler for MessageHandler {
     fn kind(&self) -> EffectKind {
-        self.transport.channel().kind()
+        // Every transport is a gateway, and a gateway's channel leaves this
+        // system — which is what having an effect kind means. The bell has no
+        // transport and reaches here through nothing.
+        self.transport
+            .channel()
+            .kind()
+            .unwrap_or_else(|| unreachable!("a transport's channel leaves this system"))
     }
 
     async fn deliver(&self, effect: &PendingEffect) -> Result<(), DeliveryError> {

@@ -305,6 +305,12 @@ pub async fn seed(
     // — would be refused, which is the fence working. A return is computed from
     // the read models, which the run above has just brought up to date.
     let filed = seed_filing(&app, slug, &token).await?;
+
+    // **After the diary is projected**, because announcing reads it: who a
+    // booking reaches is a question about the read model, asked at the moment
+    // it is announced.
+    seed_notifications(&app, &state.control, tenant, slug, &token).await?;
+
     project(&state.control, tenant).await?;
 
     // Last, so a demo that failed half-way through building is not one the
@@ -374,6 +380,12 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     advance::<reports::Reports>(&db, &reports::projections(), reports::upcasters()).await?;
     advance::<files::Files>(&db, &files::projections(), files::upcasters()).await?;
     advance::<payments::Payments>(&db, &payments::projections(), payments::upcasters()).await?;
+    advance::<notifications::Notifications>(
+        &db,
+        &notifications::projections(),
+        notifications::upcasters(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -2153,6 +2165,93 @@ async fn post(
             })?;
 
     send(app, "POST", path, request, expected).await
+}
+
+/// **The owner's own bell.**
+///
+/// Two acts, and the first is the one worth reading. `PUT …/login` says *this
+/// login is this person*: it grants nothing — no capability check reads it —
+/// and it is what lets an audience that resolves to an employee reach an inbox
+/// that belongs to a session. The signup identity is the business's owner, so
+/// it is linked to the employee at the top of the chart.
+///
+/// The second is the sweep a worker would run. The demo has no worker, so it
+/// does here exactly what `AnnounceNewBookings` does on a visit: read the
+/// diary, announce what has not been announced. Announcing is not an API route
+/// and cannot be — a bell is raised from above the modules (§47).
+async fn seed_notifications(
+    app: &axum::Router,
+    control: &Arc<ControlPlane>,
+    tenant: TenantId,
+    slug: &str,
+    token: &str,
+) -> Result<usize, DemoError> {
+    let members = get(app, slug, "/v1/members", token).await?;
+    let owner = members
+        .as_array()
+        .and_then(|members| {
+            members
+                .iter()
+                .find(|member| member["role"] == "owner")
+                .and_then(|member| member["identity"].as_str())
+        })
+        .ok_or_else(|| DemoError::Unexpected {
+            path: "/v1/members".to_owned(),
+            body: members.to_string(),
+        })?
+        .to_owned();
+
+    put(
+        app,
+        slug,
+        &format!("/v1/hr/employees/{}/login", demo_id("EMP-OWNER")),
+        token,
+        &serde_json::json!({ "identity": owner }),
+        StatusCode::OK,
+    )
+    .await?;
+
+    let db = control.enter_for_maintenance(tenant).await?;
+    // **The link has to be in the read model before the sweep reads it.**
+    // Resolving an audience is a projection read, and the `PUT` above only
+    // wrote an event — in a deployment the worker closes that gap on its next
+    // visit, and here nothing would.
+    advance::<hr::Hr>(&db, &hr::projections(), hr::upcasters()).await?;
+
+    let diary = {
+        let mut conn = db.read().await?;
+        booking::reserved_since(
+            &mut conn,
+            "2020-01-01T00:00:00Z".parse().unwrap_or_default(),
+            100,
+        )
+        .await
+        .map_err(|e| DemoError::Unexpected {
+            path: "proj_booking.reservation".to_owned(),
+            body: e.to_string(),
+        })?
+    };
+    let subjects: Vec<erp_types::AggregateId> = diary
+        .into_iter()
+        .filter_map(|id| erp_types::AggregateId::new(id).ok())
+        .collect();
+
+    let swept = notifications::announce_all(
+        &db,
+        notifications::Kind::BookingReserved,
+        &subjects,
+        // **A literal, like every other instant this seed writes.** A demo that
+        // stamped "now" would read differently every time it was built, and
+        // nothing here is a clock.
+        "2026-04-15T09:00:00Z".parse().unwrap_or_default(),
+    )
+    .await
+    .map_err(|e| DemoError::Unexpected {
+        path: "notifications::announce_all".to_owned(),
+        body: e.to_string(),
+    })?;
+
+    Ok(swept.announced)
 }
 
 /// Issues a request and insists on the status the demo expected.

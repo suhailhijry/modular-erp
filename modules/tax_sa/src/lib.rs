@@ -63,7 +63,7 @@ pub use clearance::{Clearance, ClearanceEvent};
 pub use commands::{Filed, TaxError, file_return, period_id, record_outcome, register_taxpayer};
 pub use documents::{
     Pending, Standing, Status, Stored, Taxpayers, Unsigned, ZatcaDocuments, document, documents,
-    pending, registered, standing, unsigned,
+    pending, refused_since, registered, standing, unsigned,
 };
 pub use filing::{Filing, FilingEvent};
 pub use onboarded::{Onboarding, OnboardingEvent, Refusal, Step, onboarding_id};

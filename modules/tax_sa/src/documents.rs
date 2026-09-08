@@ -811,6 +811,30 @@ pub struct Unsigned {
 /// A document has to be signed before it can be submitted **and** before it can
 /// be printed: a simplified invoice's QR carries the stamp, and the receipt goes
 /// to the customer at the till.
+/// Documents ZATCA refused in a window, oldest first.
+///
+/// **Paired with the invoice they were built from**, not the statutory number:
+/// what somebody has to open and correct is the source document, and it is what
+/// every other module knows the record by.
+pub async fn refused_since(
+    conn: &mut PgConnection,
+    since: Timestamp,
+    limit: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT source_id as "source_id!"
+             FROM proj_tax_sa.zatca_document
+            WHERE status = 'refused' AND settled_at > $1
+            ORDER BY settled_at, id
+            LIMIT $2"#,
+        since,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.source_id).collect())
+}
+
 pub async fn unsigned(conn: &mut PgConnection, limit: i64) -> Result<Vec<Unsigned>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"SELECT id as "id!", kind as "kind!", issued_at as "issued_at!",

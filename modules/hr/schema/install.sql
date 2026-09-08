@@ -28,6 +28,13 @@ CREATE TABLE IF NOT EXISTS employee (
     -- the module docs; conflating them is the bug this phase invites.
     branch        TEXT,
 
+    -- **Which login is this person**, when somebody has said. Nothing about
+    -- authorization reads it — `notifications` reads it to know whose bell to
+    -- ring. Deliberately not unique here: a projection that can fail to apply
+    -- is a projection that stops, so "one login is one person" is refused in
+    -- the command instead.
+    identity      TEXT,
+
     hired_on      TIMESTAMPTZ NOT NULL,
     -- Set when they leave. The record stays: they are on last year's payroll
     -- and whatever they approved.
@@ -42,6 +49,11 @@ CREATE TABLE IF NOT EXISTS employee (
 -- and a scan for it would be one row in a thousand.
 CREATE INDEX IF NOT EXISTS employee_by_manager_idx ON employee (reports_to)
     WHERE reports_to IS NOT NULL;
+
+-- Which record a login belongs to. Partial for the same reason: most people in
+-- a salon's org chart never log in to anything.
+CREATE INDEX IF NOT EXISTS employee_by_identity_idx ON employee (identity)
+    WHERE identity IS NOT NULL;
 
 -- "Who works at Olaya", which is the list a branch manager opens.
 CREATE INDEX IF NOT EXISTS employee_by_branch_idx ON employee (branch, name)

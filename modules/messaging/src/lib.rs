@@ -99,7 +99,7 @@ pub use budget::{Budget, OverBudget, SpendError, Spent};
 pub use channel::{Channel, UnknownChannel, segments};
 pub use fcm::Fcm;
 pub use push::{Device, Platform, Registered};
-pub use send::{Outbound, SendError, Sending, Sent, send};
+pub use send::{Outbound, SendError, Sending, Sent, deliver, send};
 pub use settings::Settings;
 pub use taqnyat::Taqnyat;
 pub use template::{Body, Template, TemplateError, Templates};
@@ -200,13 +200,20 @@ mod tests {
         assert!(!resolver.contains("\"reservation.not_a_real_binding\""));
     }
 
-    /// This module promises effects on every channel, and each one is a kind a
-    /// worker registers a handler for. A channel with no kind is one whose
-    /// messages nothing would ever claim.
+    /// This module promises effects on every channel that leaves the system,
+    /// and each one is a kind a worker registers a handler for. A channel with
+    /// no handler is one whose messages nothing would ever claim.
+    ///
+    /// **In-system is the exception and has to be**: a bell is written as an
+    /// event by `notifications`, and an effect nothing claims would age in the
+    /// outbox until the backlog check called it a finding.
     #[test]
-    fn every_channel_is_a_kind_a_handler_can_claim() {
+    fn every_outbound_channel_is_a_kind_a_handler_can_claim() {
         for channel in Channel::ALL {
-            let kind = channel.kind();
+            let Some(kind) = channel.kind() else {
+                assert_eq!(channel, Channel::InSystem, "{channel} promises nothing");
+                continue;
+            };
             let name = kind.as_str();
             assert!(
                 name.rsplit_once('.')

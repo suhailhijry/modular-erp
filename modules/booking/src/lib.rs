@@ -74,8 +74,8 @@ pub use pricing::{
 pub use projections::{
     Bar, Barred, Booking, Lapsed, Performed, ReservationDetail, ReservationLine,
     ReservationSummary, Reservations, ResourceDetail, ResourceSummary, Resources, awaiting_deposit,
-    bars, lapsed_holds, performed, projections, reservation, reservations, resource, resources,
-    stages, unbilled_completions, unsecured_among,
+    bars, lapsed_holds, performed, projections, reservation, reservations, reserved_since,
+    resource, resources, stages, unbilled_completions, unsecured_among,
 };
 pub use reservation::{
     Customer, Deposit, DraftLine, Held, Line, Reservation, ReservationEvent, Stage, UnknownStage,

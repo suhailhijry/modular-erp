@@ -18,6 +18,7 @@ booking = { workspace = true }
 crm = { workspace = true }
 ledger = { workspace = true }
 payments = { workspace = true }
+notifications = { workspace = true }
 sales = { workspace = true }
 prepaid = { workspace = true }
 branches = { workspace = true }

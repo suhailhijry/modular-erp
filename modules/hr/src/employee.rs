@@ -464,6 +464,15 @@ pub enum EmployeeEvent {
         expires_on: chrono::NaiveDate,
         at: Timestamp,
     },
+    /// **Which login is this person.**
+    ///
+    /// Not authorization. No capability check reads this and 9c's decision
+    /// stands: a tenant's own org chart does not feed the platform's role. What
+    /// it answers is *whose bell rings* — an audience resolves to an employee
+    /// and an inbox belongs to a login, and without this the two never meet.
+    LoginLinked { identity: String, at: Timestamp },
+    /// They no longer log in as themselves. The account moved, or they left.
+    LoginUnlinked { at: Timestamp },
 }
 
 /// A `NaiveDate` in the log, as `YYYY-MM-DD`.
@@ -509,6 +518,8 @@ impl DomainEvent for EmployeeEvent {
             Self::Rostered { .. } => Self::NAMES[9],
             Self::Attended { .. } => Self::NAMES[10],
             Self::Absent { .. } => Self::NAMES[11],
+            Self::LoginLinked { .. } => Self::NAMES[12],
+            Self::LoginUnlinked { .. } => Self::NAMES[13],
         })
     }
 
@@ -518,7 +529,7 @@ impl DomainEvent for EmployeeEvent {
 }
 
 impl EmployeeEvent {
-    pub const NAMES: [&'static str; 12] = [
+    pub const NAMES: [&'static str; 14] = [
         "hr.employee.hired",
         "hr.employee.amended",
         "hr.employee.reparented",
@@ -531,6 +542,8 @@ impl EmployeeEvent {
         "hr.employee.rostered",
         "hr.employee.attended",
         "hr.employee.absent",
+        "hr.employee.login_linked",
+        "hr.employee.login_unlinked",
     ];
 }
 
@@ -574,6 +587,9 @@ pub struct Employee {
     ///
     /// **Empty means no restriction**, not "nothing" — see [`Self::can_perform`].
     pub skills: Vec<AggregateId>,
+    /// Which login is this person, when somebody has said. See
+    /// [`EmployeeEvent::LoginLinked`] for why this is not authorization.
+    pub identity: Option<String>,
 }
 
 impl Aggregate for Employee {
@@ -626,6 +642,10 @@ impl Aggregate for Employee {
             EmployeeEvent::Left { at, .. } => self.left_at = Some(*at),
             EmployeeEvent::Rehired { .. } => self.left_at = None,
             EmployeeEvent::Skilled { skills, .. } => self.skills.clone_from(skills),
+            EmployeeEvent::LoginLinked { identity, .. } => {
+                self.identity = Some(identity.clone());
+            }
+            EmployeeEvent::LoginUnlinked { .. } => self.identity = None,
             EmployeeEvent::Contracted { salary, .. } => self.salary = Some(salary.clone()),
             EmployeeEvent::Rostered { shifts, .. } => self.shifts.clone_from(shifts),
             EmployeeEvent::Attended { on, minutes, .. } => {
