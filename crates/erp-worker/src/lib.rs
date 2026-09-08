@@ -34,7 +34,7 @@ mod worker;
 
 pub use health::{Finding, HealthJob, Invariant};
 pub use job::{Activity, BoxError, Job, PlatformJob};
-pub use jobs::{OutboxJob, PlatformOutboxJob, ProjectionJob};
+pub use jobs::{OutboxJob, PlatformOutboxJob, ProjectionJob, Signals};
 pub use retention::{
     DELIVERED_EFFECTS, OCCUPANCY_CLAIMS, Retention, SHORT_LINKS, SweepSessions, WEBHOOK_EVENTS,
 };

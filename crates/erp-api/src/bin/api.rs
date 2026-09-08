@@ -59,6 +59,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let control = Arc::new(control);
     let _invalidations = erp_control::shared::apply_invalidations_in_background(&control);
 
+    // **Where open streams wait.** Only with Redis, because a projection
+    // advance on a worker reaches an API node through it; without one the
+    // stream routes refuse rather than sit silent.
+    let realtime = if control.shared().is_some() {
+        let caps = erp_web::realtime::Caps {
+            staff_per_tenant: env_usize("REALTIME_STAFF_STREAMS_PER_TENANT", 256)?,
+            public_per_tenant: env_usize("REALTIME_PUBLIC_STREAMS_PER_TENANT", 4096)?,
+        };
+        tracing::info!(?caps, "live streams enabled");
+        Some(Arc::new(erp_web::realtime::Hub::new(caps)))
+    } else {
+        tracing::warn!("REDIS_URL is not set; nothing can be watched live");
+        None
+    };
+    let _advances = realtime
+        .as_ref()
+        .and_then(|hub| erp_web::realtime::listen_in_background(&control, Arc::clone(hub)));
+
     // States what this process could demand against what the server allows.
     // Nothing wrote either number down before, which is how four processes each
     // holding a 400-permit budget against a 200-connection server went unnoticed.
@@ -108,6 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
 
+    if let Some(hub) = realtime {
+        state = state.streaming_through(hub);
+    }
+
     let app = router(state)
         .layer(TraceLayer::new_for_http())
         // 504, not 408: the request was fine, we were slow.
@@ -137,4 +159,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     .await?;
 
     Ok(())
+}
+
+/// A number from the environment, or its default; a value that is set and
+/// does not parse stops the process rather than silently becoming the default.
+fn env_usize(
+    name: &str,
+    default: usize,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .trim()
+            .parse()
+            .map_err(|e| format!("{name} is not a number: {e}").into()),
+        Err(_) => Ok(default),
+    }
 }

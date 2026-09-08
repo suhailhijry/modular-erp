@@ -334,6 +334,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(crate::billing::routes())
         .merge(crate::effects::routes())
         .merge(crate::calendar::routes())
+        .merge(crate::realtime::routes())
         // Every module's own routes, from the one list that also says what to
         // install. See `crate::modules::REGISTERED`.
         .merge(crate::modules::mounted())

@@ -49,7 +49,7 @@
 
 use std::time::Duration;
 
-use erp_types::{IdentityId, TenantId};
+use erp_types::{IdentityId, LogPosition, ModuleId, StreamId, TenantId};
 use redis::AsyncCommands as _;
 
 /// How long a session stays readable from Redis without being re-checked.
@@ -63,6 +63,26 @@ pub const SESSION_TTL: Duration = Duration::from_mins(1);
 
 /// The channel invalidations are published on.
 const CHANNEL: &str = "erp:invalidate";
+
+/// The channel a projection advance is announced on. Its own, so the
+/// invalidation consumer never sees a message it has no variant for.
+const ADVANCED_CHANNEL: &str = "erp:advanced";
+
+/// **A projection group is queryable through a position.** Published by the
+/// worker after the commit that made it true, fanned out to every open stream.
+///
+/// A signal, not data: the group and where it got to. `streams` names what
+/// the batch touched so a subject stream can wake one phone rather than all of
+/// them; `None` means more than the runner's cap, and every subject re-checks.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Advanced {
+    pub tenant: TenantId,
+    pub group: String,
+    pub module: ModuleId,
+    pub position: LogPosition,
+    #[serde(default)]
+    pub streams: Option<Vec<StreamId>>,
+}
 
 /// What one node changed, so the others can forget it.
 ///
@@ -310,6 +330,29 @@ impl Shared {
     pub async fn subscribe(&self) -> Result<redis::aio::PubSub, redis::RedisError> {
         let mut pubsub = self.client.get_async_pubsub().await?;
         pubsub.subscribe(CHANNEL).await?;
+        Ok(pubsub)
+    }
+
+    /// Announces an advance. A failure is a warning: the commit stands, and an
+    /// open stream catches up on its next `ready`.
+    pub async fn publish_advanced(&self, what: &Advanced) {
+        let Ok(encoded) = serde_json::to_string(what) else {
+            return;
+        };
+        let mut conn = self.conn.clone();
+        if let Err(e) = conn.publish::<_, _, ()>(ADVANCED_CHANNEL, encoded).await {
+            tracing::warn!(
+                error = %e, group = %what.group, tenant = %what.tenant,
+                "could not announce a projection advance; open streams catch up on their next ready"
+            );
+        }
+    }
+
+    /// Every advance announced from now on. A dedicated connection, as
+    /// [`Self::subscribe`] is.
+    pub async fn subscribe_advanced(&self) -> Result<redis::aio::PubSub, redis::RedisError> {
+        let mut pubsub = self.client.get_async_pubsub().await?;
+        pubsub.subscribe(ADVANCED_CHANNEL).await?;
         Ok(pubsub)
     }
 }

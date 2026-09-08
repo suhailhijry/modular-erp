@@ -331,6 +331,51 @@ async fn a_group_advances_and_records_where_it_got_to() {
     assert_eq!(total, 300, "a second pass must not double-count");
 }
 
+/// **An advance says which streams it touched**, bounded. A subject stream on
+/// the API wakes a phone only for its own reservation from this list; past the
+/// cap it says "many" and every subject re-checks once.
+#[tokio::test]
+async fn an_advance_names_the_streams_it_touched() {
+    let db = fixture().await;
+    let mut conn = db.pool().acquire().await.expect("connection");
+    post(&mut conn, "cash", 100, 0).await;
+    post(&mut conn, "bank", 50, 0).await;
+    post(&mut conn, "cash", 100, 1).await;
+    drop(conn);
+
+    let projections: Vec<&dyn Projection<Group = Ledger>> = vec![&Balances];
+    let progress = run_once::<Ledger>(db.pool(), &projections, &upcasters(), 100)
+        .await
+        .expect("runs");
+    let Progress::Advanced { streams, .. } = progress else {
+        panic!("{progress:?}");
+    };
+    let named: Vec<String> = streams
+        .expect("a bounded batch names its streams")
+        .iter()
+        .map(|s| s.id.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        named,
+        vec!["bank".to_owned(), "cash".to_owned()],
+        "each once, ordered"
+    );
+
+    // Past the cap it is "many", which a subscriber treats as "re-check".
+    let mut conn = db.pool().acquire().await.expect("connection");
+    for i in 0..=erp_projection::TOUCHED_STREAMS_CAP {
+        post(&mut conn, &format!("acct-{i:04}"), 1, 0).await;
+    }
+    drop(conn);
+    let progress = run_once::<Ledger>(db.pool(), &projections, &upcasters(), 1_000)
+        .await
+        .expect("runs");
+    assert!(
+        matches!(progress, Progress::Advanced { streams: None, .. }),
+        "{progress:?}"
+    );
+}
+
 /// **L3.** A projection reaching into another group's schema fails.
 #[tokio::test]
 async fn a_projection_cannot_read_another_groups_tables() {

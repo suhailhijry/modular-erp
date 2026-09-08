@@ -194,6 +194,11 @@ and the fallback poll it would optimize is cheap enough that the dependency
 isn't worth it. Wake-ups are: poll on a short interval when a tenant has recent
 activity, back off when idle.
 
+Real time (Phase 13) does not change this. The worker announces each projection
+commit on a Redis channel, API nodes fan it out to open server-sent-event
+streams, and a stream carries a signal — *group G is queryable through N* —
+never data and never a database connection. `pg_notify` stays refused.
+
 Kafka, if it appears, is an *outbound export* for consumers outside the system,
 fed from the outbox. Nothing internal ever consumes it.
 

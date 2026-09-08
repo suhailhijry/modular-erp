@@ -550,3 +550,36 @@ Drops every database this project creates and clears the control plane rows that
 went with them. **It refuses while a test run is in progress**: it drops with
 `FORCE`, which would otherwise pull a database out from under a running test —
 and that failure surfaces as an unrelated assertion somewhere else entirely.
+
+## Watching a tenant live
+
+Needs Redis (`REDIS_URL`); without it the routes answer 503. A staff screen:
+
+```bash
+curl -N $API/v1/events -H "$H" -H "$A"
+```
+
+```text
+event: ready
+data: {"groups":{"booking":1234,"sales":980}}
+
+event: advanced
+data: {"group":"booking","position":1235}
+
+: keep-alive
+
+event: reconnect
+```
+
+Re-fetch through the ordinary API with `?consistent_after=1235`; never apply a
+delta, the stream carries none. The phone that booked watches its reservation:
+
+```bash
+curl -N $API/v1/booking/public/reservations/$RESERVATION/events -H "$H"
+```
+
+and re-fetches `…/reservations/$RESERVATION/deposit?consistent_after=<position>`.
+Streams end after ten minutes with `reconnect`; `EventSource` reconnects by
+itself and the fresh `ready` says what moved. Caps per business per server:
+`REALTIME_STAFF_STREAMS_PER_TENANT` (256) and
+`REALTIME_PUBLIC_STREAMS_PER_TENANT` (4096).

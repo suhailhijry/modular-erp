@@ -51,6 +51,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let control = Arc::new(control);
     let _invalidations = erp_control::shared::apply_invalidations_in_background(&control);
 
+    // **Every projection advance is announced**, so a screen learns of it
+    // without polling. Without Redis there is nobody to tell.
+    let signals: Option<Arc<dyn erp_worker::Signals>> = control
+        .shared()
+        .map(|shared| Arc::new(shared.clone()) as Arc<dyn erp_worker::Signals>);
+
     // States what this process could demand against what the server allows.
     // Nothing wrote either number down before, which is how four processes each
     // holding a 400-permit budget against a 200-connection server went unnoticed.
@@ -130,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .with(Arc::new(CertificateExpiry))
                 .with(Arc::new(WorkDocumentExpiry)),
         ));
-    for job in module_jobs() {
+    for job in module_jobs(signals.as_ref()) {
         worker = worker.with_job(job);
     }
     worker = worker
@@ -1487,7 +1493,7 @@ async fn zatca_environment(
     reason = "one entry per module, in a list; splitting it would hide that this \
               is the complete set `every_module_has_a_projection_job` checks"
 )]
-fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
+fn module_jobs(signals: Option<&Arc<dyn erp_worker::Signals>>) -> Vec<Arc<dyn erp_worker::Job>> {
     vec![
         Arc::new(
             ProjectionJob::<booking::Booking>::new(
@@ -1495,7 +1501,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(booking::upcasters().clone()),
                 200,
             )
-            .for_module(booking::module_id()),
+            .for_module(booking::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<crm::Crm>::new(
@@ -1503,7 +1510,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(crm::upcasters().clone()),
                 200,
             )
-            .for_module(crm::module_id()),
+            .for_module(crm::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<payments::Payments>::new(
@@ -1511,7 +1519,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(payments::upcasters().clone()),
                 200,
             )
-            .for_module(payments::module_id()),
+            .for_module(payments::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<ledger::Ledger>::new(
@@ -1519,7 +1528,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(ledger::upcasters().clone()),
                 200,
             )
-            .for_module(ledger::module_id()),
+            .for_module(ledger::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<sales::Sales>::new(
@@ -1527,7 +1537,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(sales::upcasters().clone()),
                 200,
             )
-            .for_module(sales::module_id()),
+            .for_module(sales::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<prepaid::Prepaid>::new(
@@ -1535,7 +1546,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(prepaid::upcasters().clone()),
                 200,
             )
-            .for_module(prepaid::module_id()),
+            .for_module(prepaid::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<payroll::Payroll>::new(
@@ -1543,11 +1555,13 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(payroll::upcasters().clone()),
                 200,
             )
-            .for_module(payroll::module_id()),
+            .for_module(payroll::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<hr::Hr>::new(hr::projections(), Arc::new(hr::upcasters().clone()), 200)
-                .for_module(hr::module_id()),
+                .for_module(hr::module_id())
+                .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<branches::Branches>::new(
@@ -1555,7 +1569,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(branches::upcasters().clone()),
                 200,
             )
-            .for_module(branches::module_id()),
+            .for_module(branches::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<pos::Pos>::new(
@@ -1563,7 +1578,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(pos::upcasters().clone()),
                 200,
             )
-            .for_module(pos::module_id()),
+            .for_module(pos::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<purchases::Purchases>::new(
@@ -1571,7 +1587,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(purchases::upcasters().clone()),
                 200,
             )
-            .for_module(purchases::module_id()),
+            .for_module(purchases::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<tax_sa::TaxSa>::new(
@@ -1579,7 +1596,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(tax_sa::upcasters().clone()),
                 200,
             )
-            .for_module(tax_sa::module_id()),
+            .for_module(tax_sa::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<files::Files>::new(
@@ -1587,7 +1605,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(files::upcasters().clone()),
                 200,
             )
-            .for_module(files::module_id()),
+            .for_module(files::module_id())
+            .signalling(signals.cloned()),
         ),
         Arc::new(
             ProjectionJob::<reports::Reports>::new(
@@ -1595,7 +1614,8 @@ fn module_jobs() -> Vec<Arc<dyn erp_worker::Job>> {
                 Arc::new(reports::upcasters().clone()),
                 200,
             )
-            .for_module(reports::module_id()),
+            .for_module(reports::module_id())
+            .signalling(signals.cloned()),
         ),
     ]
 }
@@ -1744,7 +1764,7 @@ mod tests {
             .map(|(_, setup)| setup.module.as_str().to_owned())
             .collect();
 
-        let worked: BTreeSet<String> = module_jobs()
+        let worked: BTreeSet<String> = module_jobs(None)
             .iter()
             .filter_map(|job| job.module())
             .map(|module| module.as_str().to_owned())
@@ -1772,7 +1792,7 @@ mod tests {
     #[test]
     fn no_module_job_runs_for_tenants_that_declined_it() {
         let sealing = erp_eventlog::SealingKey::new("test", &[0u8; 32]).expect("32 bytes");
-        for job in module_jobs().into_iter().chain(zatca_jobs(&sealing)) {
+        for job in module_jobs(None).into_iter().chain(zatca_jobs(&sealing)) {
             assert!(
                 job.module().is_some(),
                 "{} runs for every tenant, including the ones that did not buy it",

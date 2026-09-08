@@ -1,7 +1,7 @@
 //! Driving a projection group forward.
 
 use erp_eventlog::{ReadError, Upcasters, read_since};
-use erp_types::LogPosition;
+use erp_types::{LogPosition, StreamId};
 use sqlx::{PgConnection, PgPool};
 
 use crate::group::{Projection, ProjectionCtx, ProjectionError, ProjectionGroup};
@@ -24,8 +24,16 @@ pub enum RunError {
     Database(#[from] sqlx::Error),
 }
 
+/// How many distinct streams one advance will name before it says "many".
+///
+/// A subject stream on the API wakes a phone only for its own reservation, and
+/// it decides from this list without touching the database. A batch that
+/// touches more streams than this — a replay, a bulk import — is not worth
+/// carrying on the wire: every subject re-checks once instead.
+pub const TOUCHED_STREAMS_CAP: usize = 256;
+
 /// What one pass did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
     /// Nothing to do — already at the head of the log.
     UpToDate { at: LogPosition },
@@ -34,6 +42,9 @@ pub enum Progress {
         from: LogPosition,
         to: LogPosition,
         events: usize,
+        /// The distinct streams this batch touched, in order, or `None` when
+        /// there were more than [`TOUCHED_STREAMS_CAP`]: "many; re-check".
+        streams: Option<Vec<StreamId>>,
     },
     /// Another worker holds the lease. Not an error: the group is being
     /// processed, just not by us.
@@ -194,8 +205,12 @@ pub async fn run_once_in<G: ProjectionGroup>(
     //    group's own schema.
     set_search_path(&mut *conn, G::SCHEMA).await?;
 
-    // 3. Apply, in order.
+    // 3. Apply, in order — and remember which streams the batch touched, so
+    //    the signal after the commit can wake one phone rather than all of
+    //    them. Bounded: past the cap the answer is "many".
     let mut to = from;
+    let mut touched = std::collections::BTreeSet::new();
+    let mut many = false;
     for envelope in &batch {
         let ctx = ProjectionCtx::new(
             envelope.position,
@@ -214,6 +229,14 @@ pub async fn run_once_in<G: ProjectionGroup>(
                 })?;
         }
         to = envelope.position;
+        if !many && !touched.contains(&envelope.stream) {
+            if touched.len() < TOUCHED_STREAMS_CAP {
+                touched.insert(envelope.stream.clone());
+            } else {
+                many = true;
+                touched.clear();
+            }
+        }
     }
 
     // 4. The checkpoint, in the same transaction as the effects above.
@@ -235,6 +258,11 @@ pub async fn run_once_in<G: ProjectionGroup>(
         from,
         to,
         events: batch.len(),
+        streams: if many {
+            None
+        } else {
+            Some(touched.into_iter().collect())
+        },
     })
 }
 

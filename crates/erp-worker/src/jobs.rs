@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use erp_control::TenantDb;
+use erp_control::shared::{Advanced, Shared};
 use erp_eventlog::{Dispatcher, Upcasters};
 use erp_projection::{Progress, Projection, ProjectionGroup, run_once_in};
 use erp_types::ModuleId;
@@ -22,12 +23,31 @@ use crate::job::{Activity, BoxError, Job};
 /// for exactly as long as the batch takes, and released the moment it commits.
 /// [`run_once_in`] does the lease, the batch and the checkpoint inside it, which
 /// is law L4; committing here is what makes it hold.
+/// **Who is told that a projection advanced.** One method, so the job can be
+/// proven with a recording fake and the real one is Redis.
+///
+/// The worker announces after the commit that made the read model queryable
+/// through the position — never on append, which is before. Every open stream
+/// on every API node is waiting for exactly this.
+#[async_trait::async_trait]
+pub trait Signals: Send + Sync + std::fmt::Debug {
+    async fn advanced(&self, signal: &Advanced);
+}
+
+#[async_trait::async_trait]
+impl Signals for Shared {
+    async fn advanced(&self, signal: &Advanced) {
+        self.publish_advanced(signal).await;
+    }
+}
+
 pub struct ProjectionJob<G: ProjectionGroup> {
     name: &'static str,
     projections: Vec<Arc<dyn Projection<Group = G>>>,
     upcasters: Arc<Upcasters>,
     batch_size: i64,
     module: Option<ModuleId>,
+    signals: Option<Arc<dyn Signals>>,
 }
 
 impl<G: ProjectionGroup> std::fmt::Debug for ProjectionJob<G> {
@@ -52,6 +72,7 @@ impl<G: ProjectionGroup> ProjectionJob<G> {
             upcasters,
             batch_size,
             module: None,
+            signals: None,
         }
     }
 
@@ -60,6 +81,15 @@ impl<G: ProjectionGroup> ProjectionJob<G> {
     #[must_use]
     pub fn for_module(mut self, module: ModuleId) -> Self {
         self.module = Some(module);
+        self
+    }
+
+    /// The same job, announcing each advance. `None` — a deployment without
+    /// Redis — announces nothing, and the streams that would listen refuse to
+    /// open (L6) rather than sit silent.
+    #[must_use]
+    pub fn signalling(mut self, signals: Option<Arc<dyn Signals>>) -> Self {
+        self.signals = signals;
         self
     }
 }
@@ -92,8 +122,22 @@ impl<G: ProjectionGroup> Job for ProjectionJob<G> {
             };
 
         match progress {
-            Progress::Advanced { .. } => {
+            Progress::Advanced { to, streams, .. } => {
                 tx.commit().await?;
+                // **After the commit, never before.** This is the moment the
+                // guarantee "queryable through `to`" becomes true; a signal on
+                // the append would send a screen to read a row not yet there.
+                if let (Some(signals), Some(module)) = (&self.signals, &self.module) {
+                    signals
+                        .advanced(&Advanced {
+                            tenant: db.tenant(),
+                            group: G::NAME.to_owned(),
+                            module: module.clone(),
+                            position: to,
+                            streams,
+                        })
+                        .await;
+                }
                 Ok(Activity::Worked)
             }
             // Nothing was applied, so there is nothing to commit. `Busy` means

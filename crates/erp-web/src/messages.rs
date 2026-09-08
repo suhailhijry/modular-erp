@@ -33,6 +33,8 @@ pub const UNKNOWN_ONBOARDING_STAGE: MessageCode =
 pub const UNKNOWN_ZATCA_ENVIRONMENT: MessageCode =
     MessageCode::new("request.unknown_zatca_environment");
 pub const NO_SEALING_KEY: MessageCode = MessageCode::new("request.no_sealing_key");
+pub const NO_REALTIME: MessageCode = MessageCode::new("request.no_realtime");
+pub const TOO_MANY_STREAMS: MessageCode = MessageCode::new("request.too_many_streams");
 pub const UNUSABLE_UNIT: MessageCode = MessageCode::new("request.unusable_unit");
 pub const UNREADABLE_CERTIFICATE: MessageCode = MessageCode::new("request.unreadable_certificate");
 pub const CERTIFICATE_KEY_MISMATCH: MessageCode =
@@ -104,6 +106,8 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_ONBOARDING_STAGE,
     UNKNOWN_ZATCA_ENVIRONMENT,
     NO_SEALING_KEY,
+    NO_REALTIME,
+    TOO_MANY_STREAMS,
     UNUSABLE_UNIT,
     UNREADABLE_CERTIFICATE,
     CERTIFICATE_KEY_MISMATCH,
@@ -448,6 +452,34 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Locale::Arabic,
         Template::Simple(
             "لا يوجد مفتاح تشفير مُهيّأ في هذا النظام، فلا يمكن حفظ المفتاح الخاص بأمان. اضبط SEALING_KEY ثم أعد المحاولة.",
+        ),
+    ),
+    (
+        NO_REALTIME,
+        Locale::English,
+        Template::Simple(
+            "This deployment has no Redis, so nothing can be watched live. Set REDIS_URL and try again.",
+        ),
+    ),
+    (
+        NO_REALTIME,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يوجد Redis مُهيّأ في هذا النظام، فلا يمكن متابعة أي شيء مباشرةً. اضبط REDIS_URL ثم أعد المحاولة.",
+        ),
+    ),
+    (
+        TOO_MANY_STREAMS,
+        Locale::English,
+        Template::Simple(
+            "Too many live streams are open for this business on this server. Try again in a moment.",
+        ),
+    ),
+    (
+        TOO_MANY_STREAMS,
+        Locale::Arabic,
+        Template::Simple(
+            "عدد البثوث المباشرة المفتوحة لهذه المنشأة على هذا الخادم كبير جدًا. أعد المحاولة بعد لحظات.",
         ),
     ),
     (

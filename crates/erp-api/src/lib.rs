@@ -50,6 +50,7 @@ mod links;
 mod members;
 mod modules;
 mod origins;
+mod realtime;
 mod routes;
 mod signup;
 

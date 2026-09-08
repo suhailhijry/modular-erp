@@ -10,9 +10,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use erp_control::shared::Advanced;
 use erp_control::shared::{Invalidate, SESSION_TTL, Shared};
 use erp_control::{Actor, ClusterRegistry, ControlPlane, PoolConfig, Role, Scope, TenantPools};
 use erp_testkit::{Schema, TestDb};
+use erp_types::{AggregateId, DomainName, LogPosition, ModuleId, StreamId, TenantId};
+use futures_util::StreamExt as _;
 
 static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
 
@@ -314,4 +317,35 @@ async fn an_unreadable_invalidation_is_not_guessed_at() {
             "{unknown} was accepted as an invalidation"
         );
     }
+}
+
+/// **A projection advance published on one node reaches a subscriber on
+/// another.** Every open stream in the fleet learns of it from this.
+#[tokio::test]
+async fn an_advance_published_is_received_by_a_subscriber() {
+    let shared = shared().await;
+    let mut pubsub = shared.subscribe_advanced().await.expect("subscribes");
+    let mut messages = pubsub.on_message();
+
+    let signal = Advanced {
+        tenant: TenantId::new(),
+        group: "booking".to_owned(),
+        module: ModuleId::new("booking").expect("a module"),
+        position: LogPosition::new(42).expect("a position"),
+        streams: Some(vec![StreamId::new(
+            DomainName::new("booking_reservation").expect("a domain"),
+            AggregateId::new("r-1").expect("an id"),
+        )]),
+    };
+    shared.publish_advanced(&signal).await;
+
+    let message = tokio::time::timeout(Duration::from_secs(5), messages.next())
+        .await
+        .expect("arrives in time")
+        .expect("a message");
+    let raw: String = message.get_payload().expect("a payload");
+    assert_eq!(
+        serde_json::from_str::<Advanced>(&raw).expect("parses"),
+        signal
+    );
 }

@@ -11707,6 +11707,16 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Wait for the booking read model to reach this log position — the one a stream's `advanced` named.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -11932,6 +11942,113 @@
           "booking"
         ]
       }
+    },
+    "/v1/booking/public/reservations/{reservation}/events": {
+      "get": {
+        "description": "For the phone that booked: `ready` with the position `booking` is queryable\nthrough, then `advanced` each time this reservation moves — a deposit\nconfirmed, a stage changed — and `reconnect` after ten minutes. Re-fetch the\ndeposit status with `?consistent_after=<position>`. Keyed on the\nreservation's id, which only the phone that booked it holds, and bounded by\nthe same per-origin and per-business limits as every public route.",
+        "operationId": "public_reservation_events",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `POST /v1/booking/public/reservations`.",
+            "in": "path",
+            "name": "reservation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "An event stream: `ready`, then `advanced`, then `reconnect`."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not an id"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such business, or it does not take bookings online"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This surface is bounded per origin and per business, and streams per business on this server."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This deployment has no Redis, so nothing can be watched live."
+          }
+        },
+        "security": [],
+        "summary": "Watch one booking live.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/booking/public/services": {
       "get": {
@@ -17546,6 +17663,123 @@
           "service"
         ]
       }
+    },
+    "/v1/events": {
+      "get": {
+        "description": "A stream of **signals, not data**. The first event is `ready`, naming every\nprojection group this business has a module for and the position each is\nqueryable through. After that, `advanced` with a group and a position each\ntime the worker commits, and `reconnect` when the stream has lived ten\nminutes — reconnect, and `ready` says what moved. Re-fetch through the\nordinary API with `?consistent_after=<position>`; never apply a delta, the\nstream carries none. A keep-alive comment every fifteen seconds.",
+        "operationId": "event_stream",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "An event stream: `ready`, then `advanced`, then `reconnect`."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Too many streams open for this business on this server. Try again in a moment."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This deployment has no Redis, so nothing can be watched live."
+          }
+        },
+        "summary": "Watch this business live.",
+        "tags": [
+          "service"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/files": {
       "get": {

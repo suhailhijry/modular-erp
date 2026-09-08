@@ -38,6 +38,7 @@ mod extract;
 pub mod messages;
 mod problem;
 pub mod rate;
+pub mod realtime;
 mod state;
 pub mod version;
 pub mod webhook;

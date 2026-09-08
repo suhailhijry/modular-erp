@@ -47,6 +47,11 @@ pub struct AppState {
     /// some of them can buy this at all, and that is a deployment fact this
     /// crate must not have an opinion about.
     pub storage: Option<Arc<dyn erp_storage::Storage>>,
+    /// Where open streams wait for a projection advance.
+    ///
+    /// `None` when the deployment has no Redis, and then the stream routes
+    /// **refuse** rather than open a stream nothing would ever write to (L6).
+    pub realtime: Option<Arc<crate::realtime::Hub>>,
 }
 
 impl AppState {
@@ -66,6 +71,7 @@ impl AppState {
             limiter: Arc::new(crate::rate::Limiter::sharing(control.shared().cloned())),
             control,
             storage: None,
+            realtime: None,
             trust_forwarded: false,
         }
     }
@@ -92,6 +98,13 @@ impl AppState {
     #[must_use]
     pub fn sealing_with(mut self, sealing: erp_eventlog::SealingKey) -> Self {
         self.sealing = Some(sealing);
+        self
+    }
+
+    /// The same state, able to keep streams open.
+    #[must_use]
+    pub fn streaming_through(mut self, hub: Arc<crate::realtime::Hub>) -> Self {
+        self.realtime = Some(hub);
         self
     }
 }

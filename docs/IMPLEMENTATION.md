@@ -651,6 +651,58 @@ the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
 
+### 46 · The signal stream: two screens and a phone agree, and nobody polled
+
+**Every read was a poll, and the phase said so.** A booking from a phone had to
+reach every counter screen without a refresh, and `pg_notify` was refused by D4.
+What replaces polling is the shape 13a wrote down before it was built: a
+server-sent-event stream that carries *group `booking` is queryable through N*
+and nothing else, published by the worker **after** the projection commit —
+the `Advanced` arm in `jobs.rs`, the one moment the guarantee is true — and
+fanned out over the Redis channel `shared.rs` already had. The client
+re-fetches through the ordinary API with `consistent_after`, which already does
+authorization, localization and paging. A stream holds a receiver, a deadline
+and a list of module ids; never a connection.
+
+**Two surfaces, apart on purpose.** Staff watch a tenant on `GET /v1/events`;
+a customer's phone watches one reservation on
+`GET /v1/booking/public/reservations/{id}/events`, keyed by the id only the
+phone holds, behind the public limiter. They are different populations —
+dozens against thousands — so the hub keeps them in separate registries with
+separate caps (`REALTIME_STAFF_STREAMS_PER_TENANT`,
+`REALTIME_PUBLIC_STREAMS_PER_TENANT`), and a public signal is never routed
+through a staff sender. For the phone to be woken only for its own booking
+without a database read per open stream, the signal names the streams a batch
+touched — `Progress::Advanced.streams`, bounded at 256, `None` for "many".
+
+**Reconnect is the reconcile.** Every stream's first event is `ready`, the
+checkpoint of every visible group; every stream ends at ten minutes with
+`reconnect`, so authorization is re-run by the reconnect rather than outlived;
+and a watcher behind the 64-signal buffer is sent `reconnect` too, because
+`TenantDb` is deliberately not `Clone` and the cheapest fresh snapshot that
+touches no database from inside a stream is the next `ready`. The deposit
+status gained `consistent_after` so the phone's re-fetch has the same
+guarantee a screen's has.
+
+**The exit criterion is a test:**
+`two_screens_and_a_phone_agree_within_a_second_and_nobody_polled` books through
+the public route, plays the worker the way `ProjectionJob::tick` does, and reads
+`advanced` at the committed position on two staff streams and the phone's, then
+reads the reservation at that position. Beside it:
+`ready_names_every_group_the_tenant_may_see_and_nothing_else`,
+`a_signal_for_a_module_the_tenant_lacks_is_not_delivered`,
+`opening_a_stream_asks_for_a_visit`, `without_redis_nothing_can_be_watched`,
+`the_caps_refuse_the_stream_past_them`,
+`a_stream_ends_after_its_lifetime_with_reconnect`,
+`a_phone_hears_only_its_own_reservation`; the worker's
+`a_projection_that_advances_signals_once_with_the_committed_position`; the
+runner's `an_advance_names_the_streams_it_touched`; the hub's four unit tests;
+and `an_advance_published_is_received_by_a_subscriber` over a real Redis.
+
+**Left by decision:** 13c notifications and 13d conversations, next in that
+order; `Last-Event-ID` replay; per-branch filtering; public streams for anything
+but a reservation, which the subject registry is ready for.
+
 ### 45 · The OTP is typed once, and the worker finishes the onboarding
 
 **`activate` did everything in one request, and that was the problem.** Ten
@@ -3539,35 +3591,36 @@ optimised.
 Designed already, not built. The shape matters more than the transport, and
 three parts of it are not obvious.
 
-- [ ] Server-sent events over the tenant's own log. Not WebSockets: the traffic
+- [x] Server-sent events over the tenant's own log. Not WebSockets: the traffic
       is one-directional, and SSE reconnects by itself
-- [ ] **It carries a signal, not the data.** *"Group `booking` is queryable
+- [x] **It carries a signal, not the data.** *"Group `booking` is queryable
       through position N."* The client re-fetches through the ordinary API, which
       already does authorization, localization and paging. A payload stream would
       need all of that again, in a second dialect — and would make the log a
       query engine, which L7 forbids
-- [ ] **Published when the projection advances, never when the event is
+- [x] **Published when the projection advances, never when the event is
       appended.** An event is committed and visible before its projection has
       applied it; signal on the append and the client re-fetches, reads a lagging
       read model, sees nothing new, and stops. The hook is the `Advanced` arm
       after its commit, because that is the moment the guarantee becomes true
-- [ ] **A stream holds no database connection.** Fan-out is the Redis channel
+- [x] **A stream holds no database connection.** Fan-out is the Redis channel
       `shared.rs` already uses for cache agreement. A per-stream poll would
       multiply connection demand by open browser tabs, against a budget sized in
       `pools.rs` for tenants rather than tabs
-- [ ] Opening a stream calls `request_visit`. A quiet tenant has backed off to a
+- [x] Opening a stream calls `request_visit`. A quiet tenant has backed off to a
       six-hour interval, and a stream onto a dormant tenant is silent until
       somebody gives up
-- [ ] Streams are capped and reconnect. A stream held for hours outlives the
+- [x] Streams are capped and reconnect. A stream held for hours outlives the
       authorization checked when it opened, and reconnection re-runs the
       extractor for free
 
 ### 13b · The live grid
 
-- [ ] A booking made anywhere reaches every screen watching that branch and day
-- [ ] Filtered by what the watcher may see — a signal naming a group a viewer has
+- [x] A booking made anywhere reaches every screen watching that branch and day
+      — and the phone that booked, on its own stream (§46)
+- [x] Filtered by what the watcher may see — a signal naming a group a viewer has
       no module for is not sent
-- [ ] The grid reconciles on reconnect rather than trusting a delta it may have
+- [x] The grid reconciles on reconnect rather than trusting a delta it may have
       missed. `?consistent_after=` already expresses "wait for at least this"
 
 ### 13c · Notifications inside the system

@@ -19,6 +19,8 @@ payments = { workspace = true }
 erp-recurrence = { workspace = true }
 erp-control = { workspace = true }
 erp-eventlog = { workspace = true }
+erp-projection = { workspace = true }
+futures-util = { workspace = true }
 booking = { workspace = true }
 crm = { workspace = true }
 hr = { workspace = true }
@@ -73,3 +75,4 @@ serde_json = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tower = { workspace = true }
+futures-util = { workspace = true }

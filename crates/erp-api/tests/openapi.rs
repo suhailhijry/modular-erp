@@ -255,6 +255,14 @@ fn only_the_deliberately_public_routes_are_public() {
             "get",
             "/v1/booking/public/reservations/{reservation}/deposit",
         ),
+        // **The phone's stream.** Signals about one reservation — a position,
+        // never data — keyed by an id only the phone that booked it holds,
+        // behind the same per-origin and per-business limiter, and capped per
+        // business on each server apart from the staff stream (Phase 13).
+        (
+            "get",
+            "/v1/booking/public/reservations/{reservation}/events",
+        ),
         // **A code to a phone, and only when the business asks for one.**
         //
         // It says nothing about the number — the answer is the same for one

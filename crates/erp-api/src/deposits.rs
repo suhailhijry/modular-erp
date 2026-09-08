@@ -429,6 +429,7 @@ async fn record(
     params(
         ("Host" = String, Header, description = "The tenant's subdomain — which is how a public request names the business."),
         ("reservation" = String, Path, description = "From `POST /v1/booking/public/reservations`."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the booking read model to reach this log position — the one a stream's `advanced` named."),
     ),
     security(),
     responses(
@@ -443,6 +444,7 @@ async fn public_deposit_status(
     caller: Public,
     Language(locale): Language,
     Path(reservation): Path<String>,
+    consistency: erp_web::Consistency,
 ) -> Result<Json<DepositStatus>, Problem> {
     if !caller.db.has_module(&booking::module_id()) || !caller.db.has_module(&payments::module_id())
     {
@@ -452,6 +454,15 @@ async fn public_deposit_status(
     if !public_settings(&caller, locale).await?.open {
         return Err(nothing_here(locale));
     }
+    // The phone re-fetches at the position a stream named; it must not read a
+    // row the worker has not written yet.
+    consistency
+        .wait_for(
+            &caller.db,
+            <booking::Booking as erp_projection::ProjectionGroup>::NAME,
+            locale,
+        )
+        .await?;
 
     let mut conn = caller
         .db
@@ -707,7 +718,7 @@ const fn deposit_word(locale: Locale) -> &'static str {
     }
 }
 
-async fn public_settings(
+pub(crate) async fn public_settings(
     caller: &Public,
     locale: Locale,
 ) -> Result<booking::PublicBooking, Problem> {
@@ -780,7 +791,7 @@ async fn owed_for(
     })
 }
 
-fn nothing_here(locale: Locale) -> Problem {
+pub(crate) fn nothing_here(locale: Locale) -> Problem {
     Problem::new(
         StatusCode::NOT_FOUND,
         &erp_i18n::Message::new(erp_web::messages::MODULE_NOT_ENABLED)

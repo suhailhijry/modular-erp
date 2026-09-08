@@ -8,6 +8,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -16,6 +17,7 @@ use erp_api::{AppState, router};
 use erp_control::{Actor, ClusterRegistry, ControlPlane, PoolConfig, Scope, TenantPools};
 use erp_testkit::{Schema, TestDb};
 use erp_types::{IdentityId, TenantId};
+use futures_util::StreamExt as _;
 use tower::ServiceExt;
 
 static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
@@ -25,6 +27,9 @@ struct Fixture {
     app: Router,
     control: Arc<ControlPlane>,
     db: TestDb,
+    /// Where the streams these tests open wait; a test publishes into it the
+    /// way the Redis listener would.
+    hub: Arc<erp_web::realtime::Hub>,
     /// The DNS these tests publish to. `prove` puts the record a claim asked
     /// for where `verify_domain` will look.
     prover: Arc<FakeProver>,
@@ -78,8 +83,93 @@ fn idem(name: &str) -> String {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()).to_string()
 }
 
+/// The next SSE event on a body: `(event, data)`. Comments (keep-alives) are
+/// skipped. `None` when nothing arrives in time or the body ends.
+async fn next_event(
+    body: &mut axum::body::BodyDataStream,
+    buffer: &mut String,
+    wait: Duration,
+) -> Option<(String, String)> {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if let Some(end) = buffer.find("\n\n") {
+            let frame = buffer[..end].to_owned();
+            buffer.drain(..end + 2);
+            let mut event = String::new();
+            let mut data = String::new();
+            for line in frame.lines() {
+                if let Some(rest) = line.strip_prefix("event:") {
+                    rest.trim().clone_into(&mut event);
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    rest.trim().clone_into(&mut data);
+                }
+            }
+            if event.is_empty() && data.is_empty() {
+                continue; // a comment
+            }
+            return Some((event, data));
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        match tokio::time::timeout(left, body.next()).await {
+            Ok(Some(Ok(bytes))) => buffer.push_str(&String::from_utf8_lossy(&bytes)),
+            _ => return None,
+        }
+    }
+}
+
+/// A projection advance, as the worker would announce it.
+fn advanced(
+    tenant: TenantId,
+    group: &str,
+    module: &str,
+    position: i64,
+    streams: Option<Vec<erp_types::StreamId>>,
+) -> erp_control::shared::Advanced {
+    erp_control::shared::Advanced {
+        tenant,
+        group: group.to_owned(),
+        module: erp_types::ModuleId::new(module).expect("a module"),
+        position: erp_types::LogPosition::new(position).expect("a position"),
+        streams,
+    }
+}
+
+/// Turns online booking on for a tenant, the way the settings route would.
+async fn open_the_diary(fixture: &Fixture, tenant: TenantId) {
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let mut conn = db.acquire().await.expect("connection");
+    erp_eventlog::configuration::set(
+        &mut conn,
+        booking::PublicBooking::KEY,
+        &booking::PublicBooking {
+            verify_phone: false,
+            hold_minutes: 0,
+            open: true,
+            deposit_bp: 0,
+        },
+        None,
+        None,
+    )
+    .await
+    .expect("stores the setting");
+}
+
 impl Fixture {
     async fn new() -> Self {
+        Self::with_hub(Arc::new(erp_web::realtime::Hub::new(
+            erp_web::realtime::Caps::default(),
+        )))
+        .await
+    }
+
+    async fn with_hub(hub: Arc<erp_web::realtime::Hub>) -> Self {
         let db = erp_testkit::Template::get(&CONTROL)
             .await
             .expect("control template builds")
@@ -122,6 +212,7 @@ impl Fixture {
                     // and no peer address; the tests that need a caller to be
                     // somebody send `X-Forwarded-For`, the way a proxy would.
                     .trusting_forwarded_for(true)
+                    .streaming_through(Arc::clone(&hub))
                     .sealing_with(
                         erp_eventlog::SealingKey::new("test", &[5u8; 32]).expect("32 bytes"),
                     )
@@ -134,7 +225,17 @@ impl Fixture {
             ),
             control,
             db,
+            hub,
         }
+    }
+
+    /// Opens a stream and returns its status and body, unread.
+    async fn open_stream(
+        &self,
+        request: Request<Body>,
+    ) -> (StatusCode, axum::body::BodyDataStream) {
+        let response = self.raw(request).await;
+        (response.status(), response.into_body().into_data_stream())
     }
 
     /// An identity with a password, and no memberships.
@@ -279,10 +380,17 @@ impl Fixture {
             .unwrap_or_default()
             .as_bytes()
             .to_vec();
-        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
-            .await
-            .expect("body reads");
-        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        // An event stream has no end to read to: its body is what
+        // `open_stream` is for, and here only the status is the answer.
+        let json = if content_type.starts_with(b"text/event-stream") {
+            drop(response);
+            serde_json::Value::Null
+        } else {
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("body reads");
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
         // Every response in this file is also a contract test. See `contract`.
         contract::check(&method, &path, status, &json);
         (status, json, content_type)
@@ -1856,6 +1964,7 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // they just handed over has been reported.
     ("registration", ALL_ROLES),
     ("onboarding_status", ALL_ROLES),
+    ("event_stream", ALL_ROLES),
     ("zatca_standing", ALL_ROLES),
     ("zatca_documents", ALL_ROLES),
     ("zatca_document", ALL_ROLES),
@@ -2201,8 +2310,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        216,
-        "expected two hundred and sixteen role-scoped operations"
+        217,
+        "expected two hundred and seventeen role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -10055,6 +10164,519 @@ async fn the_tenant_calendar_is_a_named_zone() {
     )
     .expect("json");
     assert_eq!(body["zone"], "Europe/Berlin");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Real time: the signal stream
+// ---------------------------------------------------------------------------
+
+/// **`ready` names every group the tenant may see, at its checkpoint, and
+/// nothing else.** The snapshot a screen reconciles against.
+#[tokio::test]
+async fn ready_names_every_group_the_tenant_may_see_and_nothing_else() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, mut body) = fixture
+        .open_stream(
+            Request::get("/v1/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut buffer = String::new();
+    let (event, data) = next_event(&mut body, &mut buffer, Duration::from_secs(2))
+        .await
+        .expect("a first event");
+    assert_eq!(event, "ready");
+    let ready: serde_json::Value = serde_json::from_str(&data).expect("json");
+    let groups = ready["groups"].as_object().expect("groups");
+    assert!(groups.contains_key("sales"), "{ready}");
+    assert!(groups.contains_key("ledger"), "{ready}");
+    assert!(groups.contains_key("tax_sa"), "{ready}");
+    assert!(
+        !groups.contains_key("booking"),
+        "a module the tenant lacks: {ready}"
+    );
+    assert!(groups["sales"].is_i64());
+
+    fixture.cleanup().await;
+}
+
+/// **A signal for a module the tenant lacks is not delivered**, and one for a
+/// module it has is — with the group and the position.
+#[tokio::test]
+async fn a_signal_for_a_module_the_tenant_lacks_is_not_delivered() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_selling_only(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (_, mut body) = fixture
+        .open_stream(
+            Request::get("/v1/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let mut buffer = String::new();
+    next_event(&mut body, &mut buffer, Duration::from_secs(2))
+        .await
+        .expect("ready");
+
+    fixture
+        .hub
+        .publish(&advanced(tenant, "booking", "booking", 5, None));
+    fixture
+        .hub
+        .publish(&advanced(tenant, "sales", "sales", 6, None));
+    let (event, data) = next_event(&mut body, &mut buffer, Duration::from_secs(2))
+        .await
+        .expect("the sales signal");
+    assert_eq!(event, "advanced");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&data).expect("json"),
+        serde_json::json!({ "group": "sales", "position": 6 }),
+        "the booking signal was delivered to a tenant without booking"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Opening a stream asks for a visit.** A dormant tenant's worker has
+/// backed off for hours; a screen that just opened should not wait for it.
+#[tokio::test]
+async fn opening_a_stream_asks_for_a_visit() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    sqlx::query("UPDATE tenant SET next_visit_at = now() + interval '1 hour' WHERE id = $1")
+        .bind(tenant.as_uuid())
+        .execute(fixture.db.pool())
+        .await
+        .expect("dormant");
+
+    let (status, mut body) = fixture
+        .open_stream(
+            Request::get("/v1/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut buffer = String::new();
+    next_event(&mut body, &mut buffer, Duration::from_secs(2))
+        .await
+        .expect("ready");
+
+    let due: bool = sqlx::query_scalar("SELECT next_visit_at <= now() FROM tenant WHERE id = $1")
+        .bind(tenant.as_uuid())
+        .fetch_one(fixture.db.pool())
+        .await
+        .expect("reads");
+    assert!(due, "the stream did not ask for a visit");
+
+    fixture.cleanup().await;
+}
+
+/// **Without Redis nothing can be watched**, and the route says so rather
+/// than opening a stream nothing would ever write to (L6).
+#[tokio::test]
+async fn without_redis_nothing_can_be_watched() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // The same control plane, a state with no hub: the deployment without Redis.
+    let bare = router(AppState::new(Arc::clone(&fixture.control)).trusting_forwarded_for(true));
+    let response = bare
+        .oneshot(
+            Request::get("/v1/events")
+                .header(header::HOST, "acme.localhost")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("responds");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(body["code"], "request.no_realtime");
+
+    fixture.cleanup().await;
+}
+
+/// **The caps refuse the stream past them**, staff and public counted apart.
+#[tokio::test]
+async fn the_caps_refuse_the_stream_past_them() {
+    let hub = Arc::new(erp_web::realtime::Hub::new(erp_web::realtime::Caps {
+        staff_per_tenant: 1,
+        public_per_tenant: 1,
+    }));
+    let mut fixture = Fixture::with_hub(Arc::clone(&hub)).await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let open = || {
+        Request::get("/v1/events")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (status, _first) = fixture.open_stream(open()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, _) = fixture.send(open()).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["code"], "request.too_many_streams");
+    assert_eq!(hub.open(tenant), (1, 0));
+
+    fixture.cleanup().await;
+}
+
+/// **A stream ends after its lifetime with `reconnect`**, so authorization is
+/// re-run by the reconnect rather than outlived by the stream.
+#[tokio::test]
+async fn a_stream_ends_after_its_lifetime_with_reconnect() {
+    let hub = Arc::new(
+        erp_web::realtime::Hub::new(erp_web::realtime::Caps::default())
+            .living(Duration::from_millis(300)),
+    );
+    let mut fixture = Fixture::with_hub(hub).await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (_, mut body) = fixture
+        .open_stream(
+            Request::get("/v1/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let mut buffer = String::new();
+    let (event, _) = next_event(&mut body, &mut buffer, Duration::from_secs(2))
+        .await
+        .expect("ready");
+    assert_eq!(event, "ready");
+    let (event, _) = next_event(&mut body, &mut buffer, Duration::from_secs(2))
+        .await
+        .expect("reconnect");
+    assert_eq!(event, "reconnect");
+    assert!(
+        next_event(&mut body, &mut buffer, Duration::from_millis(500))
+            .await
+            .is_none(),
+        "the stream did not end"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A phone hears only its own reservation**, and "many" wakes it too.
+#[tokio::test]
+async fn a_phone_hears_only_its_own_reservation() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    open_the_diary(&fixture, tenant).await;
+
+    let stream_for = |id: &str| {
+        Request::get(format!("/v1/booking/public/reservations/{id}/events"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let mine = idem("PUBLIC-BOOKING-1");
+    let theirs = idem("PUBLIC-BOOKING-2");
+    let (status, mut my_body) = fixture.open_stream(stream_for(&mine)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, mut their_body) = fixture.open_stream(stream_for(&theirs)).await;
+    let (mut my_buffer, mut their_buffer) = (String::new(), String::new());
+    let (event, data) = next_event(&mut my_body, &mut my_buffer, Duration::from_secs(2))
+        .await
+        .expect("ready");
+    assert_eq!(event, "ready");
+    let ready: serde_json::Value = serde_json::from_str(&data).expect("json");
+    assert_eq!(ready["reservation"], mine);
+    assert!(ready["position"].is_i64());
+    next_event(&mut their_body, &mut their_buffer, Duration::from_secs(2))
+        .await
+        .expect("ready");
+
+    let reservation = |id: &str| {
+        erp_types::StreamId::new(
+            <booking::Reservation as erp_eventlog::Aggregate>::domain(),
+            erp_types::AggregateId::new(id).expect("an id"),
+        )
+    };
+    fixture.hub.publish(&advanced(
+        tenant,
+        "booking",
+        "booking",
+        9,
+        Some(vec![reservation(&mine)]),
+    ));
+    let (event, data) = next_event(&mut my_body, &mut my_buffer, Duration::from_secs(2))
+        .await
+        .expect("mine");
+    assert_eq!(event, "advanced");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&data).expect("json"),
+        serde_json::json!({ "position": 9 })
+    );
+    assert!(
+        next_event(
+            &mut their_body,
+            &mut their_buffer,
+            Duration::from_millis(300)
+        )
+        .await
+        .is_none(),
+        "the other phone woke"
+    );
+
+    fixture
+        .hub
+        .publish(&advanced(tenant, "booking", "booking", 10, None));
+    assert!(
+        next_event(&mut my_body, &mut my_buffer, Duration::from_secs(2))
+            .await
+            .is_some()
+    );
+    assert!(
+        next_event(&mut their_body, &mut their_buffer, Duration::from_secs(2))
+            .await
+            .is_some(),
+        "many did not wake every phone"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The exit criterion.** Two screens and a phone agree about a schedule
+/// within a second of a booking, and nobody polled: the booking is made through
+/// the public route, the worker projects and announces it, all three streams
+/// hear it at the committed position, and a read at that position shows it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the phase's exit criterion, told once"
+)]
+#[tokio::test]
+async fn two_screens_and_a_phone_agree_within_a_second_and_nobody_polled() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let bearer = |request: axum::http::request::Builder| {
+        request
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+    };
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::post("/v1/booking/resources"))
+                .header("Idempotency-Key", idem("CHAIR-1"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "id": "CHAIR-1", "name": "كرسي", "kind": "person", "capacity": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    open_the_diary(&fixture, tenant).await;
+    fixture.project_booking(tenant).await;
+
+    // Two counter screens, and the phone that is about to book.
+    let staff = || {
+        bearer(Request::get("/v1/events"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let reservation = idem("PUBLIC-BOOKING-1");
+    let (_, mut screen_a) = fixture.open_stream(staff()).await;
+    let (_, mut screen_b) = fixture.open_stream(staff()).await;
+    let (_, mut phone) = fixture
+        .open_stream(
+            Request::get(format!(
+                "/v1/booking/public/reservations/{reservation}/events"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    let (mut buf_a, mut buf_b, mut buf_p) = (String::new(), String::new(), String::new());
+    for (body, buffer) in [
+        (&mut screen_a, &mut buf_a),
+        (&mut screen_b, &mut buf_b),
+        (&mut phone, &mut buf_p),
+    ] {
+        let (event, _) = next_event(body, buffer, Duration::from_secs(2))
+            .await
+            .expect("ready");
+        assert_eq!(event, "ready");
+    }
+
+    // The booking, from the phone.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/booking/public/reservations")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", &reservation)
+                .body(Body::from(
+                    serde_json::json!({
+                        "customer_name": "سارة",
+                        "customer_phone": "+966500000000",
+                        "lines": [{
+                            "resource": "CHAIR-1",
+                            "from": "2026-05-01T09:00:00Z",
+                            "until": "2026-05-01T10:00:00Z"
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // The worker, played by this test exactly as `ProjectionJob::tick` does:
+    // project in a transaction, commit, announce what was committed.
+    let announced = {
+        let db = fixture
+            .control
+            .enter_for_maintenance(tenant)
+            .await
+            .expect("maintenance entry");
+        let projections = booking::projections();
+        let refs: Vec<&dyn erp_projection::Projection<Group = booking::Booking>> =
+            projections.iter().map(AsRef::as_ref).collect();
+        let mut tx = db.begin().await.expect("transaction");
+        let progress = erp_projection::run_once_in::<booking::Booking>(
+            &mut tx,
+            &refs,
+            booking::upcasters(),
+            200,
+        )
+        .await
+        .expect("projects");
+        let erp_projection::Progress::Advanced { to, streams, .. } = progress else {
+            panic!("nothing to project: {progress:?}");
+        };
+        tx.commit().await.expect("commits");
+        fixture.hub.publish(&erp_control::shared::Advanced {
+            tenant,
+            group: "booking".to_owned(),
+            module: booking::module_id(),
+            position: to,
+            streams,
+        });
+        to
+    };
+
+    // Within a second, all three heard it, at the committed position.
+    for (body, buffer, expected) in [
+        (
+            &mut screen_a,
+            &mut buf_a,
+            serde_json::json!({ "group": "booking", "position": announced.get() }),
+        ),
+        (
+            &mut screen_b,
+            &mut buf_b,
+            serde_json::json!({ "group": "booking", "position": announced.get() }),
+        ),
+        (
+            &mut phone,
+            &mut buf_p,
+            serde_json::json!({ "position": announced.get() }),
+        ),
+    ] {
+        let (event, data) = next_event(body, buffer, Duration::from_secs(1))
+            .await
+            .expect("advanced within a second");
+        assert_eq!(event, "advanced");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&data).expect("json"),
+            expected
+        );
+    }
+
+    // And a read at that position shows the booking — the screen's re-fetch.
+    let (status, body, _) = fixture
+        .send(
+            bearer(Request::get(format!(
+                "/v1/booking/reservations/{reservation}?consistent_after={}",
+                announced.get()
+            )))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["stage"], "reserved");
+
+    fixture.cleanup().await;
+}
+
+/// **The deposit status waits for the position a stream named.** The phone's
+/// re-fetch after `advanced` must not read a row the worker has not written;
+/// a position the read model has not reached is a 503 that says so, not a
+/// 404 that says there is no deposit.
+#[tokio::test]
+async fn the_deposit_status_waits_for_the_position_a_stream_named() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    fixture.enable_module(tenant, payments::setup()).await;
+    open_the_diary(&fixture, tenant).await;
+
+    let reservation = idem("PUBLIC-BOOKING-1");
+    let (status, body, _) = fixture
+        .send(
+            Request::get(format!(
+                "/v1/booking/public/reservations/{reservation}/deposit?consistent_after=999999"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "request.not_caught_up");
 
     fixture.cleanup().await;
 }

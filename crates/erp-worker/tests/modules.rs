@@ -684,3 +684,111 @@ async fn retention_forgets_old_receipts_and_keeps_young_ones_and_open_promises()
     drop(db);
     fixture.cleanup().await;
 }
+
+// ---------------------------------------------------------------------------
+// The signal after the commit
+// ---------------------------------------------------------------------------
+
+struct Tiny;
+impl erp_projection::ProjectionGroup for Tiny {
+    const NAME: &'static str = "tiny";
+    const SCHEMA: &'static str = "proj_tiny";
+}
+
+/// Applies nothing. The signal is about the commit, not the tables.
+struct Noop;
+#[async_trait::async_trait]
+impl erp_projection::Projection for Noop {
+    type Group = Tiny;
+    fn name(&self) -> &'static str {
+        "noop"
+    }
+    async fn apply(
+        &self,
+        _ctx: &erp_projection::ProjectionCtx<'_>,
+        _envelope: &erp_eventlog::Envelope,
+        _conn: &mut sqlx::PgConnection,
+    ) -> Result<(), erp_projection::ProjectionError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct Announced(std::sync::Mutex<Vec<erp_control::shared::Advanced>>);
+#[async_trait::async_trait]
+impl erp_worker::Signals for Announced {
+    async fn advanced(&self, signal: &erp_control::shared::Advanced) {
+        self.0.lock().expect("not poisoned").push(signal.clone());
+    }
+}
+
+fn tiny_event() -> erp_eventlog::NewEvent {
+    erp_eventlog::NewEvent::new(
+        erp_types::EventName::new("tiny.happened").expect("a name"),
+        erp_types::SchemaVersion::new(1).expect("a version"),
+        serde_json::json!({}),
+    )
+}
+
+/// **A projection that advances signals once, with the committed position and
+/// the streams it touched; one that is up to date signals nothing.** The
+/// signal is what every open stream in the fleet is waiting for.
+#[tokio::test]
+async fn a_projection_that_advances_signals_once_with_the_committed_position() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.tenant("tiny").await;
+    let db = fixture.db(tenant).await;
+
+    let mut conn = db.acquire().await.expect("connection");
+    erp_projection::ensure_group_schema::<Tiny>(&mut conn)
+        .await
+        .expect("schema");
+    for (stream, sequence) in [("a", 0), ("b", 0), ("a", 1)] {
+        erp_eventlog::append(
+            &mut conn,
+            &erp_types::StreamId::new(
+                erp_types::DomainName::new("tiny").expect("a domain"),
+                erp_types::AggregateId::new(stream).expect("an id"),
+            ),
+            erp_types::Sequence::new(sequence).expect("a sequence"),
+            &[tiny_event()],
+            &erp_eventlog::Metadata::default(),
+        )
+        .await
+        .expect("appends");
+    }
+    drop(conn);
+
+    let recorder = Arc::new(Announced::default());
+    let upcasters = erp_eventlog::Upcasters::new().declare(
+        &erp_types::EventName::new("tiny.happened").expect("a name"),
+        erp_types::SchemaVersion::new(1).expect("a version"),
+    );
+    let job =
+        erp_worker::ProjectionJob::<Tiny>::new(vec![Arc::new(Noop)], Arc::new(upcasters), 100)
+            .for_module(module("tiny"))
+            .signalling(Some(Arc::clone(&recorder) as Arc<dyn erp_worker::Signals>));
+
+    assert_eq!(job.tick(&db).await.expect("ticks"), Activity::Worked);
+    let signals = recorder.0.lock().expect("not poisoned").clone();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].tenant, tenant);
+    assert_eq!(signals[0].group, "tiny");
+    assert_eq!(signals[0].module, module("tiny"));
+    assert_eq!(signals[0].position.get(), 3, "the committed position");
+    let named: Vec<&str> = signals[0]
+        .streams
+        .as_ref()
+        .expect("named")
+        .iter()
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(named, vec!["a", "b"]);
+
+    // Up to date: nothing committed, nothing announced.
+    assert_eq!(job.tick(&db).await.expect("ticks"), Activity::Idle);
+    assert_eq!(recorder.0.lock().expect("not poisoned").len(), 1);
+
+    drop(db);
+    fixture.cleanup().await;
+}
