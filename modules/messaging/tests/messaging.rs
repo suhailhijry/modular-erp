@@ -621,3 +621,80 @@ async fn a_device_can_only_belong_to_an_employee_or_a_customer() {
     drop(conn);
     fixture.cleanup().await;
 }
+
+/// **What a reply answers.**
+///
+/// A gateway hands back a number and a body and nothing else, so the only way
+/// to know what an inbound message is about is to remember what was said to
+/// that number — and until this, sending kept nothing at all.
+#[tokio::test]
+async fn what_was_sent_is_remembered_against_what_it_was_about() {
+    let fixture = Fixture::new("sent-record").await;
+    fixture.a_salon().await;
+    fixture
+        .template("booking.reminder", sms("Your appointment", "موعدك"))
+        .await;
+
+    fixture
+        .send(&reminder("booking.reminder.BK-1", at("2026-05-04", "08")))
+        .await
+        .expect("sends");
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let about = messaging::last_sent_to(
+        &mut conn,
+        "+966500000001",
+        at("2026-05-04", "09"),
+        chrono::TimeDelta::days(7),
+    )
+    .await
+    .expect("reads")
+    .expect("something was sent to that number");
+    assert_eq!(about.topic, Topic::Reservation);
+    assert_eq!(about.id.as_str(), "BK-1");
+
+    // **As of the reply's own instant, never the clock.** A question asked from
+    // before the message went out must not find it — that is what makes the
+    // answer stable however often it is asked.
+    assert!(
+        messaging::last_sent_to(
+            &mut conn,
+            "+966500000001",
+            at("2026-05-04", "07"),
+            chrono::TimeDelta::days(7),
+        )
+        .await
+        .expect("reads")
+        .is_none(),
+        "a message sent after the reply was correlated to it"
+    );
+
+    // And something said a long time ago is not what this answers.
+    assert!(
+        messaging::last_sent_to(
+            &mut conn,
+            "+966500000001",
+            at("2026-05-04", "09"),
+            chrono::TimeDelta::minutes(1),
+        )
+        .await
+        .expect("reads")
+        .is_none(),
+        "a stale message was correlated to a fresh reply"
+    );
+
+    // Somebody else's number gets nobody else's subject.
+    assert!(
+        messaging::last_sent_to(
+            &mut conn,
+            "+966500000009",
+            at("2026-05-04", "09"),
+            chrono::TimeDelta::days(7),
+        )
+        .await
+        .expect("reads")
+        .is_none()
+    );
+
+    fixture.cleanup().await;
+}

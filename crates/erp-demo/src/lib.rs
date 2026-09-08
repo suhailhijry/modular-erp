@@ -310,6 +310,7 @@ pub async fn seed(
     // booking reaches is a question about the read model, asked at the moment
     // it is announced.
     seed_notifications(&app, &state.control, tenant, slug, &token).await?;
+    seed_conversations(&state.control, tenant).await?;
 
     project(&state.control, tenant).await?;
 
@@ -384,6 +385,12 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
         &db,
         &notifications::projections(),
         notifications::upcasters(),
+    )
+    .await?;
+    advance::<conversations::Conversations>(
+        &db,
+        &conversations::projections(),
+        conversations::upcasters(),
     )
     .await?;
     Ok(())
@@ -2165,6 +2172,95 @@ async fn post(
             })?;
 
     send(app, "POST", path, request, expected).await
+}
+
+/// **A conversation about a booking, and a reply to it.**
+///
+/// Two notes and the answer to one of them, so the demo shows what 13d is for:
+/// somebody wrote down what a customer said on the phone, the business
+/// answered, and the customer's reply is on the booking it answers rather than
+/// in a gateway's logs.
+///
+/// The reply is landed the way a worker would land it — `conversations::land`
+/// reads what the inbound route recorded — which is also what makes it prove
+/// the correlation: nothing here says which thread it belongs in.
+async fn seed_conversations(
+    control: &Arc<ControlPlane>,
+    tenant: TenantId,
+) -> Result<usize, DemoError> {
+    let db = control.enter_for_maintenance(tenant).await?;
+    let booking = messaging::Subject::new(
+        messaging::Topic::Reservation,
+        erp_types::AggregateId::new(demo_id("BK-0005")).map_err(|e| DemoError::Unexpected {
+            path: "conversations".to_owned(),
+            body: e.to_string(),
+        })?,
+    );
+
+    conversations::note(
+        &db,
+        &booking,
+        "اتصلت وتسأل إن كان بالإمكان التأخير نصف ساعة",
+        "2026-05-03T09:00:00Z".parse().unwrap_or_default(),
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .map_err(|e| DemoError::Unexpected {
+        path: "conversations".to_owned(),
+        body: e.to_string(),
+    })?;
+
+    conversations::say(
+        &db,
+        &booking,
+        "أهلًا نورة، لا مشكلة — نراكِ الساعة ١٢:٣٠",
+        messaging::Channel::Sms,
+        "2026-05-03T09:05:00Z".parse().unwrap_or_default(),
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .map_err(|e| DemoError::Unexpected {
+        path: "conversations".to_owned(),
+        body: e.to_string(),
+    })?;
+
+    // What her phone sent back, as the inbound route would have recorded it.
+    let reply = conversations::Inbound {
+        id: "demo-reply-1".to_owned(),
+        from: "+966500000001".to_owned(),
+        body: "شكرًا لكم".to_owned(),
+        sent_at: "2026-05-03T09:07:00Z".parse().unwrap_or_default(),
+    };
+    let mut conn = db.acquire().await?;
+    sqlx::query(
+        "INSERT INTO webhook_event (provider, event_id, kind, payload)
+         VALUES ($1,$2,'message',$3)
+         ON CONFLICT (provider, event_id) DO NOTHING",
+    )
+    .bind(conversations::PROVIDER)
+    .bind(&reply.id)
+    .bind(serde_json::to_value(&reply).unwrap_or(serde_json::Value::Null))
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| DemoError::Unexpected {
+        path: "webhook_event".to_owned(),
+        body: e.to_string(),
+    })?;
+    drop(conn);
+
+    let landed = conversations::land(
+        &db,
+        "2026-05-01T00:00:00Z".parse().unwrap_or_default(),
+        chrono::TimeDelta::days(7),
+        50,
+    )
+    .await
+    .map_err(|e| DemoError::Unexpected {
+        path: "conversations".to_owned(),
+        body: e.to_string(),
+    })?;
+
+    Ok(landed.landed)
 }
 
 /// **The owner's own bell.**

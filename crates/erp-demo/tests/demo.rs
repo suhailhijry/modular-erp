@@ -459,6 +459,12 @@ async fn the_demo_replays_to_exactly_what_is_live() {
         replay!(pool, files, files::Files, "file"),
         replay!(pool, payments, payments::Payments, "payment"),
         replay!(pool, notifications, notifications::Notifications, "inbox"),
+        replay!(
+            pool,
+            conversations,
+            conversations::Conversations,
+            "conversation_message"
+        ),
     ];
 
     pool.close().await;

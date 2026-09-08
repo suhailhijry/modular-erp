@@ -92,6 +92,11 @@ impl Localize for AnnounceError {
 /// **In the caller's transaction.** This module never opens one behind your
 /// back, exactly as `messaging::send` does not: commit and the notification
 /// stands, roll back and nothing was announced and nothing was charged.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the four steps of announcing, in the order the doc comment gives \
+              them; splitting them would hide that order"
+)]
 pub async fn announce(
     conn: &mut PgConnection,
     announcing: &Announcing,
@@ -199,7 +204,15 @@ pub async fn announce(
             // the outbox deduplicates on it even if the record above somehow
             // did not.
             let key = format!("{}.{identity}.{}", id.as_str(), channel.as_str());
-            if messaging::deliver(&mut *conn, &message, key, announcing.at).await? {
+            if messaging::deliver(
+                &mut *conn,
+                &message,
+                key,
+                Some(&announcing.subject),
+                announcing.at,
+            )
+            .await?
+            {
                 promised += 1;
             }
         }

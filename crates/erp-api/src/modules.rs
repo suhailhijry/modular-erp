@@ -166,6 +166,15 @@ const REGISTERED: &[Registered] = &[
         http: notifications::http::routes,
         catalog: &notifications::CATALOG,
     },
+    // After `messaging` and `crm`, which it is built on: a thread resolves the
+    // customer of a subject through the first and matches an inbound number
+    // through the second.
+    Registered {
+        name: "conversations",
+        setup: conversations::setup,
+        http: conversations::http::routes,
+        catalog: &conversations::CATALOG,
+    },
     Registered {
         name: "files",
         setup: files::setup,

@@ -620,3 +620,47 @@ channel; its bindings are checked when it is saved, like every other template.
 The bell is a projection group like any other, so `advanced` names it on the
 staff stream and a screen re-fetches its own inbox — the signal carries a
 position and never the notification.
+
+## Conversations
+
+A thread is named by what it is about, so there is nothing to create:
+
+```bash
+curl $API/v1/conversations/reservation/BK-1 -H "$H" -H "$A"
+curl -X POST $API/v1/conversations/reservation/BK-1/notes -H "$H" -H "$A" -H 'content-type: application/json' \
+  -d '{"text":"Called, wants Thursday."}'
+curl -X POST $API/v1/conversations/reservation/BK-1/messages -H "$H" -H "$A" -H 'content-type: application/json' \
+  -d '{"text":"Thursday at 10 works.","channel":"sms"}'
+```
+
+A note stays inside. A message goes out through `messaging`, is charged to the
+meter and answers `402` when the month's budget is spent. `sms` and `email` are
+the channels a person may pick — WhatsApp takes approved templates outside a
+24-hour window and push reaches a device rather than a person, so both are
+refused with that as the reason. **Reading needs `post_entries`**, not `read`: a
+thread holds private notes, and `read` is the external accountant's role.
+
+### Replies coming back
+
+Point your SMS gateway's inbound relay at the webhook route and register its
+secret under the provider name `messages`:
+
+```bash
+curl -X POST $API/v1/hooks/messages -H "$H" \
+  -H "x-webhook-timestamp: $(date +%s)" \
+  -H "x-webhook-signature: <hmac-sha256 of '<timestamp>.<body>', hex>" \
+  -d '{"id":"gw-123","from":"+966500000001","body":"Thursday works","sent_at":"2026-05-04T09:00:00Z"}'
+```
+
+The worker lands it in the thread it answers: what was last said to that number
+**as of when they replied**, else that number's customer, else the tray:
+
+```bash
+curl $API/v1/conversations/unmatched -H "$H" -H "$A"
+curl -X POST $API/v1/conversations/unmatched/+966599999999/assign -H "$H" -H "$A" -H 'content-type: application/json' \
+  -d '{"topic":"reservation","id":"BK-1"}'
+```
+
+Assigning moves what has arrived. The next message from that number lands in the
+tray again — put it on the customer's record to stop that, which is `crm`'s job
+and not this one's.

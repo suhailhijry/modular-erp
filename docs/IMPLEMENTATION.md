@@ -651,6 +651,57 @@ the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
 
+### 48 · Conversations: what a reply answers, and how it is known
+
+**`messaging` had to start remembering.** Everything about that module is
+fire-and-forget by design — resolve late, render late, promise an effect, hold
+nothing — and that is right for sending and useless for receiving. An SMS reply
+arrives as a number, a body and the gateway's id; *what it answers* exists
+nowhere unless what was sent to that number was written down. So `message_sent`
+joins the meter and the device tokens in the tenant migration chain, for the
+same stated reason both of those are there: a send is an **effect promise, not
+an event**, nothing in the log says one happened, and a rebuild must not destroy
+it. The module still owns no projections.
+
+**Correlation is against the reply's own instant, never the clock.** This is the
+whole trick of the phase. Asked against *now*, "what does this answer" gives a
+different answer every time it is asked — a reply landing on one booking this
+minute and another the next, as later reminders go out. Asked as of when they
+replied, the answer never moves; so the sweep that lands inbound messages can
+re-run over an overlapping window for ever, with **no cursor and no checkpoint
+table**, and the same webhook always lands in the same place. It is the same
+shape 13c uses with derived ids: do not remember what you did, make what you do
+deterministic.
+
+**Three questions in order.** What was last said to that number; whose number it
+is; and failing both, the tray. The number is matched **exactly** — no
+normalisation and no last-nine-digits heuristic, because a heuristic that
+resolves `+966500000001` and `0500000001` to each other also eventually resolves
+two people to one, and putting one customer's reply into another customer's
+conversation is a worse failure than not matching. The tray is what catches the
+rest, and it moves what has arrived without binding the number: the fix that
+stops it recurring is the number on the customer record, which is `crm`'s.
+
+**A thread is named by what it is about.** `v5("{topic}:{id}")`, so opening the
+conversation about a booking is a computation, nothing is created before the
+first note, and two people opening it at once open one thread. The projection
+gets something for free from that: it can *recompute* an id to tell which
+derivation produced the one it is looking at — which is how it knows a thread is
+the tray for a number rather than a real subject's, without a flag on the event
+or a column to keep in step.
+
+**Two of the four channels are refused, and say why.** WhatsApp takes
+pre-approved templates outside a 24-hour service window (§26) and every message
+typed into a thread is outside one, so promising it would be this system
+pretending; push addresses a device rather than a person. `sms` and `email` are
+what a person may pick, and a customer with no address on the one they picked is
+a refusal naming it.
+
+**Reading a thread needs `PostEntries`** — the one place in this API where
+reading is not the most permissive capability. A thread holds staff's private
+notes about a customer, and `Read` is the role for an external accountant at
+year end: every reason to see the books, none to see what the front desk wrote.
+
 ### 47 · The bell: who a notification is for, and why no module may ring it
 
 **A notification had nowhere to live.** `messaging` reaches people well and
@@ -3698,11 +3749,13 @@ three parts of it are not obvious.
 
 ### 13d · Conversations
 
-- [ ] A thread against a subject: a booking, an invoice, a customer. Not a chat
-      room, which nobody can find afterwards
-- [ ] Inbound messages (Phase 12b) land in the thread, so a customer replying to
-      a reminder is answering a person and not a void
-- [ ] Internal notes and customer-visible messages in one thread, distinguished —
+- [x] A thread against a subject: a booking, an invoice, a customer. Not a chat
+      room, which nobody can find afterwards. **Its id is derived from its
+      subject**, so opening one is a computation rather than a search (§48)
+- [x] Inbound messages (Phase 12b) land in the thread, so a customer replying to
+      a reminder is answering a person and not a void — correlated against what
+      was last said to that number **as of the moment they replied**
+- [x] Internal notes and customer-visible messages in one thread, distinguished —
       the private-note distinction the system read for Phase 7 found necessary
       enough to build twice
 

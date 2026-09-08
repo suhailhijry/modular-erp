@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT payload as \"payload!\"\n                 FROM webhook_event\n                WHERE provider = $1 AND received_at > $2\n                ORDER BY received_at\n                LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payload!",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "webhook_event",
+            "name": "payload"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9d42f37fc36af86de4f8a299f2c0b0cc0e3d12f0d5e9029dc757923ec616211d"
+}

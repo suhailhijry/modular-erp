@@ -405,6 +405,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "conversations"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "booking",
+ "branches",
+ "chrono",
+ "crm",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-occupancy",
+ "erp-projection",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "hr",
+ "messaging",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+ "uuid",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -674,6 +706,7 @@ dependencies = [
  "booking",
  "branches",
  "chrono",
+ "conversations",
  "crm",
  "erp-control",
  "erp-eventlog",
@@ -751,6 +784,8 @@ dependencies = [
  "axum",
  "booking",
  "branches",
+ "chrono",
+ "conversations",
  "crm",
  "erp-api",
  "erp-control",
@@ -979,6 +1014,7 @@ dependencies = [
  "booking",
  "branches",
  "chrono",
+ "conversations",
  "crm",
  "erp-api",
  "erp-control",

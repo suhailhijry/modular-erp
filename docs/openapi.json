@@ -484,6 +484,27 @@
         ],
         "type": "object"
       },
+      "Assignment": {
+        "example": {
+          "id": "BK-1",
+          "topic": "reservation"
+        },
+        "properties": {
+          "id": {
+            "description": "The record's own id.",
+            "type": "string"
+          },
+          "topic": {
+            "description": "`reservation`, `invoice`, `customer` or `employee`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "id"
+        ],
+        "type": "object"
+      },
       "AtAMoment": {
         "properties": {
           "at": {
@@ -1636,6 +1657,47 @@
           "employee",
           "employer",
           "total"
+        ],
+        "type": "object"
+      },
+      "ConversationLine": {
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "channel": {
+            "description": "Set on `said` and `heard`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "`note` — internal, `said` — sent to the customer, `heard` — they replied.",
+            "type": "string"
+          },
+          "said_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "who": {
+            "description": "The identity that wrote it. Absent on `heard`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "body",
+          "said_at"
         ],
         "type": "object"
       },
@@ -5390,6 +5452,27 @@
         ],
         "type": "object"
       },
+      "NewNote": {
+        "example": {
+          "text": "Called, moving to Thursday."
+        },
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
       "NewOrigin": {
         "example": {
           "domain": "salon.example",
@@ -6489,6 +6572,33 @@
         ],
         "type": "object"
       },
+      "OutwardMessage": {
+        "example": {
+          "channel": "sms",
+          "text": "Thursday at 10 works."
+        },
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "channel": {
+            "description": "`sms` or `email`. `WhatsApp` and push are refused — see the error.",
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "channel"
+        ],
+        "type": "object"
+      },
       "Owed": {
         "properties": {
           "outstanding": {
@@ -6887,6 +6997,66 @@
                 "counts",
                 "lifetime",
                 "opened_on"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Paged_ConversationLine": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "address": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "body": {
+                  "type": "string"
+                },
+                "channel": {
+                  "description": "Set on `said` and `heard`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "description": "`note` — internal, `said` — sent to the customer, `heard` — they replied.",
+                  "type": "string"
+                },
+                "said_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "who": {
+                  "description": "The identity that wrote it. Absent on `heard`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "body",
+                "said_at"
               ],
               "type": "object"
             },
@@ -10346,6 +10516,28 @@
         ],
         "type": "object"
       },
+      "UnmatchedView": {
+        "properties": {
+          "address": {
+            "description": "The number nobody on the books has.",
+            "type": "string"
+          },
+          "last_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "messages": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "messages",
+          "last_at"
+        ],
+        "type": "object"
+      },
       "UtilisationView": {
         "properties": {
           "average_lead_minutes": {
@@ -10511,6 +10703,18 @@
           "minutes",
           "note"
         ],
+        "type": "object"
+      },
+      "Written": {
+        "properties": {
+          "position": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       }
     },
@@ -15562,6 +15766,773 @@
         "summary": "**Send a one-time code to a phone number.**",
         "tags": [
           "sessions"
+        ]
+      }
+    },
+    "/v1/conversations/unmatched": {
+      "get": {
+        "operationId": "list_unmatched",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UnmatchedView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Replies from numbers nobody on the books has.",
+        "tags": [
+          "conversations"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/conversations/unmatched/{address}/assign": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**Moves what has arrived, and binds nothing.** The next message from that\nnumber lands here again — putting it on the customer's record is what stops\nthat, and `crm` is where a customer's number lives.",
+        "operationId": "assign_unmatched",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The number, from `GET /v1/conversations/unmatched`.",
+            "in": "path",
+            "name": "address",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Assignment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Written"
+                }
+              }
+            },
+            "description": "Moved onto that thread."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a topic, or not an id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Already assigned"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Say what an unmatched conversation was about.",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/v1/conversations/{topic}/{subject}": {
+      "get": {
+        "operationId": "read_conversation",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`reservation`, `invoice`, `customer` or `employee`.",
+            "in": "path",
+            "name": "topic",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The record's own id.",
+            "in": "path",
+            "name": "subject",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Up to 200. Defaults to 50.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The `next` from the previous page.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_ConversationLine"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a topic, or not an id"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A thread holds private notes; reading one needs more than `read`"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Everything said about one thing, oldest first.",
+        "tags": [
+          "conversations"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/conversations/{topic}/{subject}/messages": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Charged to the messaging meter, and refused when the month's budget is\nspent. **`sms` or `email`**: `WhatsApp` takes approved templates outside a\n24-hour window and push reaches a device rather than a person.",
+        "operationId": "send_in_conversation",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`reservation`, `invoice`, `customer` or `employee`.",
+            "in": "path",
+            "name": "topic",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The record's own id.",
+            "in": "path",
+            "name": "subject",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutwardMessage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Written"
+                }
+              }
+            },
+            "description": "Recorded and promised, in one transaction."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Nothing in it, not a channel, or not a topic"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "402": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This month's budget for that channel is spent"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Nobody to send to, or no address on that channel"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Say something to the customer this is about.",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/v1/conversations/{topic}/{subject}/notes": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "add_note",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`reservation`, `invoice`, `customer` or `employee`.",
+            "in": "path",
+            "name": "topic",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The record's own id.",
+            "in": "path",
+            "name": "subject",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Written"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Nothing in it, or not a topic"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Write something down. **Internal — it never leaves.**",
+        "tags": [
+          "conversations"
         ]
       }
     },

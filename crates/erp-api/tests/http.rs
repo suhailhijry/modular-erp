@@ -2017,6 +2017,15 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("mark_all_read", ALL_ROLES),
     ("get_preferences", ALL_ROLES),
     ("set_preferences", ALL_ROLES),
+    // **Conversations, and the one place reading is not `read`.** A thread
+    // holds staff's private notes about a customer; `viewer` is the role for an
+    // external accountant at year end, with every reason to see the books and
+    // none to see what the front desk wrote.
+    ("read_conversation", &["owner", "accountant", "clerk"]),
+    ("add_note", &["owner", "accountant", "clerk"]),
+    ("send_in_conversation", &["owner", "accountant", "clerk"]),
+    ("list_unmatched", &["owner", "accountant", "clerk"]),
+    ("assign_unmatched", &["owner", "accountant", "clerk"]),
     // Documents. Reading what is attached is ordinary; attaching and taking
     // off is recording what happened, which is a clerk's job.
     ("list_attachments", ALL_ROLES),
@@ -2323,8 +2332,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        224,
-        "expected two hundred and twenty-four role-scoped operations"
+        229,
+        "expected two hundred and twenty-nine role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -10914,6 +10923,171 @@ async fn a_bell_rings_on_one_screen_and_not_the_other() {
     assert_eq!(
         mine["unread"], 0,
         "clearing the bell left it ringing: {mine}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A conversation, and a reply reaching an open screen.**
+///
+/// Phase 13d over HTTP: a note stays inside, a message goes out, both are in
+/// the thread in the order they happened — and the 13a stream names the group
+/// so a screen with the thread open re-fetches without polling.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "a customer, a stream, two kinds of line, a refusal and a signal — \
+              what the claim is made of"
+)]
+async fn a_conversation_holds_both_kinds_and_reaches_an_open_screen() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, messaging::setup()).await;
+    fixture.enable_module(tenant, conversations::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // Somebody to talk to.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/crm/customers")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", idem("CUST-1"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "نورة",
+                        "kind": "person",
+                        "phone": "+966500000001"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    fixture
+        .project::<crm::Crm>(tenant, &crm::projections(), crm::upcasters())
+        .await;
+
+    // A create takes its id from the `Idempotency-Key`, so the customer is
+    // stored under what that key derives.
+    let customer = idem("CUST-1");
+    let thread = format!("/v1/conversations/customer/{customer}");
+
+    // A screen watching this tenant.
+    let (status, mut stream) = fixture
+        .open_stream(
+            Request::get("/v1/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut buffer = String::new();
+    let (event, data) = next_event(&mut stream, &mut buffer, Duration::from_secs(2))
+        .await
+        .expect("ready");
+    assert_eq!(event, "ready");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&data).expect("json")["groups"]
+            .as_object()
+            .expect("groups")
+            .contains_key("conversations"),
+        "a screen cannot watch the group a conversation lives in"
+    );
+
+    // An internal note, then something said to her.
+    let (status, _, _) = fixture
+        .send(
+            Request::post(format!("{thread}/notes"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "text": "اتصلت، تريد الخميس" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, said, _) = fixture
+        .send(
+            Request::post(format!("{thread}/messages"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "text": "الخميس الساعة ١٠", "channel": "sms" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{said}");
+
+    // WhatsApp is refused, and says why.
+    let (status, refused, _) = fixture
+        .send(
+            Request::post(format!("{thread}/messages"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "text": "مرحبا", "channel": "whatsapp" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["code"], "conversations.not_a_channel_for_this");
+
+    fixture
+        .project::<conversations::Conversations>(
+            tenant,
+            &conversations::projections(),
+            conversations::upcasters(),
+        )
+        .await;
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get(&thread)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lines = body["items"].as_array().expect("items");
+    assert_eq!(lines.len(), 2, "{body}");
+    assert_eq!(
+        lines[0]["kind"], "note",
+        "a conversation reads newest first"
+    );
+    assert!(
+        lines[0]["channel"].is_null(),
+        "a note went out on a channel"
+    );
+    assert_eq!(lines[1]["kind"], "said");
+    assert_eq!(lines[1]["channel"], "sms");
+    assert_eq!(lines[1]["address"], "+966500000001");
+
+    // The worker would publish this the moment the group advanced.
+    fixture.hub.publish(&advanced(
+        tenant,
+        "conversations",
+        "conversations",
+        12,
+        None,
+    ));
+    let (event, data) = next_event(&mut stream, &mut buffer, Duration::from_secs(2))
+        .await
+        .expect("the conversation signal");
+    assert_eq!(event, "advanced");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&data).expect("json"),
+        serde_json::json!({ "group": "conversations", "position": 12 })
     );
 
     fixture.cleanup().await;

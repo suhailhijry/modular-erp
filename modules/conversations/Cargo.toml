@@ -1,0 +1,49 @@
+[package]
+name = "conversations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A thread against a subject: internal notes, outward messages, and the replies that answer them."
+
+[lints]
+workspace = true
+
+[dependencies]
+# **Two module dependencies, and the arrow only points this way.** `messaging`
+# resolves the client of a subject and promises what goes out; `crm` turns the
+# number an inbound message arrives from into a person.
+#
+# The consequence is the layering rule `notifications` states: a domain module
+# can never open a thread, because `booking → conversations → messaging →
+# booking` is a cycle cargo would refuse. Inbound messages are landed from
+# above the modules, in a worker job.
+messaging = { workspace = true }
+crm = { workspace = true }
+erp-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+booking = { workspace = true }
+branches = { workspace = true }
+hr = { workspace = true }
+erp-occupancy = { workspace = true }
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

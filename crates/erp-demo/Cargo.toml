@@ -18,6 +18,9 @@ booking = { workspace = true }
 crm = { workspace = true }
 ledger = { workspace = true }
 payments = { workspace = true }
+conversations = { workspace = true }
+# The correlation window a reply is answered within.
+chrono = { workspace = true }
 notifications = { workspace = true }
 sales = { workspace = true }
 prepaid = { workspace = true }

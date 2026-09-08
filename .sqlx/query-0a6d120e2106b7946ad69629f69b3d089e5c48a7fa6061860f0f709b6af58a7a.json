@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT thread as \"thread!\", address as \"address!\",\n                  messages as \"messages!\", last_at as \"last_at!\"\n             FROM proj_conversations.conversation_thread\n            WHERE address IS NOT NULL AND assigned_to IS NULL\n            ORDER BY last_at DESC\n            LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "thread!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_thread",
+            "name": "thread"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "address!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_thread",
+            "name": "address"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "messages!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_thread",
+            "name": "messages"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "last_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_thread",
+            "name": "last_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "0a6d120e2106b7946ad69629f69b3d089e5c48a7fa6061860f0f709b6af58a7a"
+}

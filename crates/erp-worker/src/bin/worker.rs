@@ -145,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         worker = worker.with_job(job);
     }
     worker = worker
+        .with_job(Arc::new(LandInboundMessages))
         .with_job(Arc::new(AnnounceNewBookings))
         .with_job(Arc::new(AnnounceExpiringDocuments))
         .with_job(Arc::new(BookingReminders))
@@ -1430,6 +1431,75 @@ async fn announce_refusals(db: &erp_control::TenantDb) {
     }
 }
 
+/// **Lands what customers said back.**
+///
+/// A relay posts an inbound message to `POST /v1/hooks/messages`, which
+/// verifies it, deduplicates it on the gateway's own id and records it. This is
+/// what turns that row into a line in a conversation — in a job rather than in
+/// a handler, because a handler is given no database connection and landing a
+/// reply is three read models deep: what was last said to that number, whose
+/// number it is, and the thread either of those names.
+///
+/// **No cursor.** Correlation is against the reply's own instant, so the same
+/// webhook lands on the same thread however often this runs, and a thread
+/// refuses a message id it has already heard. The window may therefore overlap
+/// the last one freely.
+#[derive(Debug)]
+struct LandInboundMessages;
+
+#[async_trait::async_trait]
+impl erp_worker::Job for LandInboundMessages {
+    fn name(&self) -> &'static str {
+        "conversations.inbound"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(conversations::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        let now = chrono::Utc::now();
+        let landing = conversations::land(
+            db,
+            now - ANNOUNCE_WINDOW,
+            CORRELATION_WINDOW,
+            ANNOUNCE_BATCH,
+        )
+        .await?;
+
+        if landing.unreadable > 0 {
+            // A relay sending something that is not an inbound message is a
+            // misconfiguration somebody has to fix, and nothing else would say
+            // so.
+            tracing::warn!(
+                tenant = %db.tenant(),
+                count = landing.unreadable,
+                "payloads arrived under the messages provider that are not messages"
+            );
+        }
+        if landing.unmatched > 0 {
+            tracing::info!(
+                tenant = %db.tenant(),
+                count = landing.unmatched,
+                "replies from numbers nobody on the books has are waiting to be placed"
+            );
+        }
+
+        Ok(if landing.landed > 0 {
+            Activity::Worked
+        } else {
+            Activity::Idle
+        })
+    }
+}
+
+/// How far back a reply may have been answered.
+///
+/// A week: long enough that somebody who reads a reminder on Monday and answers
+/// on Friday is still answering it, short enough that a message about last
+/// month's booking is not taken for one about this one.
+const CORRELATION_WINDOW: chrono::TimeDelta = chrono::TimeDelta::days(7);
+
 /// **Tells the counter a booking arrived.**
 ///
 /// A scan rather than a hook in `booking::reserve`, because a module cannot
@@ -1742,6 +1812,15 @@ fn module_jobs(signals: Option<&Arc<dyn erp_worker::Signals>>) -> Vec<Arc<dyn er
                 200,
             )
             .for_module(booking::module_id())
+            .signalling(signals.cloned()),
+        ),
+        Arc::new(
+            ProjectionJob::<conversations::Conversations>::new(
+                conversations::projections(),
+                Arc::new(conversations::upcasters().clone()),
+                200,
+            )
+            .for_module(conversations::module_id())
             .signalling(signals.cloned()),
         ),
         Arc::new(

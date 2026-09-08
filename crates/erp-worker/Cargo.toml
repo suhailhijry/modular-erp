@@ -29,6 +29,7 @@ purchases = { workspace = true }
 tax_sa = { workspace = true }
 reports = { workspace = true }
 messaging = { workspace = true }
+conversations = { workspace = true }
 notifications = { workspace = true }
 files = { workspace = true }
 erp-links = { workspace = true }

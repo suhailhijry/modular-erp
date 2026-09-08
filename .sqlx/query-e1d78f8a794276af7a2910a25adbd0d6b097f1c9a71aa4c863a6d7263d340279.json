@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT topic as \"topic!\", subject_id as \"subject_id!\"\n             FROM message_sent\n            WHERE addressed_to = $1\n              AND sent_at <= $2\n              AND sent_at > $3\n              AND topic IS NOT NULL\n              AND subject_id IS NOT NULL\n            ORDER BY sent_at DESC\n            LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "topic!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message_sent",
+            "name": "topic"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "subject_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "message_sent",
+            "name": "subject_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "e1d78f8a794276af7a2910a25adbd0d6b097f1c9a71aa4c863a6d7263d340279"
+}

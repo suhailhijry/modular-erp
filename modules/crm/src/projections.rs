@@ -293,6 +293,50 @@ pub struct CustomerDetail {
 }
 
 /// One customer by id.
+/// **Whose number this is**, if it is anybody's on the books.
+///
+/// # Exactly, or not at all
+///
+/// An inbound SMS arrives as a number and a body, and this is what turns the
+/// number into a person. The comparison is character-for-character on purpose:
+/// a last-nine-digits match, or any other normalisation, resolves
+/// `+966500000001` and `0500000001` to each other **and** eventually resolves
+/// two different people to one — which puts one customer's reply into another
+/// customer's conversation. That is a worse failure than not matching, and
+/// `conversations` has an unmatched tray for what this does not answer.
+///
+/// Oldest first, so two records sharing a number resolve to the same one every
+/// time rather than to whichever the planner happened to return.
+pub async fn customer_by_phone(
+    conn: &mut PgConnection,
+    phone: &str,
+) -> Result<Option<CustomerSummary>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"SELECT id as "id!", name as "name!", name_latin, kind as "kind!",
+                  phone, email, vat_number, registered_on as "registered_on!",
+                  (archived_at IS NOT NULL) as "archived!"
+             FROM proj_crm.customer
+            WHERE phone = $1 AND archived_at IS NULL
+            ORDER BY registered_on, id
+            LIMIT 1"#,
+        phone,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(row.map(|r| CustomerSummary {
+        id: r.id,
+        name: r.name,
+        name_latin: r.name_latin,
+        kind: r.kind,
+        phone: r.phone,
+        email: r.email,
+        vat_number: r.vat_number,
+        registered_on: r.registered_on,
+        archived: r.archived,
+    }))
+}
+
 ///
 /// `None` if there is no such customer, **or** if the projection has not caught
 /// up with one that was just created, which is what `?consistent_after=` is for.

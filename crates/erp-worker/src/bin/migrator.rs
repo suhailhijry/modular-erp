@@ -211,6 +211,11 @@ async fn refresh_fleet(
 /// `rebuild_swap` is generic over the group and a module's group is a type. A
 /// module whose name is not here is a module nobody can rebuild, which is what
 /// `every_module_can_be_rebuilt` refuses.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per module's projection group: the list is the point, and \
+              a test fails when a module is missing from it"
+)]
 async fn rebuild(
     control: &ControlPlane,
     tenant: erp_types::TenantId,
@@ -298,6 +303,12 @@ async fn rebuild(
             let refs: Vec<&dyn Projection<Group = files::Files>> =
                 owned.iter().map(AsRef::as_ref).collect();
             rebuild_swap::<files::Files>(&pool, sql, &refs, upcasters, 500).await?
+        }
+        "conversations" => {
+            let owned = conversations::projections();
+            let refs: Vec<&dyn Projection<Group = conversations::Conversations>> =
+                owned.iter().map(AsRef::as_ref).collect();
+            rebuild_swap::<conversations::Conversations>(&pool, sql, &refs, upcasters, 500).await?
         }
         "notifications" => {
             let owned = notifications::projections();
@@ -461,6 +472,7 @@ mod tests {
             "tax_sa",
             "reports",
             "files",
+            "conversations",
             "notifications",
             "payments",
         ];

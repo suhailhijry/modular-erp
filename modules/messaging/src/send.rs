@@ -289,7 +289,15 @@ pub async fn send(conn: &mut PgConnection, sending: &Sending) -> Result<Sent, Se
             platform: address.platform,
         };
 
-        if !deliver(conn, &message, format!("{}.{n}", sending.key), sending.at).await? {
+        if !deliver(
+            conn,
+            &message,
+            format!("{}.{n}", sending.key),
+            Some(&sending.subject),
+            sending.at,
+        )
+        .await?
+        {
             // Already promised under this key. Nothing was written, so nothing
             // is charged.
             continue;
@@ -325,9 +333,10 @@ pub async fn deliver(
     conn: &mut PgConnection,
     message: &Outbound,
     key: String,
+    about: Option<&Subject>,
     at: Timestamp,
 ) -> Result<bool, SendError> {
-    let Some(effect) = message.promised(key) else {
+    let Some(effect) = message.promised(key.clone()) else {
         return Err(SendError::NotSendable {
             channel: message.channel.as_str().to_owned(),
         });
@@ -343,6 +352,11 @@ pub async fn deliver(
     // whatever the month has cost so far.
     let each = message.channel.units(&message.body);
     budget::charge(conn, message.channel, each, at).await?;
+
+    // **What was said, so a reply can be answered.** In this transaction, so a
+    // caller that rolls back has neither promised nor recorded — and there is
+    // no state in which this system believes it said something it did not.
+    crate::sent::record(conn, &key, message, about, at).await?;
     Ok(true)
 }
 

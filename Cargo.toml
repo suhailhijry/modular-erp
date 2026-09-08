@@ -39,6 +39,7 @@ hr_sa = { path = "modules/hr_sa" }
 reports = { path = "modules/reports" }
 messaging = { path = "modules/messaging" }
 notifications = { path = "modules/notifications" }
+conversations = { path = "modules/conversations" }
 files = { path = "modules/files" }
 crm = { path = "modules/crm" }
 ledger = { path = "modules/ledger" }

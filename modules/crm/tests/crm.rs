@@ -974,3 +974,77 @@ async fn a_field_with_values_is_known_to_have_them() {
             .expect("reads")
     );
 }
+
+/// **Whose number this is — exactly, or not at all.**
+///
+/// This is what turns an inbound SMS into a person. The match is
+/// character-for-character on purpose: a normalisation that resolved
+/// `+966511111111` and `0511111111` to each other would eventually resolve two
+/// different people to one, and put one customer's reply into another
+/// customer's conversation. Not matching is the safer failure, and
+/// `conversations` has an unmatched tray for it.
+#[tokio::test]
+async fn a_customer_is_found_by_the_number_they_gave_and_no_other() {
+    let fixture = Fixture::new().await;
+
+    register_customer(
+        &fixture.db,
+        &code("CUST-1"),
+        &person(),
+        on("2026-01-15"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("registers");
+    fixture.project().await;
+
+    let mut conn = fixture.pool.acquire().await.expect("connection");
+    assert_eq!(
+        crm::customer_by_phone(&mut conn, "+966511111111")
+            .await
+            .expect("reads")
+            .map(|c| c.id),
+        Some("CUST-1".to_owned())
+    );
+
+    // The same number written another way is not the same number here.
+    assert!(
+        crm::customer_by_phone(&mut conn, "0511111111")
+            .await
+            .expect("reads")
+            .is_none(),
+        "a number was matched by something other than what it says"
+    );
+    assert!(
+        crm::customer_by_phone(&mut conn, "+966599999999")
+            .await
+            .expect("reads")
+            .is_none()
+    );
+    drop(conn);
+
+    // Somebody archived is not somebody to answer.
+    archive_customer(
+        &fixture.db,
+        &code("CUST-1"),
+        Some("left".to_owned()),
+        &Metadata::default(),
+    )
+    .await
+    .expect("archives");
+    fixture.project().await;
+
+    let mut conn = fixture.pool.acquire().await.expect("connection");
+    assert!(
+        crm::customer_by_phone(&mut conn, "+966511111111")
+            .await
+            .expect("reads")
+            .is_none(),
+        "an archived customer was offered as somebody to reply to"
+    );
+    // **Before `cleanup`.** It closes the pool, and closing waits for every
+    // connection to come back — one still checked out here waits for ever.
+    drop(conn);
+
+    fixture.cleanup().await;
+}

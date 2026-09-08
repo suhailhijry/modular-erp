@@ -1,0 +1,102 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT kind as \"kind!\", body as \"body!\", channel, address, who,\n                  said_at as \"said_at!\", position as \"position!\"\n             FROM proj_conversations.conversation_message\n            WHERE thread = $1 AND position > $2\n            ORDER BY position\n            LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_message",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "body!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_message",
+            "name": "body"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "channel",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_message",
+            "name": "channel"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_message",
+            "name": "address"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "who",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_message",
+            "name": "who"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "said_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_message",
+            "name": "said_at"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "position!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_conversations.conversation_message",
+            "name": "position"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "dfdf1e4cc308b82c21f850f39ac5f6126aa3512b3368c74c06a5817b86df49ef"
+}

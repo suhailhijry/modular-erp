@@ -44,7 +44,8 @@ pub use customer::{
     Address, Contact, Customer, CustomerEvent, CustomerKind, TaxRegistration, UnknownKind,
 };
 pub use projections::{
-    Crm, CustomerDetail, CustomerSummary, Customers, customer, customers, projections,
+    Crm, CustomerDetail, CustomerSummary, Customers, customer, customer_by_phone, customers,
+    projections,
 };
 
 use erp_i18n::StaticCatalog;
