@@ -1707,6 +1707,13 @@
           "password": "correct horse battery staple"
         },
         "properties": {
+          "code": {
+            "description": "**The six digits from an authenticator app, or a recovery code.**\n\nOnly needed by an account that has enrolled a second factor. Sending one\nthat has not is harmless and is ignored, so a client may always ask for\nit rather than first discovering which accounts are enrolled — which\nwould be an enumeration oracle.\n\nOmitting it for an account that needs one answers `401` with code\n`auth.second_factor_required`, which is the signal to ask and retry.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "handle": {
             "description": "The email address the account was registered with.",
             "type": "string"
@@ -2461,6 +2468,27 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "EnrolmentStarted": {
+        "example": {
+          "secret": "JBSWY3DPEHPK3PXP",
+          "uri": "otpauth://totp/Acme:sara%40acme.test?secret=JBSWY3DPEHPK3PXP&issuer=Acme&algorithm=SHA1&digits=6&period=30"
+        },
+        "properties": {
+          "secret": {
+            "description": "The same secret, for typing in when a camera will not co-operate.",
+            "type": "string"
+          },
+          "uri": {
+            "description": "Render as a QR code. Every authenticator app reads this.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri",
+          "secret"
+        ],
         "type": "object"
       },
       "EntitlementRecord": {
@@ -8626,6 +8654,21 @@
         ],
         "type": "object"
       },
+      "RecoveryCodes": {
+        "properties": {
+          "recovery_codes": {
+            "description": "**Shown once and never again.** The server keeps only their digests, so\nthis list cannot be produced a second time — enrolling again is the only\nway to get a new one, and it invalidates these.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "recovery_codes"
+        ],
+        "type": "object"
+      },
       "RefusalView": {
         "properties": {
           "at": {
@@ -9437,6 +9480,36 @@
           "name",
           "from",
           "rate_bp"
+        ],
+        "type": "object"
+      },
+      "SecondFactorCode": {
+        "properties": {
+          "code": {
+            "description": "Six digits from the app.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "SecondFactorView": {
+        "properties": {
+          "enrolled": {
+            "description": "Whether this account needs a code to sign in.",
+            "type": "boolean"
+          },
+          "recovery_codes_left": {
+            "description": "Recovery codes not yet spent. **Zero with `enrolled` true is a person\none lost phone away from locked out**, which is worth a warning on a\nscreen: enrolling again issues a fresh set.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enrolled",
+          "recovery_codes_left"
         ],
         "type": "object"
       },
@@ -40321,7 +40394,7 @@
                 }
               }
             },
-            "description": "Wrong handle or password — the same answer for both, deliberately"
+            "description": "Wrong handle or password — the same answer for both, deliberately. Also the answer when the password was right and this account needs its second factor: `code` is then `auth.second_factor_required`."
           },
           "413": {
             "content": {
@@ -40565,6 +40638,289 @@
           }
         }
       ]
+    },
+    "/v1/sessions/second-factor": {
+      "delete": {
+        "operationId": "disable_second_factor",
+        "responses": {
+          "204": {
+            "description": "Off. The password is the whole login again."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Turn the second factor off, taking the recovery codes with it.",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "get": {
+        "operationId": "second_factor",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecondFactorView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Whether this account has a second factor.",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**Nothing changes about signing in until it is confirmed.** Somebody who\nscans the QR and walks away is not locked out.",
+        "operationId": "begin_second_factor",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrolmentStarted"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This deployment has no sealing key, so there is nowhere safe to keep the secret"
+          }
+        },
+        "summary": "Start enrolling an authenticator app.",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/sessions/second-factor/confirmation": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Returns the recovery codes, **once**.",
+        "operationId": "confirm_second_factor",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecondFactorCode"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCodes"
+                }
+              }
+            },
+            "description": "Enrolled. Keep the recovery codes — they are not shown again."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The code is wrong, or nothing is waiting to be confirmed"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable."
+          }
+        },
+        "summary": "Confirm an enrolment with the first code the app shows.",
+        "tags": [
+          "sessions"
+        ]
+      }
     },
     "/v1/signups": {
       "parameters": [

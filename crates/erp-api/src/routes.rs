@@ -320,6 +320,12 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(openapi_json))
         .routes(routes!(log_in))
         .routes(routes!(log_out))
+        .routes(routes!(
+            second_factor,
+            begin_second_factor,
+            disable_second_factor
+        ))
+        .routes(routes!(confirm_second_factor))
         .routes(routes!(tenant))
         .merge(crate::signup::routes())
         .merge(crate::members::routes())
@@ -460,6 +466,17 @@ struct Credentials {
     /// The email address the account was registered with.
     handle: String,
     password: String,
+    /// **The six digits from an authenticator app, or a recovery code.**
+    ///
+    /// Only needed by an account that has enrolled a second factor. Sending one
+    /// that has not is harmless and is ignored, so a client may always ask for
+    /// it rather than first discovering which accounts are enrolled — which
+    /// would be an enumeration oracle.
+    ///
+    /// Omitting it for an account that needs one answers `401` with code
+    /// `auth.second_factor_required`, which is the signal to ask and retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -482,7 +499,7 @@ struct SessionCreated {
     request_body = Credentials,
     responses(
         (status = CREATED, body = SessionCreated),
-        (status = UNAUTHORIZED, description = "Wrong handle or password — the same answer for both, deliberately", body = Problem),
+        (status = UNAUTHORIZED, description = "Wrong handle or password — the same answer for both, deliberately. Also the answer when the password was right and this account needs its second factor: `code` is then `auth.second_factor_required`.", body = Problem),
         (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
     ),
 )]
@@ -498,11 +515,32 @@ async fn log_in(
     anonymous
         .charge_for_handle(&state, &credentials.handle)
         .await?;
-    let (token, session) = state
-        .control
-        .log_in(&credentials.handle, &credentials.password)
-        .await
-        .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
+    // **Both factors, or neither.** `log_in` refuses an enrolled account
+    // outright, so a client that never sends a code cannot get past one; a
+    // client that always sends one works either way.
+    let signed_in = match credentials.code.as_deref() {
+        Some(code) => {
+            let sealing = sealing_key(&state, locale)?;
+            state
+                .control
+                .log_in_with_second_factor(
+                    &credentials.handle,
+                    &credentials.password,
+                    code,
+                    chrono::Utc::now(),
+                    sealing,
+                )
+                .await
+        }
+        None => {
+            state
+                .control
+                .log_in(&credentials.handle, &credentials.password)
+                .await
+        }
+    };
+    let (token, session) =
+        signed_in.map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
 
     // **The cookie as well as the body**, and they are the same session — see
     // `crate::codes::session_cookie`. A browser can ignore the token entirely.
@@ -550,6 +588,197 @@ async fn log_out(
             crate::codes::cleared_cookie(),
         )],
     ))
+}
+
+// ---------------------------------------------------------------------------
+// The second factor
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, ToSchema)]
+struct SecondFactorView {
+    /// Whether this account needs a code to sign in.
+    enrolled: bool,
+    /// Recovery codes not yet spent. **Zero with `enrolled` true is a person
+    /// one lost phone away from locked out**, which is worth a warning on a
+    /// screen: enrolling again issues a fresh set.
+    recovery_codes_left: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[schema(example = json!({
+    "uri": "otpauth://totp/Acme:sara%40acme.test?secret=JBSWY3DPEHPK3PXP&issuer=Acme&algorithm=SHA1&digits=6&period=30",
+    "secret": "JBSWY3DPEHPK3PXP"
+}))]
+struct EnrolmentStarted {
+    /// Render as a QR code. Every authenticator app reads this.
+    uri: String,
+    /// The same secret, for typing in when a camera will not co-operate.
+    secret: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+struct SecondFactorCode {
+    /// Six digits from the app.
+    code: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct RecoveryCodes {
+    /// **Shown once and never again.** The server keeps only their digests, so
+    /// this list cannot be produced a second time — enrolling again is the only
+    /// way to get a new one, and it invalidates these.
+    recovery_codes: Vec<String>,
+}
+
+/// Whether this account has a second factor.
+#[utoipa::path(
+    get,
+    path = "/v1/sessions/second-factor",
+    tag = "sessions",
+    responses(
+        (status = OK, body = SecondFactorView),
+        (status = UNAUTHORIZED, body = Problem),
+    ),
+)]
+async fn second_factor(
+    State(state): State<AppState>,
+    Language(locale): Language,
+    auth: Authenticated,
+) -> Result<Json<SecondFactorView>, Problem> {
+    let identity = auth.session.identity;
+    let problem =
+        |e: erp_control::AuthError| ApiError::Auth(e).into_problem(locale, &crate::CATALOG);
+    Ok(Json(SecondFactorView {
+        enrolled: state
+            .control
+            .has_second_factor(identity)
+            .await
+            .map_err(problem)?,
+        recovery_codes_left: state
+            .control
+            .recovery_codes_left(identity)
+            .await
+            .map_err(problem)?,
+    }))
+}
+
+/// Start enrolling an authenticator app.
+///
+/// **Nothing changes about signing in until it is confirmed.** Somebody who
+/// scans the QR and walks away is not locked out.
+#[utoipa::path(
+    post,
+    path = "/v1/sessions/second-factor",
+    tag = "sessions",
+    responses(
+        (status = CREATED, body = EnrolmentStarted),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "This deployment has no sealing key, so there is nowhere safe to keep the secret", body = Problem),
+    ),
+)]
+async fn begin_second_factor(
+    State(state): State<AppState>,
+    Language(locale): Language,
+    auth: Authenticated,
+) -> Result<impl IntoResponse, Problem> {
+    let sealing = sealing_key(&state, locale)?;
+    let enrolment = state
+        .control
+        .begin_second_factor(
+            auth.session.identity,
+            "ERP",
+            &auth.session.identity.to_string(),
+            sealing,
+        )
+        .await
+        .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(EnrolmentStarted {
+            uri: enrolment.uri,
+            secret: enrolment.secret,
+        }),
+    ))
+}
+
+/// Confirm an enrolment with the first code the app shows.
+///
+/// Returns the recovery codes, **once**.
+#[utoipa::path(
+    post,
+    path = "/v1/sessions/second-factor/confirmation",
+    tag = "sessions",
+    request_body = SecondFactorCode,
+    responses(
+        (status = CREATED, description = "Enrolled. Keep the recovery codes — they are not shown again.", body = RecoveryCodes),
+        (status = UNAUTHORIZED, description = "The code is wrong, or nothing is waiting to be confirmed", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn confirm_second_factor(
+    State(state): State<AppState>,
+    Language(locale): Language,
+    auth: Authenticated,
+    Json(body): Json<SecondFactorCode>,
+) -> Result<impl IntoResponse, Problem> {
+    let sealing = sealing_key(&state, locale)?;
+    let confirmed = state
+        .control
+        .confirm_second_factor(
+            auth.session.identity,
+            &body.code,
+            chrono::Utc::now(),
+            sealing,
+        )
+        .await
+        .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(RecoveryCodes {
+            recovery_codes: confirmed.recovery_codes,
+        }),
+    ))
+}
+
+/// Turn the second factor off, taking the recovery codes with it.
+#[utoipa::path(
+    delete,
+    path = "/v1/sessions/second-factor",
+    tag = "sessions",
+    responses(
+        (status = NO_CONTENT, description = "Off. The password is the whole login again."),
+        (status = UNAUTHORIZED, body = Problem),
+    ),
+)]
+async fn disable_second_factor(
+    State(state): State<AppState>,
+    Language(locale): Language,
+    auth: Authenticated,
+) -> Result<StatusCode, Problem> {
+    state
+        .control
+        .disable_second_factor(auth.session.identity)
+        .await
+        .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The deployment's sealing key, or a refusal. **Not a degraded mode**: without
+/// it there is nowhere safe to keep a shared secret, and keeping one in the
+/// clear because an environment variable is missing is the "log a warning and
+/// continue" this system does not do (L6).
+fn sealing_key(
+    state: &AppState,
+    locale: erp_i18n::Locale,
+) -> Result<&erp_eventlog::SealingKey, Problem> {
+    state.sealing.as_ref().ok_or_else(|| {
+        erp_web::Problem::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &erp_i18n::Message::new(erp_web::messages::NO_SEALING_KEY),
+            locale,
+            &crate::CATALOG,
+        )
+    })
 }
 
 #[derive(Debug, Serialize, ToSchema)]

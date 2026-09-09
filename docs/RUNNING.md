@@ -377,6 +377,49 @@ asked for. The codes are the module catalogs (`erp_api::CATALOG` is their
 union), and every code has an English and an Arabic rendering, which a test
 enforces.
 
+## Turning on a second factor
+
+Per person, not per tenant — an account is one identity across every tenant it
+belongs to.
+
+```bash
+# 1. Start. Nothing about signing in changes yet.
+curl -X POST "$API/v1/sessions/second-factor" -H "$AUTH"
+# → { "uri": "otpauth://totp/ERP:...", "secret": "JBSWY3DPEHPK3PXP" }
+```
+
+Render `uri` as a QR for an authenticator app, or type `secret` in by hand.
+
+```bash
+# 2. Confirm with the first code the app shows. This is what turns it on.
+curl -X POST "$API/v1/sessions/second-factor/confirmation" -H "$AUTH" \
+  -H 'Content-Type: application/json' -d '{ "code": "123456" }'
+# → { "recovery_codes": ["ABCDE-FGHJK", ...] }
+```
+
+**Keep the recovery codes.** The server stores only their digests, so that list
+cannot be produced again — enrolling afresh is the only way to get a new one,
+and it invalidates the old set along with the old phone.
+
+From then on, signing in takes both:
+
+```bash
+curl -X POST "$API/v1/sessions" -H 'Content-Type: application/json' -d '{
+  "handle": "sara@acme.test", "password": "…", "code": "123456"
+}'
+```
+
+Without `code`, an enrolled account gets `401` with code
+`auth.second_factor_required` — that is the signal to ask for six digits and
+retry, **not** to say the password was wrong. A recovery code goes in the same
+field and is spent when used.
+
+`GET /v1/sessions/second-factor` says whether an account is enrolled and how
+many recovery codes are left. `DELETE` on the same path turns it off.
+
+**This deployment needs a sealing key.** The shared secret is encrypted at rest,
+so without one enrolment answers `503` rather than storing it in the clear.
+
 ## Before you invoice anything untaxed
 
 **A line that carries no tax must name the article it is untaxed under**, and

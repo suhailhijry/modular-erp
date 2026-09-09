@@ -34,3 +34,12 @@ control/0013_one_time_codes.sql  add-constraint  Widened again, for the same
     `kind IN ('password', 'api_key', 'phone')`. Every row a draining pod can
     write satisfied the old rule and satisfies the new one, so there is nothing
     this refuses that the previous constraint allowed.
+
+control/0015_second_factor.sql  add-constraint  Widened, like `0012` and `0013`
+    before it: `kind IN ('password', 'api_key', 'phone')` gains `totp_pending`,
+    `totp` and `recovery`. Every row a draining pod can write is one of the three
+    kinds it already knew, all of which the new constraint still allows, so
+    nothing this refuses was previously accepted. A CHECK cannot be altered in
+    place in Postgres — drop and add is the only way to widen one — which is why
+    the scan sees a `drop constraint` it cannot tell from a narrowing.
+

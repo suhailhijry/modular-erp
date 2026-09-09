@@ -37,8 +37,11 @@ mod otp;
 mod placement;
 mod pools;
 mod provision;
+mod second_factor;
 pub mod shared;
+pub use second_factor::{Enrolled, Enrolment, RECOVERY_CODES};
 mod signup;
+pub mod totp;
 
 pub use auth::{
     AuthError, InvitationToken, SESSION_LIFETIME, Session, SessionToken, SignupToken, hash_password,

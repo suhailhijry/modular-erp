@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE authenticator\n                SET secret = split_part(secret, '|', 1) || '|' || $2\n              WHERE identity_id = $1 AND kind = 'totp'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d1eeab14e73cc7770f0bb9106a4cd35cfcb2fddbd25281ac5cbe58ef52f87da4"
+}

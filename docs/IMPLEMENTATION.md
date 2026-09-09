@@ -666,6 +666,94 @@ the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
 
+### 51 · A second factor, and the state it refuses to have
+
+**Built 2026-09-09.** Half of Phase 3's MFA box, and the reason it was worth
+doing tonight is that it needs nothing from the outside world: RFC 6238 is
+specified to the byte and publishes test vectors, so it can be proved right
+here rather than guessed at — the exact opposite of the WPS file and the
+Taqnyat callback, both of which were skipped the same day for want of a
+verifiable specification.
+
+#### There is no half-authenticated state
+
+The usual shape is a challenge: check the password, hand back a short-lived
+token, exchange that plus a code for a session. It needs a table of
+part-way-there states, and **every query that reads a session then has to
+remember to exclude them.** One that forgets is a login that never needed the
+second factor.
+
+So `log_in` takes the password, and refuses with `SecondFactorRequired` if a
+factor is enrolled. `log_in_with_second_factor` takes both and **creates nothing
+until both pass**. The cost is that a client holds the password while the person
+types six digits. The gain is that "a session that skipped a factor" is not a
+state this system can be in — not a bug that is unlikely, a bug that cannot be
+written.
+
+The refusal lives in `log_in` itself rather than in the API route, so a path that
+never heard of a second factor — an invitation acceptance, a test helper —
+cannot issue a session past one.
+
+#### Four kinds, no new table
+
+`0004_authentication.sql` predicted that "OIDC and API keys are more rows, not
+more tables". §50's sibling finding was that the prediction was **half wrong**
+for API keys, which needed their own table. Here it is exactly right:
+
+| kind | `secret` holds | `handle` holds |
+|---|---|---|
+| `password` | an Argon2id PHC string | the login address |
+| `totp_pending` | the sealed shared secret | the identity's id |
+| `totp` | the same, once proved | the identity's id |
+| `recovery` | SHA-256 of one single-use code | `<identity>:<n>` |
+
+**Why `totp_pending` is a kind and not a `confirmed_at` column.** A pending
+enrolment must never satisfy a login. A row that is simply *not there* under
+`kind = 'totp'` cannot be missed by a query that forgot to check a nullable
+column — and somebody who scans a QR and wanders off is not locked out of their
+account.
+
+#### Three things that are easy to get wrong
+
+**The secret is sealed, not hashed.** It has to be recoverable to compute a
+code, so hashing is not available; it is AES-256-GCM under the deployment's
+`SealingKey`, **bound to the identity**. A row moved onto another account does
+not open — there is a test that moves one.
+
+**A code cannot be used twice.** TOTP has no memory, so the same six digits work
+for the whole thirty-second window, including for somebody who read them over a
+shoulder. The last accepted code's digest is recorded beside the secret and a
+repeat is refused, which closes the replay without a second table.
+
+**Re-enrolling retires everything.** A new enrolment deletes the old secret
+*and* the old recovery codes. Somebody whose phone was stolen needs one action
+that makes everything they had useless.
+
+#### SHA-1, deliberately
+
+RFC 6238 permits SHA-256 and SHA-512. Every authenticator worth naming computes
+SHA-1 and ignores the `algorithm` parameter in the provisioning URI, so a build
+that chose SHA-256 would be more modern and would produce codes nobody's phone
+agrees with. HMAC-SHA1 is not broken for this: the attack on SHA-1 is
+collisions, and HMAC does not rest on collision resistance.
+
+#### Proved rather than asserted
+
+Seventeen tests. Eight are arithmetic against **published vectors** — RFC 6238
+Appendix B for the codes, RFC 4648 §10 for base32 and base64 — so if this build
+ever disagrees with them, every authenticator app in the world disagrees with
+it. Nine are against a real control database, and **all six guards were
+falsified**: the password gate, the pending-enrolment gate, the replay refusal,
+the recovery-code spend, the re-enrolment purge, and the identity binding.
+
+#### Left open
+
+**A tenant cannot require it.** Enrolment is per identity, because an identity
+spans tenants and a login happens before any tenant is chosen. "This tenant may
+not be entered without a second factor" is a different and larger feature —
+enforceable at `ControlPlane::enter` — and is not built. Recorded in
+`docs/AMBIGUITIES.md` §6.
+
 ### 50 · Exemption reasons: the invoice that called rent a financial service
 
 **Built 2026-09-09.** Phase 4e's open box, and it turned out to be a defect
@@ -2282,8 +2370,12 @@ modules can say what shape they need.
       needed its own table for the public half, the scopes and the rotation
       (`migrations/control/0012_api_keys.sql`). Left visible rather than
       rewritten: the guess was reasonable and the correction is the useful part.
-- [ ] MFA and OIDC *(more rows in `authenticator`, and on that half the
-      prediction should hold — neither needs state a key needed)*
+- [x] **MFA — built 2026-09-09 (§51).** TOTP, as an authenticator app computes
+      it, with recovery codes. **The prediction held this time**: four kinds in
+      `authenticator` and no new table — `password`, `totp_pending`, `totp`,
+      `recovery`. `migrations/control/0015_second_factor.sql` widens one CHECK
+      and adds nothing else
+- [ ] OIDC *(still more rows in `authenticator`; unscheduled)*
 
 ### 3b · The HTTP surface
 - [x] `erp-api` on axum; `bin/api` with body limit, timeout, graceful shutdown

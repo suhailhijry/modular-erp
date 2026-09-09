@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM authenticator\n              WHERE identity_id = $1 AND kind IN ('totp', 'recovery')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4263a3a3aa5991f615d1c9603e2c14d2744ced18933c6e57903d5f1f48371e03"
+}

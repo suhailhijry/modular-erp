@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO authenticator (id, identity_id, kind, handle, secret)\n                 VALUES ($1, $2, 'recovery', $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "997855f514bf1b8ce2b43432100e030e497cf43d68223f0e6d5fe0d22823c175"
+}

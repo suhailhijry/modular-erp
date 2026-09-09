@@ -40,6 +40,7 @@ pub const ORIGIN_OUTSIDE_DOMAIN: MessageCode = MessageCode::new("origins.outside
 /// message for all four, for the same reason `NoSuchTenant` and `NotAMember`
 /// share one.
 pub const INVALID_CREDENTIALS: MessageCode = MessageCode::new("auth.invalid_credentials");
+pub const SECOND_FACTOR_REQUIRED: MessageCode = MessageCode::new("auth.second_factor_required");
 pub const HANDLE_TAKEN: MessageCode = MessageCode::new("auth.handle_taken");
 pub const SESSION_EXPIRED: MessageCode = MessageCode::new("auth.session_expired");
 /// 403, naming the capability. "Ask someone with permission" is only actionable
@@ -109,6 +110,7 @@ pub static CODES: &[MessageCode] = &[
     CLUSTERS_AT_LIMIT,
     SLUG_TAKEN,
     INVALID_CREDENTIALS,
+    SECOND_FACTOR_REQUIRED,
     HANDLE_TAKEN,
     SESSION_EXPIRED,
     NOT_PERMITTED,
@@ -404,6 +406,18 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Template::Simple("الاسم {slug} مستخدم بالفعل. يُرجى اختيار اسم آخر."),
     ),
     // -- authentication ----------------------------------------------------
+    (
+        SECOND_FACTOR_REQUIRED,
+        Locale::English,
+        // Safe to be specific: only somebody who has already given the right
+        // password ever sees this.
+        Template::Simple("Enter the code from your authenticator app to finish signing in."),
+    ),
+    (
+        SECOND_FACTOR_REQUIRED,
+        Locale::Arabic,
+        Template::Simple("أدخل الرمز من تطبيق المصادقة لإكمال تسجيل الدخول."),
+    ),
     (
         INVALID_CREDENTIALS,
         Locale::English,

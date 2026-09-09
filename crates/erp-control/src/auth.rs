@@ -20,6 +20,15 @@ pub enum AuthError {
     InvalidCredentials,
     #[error("the session is expired or unknown")]
     NoSession,
+    /// **The password was right and it is not enough.**
+    ///
+    /// Deliberately *not* folded into `InvalidCredentials`, unlike every other
+    /// login failure: this one is only ever reached by somebody who has already
+    /// proved the password, so it tells an attacker nothing they did not
+    /// already know, and a client that cannot tell it apart cannot ask for the
+    /// code.
+    #[error("this account needs its second factor")]
+    SecondFactorRequired,
     /// That login handle already belongs to somebody.
     ///
     /// Deliberately *not* folded into `InvalidCredentials`: this one reaches a
@@ -41,6 +50,7 @@ impl erp_i18n::Localize for AuthError {
             Self::HandleTaken(handle) => erp_i18n::Message::new(messages::HANDLE_TAKEN)
                 .with("handle", erp_i18n::MessageArg::text(handle.clone())),
             Self::NoSession => erp_i18n::Message::new(messages::SESSION_EXPIRED),
+            Self::SecondFactorRequired => erp_i18n::Message::new(messages::SECOND_FACTOR_REQUIRED),
             Self::Hash(_) | Self::Database(_) => erp_i18n::Message::new(messages::INTERNAL),
         }
     }
@@ -281,6 +291,43 @@ impl crate::ControlPlane {
         password: &str,
     ) -> Result<(SessionToken, Session), AuthError> {
         let identity = self.authenticate(handle, password).await?;
+        // **Refused here rather than in the caller**, so that a path which
+        // never heard of a second factor cannot issue a session that skipped
+        // one. `log_in_with_second_factor` is the way past this.
+        if self.has_second_factor(identity).await? {
+            return Err(AuthError::SecondFactorRequired);
+        }
+        self.start_session(identity).await
+    }
+
+    /// **A login that presents both factors at once.**
+    ///
+    /// See `second_factor.rs` on why there is no challenge token: nothing is
+    /// created until both factors pass, so a half-authenticated session is not
+    /// a state this system can be in.
+    ///
+    /// Accepts either a code from the authenticator app or one of the recovery
+    /// codes. Works for an identity with no second factor too, ignoring the
+    /// code — a client that always sends one does not need to know which
+    /// accounts are enrolled.
+    ///
+    /// # Errors
+    /// [`AuthError::InvalidCredentials`] for a wrong password *or* a wrong
+    /// code. The two are one error on the way in, for the reason the password
+    /// failures are.
+    pub async fn log_in_with_second_factor(
+        &self,
+        handle: &str,
+        password: &str,
+        code: &str,
+        now: erp_types::Timestamp,
+        sealing: &erp_eventlog::SealingKey,
+    ) -> Result<(SessionToken, Session), AuthError> {
+        let identity = self.authenticate(handle, password).await?;
+        if self.has_second_factor(identity).await? {
+            self.verify_second_factor(identity, code, now, sealing)
+                .await?;
+        }
         self.start_session(identity).await
     }
 

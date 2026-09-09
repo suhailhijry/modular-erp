@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE authenticator SET kind = 'totp'\n              WHERE identity_id = $1 AND kind = 'totp_pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b960c47fde6e268c1e0ff222e3a42f2535972eea6bc398938673ad29ba845a75"
+}

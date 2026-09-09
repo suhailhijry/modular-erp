@@ -31,6 +31,9 @@ tracing = { workspace = true }
 argon2 = "0.5.3"
 sha2 = "0.11.0"
 getrandom = "0.4.3"
+# HMAC-SHA1 for TOTP. Already in the tree for `SealingKey`; see `totp.rs` on
+# why the algorithm is not negotiable.
+openssl = { workspace = true }
 
 [dev-dependencies]
 erp-testkit = { workspace = true }

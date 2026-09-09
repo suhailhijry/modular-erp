@@ -36,7 +36,17 @@ impl ApiError {
             // No credential, a dead one, or an identity that can no longer sign
             // in. 401 for all of them: the client's move is the same, which is
             // to log in again.
-            Self::Auth(AuthError::InvalidCredentials | AuthError::NoSession)
+            //
+            // **`SecondFactorRequired` is here too, and the `code` is what a
+            // client branches on.** The password was right and no session was
+            // created, which is the same HTTP answer as a wrong password — but
+            // a client reading `auth.second_factor_required` knows to ask for
+            // six digits rather than to say the password was wrong.
+            Self::Auth(
+                AuthError::InvalidCredentials
+                | AuthError::NoSession
+                | AuthError::SecondFactorRequired,
+            )
             | Self::Access(AccessError::NoSuchIdentity | AccessError::IdentitySuspended) => {
                 StatusCode::UNAUTHORIZED
             }

@@ -1935,6 +1935,15 @@ fn role_scoped_operations() -> Vec<(String, String, bool)> {
 
 /// `(operationId, the roles that may)`. Everything else is refused.
 const PERMISSIONS: &[(&str, &[&str])] = &[
+    // **The second factor is nobody's role.** It is about the person signing in,
+    // not about anything in a tenant — a viewer must be able to protect their
+    // own account, and an owner must not be able to touch somebody else's.
+    // Every route here acts on `auth.session.identity` and takes no tenant, so
+    // every role reaches all four and each one reaches only themselves.
+    ("second_factor", ALL_ROLES),
+    ("begin_second_factor", ALL_ROLES),
+    ("confirm_second_factor", ALL_ROLES),
+    ("disable_second_factor", ALL_ROLES),
     // Reading is what a viewer is for.
     ("tenant", ALL_ROLES),
     ("tenant_calendar", ALL_ROLES),
@@ -2359,8 +2368,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        229,
-        "expected two hundred and twenty-nine role-scoped operations"
+        233,
+        "expected two hundred and thirty-three role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
