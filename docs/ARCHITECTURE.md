@@ -1157,3 +1157,10 @@ customer conversations before Phase 6, not from this document.**
 **Module count.** Designed for ~15. If the real number turns out to be 30+,
 revisit whether the registry should be macro-generated and whether third-party
 extension needs to arrive earlier.
+
+*Checked 2026-09-09: there are **18** — booking, branches, conversations, crm,
+files, hr, hr_sa, ledger, messaging, notifications, payments, payroll, pos,
+prepaid, purchases, reports, sales, tax_sa. Property would make 19, inventory
+20, marketing 21. The design target is already passed and the revisit threshold
+is not, so nothing here changes yet — but each new module costs edits in six
+places outside itself, and that is the cost the threshold is really about.*

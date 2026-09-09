@@ -85,7 +85,7 @@ a messaging change: an effect handler is given **no database connection** by
 design (`crates/erp-eventlog/src/outbox/dispatch.rs` —
 `deliver(&self, effect) -> Result<(), DeliveryError>`), so the only component
 that *could* record what a provider returned is the dispatcher. That means
-changing `EffectHandler`, a **kernel trait with five implementors**, plus a new
+changing `EffectHandler`, a **kernel trait with four implementors**, plus a new
 outbox column.
 
 **Why that settles it.** The kernel change would exist solely to feed provider

@@ -248,4 +248,27 @@ mod tests {
         assert_eq!(at("2000"), Some(money(11_500)), "the debt goes down");
         assert_eq!(at("1000"), Some(money(-11_500)), "and the cash goes out");
     }
+
+    /// **The conventional mapping is not a guess about a tenant's chart — it is
+    /// checked against the charts this build ships.**
+    ///
+    /// Added 2026-09-09, after a new chart shipped missing an account and only
+    /// `sales` noticed. `conventional()` here has always *claimed* "the codes
+    /// every chart in `ledger::CHARTS` ships"; `sales` and `payments` enforced
+    /// it and three modules, including this one, carried only the sentence.
+    #[test]
+    fn the_conventional_accounts_exist_in_every_shipped_chart() {
+        let accounts = PostingAccounts::conventional();
+        for chart in ledger::CHARTS {
+            for needed in [&accounts.payable, &accounts.input_vat] {
+                assert!(
+                    chart.accounts.iter().any(|a| a.code == needed.as_str()),
+                    "chart {:?} has no account {} — conventional() would fail on \
+                     the first posting a tenant on that chart made",
+                    chart.id,
+                    needed,
+                );
+            }
+        }
+    }
 }

@@ -1090,6 +1090,18 @@ async fn amend_bookable(
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
     ),
 )]
+// **This sets a *resource's* availability, not a branch's opening hours.**
+//
+// The name is misleading and is kept anyway: it is the published `operationId`
+// (`docs/openapi.json`), and `crates/erp-api/tests/compatibility.rs` gates
+// exactly that — renaming it would break every generated client to fix a
+// comment. The route is `/v1/booking/resources/{resource}/availability`.
+//
+// Left with this note because the name has now caused one audit to conclude
+// that Phase 16's "opening hours — decided against" had been contradicted. It
+// has not: branch hours are still not built, and `modules/branches/src/branch.rs:16`
+// says why. Per-resource availability is the finer mechanism that decision
+// points at.
 async fn set_opening_hours(
     tenant: Allowed<ManageTenant>,
     State(state): State<AppState>,

@@ -666,6 +666,145 @@ the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
 
+### 53 · Phase 5b is unblocked — by a consumer the plan never claimed
+
+**Audit finding, 2026-09-09.** The plan says four consumers now exist and the
+rules engine's deferral condition is met. Checked one by one, **the count is
+really one and a half** — and the phase is unblocked anyway, for a different
+reason.
+
+| Claimed consumer | Verified |
+|---|---|
+| Booking automations — reminders, no-show handling, recall follow-ups | **Do not exist.** `automation`, `recall` and `follow up` return zero hits across every `.rs`. `booking` does not depend on `messaging` or `notifications` at all. `Stage::NoShow` is a manual status with no fee, no rebooking and no rule |
+| HR document expiry | **Real, and trivial** — the whole rule is `DOCUMENT_WARNING_DAYS: i32 = 60` |
+| §9b's claim union | **Real as data, inert as a consumer** — and see §52: nothing checks a claim, so the constraint §9c derives from checking one inside a transaction describes code that does not exist |
+| Authorization | **Real**, and the only one whose seam is written into the code |
+
+**The real second consumer is pricing, which shipped and which the plan still
+says does not exist.** `modules/booking/src/pricing.rs` is 524 lines:
+
+```rust
+pub struct Band { name, when: Availability, uplift }
+```
+
+That is `Rule<Uplift>` with `when: Availability` in place of `when:
+DynCondition` — a **tenant-authored, serialized, first-match condition language
+over one fact type**, configured over HTTP with ETag/If-Match and evaluated
+inside the booking's own transaction, frozen onto the line (L5). And crucially
+it is *not* our own aggregate standing in for demand, which is the error §8's
+reconciliation caught: **a tenant writes the bands.**
+
+#### What this changes about how 5b should be specified
+
+Not "build `Facts`, `DynCondition` and `FactRegistry`, then move two things onto
+them". The honest first box is **"generalise the one fact in `Availability` and
+keep everything else"** — there is a working evaluator, a working authoring
+surface and a working freeze-at-decision-time story, over a vocabulary of one.
+Authorization's vocabulary is identity and role; pricing's is time. Two thin but
+real fact types is a basis. Four, two of them fictional, is not.
+
+#### And half of one 5b box is already built
+
+`explain`-backed dry run and effective-permission inspection are one box.
+**Inspection ships twice**: `modules/hr/src/claims.rs:300` `effective` returns
+claim, branch *and source*; `GET /v1/members` returns each member's tenant role
+plus module exceptions. `explain` and `dry_run` return zero hits — and the dry
+run needs the *same* rolled-back-transaction primitive 4d's preview needs, so
+the two should be built once rather than twice.
+
+### 54 · A chart that would have failed its owner's first invoice
+
+**Caught by CI on 2026-09-09, and the interesting part is what the fix found.**
+
+The `real_estate` chart shipped without `4000`. Every other chart puts its
+principal revenue there — `services` service revenue, `retail` sales — and
+`sales::PostingAccounts::conventional()` maps revenue to it. A landlord
+installing that chart would have had **their first invoice fail to post**.
+
+`sales::conventional_codes_exist_in_every_shipped_chart` caught it, which is
+exactly the job it was written for. Rent moved to `4000`, where it belongs
+anyway: for a letting business rent *is* the principal revenue, and service
+charges and commission sit above it at `4210` and `4300`.
+
+#### What the fix uncovered
+
+**Five modules claimed the guard and two had it.** `pos`, `prepaid` and
+`purchases` each carried the sentence *"the codes every chart in
+`ledger::CHARTS` ships"* on their `conventional()` with **no test enforcing
+it**. The claim was true when written and nothing kept it true.
+
+Adding the missing three immediately caught a second hole in the same chart:
+`pos` maps a till's difference to `5910`, and `real_estate` had no `5910`.
+
+**And the guard that existed was incomplete.** `payments` checked four of its
+five conventional accounts — `forfeited` (`4910`) was in the mapping and not in
+the assertion, so a chart could ship without it and the test would pass.
+
+So one failing test in CI led to: one real defect, three missing guards, and one
+guard that did not cover its own subject. All six now bite, proved by removing
+each account in turn and watching the right module fail.
+
+#### The process lesson, which is the same one as before
+
+`ledger` was the crate I changed and `sales` was the crate that failed. I ran
+`-p ledger` and stopped. **This is the third time the same shape has caught
+me** — the pooler test in `erp-control` after adding two modules, and the
+`erp-control` migration guard after adding one.
+
+The rule that would have caught all three: **after changing anything in a crate
+that others depend on, run the dependents, not the crate.**
+`grep -rn "ledger::CHARTS"` takes five seconds and names them exactly.
+
+### 52 · Claims are granted, displayed, and enforced nowhere
+
+**Found by audit 2026-09-09. This is a defect in shipped behaviour, not a
+planning inaccuracy, and it had no box anywhere.**
+
+`modules/hr/src/claims.rs` is complete and correct. It places claims on an org
+chart, unions them upward, refuses the segregated ones, and answers who holds
+what:
+
+- `grant`, `revoke`, `place`, `withdraw` — maintained transactionally in
+  `migrations/tenant/0008_org_claims.sql`
+- `effective` — claim, branch and *source*, so a screen can say why
+- `holds(conn, employee, claim, branch)` — **the check**
+- `SEGREGATED` — `purchases:approve_payment`, `sales:approve_credit_note`,
+  `hr:approve_timesheet`, whose stated purpose is segregation of duties
+- `GET /v1/hr/employees/{employee}/claims` — a tenant can see the result
+
+**`holds` has exactly one caller in the entire repository, and it is
+`modules/hr/tests/hr.rs:171`.** No module imports it. No command consults it. A
+tenant can grant `purchases:approve_payment`, see it on the screen, put it in
+front of an auditor — and no code path will ever ask.
+
+The demo does exactly this: `crates/erp-demo/src/lib.rs:1682,1696` grant
+`sales:apply_discount` and `purchases:approve_payment`, and nothing checks
+either. Combined with `modules/hr/src/http.rs:1767` — *"a claim name is checked
+for shape and never for meaning"* — the system will accept and display any
+control a customer invents, including one it does not implement.
+
+**Why the documentation did not catch it.** §9b and §9c both assert the checks
+exist. §9c says the claims are checked *"inside commands, not at the edge …
+inside a transaction that is holding a connection"*, and derives a performance
+constraint from it. **That code does not exist.** The passage describes a design
+that was specified, argued about, and never wired up.
+
+#### What to do, and why it is small
+
+One command calling `hr::holds` before it approves something. `purchases`'
+payment approval is the obvious first, because `purchases:approve_payment` is
+already in `SEGREGATED` and already granted by the demo.
+
+It is also the thing that unblocks Phase 5b honestly — see §53.
+
+- [ ] **Wire the first claim check.** `purchases` approval consults
+      `hr::holds` before approving, and refuses without it
+- [ ] Decide what a claim on a module that has no check means: today it is
+      accepted and displayed. Refusing an unknown claim name needs the registry
+      `http.rs:1767` deliberately declined; **surfacing** unenforced claims on
+      the read model may be the cheaper honest answer
+- [ ] Correct §9b and §9c, which describe enforcement that was never built
+
 ### 51 · A second factor, and the state it refuses to have
 
 **Built 2026-09-09.** Half of Phase 3's MFA box, and the reason it was worth
@@ -2399,7 +2538,12 @@ modules can say what shape they need.
       `authenticator` and no new table — `password`, `totp_pending`, `totp`,
       `recovery`. `migrations/control/0015_second_factor.sql` widens one CHECK
       and adds nothing else
-- [ ] OIDC *(still more rows in `authenticator`; unscheduled)*
+- [ ] OIDC. *(Unscheduled. **The prediction is the shaky part, not the
+      status**: the login is more rows in `authenticator`, but provider config —
+      issuer, client id and secret, JWKS — has nowhere to live, and
+      `authenticator.secret` is `NOT NULL` for a login that has no secret. This
+      is the case likeliest to break "more rows, not more tables" the way API
+      keys already did.)*
 
 ### 3b · The HTTP surface
 - [x] `erp-api` on axum; `bin/api` with body limit, timeout, graceful shutdown
@@ -2429,8 +2573,15 @@ modules can say what shape they need.
       `POST /v1/signups/{token}`, which is where the caller gets a working
       system they are already logged into with the ledger installed and usable.
       Two calls since item 5; nothing is built by the first
-- [ ] A sweeper for tenants stuck in `provisioning` *(not needed while signup
-      compensates synchronously; needed the moment a step goes async)*
+- [ ] A sweeper for tenants stuck in `provisioning`. *(**Audited 2026-09-09:
+      the premise is true and the reason is wrong.** Signup is synchronous end
+      to end — `crates/erp-api/src/signup.rs` → `confirm_signup` → `provision`,
+      nothing spawned or enqueued. But compensation is **best-effort**:
+      `crates/erp-control/src/provision.rs:255` logs and swallows a failed
+      `abandon`, and a crash between `register_tenant` and `activate_tenant`
+      compensates nothing at all. The row sits at `provisioning` and its slug is
+      held for ever, so `request_signup` answers `SlugTaken` to a customer who
+      never got an account. Needed for that, not for the async reason.)*
 
 ### 3c · Kernel services
 
@@ -2483,8 +2634,14 @@ Built only where the ledger produced a second consumer.
       revocable. The recipient sets their own password and the owner never sees
       it. No email: sending one is an outbox effect and belongs with the first
       real handler
-- [ ] Tenant-local authorization as a projection (L7) *(roles live in the
-      control plane for now; the projection is for fact-derived permissions)*
+- [x] **Tenant-local, fact-derived authorization — built in §9c, and
+      deliberately *not* a projection.** `hr` claims are write-side state in the
+      tenant migration chain (`migrations/tenant/0008_org_claims.sql:22`), under
+      a heading that answers this box directly — *"Why it is here and not in a
+      projection schema … a read model may be a second behind; an authorization
+      answer may not."* Platform roles stay in the control plane and `Allowed<C>`
+      reads only those. **But nothing checks a claim — see §52**, which is a
+      defect rather than a deferral
 - [x] Configuration — the **store**, not the system. A versioned key-value table
       in the tenant database, a typed surface on top, and posting accounts as
       its first and only consumer. Declarations, layers and resolution rules are
@@ -2616,7 +2773,12 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [x] Customers as records — `modules/crm` (§16, §41)
 - [x] Partial credit notes — `sales::credit_part_in`, and since §44 a partial
       refund issues one (2026-09-07)
-- [ ] Quantities and unit prices on invoice lines. *Deliberately not stored:
+- [ ] Quantities and unit prices on invoice lines. **The trigger this box named
+      has already passed** — `modules/tax_sa/src/zatca/ubl.rs:659` emits
+      `cbc:InvoicedQuantity` (hardcoded `1`, with the reason written in) and
+      `:727` emits `cac:Price`, both sandbox-accepted. So they do not "land with
+      ZATCA's line-level fields"; those landed. The upcaster now waits on a
+      customer who sells by the unit. *Deliberately not stored:
       `modules/sales/src/invoice.rs` keeps a line's net only, because a client
       that shows "3 × 250.00" already computed the 750.00 it sends. They land
       with ZATCA's line-level fields, as an upcaster.*
@@ -2633,7 +2795,7 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [x] **Part of `cargo test --workspace`**, which builds the whole demo and
       asserts every module answers, every group replays identically, and every
       invariant is clean. Called "a required CI check" in an earlier draft of
-      this document: **there is no CI**, here or anywhere in the repo. It is a
+      this document: ~~**there is no CI**, here or anywhere in the repo~~ — **false since 2026-08-27**, when `.github/workflows/check.yml` landed: `just check` on every push to main and every PR, against pinned Postgres 18.3, Redis 8 and MinIO, plus an `offline-data` job. Left visible because a *ticked* box nobody re-reads is the worst place for a false claim, and **at least two open boxes are still written against the no-CI premise**. It was a
       required *test*, and nothing runs it but a person
 - [x] **Shadow replay against the demo** *(carried from Phase 2 — it needed the
       demo tenant, and now has one. All four groups, with the coverage itself
@@ -2670,7 +2832,14 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       tenant moved to the subdomain and the router refused to start)
 - [x] The test fixture installs modules through `install_module` rather than by
       hand, so it can no longer be right while the product is wrong
-- [ ] `ModuleEnabled<M>` capability tokens *(`require_module` is a runtime check
+- [ ] `ModuleEnabled<M>` capability tokens. **By this box's own threshold, the
+      moment has arrived**: `require_module` has **206 call sites**, three routes
+      assert it by hand in `crates/erp-api/tests/http.rs`, and nothing catches a
+      handler that forgot it — a route serving a module the tenant is not paying
+      for. **The cheap half of the fix is a source scan, not a token**:
+      `crates/erp-api/tests/creates.rs:84` already has `handlers()`, which splits
+      a module's `http.rs` into handler bodies and runs two other laws off it.
+      *(`require_module` is a runtime check
       at the top of each handler; the token makes a disabled module's handler
       unconstructable. Worth it when a module has enough routes that remembering
       the call is the weak link)*
@@ -2679,7 +2848,13 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 
 - [x] A second business module *(shipped as 4a — and it changed how
       cross-module integration works, which is the point of building one)*
-- [ ] Blueprints: browse → parameterize → materialize → edit → preview → install
+- [ ] Blueprints: **browse, parameterize and install already ship twice** —
+      `ledger` charts (`modules/ledger/src/http.rs:48`, whose doc comment says
+      exactly this: *"This is the first two and the last"*) and `booking` trades
+      (`:69`, six trades as data running the domain's own commands, D8). What is
+      left is **edit before install**, declined with reasons at
+      `modules/ledger/src/charts.rs:26` since every account is renameable after
+      install, and **preview**, which is the box below
 - [ ] Preview executes in a rolled-back transaction and reports resulting state.
       **Scoped 2026-09-09, not started** — and the point of writing this down is
       that it is a kernel change, not a route.
@@ -2719,8 +2894,20 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       accounts and a stronger claim
 - [ ] A chart for whichever industry the next customer is in *(the real
       remaining work, and it needs a customer rather than a guess)*
-- [ ] Self-service signup as a durable workflow
-- [ ] Template databases per module combination, built in CI from blueprints
+- [ ] Self-service signup as a durable workflow. *(**Already two-phase and
+      compensating** — `pending_signup` plus an outbox email in one transaction,
+      `confirm_signup` unclaims on `Err`, `provision` drops the database and
+      frees the slug, and `CREATE DATABASE` treats 42P04 as idempotent. What is
+      missing is surviving a **crash** rather than an `Err`, not holding a
+      request open across `CREATE DATABASE` and a whole migration chain, and
+      resuming rather than tearing down.)*
+- [ ] Template databases per module combination. *(**Half the premise is
+      stale.** The harness exists — `crates/erp-testkit/src/template.rs` clones
+      per test from a template keyed by migration-set fingerprint — but has no
+      key for a module *combination*: only `control` and `tenant` exist, and
+      module schemas are installed per test on top of the clone. And "built in
+      CI" is wrong twice: CI exists now, and templates are built lazily by the
+      first test that asks.)*
 - [x] **Demo blueprint with every module enabled, as a required CI check**
       *(4b)*
 - [x] Fleet migrator — `survey_fleet` looks, `migrate_fleet` applies, `bin/migrator`
@@ -2795,7 +2982,7 @@ system.
 
 **Resequenced.** The rule engine was to be built first and authorization moved
 onto it. But it had one real consumer and no concrete rules to describe it from
-— pricing does not exist — so building `Facts` and `DynCondition` now meant
+— pricing did not exist **— false since `modules/booking/src/pricing.rs` shipped**, see §53 — so building `Facts` and `DynCondition` now meant
 inventing which facts exist. Instead: the smallest real granularity gap first,
 and let two working cases describe the engine.
 
@@ -2828,8 +3015,18 @@ and let two working cases describe the engine.
 
 ## Phase 6 — Configured domain · 5–7 weeks
 
-- [ ] Account determination and posting rules
-- [ ] The business module's ledger path migrated onto them
+- [x] **Account determination and posting rules — built, by a route this box did
+      not imagine.** Every module that touches the ledger carries a typed,
+      versioned `PostingAccounts` configuration with its own key and route:
+      `sales` (`modules/sales/src/posting.rs:23`), `pos`, `payroll`, `prepaid`,
+      `purchases`, `payments`. The box was phrased as a *mechanism* — a rules
+      engine — and the outcome arrived as per-module typed configuration
+      instead, which is simpler and refuses at compile time what a rules engine
+      would refuse at runtime
+- [x] **The business module's ledger path migrated onto them — built**, by the
+      same evidence: **there is no module left to migrate.** All six that post
+      already resolve their accounts this way, inside the command's own
+      transaction so a configuration change cannot land mid-write (L5)
 - [ ] `StateMachine` as data driving document workflows and approval routing
 - [ ] `DocumentType` as versioned data; generic `Document` aggregate
 - [ ] One document type ported end to end
@@ -2837,6 +3034,32 @@ and let two working cases describe the engine.
 
 **Before starting:** resolve the open question in architecture §8 about whether
 the generic `Document` aggregate is right for the real document mix.
+
+**Audited 2026-09-09, and two things came out of it.**
+
+**Two of the six boxes were already built** — see above. Four remain, and all
+four are the `Document`/`StateMachine` half, which is exactly the half §8 says
+not to start.
+
+**And "What Phases 7–13 unblock" contradicts §8 about whether that question is
+answered.** It claims a reservation, a service request, a leave request and a
+payroll run are "four documents with genuinely different workflows — which is
+the evidence §8 asked for". **They are not that evidence**, and the distinction
+is the whole question:
+
+- Those four are **ours**. They are compiled Rust aggregates, they will stay
+  compiled, and no tenant defines a fifth. That the *product* has varied
+  workflows says nothing about whether a *tenant* needs to author one.
+- §8 asks whether tenants "need genuinely different workflows" or "the same
+  handful of documents with different fields". A tenant who wants a *field*
+  added is already served — `crm`'s custom fields (§41) do exactly that, and
+  nobody has asked for more.
+- The only real signal so far points the *other* way: the one configuration
+  request this build has actually met was fields, not workflows.
+
+So §8 stands as written and this phase stays blocked on customer conversations.
+The four documents are evidence about the product, not about the market, and
+the paragraph in "What Phases 7–13 unblock" has been corrected to say so.
 
 **Exit:** tenants configure charts, documents, posting and approvals without a
 deploy.
@@ -3882,8 +4105,16 @@ provider without an adapter.
       event — a person who changes their number should get the next message. An
       **audience** (`client`, `worker`, `branch_manager`, `operator`) resolved
       against the read model minutes before the send
-- [ ] Delivery receipts land back as inbound events, so "sent" and "delivered"
-      stay different words. *Was deferred to Phase 12 because there was no
+- [x] **Delivery receipts — assessed 2026-09-09 and deliberately not built.**
+      No provider's callback shape is verifiable (Taqnyat's own documentation
+      states not one field name), and correlating one needs a change to
+      `EffectHandler`, a kernel trait with four implementors, because a handler
+      gets no database connection. Building that to feed adapters that cannot be
+      written correctly is how unexercised machinery gets in.
+      `docs/AMBIGUITIES.md` §1 and §1b. **One captured callback reopens this.**
+      The original text follows, and its last line is superseded.
+- [ ] ~~Delivery receipts land back as inbound events, so "sent" and "delivered"
+      stay different words.~~ *Was deferred to Phase 12 because there was no
       verified inbound surface; Phase 12 built one (`crates/erp-api/src/hooks.rs`,
       a signed callback per provider), and payments use it. Messaging does not
       yet: `grep -rin delivered modules/messaging/src` finds only the send-side
@@ -4601,6 +4832,13 @@ would work for somebody else, which is neither true nor the caller's business.
 
 ## Phase 18 — Marketing · 3–4 weeks
 
+**Audited 2026-09-09: all five boxes are genuinely open.** Nothing here exists,
+and the one thing that looks like it does is a false positive worth naming —
+`segments` in `modules/messaging/src/budget.rs` is an **SMS billing segment**,
+the unit a long message is charged in, and has nothing to do with a marketing
+segment. There is no analytics or tracking-pixel configuration of any kind.
+
+
 - [ ] **Segments**, and the architectural constraint that shapes them: a segment
       like *"booked in the last 90 days and spent over 5,000"* spans booking and
       sales, and **L3 forbids reading across projection groups**. So marketing
@@ -4619,6 +4857,12 @@ would work for somebody else, which is neither true nor the caller's business.
 ---
 
 ## Phase 19 — `modules/inventory` · 3–4 weeks
+
+**Audited 2026-09-09: all four boxes are genuinely open.** The only hits in the
+tree are chart-of-accounts entries — `1300 Inventory` and `Cost of goods sold`
+in the **retail** chart, which anticipate this module without implementing any
+of it. That the accounts are already there is convenient and is not progress.
+
 
 - [ ] Products, quantities, and stock movements as events
 - [ ] Consumption on sale, so a POS line depletes stock
@@ -4779,11 +5023,19 @@ never a signup-specific one: rate limiting per caller. `REQUEST_INTERVAL` caps
 mail per address and cannot do more than that. Phase 12c builds the real one for
 API keys, and signup is the second user of it.
 
-**Phase 6's open question gets an answer.** Architecture §8 asks whether the
-generic `Document` aggregate is right, and says to decide from customer
-conversations rather than from the document. A reservation, a service request, a
-leave request and a payroll run are four documents with genuinely different
-workflows — which is the evidence §8 asked for.
+~~**Phase 6's open question gets an answer.**~~ **Withdrawn 2026-09-09 — this was
+wrong, and it contradicted the architecture.** It argued that a reservation, a
+service request, a leave request and a payroll run are "four documents with
+genuinely different workflows — which is the evidence §8 asked for".
+
+§8 asks what **tenants** need, and says to decide from customer conversations.
+Those four documents are **ours**: compiled Rust aggregates that no tenant
+authors and no tenant will. That this product has varied workflows is evidence
+about the product, not about the market — and the only configuration request
+this build has actually met was for *fields* (§41's custom fields), which is the
+answer §8 says would make the generic aggregate **not** worth its cost.
+
+Phase 6 remains blocked on customer conversations, exactly as §8 says.
 
 ---
 
@@ -5192,14 +5444,24 @@ correct when written and is now one item stale.
    claim union, authorization — and the deferral's own condition is therefore met.
    It is no longer correct to file this under "waiting"; it is correct to file it
    under "ready, and unscheduled".
-7. **Phase 20 proper** — 20b through 20e, the letting half. Sized in §49 at
+7. **The audit that keeps paying.** Every phase examined against the code has
+   closed boxes that were never work — Phase 9 (WPS was a decision), Phase 3
+   (API keys and `ETag` had shipped), Phase 4e (exemption reasons were a defect,
+   not a gap), Phase 4d (two chart templates should not exist as named), Phase 6
+   (account determination was built by another route). **Phases 2, 3d, 5, 7, 8,
+   10–17 have never been audited this way.** It costs about an hour a phase and
+   has so far been the cheapest work available.
+8. **Phase 20 proper** — 20b through 20e, the letting half. Sized in §49 at
    `prepaid`-scale plus its prerequisites. **Where it goes in this list is a call I
    have not made**: it is a vertical, not a feature, and whether it starts before
    or after blueprints depends on whether there is a customer waiting for it. The
    phase is written so the answer changes the order and nothing else.
-8. **Then Phase 6, 18 and 19**, unchanged, and 20f–20g — fixed assets and the
-   buying-and-selling half — after them or alongside, since nothing in the letting
-   half depends on either.
+9. **Then Phase 18 and 19**, both audited on 2026-09-09 and both genuinely
+   unbuilt, and 20f–20g — fixed assets and the buying-and-selling half — after
+   them or alongside, since nothing in the letting half depends on either.
+   **Phase 6 is not in this list any more**: four of its six boxes remain and
+   all four are blocked on customer conversations, which is a thing to do rather
+   than a thing to build.
 
 **`a_tailer_never_skips_an_event` is fixed** (reported 2026-09-09). It had failed
 once at 399 of 400 positions on 2026-09-08; my leaked-database explanation was
@@ -5921,7 +6183,7 @@ here and folded back into ARCHITECTURE.md.
 - **The rule engine was deferred, and the deferral is the interesting part.**
   Phase 5 was to build `Facts`, `DynCondition`, `FactRegistry` and `Rule<E>`,
   then move authorization onto them. Authorization is its only real consumer —
-  pricing does not exist — and no concrete rule had been asked for, so every
+  pricing did not exist **— false since `modules/booking/src/pricing.rs` shipped**, see §53 — and no concrete rule had been asked for, so every
   decision about *which facts exist* would have been a guess dressed as an
   interface.
 

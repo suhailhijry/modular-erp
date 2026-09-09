@@ -585,11 +585,19 @@ static REAL_ESTATE: &[TemplateAccount] = &[
         "الأرباح المبقاة",
         AccountKind::Equity,
     ),
+    // **At `4000`, the principal revenue account, because for a letting business
+    // rent *is* the principal revenue** — `services` puts service revenue here
+    // and `retail` puts sales. It also has to be here:
+    // `sales::PostingAccounts::conventional()` maps revenue to `4000`, and
+    // `conventional_codes_exist_in_every_shipped_chart` is what stops a chart
+    // shipping that would fail on its owner's first invoice. This chart did,
+    // until that test caught it.
+    //
     // **Kept apart from service charges on purpose.** Residential rent is
     // VAT-exempt (`VATEX-SA-30`) and a service charge generally is not; one
     // account for both makes the return unanswerable.
     account(
-        "4200",
+        "4000",
         "Rental income",
         "إيرادات الإيجار",
         AccountKind::Revenue,
@@ -658,6 +666,15 @@ static REAL_ESTATE: &[TemplateAccount] = &[
         "5900",
         "Other expenses",
         "مصروفات أخرى",
+        AccountKind::Expense,
+    ),
+    // A letting office takes cash rent like any counter does, and `pos`'s
+    // conventional mapping puts the drawer's difference here. Missing from this
+    // chart's first draft, and caught by the guard added to `pos` the same day.
+    account(
+        "5910",
+        "Cash over and short",
+        "فروقات الصندوق",
         AccountKind::Expense,
     ),
 ];
@@ -847,7 +864,11 @@ mod tests {
     fn rent_and_service_charges_are_not_the_same_account() {
         let chart = chart("real_estate").expect("the real estate chart ships");
         let codes: Vec<_> = chart.accounts.iter().map(|a| a.code).collect();
-        assert!(codes.contains(&"4200"), "no account for rent");
+        assert!(
+            codes.contains(&"4000"),
+            "rent is this chart's principal revenue and belongs at 4000, where every \
+             other shipped chart puts theirs"
+        );
         assert!(codes.contains(&"4210"), "no account for service charges");
         assert!(
             codes.contains(&"4300"),

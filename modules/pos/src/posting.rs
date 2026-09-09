@@ -136,3 +136,31 @@ fn two_sided(
 fn code(literal: &str) -> AggregateId {
     AggregateId::new(literal).expect("account codes in this crate are valid literals")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The conventional mapping is not a guess about a tenant's chart — it is
+    /// checked against the charts this build ships.**
+    ///
+    /// Added 2026-09-09, after a new chart shipped missing an account and only
+    /// `sales` noticed. `conventional()` here has always *claimed* "the codes
+    /// every chart in `ledger::CHARTS` ships"; `sales` and `payments` enforced
+    /// it and three modules, including this one, carried only the sentence.
+    #[test]
+    fn the_conventional_accounts_exist_in_every_shipped_chart() {
+        let accounts = PostingAccounts::conventional();
+        for chart in ledger::CHARTS {
+            for needed in [&accounts.cash, &accounts.bank, &accounts.over_short] {
+                assert!(
+                    chart.accounts.iter().any(|a| a.code == needed.as_str()),
+                    "chart {:?} has no account {} — conventional() would fail on \
+                     the first posting a tenant on that chart made",
+                    chart.id,
+                    needed,
+                );
+            }
+        }
+    }
+}

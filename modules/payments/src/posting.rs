@@ -413,6 +413,9 @@ mod tests {
                 &accounts.instalments,
                 &accounts.fees,
                 &accounts.differences,
+                // Was missing from this list while being in `conventional()`,
+                // so a chart could ship without it and this guard would pass.
+                &accounts.forfeited,
             ] {
                 assert!(
                     chart.accounts.iter().any(|a| a.code == code.as_str()),
