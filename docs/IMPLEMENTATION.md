@@ -651,6 +651,177 @@ the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
 
+### 49 · Property management — *answered 2026-09-09: a new vertical for this product*
+
+**Asked on 2026-09-09, before picking up the backlog. Checked against the code,
+not remembered — every claim below names the file that shows it.**
+
+The direct answer is **no**. `grep -rniE "\b(propert(y|ies)|lease|tenancy|landlord|rent(al)?|real.?estate)\b" modules/ crates/ --include=*.rs`
+returns no domain hit; every match is incidental — a `Rent` line in a
+chart-of-accounts template, `current` matching `rent`. There is no unit, no
+lease, no owner, no tenancy, and no phase that plans one.
+
+What is worth writing down is how much of the substrate *does* carry, because it
+is more than it looks, and the pieces that do not carry are specific rather than
+general.
+
+#### What carries as it stands
+
+**A rentable unit is already a `Resource`.** `modules/booking/src/resource.rs:29`
+— `Kind` is `Person | Place | Thing`, and its own comment is why this works:
+*"Display and filtering only. No rule in this module branches on it, and the
+moment one does the engine has stopped being general."* An apartment, a shop, a
+parking bay is a `Place`, and Phase 8b's six fixtures are the evidence the engine
+does not care what it is holding.
+
+**A lease term is expressible as a window.**
+`modules/booking/src/reservation.rs:425` — `starts_at`/`ends_at` are plain
+`Timestamp` with no upper bound anywhere. Twelve months is a legal reservation.
+
+**Saudi VAT for real estate is already modelled.** `modules/ledger/src/vat.rs:31`
+— `VatCategory` is `Standard | Zero | Exempt`, and `Zero` and `Exempt` are
+separate variants *because of* `input_is_reclaimable()` (`vat.rs:47`). That is
+exactly the distinction residential rent (exempt, input tax not reclaimable) and
+commercial rent (15%) require, and it is load-bearing rather than decorative.
+
+**An owner statement has a precedent, and it is not a new problem.**
+`modules/reports/src/lib.rs:1` sets out why a module that must see leases,
+invoices, payments and maintenance *at once* subscribes to the log and keeps its
+own group rather than reading four — L3, and the honest cost: *"It keeps its own
+copies of what it needs."* An arrears report and an owner disbursement statement
+are that module's shape, not a new one.
+
+**Attaching the signed lease is solved.** `modules/files/src/file.rs:34` — an
+`Owner` is an opaque `(kind, id)` pair, and `files` depends on no module.
+
+#### Three closed enums a property module would have to open from below
+
+This is the friction the layering rule creates, and it is worth naming before
+rather than during:
+
+| Enum | Where | What it costs |
+|---|---|---|
+| `messaging::Topic` | `modules/messaging/src/audience.rs:33` | Four variants. Rent reminders and expiry notices need a `Lease` |
+| `files::OwnerKind` | `modules/files/src/file.rs:34` | Seven variants, each pinned by `every_owner_kind_names_the_domain_its_module_uses` |
+| `notifications::Kind` | `modules/notifications/src/kind.rs:22` | Five variants, each carrying compiled bilingual copy |
+
+None is hard. All three are edits to a module *below* the one being added, which
+is the opposite direction from how every module so far has landed — and all
+three have a test that fails if the edit is half-done, which is the mitigation.
+
+#### What is simply not there
+
+- **Fixed assets.** No capitalisation, no depreciation schedule, no disposal, no
+  gain or loss on sale. `grep -rniE "depreciat|amorti[sz]|fixed.asset|capitali[sz]"`
+  over `modules/` and `crates/` finds three false positives and nothing else.
+  **This is what kills *buying and selling* outright** — a property bought is an
+  asset carried and depreciated, and a property sold is a disposal against
+  carrying value. Rent could ship without it; a purchase could not.
+- **Recurring invoicing.** Nothing in `modules/sales` or `modules/payments`
+  schedules anything; every invoice comes from a command. And `erp-recurrence` is
+  **not** this — it is 432 lines of `availability.rs`, weekly patterns for
+  booking, and the crate name flatters it.
+- **Arrears.** No dunning, no overdue tracking, no ageing. Chasing rent is most
+  of what property management software actually does.
+- **Paying money out.** `modules/purchases` books supplier bills, but there is no
+  payment run; an owner disbursement and a contractor payment both need one.
+
+#### Two things it would be a mistake to reuse
+
+**`booking`'s deposit is not a security deposit.**
+`modules/booking/src/reservation.rs:27` — `Deposit { net: Money, due_by: Timestamp }`,
+and `net` is documented as *"Before tax. What the prepayment invoice will be
+raised for."* That is a prepayment against a future invoice: revenue in advance.
+A rental security deposit is a **liability** — money held and not earned,
+returned at the end of the term less deductions, sitting on the balance sheet the
+whole time. Reusing the word would produce a set of books that overstates revenue
+by the entire deposit balance, and the trial-balance invariant would not catch it
+because it would balance.
+
+**The branch dimension is the wrong carrier for a property.**
+`crates/erp-eventlog/src/envelope.rs:68` says what it is: *"a fact about where the
+request came from"*, folded in from an `X-Branch` header so that every event of
+one request agrees. A property is not that — an agent at head office raises
+January rent for forty units they are not standing in. The dimension has to be on
+the document. Mechanically a second key is free, because `extra` is a generic bag
+(`crates/erp-eventlog/src/aggregate.rs:500`); what is not free is
+`proj_ledger.posting`'s dedicated `branch` column
+(`modules/ledger/src/projections.rs:135`) and `branch_balance` being a
+single-dimension rollup. A contained change to `ledger`, but a real one.
+
+#### The party model is the one genuine architectural gap
+
+`modules/crm/src/customer.rs:31` — `CustomerKind` is `Person | Company`. There is
+no role, and no relationship between parties. Property needs one person to be the
+**owner** of unit A, the **tenant** of unit B and the **guarantor** on unit C at
+the same time. Custom fields do not reach it either: `modules/crm/src/fields.rs:60`
+offers `Text | Number | Date | Choice | Flag` and has no reference type, so "owns
+unit X" cannot be a field.
+
+This is the piece that is a design question rather than a build task, and it is
+the one worth settling before anything else is drawn.
+
+#### Saudi specifics
+
+- Residential rent exempt, commercial 15% — **expressible today** (`vat.rs:31`).
+- Per-line exemption reasons — **an open box in Phase 4e**, and required rather
+  than optional: a ZATCA invoice for exempt residential rent must carry a reason
+  code, so that box has to close before a residential landlord could issue one at
+  all.
+- **RETT at 5% on a sale** — not VAT, and there is no non-VAT tax anywhere in the
+  code.
+- **Ejar**, the mandatory rental-contract registration — not built, and it would
+  not have to be invented from nothing: §45's ZATCA onboarding is the pattern for
+  an external regulatory registration with a credential, a submission and a
+  worker that finishes it.
+
+#### Sizing, honestly
+
+For calibration, by lines of `src/` plus schema: `branches` 1,399 ·
+`conversations` 1,837 · `notifications` 2,287 · `prepaid` 5,479 · `booking` 8,028.
+
+- **A lease module that bills rent** — units, leases, a rent schedule, invoicing
+  from it — is `prepaid`-sized. Call it 4–6 weeks, plus the party model and the
+  three enum edits.
+- **Arrears, security deposits held as a liability, and owner statements** roughly
+  doubles that.
+- **Buying and selling** needs fixed assets first, which is its own module and
+  appears in no phase. Another 3–4 weeks before the property side of it starts.
+- A **competitive** product also wants maintenance work orders, service-charge
+  reconciliation, utility recharging, agent commission and the sale pipeline.
+  That is a vertical, not a module.
+
+#### The answer — *2026-09-09*
+
+**A new vertical for this product.** Not a separate product.
+
+The question was whether property is a seventh Phase 8b fixture or a different
+system. It is the seventh fixture: the engine holds up, a unit is a `Place`, and
+a lease term is a window the reservation model already allows. What does not
+carry is the money — rent accrues monthly, is chased when late, and sits against
+an owned asset.
+
+So the work is **not** a property module. It is four cross-cutting pieces that
+this product wants anyway, and a module that composes them. Every one of the four
+has a second consumer already in the building, which is what makes this a vertical
+rather than a bolt-on:
+
+| Piece | Second consumer that already exists |
+|---|---|
+| A **party model** with roles and relationships (`crm`) | §9b's claim union asks *who reports to whom*; a booking client who is also a supplier |
+| **Recurring invoicing** | `prepaid` subscriptions bill on a cycle and nothing schedules them either |
+| **Arrears** — ageing, dunning, chasing | Every unpaid invoice in `sales`, today, is chased by nobody |
+| **Fixed assets** — capitalisation, depreciation, disposal | Any tenant that owns equipment; §19's inventory sits next to it |
+
+That table is the argument. If any of those four had exactly one consumer it
+would be the wrong thing to build, by the same reasoning that deferred 5b for a
+year.
+
+**What this does not settle**, and what Phase 20 is written to keep separable:
+whether the first release is *letting* only, or letting **and** buying and
+selling. Letting can ship without fixed assets; buying and selling cannot. See
+Phase 20.
+
 ### 48 · Conversations: what a reply answers, and how it is known
 
 **`messaging` had to start remembering.** Everything about that module is
@@ -4162,6 +4333,122 @@ would work for somebody else, which is neither true nor the caller's business.
 
 ---
 
+## Phase 20 — Property · the vertical, in four prerequisites and a module
+
+**Decided 2026-09-09 (§49): a new vertical for this product.** §49 is the
+assessment and is not repeated here; this is only the order, and the order is
+what the assessment was for.
+
+Read the two halves separately. **20a–20e are lettings**, and they ship a
+product: a landlord or an agency that collects rent. **20f–20g are ownership**,
+and they need a module that does not exist in any phase. Nothing in the first
+half depends on the second, which is the point of splitting them.
+
+### 20a · The party model *(a design question, and it comes first)*
+
+- [ ] Roles and relationships between parties, so one person is the **owner** of
+      unit A, the **tenant** of unit B and the **guarantor** on unit C at once.
+      `CustomerKind` is `Person | Company` today (`modules/crm/src/customer.rs:31`)
+      and there is no relationship at all
+- [ ] **Not** custom fields. `FieldKind` is `Text | Number | Date | Choice | Flag`
+      (`modules/crm/src/fields.rs:60`) with no reference type, and adding one
+      would make a typed-and-erasable field into a foreign key that erasure
+      cannot honour
+- [ ] Decide whether a role is a `crm` concept or a property one. A guarantor is
+      property-specific; an owner is not
+
+**This is the one piece that is a design question rather than a build task.**
+Everything below assumes an answer to it.
+
+### 20b · The three enums opened from below
+
+- [ ] `messaging::Topic` — a `Lease` variant (`modules/messaging/src/audience.rs:33`)
+- [ ] `files::OwnerKind` — a `Lease` variant, plus its domain name, which
+      `every_owner_kind_names_the_domain_its_module_uses` pins
+- [ ] `notifications::Kind` — rent due, rent late, lease expiring, each with
+      compiled Arabic and English copy and its ordered `audiences()`
+
+Mechanical, and each has a test that fails if the edit is half-done. Listed
+because they are edits to modules *below* the one being added, which is the
+opposite direction from every module so far.
+
+### 20c · Per-line VAT exemption reasons *(already an open box in 4e)*
+
+- [ ] Carried here because §49 found it **gates the whole vertical**: residential
+      rent is VAT-exempt, a ZATCA invoice for an exempt supply must carry a reason
+      code, and without it a residential landlord cannot issue a compliant invoice
+      at all. `VatCategory::Exempt` already exists (`modules/ledger/src/vat.rs:31`);
+      the reason code does not
+
+### 20d · Recurring invoicing
+
+- [ ] A schedule that raises an invoice — "the 1st of every month for 12 months".
+      Nothing in `sales` or `payments` schedules anything today; every invoice
+      comes from a command
+- [ ] **Not `erp-recurrence`**, which is 432 lines of `availability.rs` — weekly
+      patterns for booking, and the crate name flatters it
+- [ ] Derived ids over (schedule, period), so the producer is a scan that
+      re-runs over an overlapping window with no cursor — the shape §47 and §48
+      both landed on
+- [ ] Where it lives is a decision: `sales` owns invoices, but `prepaid`
+      subscriptions want it too, which is the second consumer that justifies it
+
+### 20e · `modules/property` — units, leases, rent
+
+- [ ] A **unit**, and whether it is a `booking::Resource` of kind `Place` or its
+      own aggregate. §49 found the engine does not care what it holds
+      (`modules/booking/src/resource.rs:29`), so this is a choice, not a constraint
+- [ ] A **lease**: parties, term, rent, escalation, break clause, renewal,
+      termination
+- [ ] A **security deposit as a liability** — money held and not earned, returned
+      at term end less deductions. **Explicitly not `booking`'s `Deposit`**, which
+      is a prepayment against a future invoice (`modules/booking/src/reservation.rs:27`).
+      Reusing it would overstate revenue by the deposit balance, and the trial
+      balance would still balance
+- [ ] **Property as a second posting dimension.** The `extra` bag is generic
+      (`crates/erp-eventlog/src/aggregate.rs:500`) so a key is free; the work is
+      `proj_ledger.posting`'s dedicated `branch` column and `branch_balance` being
+      a single-dimension rollup. **Not** the `X-Branch` header, which carries
+      *where the request came from* — head office raises January rent for forty
+      units it is not standing in
+- [ ] **Arrears**: ageing, overdue, dunning. Log-subscribing with its own group,
+      the way `modules/reports` argues for (`modules/reports/src/lib.rs:1`)
+- [ ] **Owner statements and disbursements**, which need a payment run —
+      `modules/purchases` books supplier bills and nothing pays them
+- [ ] Maintenance requests as `conversations` threads, once `Topic` has a variant
+- [ ] **Ejar** — the mandatory rental-contract registration. §45's ZATCA
+      onboarding is the pattern: a credential, a submission, and a worker that
+      finishes it
+
+**Exit for the letting half:** an agency collects rent, chases it, and pays
+owners, with a compliant invoice for both a residential and a commercial tenancy.
+
+### 20f · Fixed assets *(its own module, and it blocks the second half)*
+
+- [ ] Capitalisation, depreciation schedules, disposal, gain or loss on sale.
+      **None of this exists**: `grep -rniE "depreciat|amorti[sz]|fixed.asset|capitali[sz]"`
+      over `modules/` and `crates/` returns three false positives and nothing else
+- [ ] Posting to `ledger`, and a health check that carrying value agrees with the
+      books, in the shape §10b sets
+
+### 20g · Buying and selling
+
+- [ ] A property as an owned asset, acquired and disposed
+- [ ] **RETT at 5%** — not VAT, and there is no non-VAT tax anywhere in the code
+- [ ] The pipeline: offer, contract, title transfer, agent commission
+
+**Exit:** a property is bought, held, depreciated and sold, and the books agree.
+
+### What is deliberately not in this phase
+
+Service-charge and CAM reconciliation, utility sub-metering and recharging,
+sub-letting, valuation, and mortgage or finance on a property. Each is real and
+none is needed to collect rent; they are what turns the vertical into a
+competitive product, and they should be sequenced from customers rather than
+from this list.
+
+---
+
 ## What Phases 7–13 unblock
 
 **Phase 5b finally has its second consumer.** The rule engine was deferred
@@ -4548,10 +4835,8 @@ behind it were run down. In the order I would take them:
    OTP now exercises the whole onboarding, the worker's half included — and
    Tabby's and Tamara's sandboxes, which §43 built for and nobody has called.
    Everything below is guesswork about the hardest interfaces until this is done.
-2. **Phase 13, real time.** Fifteen open boxes and every piece they compose
-   already exists: the Redis channel `shared.rs` fans out on, `consistent_after`,
-   the audiences of 11b, the outbox for the durable record. The booking screens
-   are the first consumer, and it is the largest half-built phase.
+2. ~~**Phase 13, real time.**~~ **Done** — all fifteen boxes, across 13a–13d
+   (`0b086c9`, `274517e`, `e947280`). See §46, §47 and §48.
 3. **Blueprints (4d).** Browse → parameterize → preview in a rolled-back
    transaction → install, and the chart-of-accounts templates. Still the nearest
    customer-visible payoff, as the closing paragraph says.
@@ -4564,11 +4849,71 @@ behind it were run down. In the order I would take them:
 6. **Then, and only then** — below, unchanged: 5b and 6 wait for a second
    consumer; 18 and 19 are new modules and come after.
 
+### 13. What is next (2026-09-09)
+
+Written after Phase 13 closed and after §49 answered a question asked before the
+backlog was picked up. The order below **supersedes the one above**, which was
+correct when written and is now one item stale.
+
+1. **Prove it against the real world.** Unchanged, and now unambiguously first.
+   Item 6 — one ZATCA simulation run with a real OTP — plus Tabby's and Tamara's
+   sandboxes, which §43 built for and which nothing has ever called. Every
+   estimate below is guesswork about the hardest interfaces until this is done,
+   and it is the only item no amount of code advances.
+2. ~~**Answer §49.**~~ **Answered the same day: a new vertical for this product.**
+   What it leaves behind is **Phase 20a, the party model** — one person who is the
+   owner of unit A, the tenant of unit B and the guarantor on unit C. It is a
+   design question, it gates every other box in Phase 20, and it is worth settling
+   while the rest of the phase is still on paper rather than after.
+3. **Blueprints (4d).** Five boxes, and now the largest half-built phase: browse →
+   parameterize → preview in a rolled-back transaction → install, plus the
+   chart-of-accounts templates. Still the nearest customer-visible payoff — and
+   with §49 answered it is no longer a detour, because a real-estate chart is one
+   of the templates and Phase 20 will want it.
+4. **The singles**, in rough order of how much they unblock:
+   - Per-line VAT exemption reasons (Phase 4e, carried into 20c) — small, and now
+     a **prerequisite of the vertical**: residential rent is VAT-exempt, and no
+     exempt supply can be invoiced compliantly without a reason code.
+   - Messaging **delivery receipts** through `hooks.rs`, now that 13d has built
+     the inbound sweep the same shape needs.
+   - **WPS**, the salary file (Phase 9) — the same shape as the ZATCA submission,
+     so it is a solved problem for the second time.
+   - Large exports as outbox effects (Phase 11).
+   - MFA and OIDC (Phase 3a) — more rows in `authenticator`, not more tables.
+5. **Item 4's other half.** Deployment beyond compose, and Postgres failover.
+   Rehearsed as tests the way restore was, before either is claimed.
+6. **Phase 5b now has its consumers, and that is new.** The rules engine was
+   deferred for want of a second consumer to describe it from. "What Phases 7–13
+   unblock" already names four — booking automations, HR document expiry, §9b's
+   claim union, authorization — and the deferral's own condition is therefore met.
+   It is no longer correct to file this under "waiting"; it is correct to file it
+   under "ready, and unscheduled".
+7. **Phase 20 proper** — 20b through 20e, the letting half. Sized in §49 at
+   `prepaid`-scale plus its prerequisites. **Where it goes in this list is a call I
+   have not made**: it is a vertical, not a feature, and whether it starts before
+   or after blueprints depends on whether there is a customer waiting for it. The
+   phase is written so the answer changes the order and nothing else.
+8. **Then Phase 6, 18 and 19**, unchanged, and 20f–20g — fixed assets and the
+   buying-and-selling half — after them or alongside, since nothing in the letting
+   half depends on either.
+
+**`a_tailer_never_skips_an_event` is fixed** (reported 2026-09-09). It had failed
+once at 399 of 400 positions on 2026-09-08; my leaked-database explanation was
+wrong and was withdrawn at the time. What actually fixed it is not recorded here
+because I did not make the change — worth one line in §3 when whoever did says
+what it was.
+
 ### Then, and only then
 
-Phase 5b (the rules engine) and Phase 6 (configured domain) are still correctly
+~~Phase 5b (the rules engine) and Phase 6 (configured domain) are still correctly
 sequenced: both wait for a second real consumer to describe them, and neither has
-one yet. Blueprints (4d) are the nearest thing with a customer-visible payoff.
+one yet.~~ **Half of that stopped being true and nobody noticed.** Phase 5b's
+condition is *met*: "What Phases 7–13 unblock" names four consumers — booking
+automations, HR document expiry, §9b's claim union, and authorization — and it
+has said so since Phase 13 was planned. 5b is not waiting; it is ready and
+unscheduled, which is a different thing and belongs in a different list. Phase 6
+still waits, and correctly. Blueprints (4d) remain the nearest thing with a
+customer-visible payoff.
 
 The smaller deferrals — snapshots, `Idempotency-Key`, `ETag`, `ModuleEnabled<M>`,
 an entry-level read model, quantities and unit prices on a line — each name the
