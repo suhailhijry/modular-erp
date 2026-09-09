@@ -1460,20 +1460,47 @@
         "type": "object"
       },
       "ChartInstalled": {
+        "example": {
+          "opened": 26,
+          "opened_codes": [
+            "1000",
+            "1010"
+          ],
+          "skipped": 2,
+          "skipped_codes": [
+            "4000",
+            "2100"
+          ]
+        },
         "properties": {
           "opened": {
             "minimum": 0,
             "type": "integer"
           },
+          "opened_codes": {
+            "description": "**Which ones**, in the order the chart lists them.\n\nThe counts alone are not something a person can check, and this shape is\nalso what a *preview* answers — the same field names, because the\npreview is the same run against a transaction that is rolled back.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "skipped": {
             "description": "Accounts that were already there. Installing twice is not an error.",
             "minimum": 0,
             "type": "integer"
+          },
+          "skipped_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
           "opened",
-          "skipped"
+          "skipped",
+          "opened_codes",
+          "skipped_codes"
         ],
         "type": "object"
       },
@@ -25870,6 +25897,143 @@
           }
         },
         "summary": "Open every account in a ready-made chart.",
+        "tags": [
+          "ledger"
+        ]
+      }
+    },
+    "/v1/ledger/chart/preview": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Runs the real installation against a transaction and rolls it back, so this\nanswers what the install *did* rather than what a second implementation\npredicts it would. The two cannot disagree, because they are the same code.\n\nThe body and the answer are the same shape as `POST /v1/ledger/chart`.",
+        "operationId": "preview_chart",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallChart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChartInstalled"
+                }
+              }
+            },
+            "description": "What would happen. Nothing was written."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such chart, or a currency that is not one"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "**What installing a chart would do**, without doing it.",
         "tags": [
           "ledger"
         ]

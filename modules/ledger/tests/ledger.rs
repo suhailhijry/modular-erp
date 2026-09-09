@@ -623,8 +623,8 @@ async fn installing_a_chart_opens_its_accounts() {
     .await
     .expect("installs");
 
-    assert_eq!(installed.opened, services.accounts.len());
-    assert_eq!(installed.skipped, 0);
+    assert_eq!(installed.opened(), services.accounts.len());
+    assert_eq!(installed.skipped(), 0);
 
     fixture.project().await;
     let mut conn = fixture.db.acquire().await.expect("connection");
@@ -665,7 +665,7 @@ async fn installing_a_chart_twice_changes_nothing() {
     .await
     .expect("is a no-op, not an error");
 
-    assert_eq!(second.opened, 0);
+    assert_eq!(second.opened(), 0);
     assert_eq!(
         second.skipped, first.opened,
         "the retry must recognise every account it already opened"
@@ -714,9 +714,9 @@ async fn a_second_chart_opens_only_what_is_missing() {
         .iter()
         .filter(|a| services.accounts.iter().any(|s| s.code == a.code))
         .count();
-    assert_eq!(added.skipped, shared);
-    assert_eq!(added.opened, retail.accounts.len() - shared);
-    assert!(added.opened > 0, "retail must add something");
+    assert_eq!(added.skipped(), shared);
+    assert_eq!(added.opened(), retail.accounts.len() - shared);
+    assert!(added.opened() > 0, "retail must add something");
 
     fixture.cleanup().await;
 }
@@ -1217,6 +1217,116 @@ async fn a_close_takes_effect_on_the_next_entry() {
     assert!(
         post_on(&fixture, "JE-2", "2026-01-16").await.is_err(),
         "the entry immediately after the close still got in"
+    );
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Preview
+// ---------------------------------------------------------------------------
+
+/// **A preview writes nothing.** The whole point of running it against a real
+/// transaction is undone if the rollback is not.
+#[tokio::test]
+async fn a_preview_leaves_no_account_behind() {
+    let fixture = Fixture::new().await;
+    let services = ledger::chart("services").expect("ships");
+
+    let would = ledger::preview_chart(
+        &fixture.db,
+        services,
+        sar(),
+        erp_i18n::Locale::English,
+        &Metadata::default(),
+    )
+    .await
+    .expect("previews");
+    assert!(would.opened() > 20, "it would open a chart's worth");
+
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let balances = ledger::account_balances(&mut conn).await.expect("lists");
+    drop(conn);
+    assert!(
+        balances.is_empty(),
+        "a preview must leave nothing behind, found {}",
+        balances.len()
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The preview and the install agree, because they are the same code.**
+///
+/// This is the property the box asked for: a *predicted* preview is a second
+/// implementation of the install's rules, and two implementations drift. Here
+/// the only difference is whether the transaction commits.
+#[tokio::test]
+async fn a_preview_says_exactly_what_the_install_does() {
+    let fixture = Fixture::new().await;
+    let retail = ledger::chart("retail").expect("ships");
+
+    let would = ledger::preview_chart(
+        &fixture.db,
+        retail,
+        sar(),
+        erp_i18n::Locale::English,
+        &Metadata::default(),
+    )
+    .await
+    .expect("previews");
+
+    let did = ledger::install_chart(
+        &fixture.db,
+        retail,
+        sar(),
+        erp_i18n::Locale::English,
+        &Metadata::default(),
+    )
+    .await
+    .expect("installs");
+
+    assert_eq!(
+        would.opened, did.opened,
+        "the same accounts, in the same order"
+    );
+    assert_eq!(would.skipped, did.skipped);
+
+    fixture.cleanup().await;
+}
+
+/// **A preview over a chart already installed reports skips, not opens** — and
+/// still writes nothing.
+#[tokio::test]
+async fn a_preview_over_an_installed_chart_says_everything_is_already_there() {
+    let fixture = Fixture::new().await;
+    let services = ledger::chart("services").expect("ships");
+
+    let did = ledger::install_chart(
+        &fixture.db,
+        services,
+        sar(),
+        erp_i18n::Locale::English,
+        &Metadata::default(),
+    )
+    .await
+    .expect("installs");
+    assert_eq!(did.skipped(), 0, "a fresh tenant skips nothing");
+
+    let would = ledger::preview_chart(
+        &fixture.db,
+        services,
+        sar(),
+        erp_i18n::Locale::English,
+        &Metadata::default(),
+    )
+    .await
+    .expect("previews");
+    assert_eq!(would.opened(), 0, "nothing left to open");
+    assert_eq!(
+        would.skipped, did.opened,
+        "everything the install opened, the preview now skips"
     );
 
     fixture.cleanup().await;

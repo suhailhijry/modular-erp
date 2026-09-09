@@ -2954,24 +2954,29 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       left is **edit before install**, declined with reasons at
       `modules/ledger/src/charts.rs:26` since every account is renameable after
       install, and **preview**, which is the box below
-- [ ] Preview executes in a rolled-back transaction and reports resulting state.
-      **Scoped 2026-09-09, not started** — and the point of writing this down is
-      that it is a kernel change, not a route.
+- [x] **Preview executes in a rolled-back transaction and reports resulting
+      state — built 2026-09-10.** `POST /v1/ledger/chart/preview`, taking `Read`
+      because it writes nothing.
 
-      `TenantDb::execute` and `create` each call `self.begin()` themselves
-      (`crates/erp-tenant/src/db.rs:211,267`), so a caller cannot wrap several
-      commands in one transaction and roll it back. **The seam already exists
-      and has a name**: `ledger::post_entry_in` takes a `&mut PgConnection`
-      instead of owning its transaction, and everything that posts goes through
-      it. What preview needs is that pattern extended — `open_account_in`, and
-      then `install_chart_in` — so the whole install runs on one caller-owned
-      transaction that the preview rolls back.
+      **The seam, as scoped.** `ledger::open_account_in` and
+      `install_chart_in` take a `&mut PgConnection` instead of owning a
+      transaction, the pattern `post_entry_in` established. No retry inside
+      them: the caller's transaction owns that decision, and retrying inside
+      somebody else's would re-run their earlier steps.
 
-      **Why not compute the answer instead.** Predicting the outcome by reading
-      current state is easy and is the wrong feature: the value of a rolled-back
-      *execution* is that it runs the real code path, so a preview cannot
-      disagree with the install it is previewing. A predicted preview is a
-      second implementation of the same rules, and the two drift
+      **Preview and install are the same function.** `preview_chart` rolls the
+      transaction back and `install_chart` commits it; nothing else differs.
+      That is the property the box asked for — a *predicted* preview is a second
+      implementation of the install's rules, and two implementations drift.
+      `a_preview_says_exactly_what_the_install_does` is the test, and it
+      falsifies.
+
+      **The rollback happens on the error path too.** A preview that failed
+      halfway and left accounts behind would be the worst version of this.
+
+      `Installed` now names the accounts rather than counting them, because
+      "twenty-six would be opened" is not an answer anybody can check — and the
+      preview and the install answer in the same shape, from the same run.
 - [x] **Chart-of-accounts templates — three ship, and two of the five this box
       named should not exist.** `services` and `retail` were already built when
       this box was written; `real_estate` was added 2026-09-09 for Phase 20 and

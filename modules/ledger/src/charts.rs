@@ -719,13 +719,31 @@ pub fn chart(id: &str) -> Option<&'static Chart> {
     CHARTS.iter().find(|c| c.id == id)
 }
 
-/// How an installation went.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// How an installation went — **or would have gone**.
+///
+/// The codes and not just the counts, because a *preview* is the same run
+/// against a transaction that is rolled back, and "seventeen accounts would be
+/// opened" is not an answer somebody can check. Naming them is what makes the
+/// preview worth executing rather than predicting.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Installed {
-    pub opened: usize,
-    /// Accounts that were already there. Not a failure — see
+    /// Opened, in the order the chart lists them.
+    pub opened: Vec<&'static str>,
+    /// Already there. Not a failure — see
     /// [`install_chart`](crate::install_chart).
-    pub skipped: usize,
+    pub skipped: Vec<&'static str>,
+}
+
+impl Installed {
+    #[must_use]
+    pub fn opened(&self) -> usize {
+        self.opened.len()
+    }
+
+    #[must_use]
+    pub fn skipped(&self) -> usize {
+        self.skipped.len()
+    }
 }
 
 #[cfg(test)]

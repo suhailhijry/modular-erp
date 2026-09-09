@@ -2218,6 +2218,10 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // the chart, they do not restructure it.
     ("open_account", &["owner", "accountant"]),
     ("install_chart", &["owner", "accountant"]),
+    // **Reading what a chart *would* do is reading.** The preview writes
+    // nothing — it runs the install against a transaction and rolls it back —
+    // so it takes `Read`, unlike the install beside it.
+    ("preview_chart", ALL_ROLES),
     ("set_posting_accounts", &["owner", "accountant"]),
     // Where a liability is held is the shape of the books, not a day's work.
     ("set_deferral_accounts", &["owner", "accountant"]),
@@ -2374,8 +2378,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        235,
-        "expected two hundred and thirty-five role-scoped operations"
+        236,
+        "expected two hundred and thirty-six role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

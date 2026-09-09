@@ -93,6 +93,48 @@ type Outcome<E> = Result<Committed<E>, CommandError<LedgerError>>;
 ///
 /// Idempotent by refusal, not by silence: re-opening an existing code is an
 /// error, because the second caller almost certainly meant a different account.
+/// [`open_account`] on a caller's transaction.
+///
+/// **The `_in` pattern, as `post_entry_in` uses it.** `TenantDb::execute` owns
+/// its transaction and retries on conflict; that is right for a command that is
+/// the whole request, and wrong for one step of something larger. A caller with
+/// a transaction of its own — installing a chart, or previewing one and rolling
+/// it back — needs every step on *that* transaction or the rollback undoes
+/// nothing.
+///
+/// No retry here: the caller's transaction owns that decision, and retrying
+/// inside somebody else's would re-run their earlier steps too.
+///
+/// # Errors
+/// [`LedgerError::AccountExists`] if the code is taken, or the log's own.
+pub async fn open_account_in(
+    conn: &mut sqlx::PgConnection,
+    code: &AggregateId,
+    name: &str,
+    kind: AccountKind,
+    currency: CurrencyCode,
+    metadata: &Metadata,
+) -> Result<Committed<AccountEvent>, ExecuteError<LedgerError>> {
+    let name = name.trim().to_owned();
+    erp_eventlog::try_execute::<Account, _, LedgerError>(
+        conn,
+        code,
+        crate::upcasters(),
+        metadata,
+        |loaded| {
+            if loaded.aggregate.exists {
+                return Err(LedgerError::AccountExists(code.as_str().to_owned()));
+            }
+            Ok(Decision::one(AccountEvent::Opened {
+                name: name.clone(),
+                kind,
+                currency,
+            }))
+        },
+    )
+    .await
+}
+
 pub async fn open_account(
     db: &TenantDb,
     code: &AggregateId,
@@ -456,22 +498,77 @@ pub async fn accepts_postings(
     Ok(account.aggregate.accepts_postings())
 }
 
-fn rejected(error: LedgerError) -> CommandError<LedgerError> {
-    CommandError::Execute(erp_eventlog::ExecuteError::Rejected(error))
+/// [`install_chart`] on a caller's transaction.
+///
+/// **This is where preview and install stop being two things.** A preview is
+/// this function against a transaction that is rolled back; an install is the
+/// same function against one that commits. They cannot disagree about what a
+/// chart does, because they are the same code — which is the whole reason the
+/// box asked for a rolled-back *execution* rather than a prediction.
+///
+/// # Errors
+/// The log's own. An account that already exists is skipped and named, not an
+/// error: installing over a chart somebody has started is ordinary.
+pub async fn install_chart_in(
+    conn: &mut sqlx::PgConnection,
+    chart: &Chart,
+    currency: CurrencyCode,
+    locale: Locale,
+    metadata: &Metadata,
+) -> Result<Installed, ExecuteError<LedgerError>> {
+    let mut installed = Installed::default();
+
+    for template in chart.accounts {
+        let code = AggregateId::new(template.code)
+            .map_err(|e| ExecuteError::Rejected(LedgerError::BadAccountCode(e.to_string())))?;
+
+        match open_account_in(
+            &mut *conn,
+            &code,
+            template.name(locale),
+            template.kind,
+            currency,
+            metadata,
+        )
+        .await
+        {
+            Ok(_) => installed.opened.push(template.code),
+            Err(ExecuteError::Rejected(LedgerError::AccountExists(_))) => {
+                installed.skipped.push(template.code);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(installed)
 }
 
-/// Opens every account in a chart that is not already there.
+/// **What installing this chart would do, without doing it.**
 ///
-/// # Why an existing account is skipped rather than refused
+/// Runs [`install_chart_in`] against a real transaction and rolls it back, so
+/// the answer is what the install *did* rather than what a second
+/// implementation predicts it would.
 ///
-/// Installing eighteen accounts is eighteen commands, and the fifteenth can
-/// fail. Refusing on the first duplicate would make the retry — the obvious
-/// thing to do next — fail immediately and leave the chart half-built forever.
-/// Skipping makes this "ensure these accounts exist", which is idempotent, and
-/// idempotent is what turns recovery into retry.
-///
-/// It also means a tenant can install `retail` on top of `services` and get the
-/// three accounts it does not already have.
+/// # Errors
+/// The log's own. A refusal that would have stopped the install stops the
+/// preview too, which is the point: a preview that succeeds where the install
+/// fails is worse than none.
+pub async fn preview_chart(
+    db: &TenantDb,
+    chart: &Chart,
+    currency: CurrencyCode,
+    locale: Locale,
+    metadata: &Metadata,
+) -> Result<Installed, CommandError<LedgerError>> {
+    let mut tx = db.begin().await?;
+    let outcome = install_chart_in(&mut tx, chart, currency, locale, metadata).await;
+    // **Rolled back either way**, including on the error path: a preview that
+    // left half a chart behind would be the worst possible version of this.
+    tx.rollback().await.map_err(ExecuteError::from)?;
+    Ok(outcome?)
+}
+
+/// Installs a chart, and says what it did.
 pub async fn install_chart(
     db: &TenantDb,
     chart: &Chart,
@@ -479,30 +576,8 @@ pub async fn install_chart(
     locale: Locale,
     metadata: &Metadata,
 ) -> Result<Installed, CommandError<LedgerError>> {
-    let mut installed = Installed::default();
-
-    for template in chart.accounts {
-        let code = AggregateId::new(template.code)
-            .map_err(|e| rejected(LedgerError::BadAccountCode(e.to_string())))?;
-
-        let outcome = open_account(
-            db,
-            &code,
-            template.name(locale),
-            template.kind,
-            currency,
-            metadata,
-        )
-        .await;
-
-        match outcome {
-            Ok(_) => installed.opened += 1,
-            Err(CommandError::Execute(ExecuteError::Rejected(LedgerError::AccountExists(_)))) => {
-                installed.skipped += 1;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
+    let mut tx = db.begin().await?;
+    let installed = install_chart_in(&mut tx, chart, currency, locale, metadata).await?;
+    tx.commit().await.map_err(ExecuteError::from)?;
     Ok(installed)
 }

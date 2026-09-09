@@ -47,6 +47,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         // before anyone has an account. It is product information, not data.
         .routes(routes!(list_charts))
         .routes(routes!(install_chart))
+        .routes(routes!(preview_chart))
 }
 
 /// **What this module's routes can answer with.**
@@ -855,10 +856,86 @@ struct InstallChart {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[schema(example = json!({
+    "opened": 26, "skipped": 2,
+    "opened_codes": ["1000", "1010"], "skipped_codes": ["4000", "2100"]
+}))]
 struct ChartInstalled {
     opened: usize,
     /// Accounts that were already there. Installing twice is not an error.
     skipped: usize,
+    /// **Which ones**, in the order the chart lists them.
+    ///
+    /// The counts alone are not something a person can check, and this shape is
+    /// also what a *preview* answers — the same field names, because the
+    /// preview is the same run against a transaction that is rolled back.
+    opened_codes: Vec<String>,
+    skipped_codes: Vec<String>,
+}
+
+impl From<crate::Installed> for ChartInstalled {
+    fn from(installed: crate::Installed) -> Self {
+        Self {
+            opened: installed.opened(),
+            skipped: installed.skipped(),
+            opened_codes: installed.opened.iter().map(|c| (*c).to_owned()).collect(),
+            skipped_codes: installed.skipped.iter().map(|c| (*c).to_owned()).collect(),
+        }
+    }
+}
+
+/// **What installing a chart would do**, without doing it.
+///
+/// Runs the real installation against a transaction and rolls it back, so this
+/// answers what the install *did* rather than what a second implementation
+/// predicts it would. The two cannot disagree, because they are the same code.
+///
+/// The body and the answer are the same shape as `POST /v1/ledger/chart`.
+#[utoipa::path(
+    post,
+    path = "/v1/ledger/chart/preview",
+    tag = "ledger",
+    params(("Host" = String, Header, description = "The tenant's subdomain."),),
+    request_body = InstallChart,
+    responses(
+        (status = OK, description = "What would happen. Nothing was written.", body = ChartInstalled),
+        (status = BAD_REQUEST, description = "No such chart, or a currency that is not one", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn preview_chart(
+    tenant: Allowed<Read>,
+    State(_state): State<AppState>,
+    Language(locale): Language,
+    Json(body): Json<InstallChart>,
+) -> Result<Json<ChartInstalled>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let chart = crate::chart(&body.template).ok_or_else(|| {
+        bad_request(
+            erp_web::messages::UNKNOWN_CHART,
+            "chart",
+            &body.template,
+            locale,
+        )
+    })?;
+    let currency = body.currency.parse().map_err(|_| {
+        bad_request(
+            erp_web::messages::UNKNOWN_CURRENCY,
+            "currency",
+            &body.currency,
+            locale,
+        )
+    })?;
+
+    let would = crate::preview_chart(&tenant.db, chart, currency, locale, &metadata(&tenant))
+        .await
+        .map_err(|e| ledger_problem(&e, locale))?;
+
+    // **No `nudge`.** Nothing was written, so there is nothing for a worker to
+    // come and project.
+    Ok(Json(would.into()))
 }
 
 /// Open every account in a ready-made chart.
@@ -910,8 +987,5 @@ async fn install_chart(
 
     nudge(&state, tenant.db.tenant()).await;
 
-    Ok(Json(ChartInstalled {
-        opened: installed.opened,
-        skipped: installed.skipped,
-    }))
+    Ok(Json(installed.into()))
 }

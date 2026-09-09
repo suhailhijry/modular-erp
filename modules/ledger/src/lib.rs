@@ -35,8 +35,9 @@ mod vat;
 pub use account::{Account, AccountEvent, AccountKind};
 pub use charts::{CHARTS, Chart, Installed, TemplateAccount, chart};
 pub use commands::{
-    LedgerError, accepts_postings, close_account, install_chart, open_account, post_entry,
-    post_entry_in, rename_account, reverse_entry, reverse_in,
+    LedgerError, accepts_postings, close_account, install_chart, install_chart_in, open_account,
+    open_account_in, post_entry, post_entry_in, preview_chart, rename_account, reverse_entry,
+    reverse_in,
 };
 pub use entry::{JournalEntry, JournalEntryEvent};
 pub use lines::{BalancedLines, Line, Unbalanced};
