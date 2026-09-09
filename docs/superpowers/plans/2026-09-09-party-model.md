@@ -520,8 +520,28 @@ Expected: PASS. The four new tests plus everything from Task 1.
 cargo build --workspace --tests 2>&1 | grep -E "^error|missing field" | head -30
 ```
 
-Expected call sites, from a workspace grep for `crm::Details` and `Details {`:
-`modules/crm/tests/crm.rs`, `modules/sales/tests/sales.rs`, `modules/messaging/tests/messaging.rs`, `modules/conversations/tests/conversations.rs`, and `crates/erp-demo`. Add the field to each; do not change what any of those tests assert.
+**The exact call sites, verified** — ten files, all tests, no production code:
+
+```
+modules/crm/tests/crm.rs
+modules/booking/tests/booking.rs
+modules/booking/tests/fixtures.rs
+modules/branches/tests/branches.rs
+modules/conversations/tests/conversations.rs
+modules/messaging/tests/messaging.rs
+modules/notifications/tests/notifications.rs
+modules/pos/tests/pos.rs
+modules/prepaid/tests/prepaid.rs
+modules/sales/tests/sales.rs
+```
+
+Add `identification: None` to each construction; **do not change what any of
+those tests assert**. `crates/erp-demo` does *not* construct a `Details` — it
+only advances the `crm` projection — so it needs no edit.
+
+Beware the false positives: `hr`, `branches` and `booking` each have their own
+unrelated `Details` type, so a grep for `Details {` alone returns roughly twice
+this list. The ten above are the files that import `crm::Details` specifically.
 
 - [ ] **Step 8: Falsify the validation guard**
 
