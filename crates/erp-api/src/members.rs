@@ -27,6 +27,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_members, add_member))
         .routes(routes!(change_role, remove_member))
         .routes(routes!(set_module_role, clear_module_role))
+        .routes(routes!(second_factor_policy, set_second_factor_policy))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -124,6 +125,83 @@ async fn list_members(
             })
             .collect(),
     ))
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({ "required": true }))]
+struct SecondFactorPolicy {
+    /// **When true, a member with no authenticator app is refused at entry.**
+    ///
+    /// It refuses entry *to this tenant* and nothing else: their session stays
+    /// valid and their other organisations stay reachable. Somebody already
+    /// signed in is not thrown out mid-action — they are stopped the next time
+    /// they come through the door, and told to enrol.
+    required: bool,
+}
+
+/// Whether this organisation requires two-step sign-in.
+#[utoipa::path(
+    get,
+    path = "/v1/members/second-factor-policy",
+    tag = "members",
+    params(("Host" = String, Header, description = "The tenant's subdomain."),),
+    responses(
+        (status = OK, body = SecondFactorPolicy),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn second_factor_policy(
+    tenant: Allowed<Read>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+) -> Result<Json<SecondFactorPolicy>, Problem> {
+    let found = state
+        .control
+        .tenant(tenant.db.tenant())
+        .await
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
+    Ok(Json(SecondFactorPolicy {
+        required: found.is_some_and(|t| t.requires_second_factor),
+    }))
+}
+
+/// Require — or stop requiring — two-step sign-in here.
+///
+/// **Turning it on is refused unless you have enrolled one yourself.** One
+/// rule, no special cases, and it guarantees at least one person can still get
+/// in: an owner who could switch this on from an unprotected account would be
+/// one click from locking the business out of its own books.
+///
+/// Turning it **off** carries no such condition — somebody has to be able to
+/// undo this, and needing a second factor to remove the requirement is the trap
+/// it exists to prevent.
+#[utoipa::path(
+    put,
+    path = "/v1/members/second-factor-policy",
+    tag = "members",
+    params(("Host" = String, Header, description = "The tenant's subdomain."),),
+    request_body = SecondFactorPolicy,
+    responses(
+        (status = NO_CONTENT, description = "Set."),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, description = "Not permitted here — or switching it on without a second factor of your own, which is `auth.tenant_requires_second_factor`", body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn set_second_factor_policy(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Json(body): Json<SecondFactorPolicy>,
+) -> Result<StatusCode, Problem> {
+    state
+        .control
+        .set_second_factor_requirement(tenant.db.tenant(), tenant.session.identity, body.required)
+        .await
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Add somebody, choosing their password for them.

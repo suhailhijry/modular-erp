@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT t.id as \"id: TenantId\", t.slug, t.display_name, t.status, t.cluster,\n                      t.database_name, t.demo_expires_at, t.created_at\n                 FROM tenant_domain d\n                 JOIN tenant t ON t.id = d.tenant\n                WHERE d.verified_at IS NOT NULL\n                  AND ($1 = d.domain OR $1 LIKE '%.' || d.domain)\n                ORDER BY length(d.domain) DESC\n                LIMIT 1",
+  "query": "SELECT t.id, t.slug, t.display_name, t.status, t.cluster,\n                      t.database_name, t.demo_expires_at,\n                      t.requires_second_factor, t.created_at\n                 FROM tenant t\n                 JOIN entitlement e ON e.tenant_id = t.id\n                WHERE t.status IN ('active', 'suspended')\n                  AND e.module_id = $1\n                  AND e.disabled_at IS NULL\n                ORDER BY t.created_at",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id: TenantId",
+        "name": "id",
         "type_info": "Uuid",
         "origin": {
           "Table": {
@@ -82,6 +82,17 @@
       },
       {
         "ordinal": 7,
+        "name": "requires_second_factor",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "requires_second_factor"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -105,8 +116,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "919991d66d2d6e9509e585dc51f3e2e834ef3a328bbf11d8ae839f1650812e93"
+  "hash": "28ef1db830bb65a057112fbbc95e1cc408b38c6d164c0eee35cc2113eb3ecb3b"
 }

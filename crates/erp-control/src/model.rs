@@ -79,6 +79,14 @@ pub struct Tenant {
     pub database_name: String,
     /// Set for demo tenants; `None` for real ones.
     pub demo_expires_at: Option<Timestamp>,
+    /// **This tenant refuses members who have not enrolled a second factor.**
+    ///
+    /// Checked at `ControlPlane::enter`, so it costs nothing — this row is
+    /// already cached there. It refuses *entry to this tenant* and nothing
+    /// else: the session stays valid and the person's other tenants stay
+    /// reachable, because being thrown out of everything is not what an owner
+    /// asked for when they turned this on.
+    pub requires_second_factor: bool,
     pub created_at: Timestamp,
 }
 
@@ -167,6 +175,7 @@ mod tests {
     #[test]
     fn only_active_tenants_may_be_entered() {
         let base = Tenant {
+            requires_second_factor: false,
             id: TenantId::new(),
             slug: "acme".into(),
             display_name: "Acme".into(),

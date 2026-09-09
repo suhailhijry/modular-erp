@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO tenant (id, slug, display_name, cluster, database_name)\n               VALUES ($1, $2, $3, $4, $5)\n               RETURNING id as \"id: TenantId\", slug, display_name, status, cluster,\n                         database_name, demo_expires_at, created_at",
+  "query": "INSERT INTO tenant (id, slug, display_name, cluster, database_name)\n               VALUES ($1, $2, $3, $4, $5)\n               RETURNING id as \"id: TenantId\", slug, display_name, status, cluster,\n                         database_name, demo_expires_at,\n                      requires_second_factor, created_at",
   "describe": {
     "columns": [
       {
@@ -82,6 +82,17 @@
       },
       {
         "ordinal": 7,
+        "name": "requires_second_factor",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "requires_second_factor"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -109,8 +120,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "75c987d1be13d2e7306c6cc0543642dde58a3d5863039d7656d5deeec59117b1"
+  "hash": "a8405bc6457280f374dc8a2c69fbdc17d474ec8b03fec7bc551f0659e28f6b38"
 }

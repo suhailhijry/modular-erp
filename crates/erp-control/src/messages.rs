@@ -41,6 +41,8 @@ pub const ORIGIN_OUTSIDE_DOMAIN: MessageCode = MessageCode::new("origins.outside
 /// share one.
 pub const INVALID_CREDENTIALS: MessageCode = MessageCode::new("auth.invalid_credentials");
 pub const SECOND_FACTOR_REQUIRED: MessageCode = MessageCode::new("auth.second_factor_required");
+pub const TENANT_REQUIRES_SECOND_FACTOR: MessageCode =
+    MessageCode::new("auth.tenant_requires_second_factor");
 pub const HANDLE_TAKEN: MessageCode = MessageCode::new("auth.handle_taken");
 pub const SESSION_EXPIRED: MessageCode = MessageCode::new("auth.session_expired");
 /// 403, naming the capability. "Ask someone with permission" is only actionable
@@ -111,6 +113,7 @@ pub static CODES: &[MessageCode] = &[
     SLUG_TAKEN,
     INVALID_CREDENTIALS,
     SECOND_FACTOR_REQUIRED,
+    TENANT_REQUIRES_SECOND_FACTOR,
     HANDLE_TAKEN,
     SESSION_EXPIRED,
     NOT_PERMITTED,
@@ -406,6 +409,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Template::Simple("الاسم {slug} مستخدم بالفعل. يُرجى اختيار اسم آخر."),
     ),
     // -- authentication ----------------------------------------------------
+    (
+        TENANT_REQUIRES_SECOND_FACTOR,
+        Locale::English,
+        Template::Simple(
+            "This organisation requires two-step sign-in. Set up an authenticator app on your account, then try again.",
+        ),
+    ),
+    (
+        TENANT_REQUIRES_SECOND_FACTOR,
+        Locale::Arabic,
+        Template::Simple(
+            "تشترط هذه المنشأة تسجيل الدخول بخطوتين. فعّل تطبيق المصادقة في حسابك ثم أعد المحاولة.",
+        ),
+    ),
     (
         SECOND_FACTOR_REQUIRED,
         Locale::English,

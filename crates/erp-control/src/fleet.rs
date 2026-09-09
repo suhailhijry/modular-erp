@@ -256,7 +256,8 @@ impl ControlPlane {
     async fn tenants_with_databases(&self) -> Result<Vec<crate::model::Tenant>, AccessError> {
         let rows = sqlx::query!(
             r#"SELECT id, slug, display_name, status, cluster,
-                      database_name, demo_expires_at, created_at
+                      database_name, demo_expires_at,
+                      requires_second_factor, created_at
                  FROM tenant
                 WHERE status IN ('active', 'suspended')
                 ORDER BY created_at"#
@@ -274,6 +275,7 @@ impl ControlPlane {
                     row.cluster,
                     row.database_name,
                     row.demo_expires_at,
+                    row.requires_second_factor,
                     row.created_at,
                 )
             })

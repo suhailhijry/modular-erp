@@ -448,6 +448,220 @@ static RETAIL: &[TemplateAccount] = &[
     ),
 ];
 
+/// **Letting and managing property.**
+///
+/// The services chart plus the five things a landlord or an agency has that a
+/// consultancy does not, each of which §49 identified as a gap before Phase 20
+/// existed:
+///
+/// - **A security deposit is a liability** (`2500`), not revenue. Money held
+///   and returned at the end of a term less deductions. Posting it to `4000`
+///   would overstate revenue by the whole deposit balance — and the trial
+///   balance would still balance, which is why this needs its own account
+///   rather than care.
+/// - **Rent collected for an owner is a liability too** (`2600`) until it is
+///   paid over. An agency's bank balance is mostly other people's money.
+/// - **Investment property** (`1600`) is the asset itself, held under IAS 40.
+/// - **Rent and service charges are separate revenue** (`4200`, `4210`),
+///   because residential rent is VAT-exempt and a service charge generally is
+///   not. One account for both makes the VAT return unanswerable.
+/// - **Maintenance** (`5500`) is the cost that decides whether a unit made
+///   money, and it is nobody's salary or utilities.
+static REAL_ESTATE: &[TemplateAccount] = &[
+    account(
+        "1000",
+        "Cash on hand",
+        "النقد في الصندوق",
+        AccountKind::Asset,
+    ),
+    account("1010", "Bank", "البنك", AccountKind::Asset),
+    account(
+        "1150",
+        "Payments in transit",
+        "مدفوعات قيد التحصيل",
+        AccountKind::Asset,
+    ),
+    // **A tenant may pay a deposit through Tabby like anyone else.** Dropped
+    // from the first draft of this chart and put back by
+    // `every_chart_can_settle_a_gateway_payment`, which exists because a chart
+    // that cannot receive the money the product takes is not a starting point.
+    account(
+        "1160",
+        "Instalment provider receivable",
+        "ذمم مزودي التقسيط",
+        AccountKind::Asset,
+    ),
+    account(
+        "1100",
+        "Rent receivable",
+        "إيجارات مدينة",
+        AccountKind::Asset,
+    ),
+    account(
+        "1200",
+        "VAT receivable",
+        "ضريبة القيمة المضافة المستحقة",
+        AccountKind::Asset,
+    ),
+    account(
+        "1500",
+        "Prepaid expenses",
+        "مصروفات مدفوعة مقدمًا",
+        AccountKind::Asset,
+    ),
+    // **The property itself.** IAS 40 investment property: held to earn rent
+    // or for capital appreciation, which is what makes it not fixed assets in
+    // the ordinary sense.
+    account(
+        "1600",
+        "Investment property",
+        "عقارات استثمارية",
+        AccountKind::Asset,
+    ),
+    account(
+        "1610",
+        "Accumulated depreciation — property",
+        "مجمع إهلاك العقارات",
+        AccountKind::Asset,
+    ),
+    account(
+        "2000",
+        "Accounts payable",
+        "الذمم الدائنة",
+        AccountKind::Liability,
+    ),
+    account(
+        "2100",
+        "VAT payable",
+        "ضريبة القيمة المضافة المستحقة الدفع",
+        AccountKind::Liability,
+    ),
+    account(
+        "2200",
+        "Salaries payable",
+        "رواتب مستحقة",
+        AccountKind::Liability,
+    ),
+    account(
+        "2210",
+        "Payroll deductions",
+        "استقطاعات الرواتب",
+        AccountKind::Liability,
+    ),
+    account(
+        "2300",
+        "Zakat payable",
+        "الزكاة المستحقة",
+        AccountKind::Liability,
+    ),
+    // **Rent invoiced for a period that has not happened yet.** A year paid up
+    // front is one payment and twelve months of revenue.
+    account(
+        "2400",
+        "Deferred rent",
+        "إيجارات مؤجلة",
+        AccountKind::Liability,
+    ),
+    // **Held, not earned.** Returned at the end of the tenancy less whatever
+    // was deducted, and on the balance sheet the whole time.
+    account(
+        "2500",
+        "Tenant deposits held",
+        "ضمانات المستأجرين",
+        AccountKind::Liability,
+    ),
+    // **Other people's money.** Rent collected on an owner's behalf, less
+    // commission, until it is disbursed.
+    account(
+        "2600",
+        "Owner funds payable",
+        "مستحقات الملاك",
+        AccountKind::Liability,
+    ),
+    account("3000", "Owner's capital", "رأس المال", AccountKind::Equity),
+    account(
+        "3100",
+        "Retained earnings",
+        "الأرباح المبقاة",
+        AccountKind::Equity,
+    ),
+    // **Kept apart from service charges on purpose.** Residential rent is
+    // VAT-exempt (`VATEX-SA-30`) and a service charge generally is not; one
+    // account for both makes the return unanswerable.
+    account(
+        "4200",
+        "Rental income",
+        "إيرادات الإيجار",
+        AccountKind::Revenue,
+    ),
+    account(
+        "4210",
+        "Service charge income",
+        "إيرادات رسوم الخدمات",
+        AccountKind::Revenue,
+    ),
+    // What the agency earns, as distinct from what it collects.
+    account(
+        "4300",
+        "Management commission",
+        "عمولة الإدارة",
+        AccountKind::Revenue,
+    ),
+    account(
+        "4910",
+        "Forfeited deposits",
+        "دفعات مقدمة مصادرة",
+        AccountKind::Revenue,
+    ),
+    account(
+        "4900",
+        "Discounts given",
+        "الخصومات الممنوحة",
+        AccountKind::Revenue,
+    ),
+    account(
+        "5000",
+        "Salaries and wages",
+        "الرواتب والأجور",
+        AccountKind::Expense,
+    ),
+    account("5200", "Utilities", "المرافق", AccountKind::Expense),
+    account("5300", "Marketing", "التسويق", AccountKind::Expense),
+    account(
+        "5400",
+        "Payment processing fees",
+        "رسوم معالجة المدفوعات",
+        AccountKind::Expense,
+    ),
+    // The number that decides whether a unit made money.
+    account(
+        "5500",
+        "Property maintenance",
+        "صيانة العقارات",
+        AccountKind::Expense,
+    ),
+    account(
+        "5510",
+        "Depreciation — property",
+        "إهلاك العقارات",
+        AccountKind::Expense,
+    ),
+    // A gateway pays over net of its cut and rounds; the difference has to
+    // land somewhere that is not revenue.
+    account(
+        "5420",
+        "Settlement differences",
+        "فروقات التسويات",
+        AccountKind::Expense,
+    ),
+    account(
+        "5900",
+        "Other expenses",
+        "مصروفات أخرى",
+        AccountKind::Expense,
+    ),
+];
+
 /// Every chart this build ships.
 pub static CHARTS: &[Chart] = &[
     Chart {
@@ -466,6 +680,16 @@ pub static CHARTS: &[Chart] = &[
         description_en: "Adds inventory, cost of goods sold and sales returns.",
         description_ar: "يضيف المخزون وتكلفة البضاعة المباعة ومردودات المبيعات.",
         accounts: RETAIL,
+    },
+    Chart {
+        id: "real_estate",
+        name_en: "Letting and property management",
+        name_ar: "تأجير وإدارة عقارات",
+        description_en: "Deposits held as a liability, rent and service charges \
+                         apart for VAT, and owner funds kept from the agency's own.",
+        description_ar: "الضمانات كالتزام، وفصل الإيجار عن رسوم الخدمات لأغراض الضريبة، \
+                         وفصل أموال الملاك عن أموال المنشأة.",
+        accounts: REAL_ESTATE,
     },
 ];
 
@@ -584,6 +808,51 @@ mod tests {
                 c.id
             );
         }
+    }
+
+    /// **The two mistakes a property chart exists to prevent**, both of which
+    /// balance and so are invisible to the trial-balance invariant.
+    ///
+    /// A security deposit posted to revenue overstates income by the whole
+    /// deposit balance and understates what is owed back. Rent collected for an
+    /// owner posted to revenue makes an agency look like it earned the rent
+    /// rather than the commission on it. §49 found both while assessing whether
+    /// this product could manage property; this is where they are pinned.
+    #[test]
+    fn money_that_is_held_rather_than_earned_is_a_liability() {
+        let chart = chart("real_estate").expect("the real estate chart ships");
+        for (code, what) in [
+            ("2500", "a tenant's deposit"),
+            ("2600", "rent collected for an owner"),
+        ] {
+            let account = chart
+                .accounts
+                .iter()
+                .find(|a| a.code == code)
+                .unwrap_or_else(|| panic!("{code} is missing, and {what} needs somewhere to go"));
+            assert_eq!(
+                account.kind,
+                AccountKind::Liability,
+                "{what} is held and not earned, so {code} is a liability"
+            );
+        }
+    }
+
+    /// **Rent and service charges are separate revenue on purpose.**
+    ///
+    /// Residential rent is VAT-exempt under `VATEX-SA-30`; a service charge
+    /// generally is not. One account for both makes the VAT return
+    /// unanswerable, and the two rates cannot be told apart after the fact.
+    #[test]
+    fn rent_and_service_charges_are_not_the_same_account() {
+        let chart = chart("real_estate").expect("the real estate chart ships");
+        let codes: Vec<_> = chart.accounts.iter().map(|a| a.code).collect();
+        assert!(codes.contains(&"4200"), "no account for rent");
+        assert!(codes.contains(&"4210"), "no account for service charges");
+        assert!(
+            codes.contains(&"4300"),
+            "an agency earns commission, which is not rent it collected"
+        );
     }
 
     /// Saudi VAT is 15% and ZATCA-reported; Zakat applies to GCC-owned

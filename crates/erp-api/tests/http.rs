@@ -1941,6 +1941,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Every route here acts on `auth.session.identity` and takes no tenant, so
     // every role reaches all four and each one reaches only themselves.
     ("second_factor", ALL_ROLES),
+    // Reading the policy is reading; setting it is ManageTenant, like every
+    // other decision about who may be here.
+    ("second_factor_policy", ALL_ROLES),
     ("begin_second_factor", ALL_ROLES),
     ("confirm_second_factor", ALL_ROLES),
     ("disable_second_factor", ALL_ROLES),
@@ -2241,6 +2244,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("activate", OWNER),
     ("add_member", OWNER),
     ("change_role", OWNER),
+    // Requiring two-step sign-in is a decision about who may be here, which is
+    // the same authority as adding somebody or changing their role.
+    ("set_second_factor_policy", OWNER),
     ("remove_member", OWNER),
     ("set_module_role", OWNER),
     ("clear_module_role", OWNER),
@@ -2368,8 +2374,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        233,
-        "expected two hundred and thirty-three role-scoped operations"
+        235,
+        "expected two hundred and thirty-five role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

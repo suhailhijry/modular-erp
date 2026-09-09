@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, slug, display_name, status, cluster,\n                      database_name, demo_expires_at, created_at\n                 FROM tenant\n                WHERE status IN ('active', 'suspended')\n                ORDER BY created_at",
+  "query": "SELECT t.id as \"id: TenantId\", t.slug, t.display_name, t.status, t.cluster,\n                      t.database_name, t.demo_expires_at,\n                      t.requires_second_factor, t.created_at\n                 FROM tenant t\n                 JOIN membership m ON m.tenant_id = t.id\n                WHERE m.identity_id = $1\n                  AND m.revoked_at IS NULL\n                  AND t.status <> 'deleted'\n                ORDER BY t.display_name",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
+        "name": "id: TenantId",
         "type_info": "Uuid",
         "origin": {
           "Table": {
@@ -82,6 +82,17 @@
       },
       {
         "ordinal": 7,
+        "name": "requires_second_factor",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "requires_second_factor"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -93,7 +104,9 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Uuid"
+      ]
     },
     "nullable": [
       false,
@@ -103,8 +116,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "541be359954c44e8e3336afe75b47df2544bda990069029079c7e365642a4251"
+  "hash": "4cd2bb66fc426313b7eb76c17d245d14e7232e7582020c0da0990a5d1e3ced68"
 }

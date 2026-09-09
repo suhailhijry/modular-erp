@@ -24,6 +24,7 @@ here is what a setting *cannot* answer.
 | Taqnyat DLR callback payload | `dev.taqnyat.sa/ar/doc/sms/` (primary source) + search | **Still undecidable.** The primary source documents *that* a webhook exists and how to configure it, and does not document a single field name, type or status value. See §1, §1b — feature skipped |
 | ZATCA VAT categories and VATEX-SA exemption codes | Vertex e-invoicing docs + ClearTax + ZATCA rule discussion | **Decided.** Cross-confirmed by two independent sources; built (§50 of the implementation plan) |
 | TOTP algorithm and test vectors | RFC 6238 / RFC 4226 / RFC 4648, published vectors | **Decided.** Specified to the byte with vectors the build now runs; built (§51) |
+| Is there a SOCPA or Saudi-mandated chart of accounts? | IFRS Foundation jurisdiction profile, IFAC, SOCPA guidance | **Decided: there is none.** SOCPA endorses IFRS and IFRS for SMEs — accounting *standards*, not a chart — and Saudi Arabia mandates no chart of accounts for private companies. The plan's "SOCPA-aligned" template was therefore dropped rather than invented; see §7 |
 
 ### What the ZATCA research settled
 
@@ -162,7 +163,7 @@ ZATCA expects. A per-line override is a small change once the answer is known.
 
 ---
 
-## 6 · Whether a tenant may *require* a second factor of its members
+## 6 · ~~Whether a tenant may *require* a second factor of its members~~ — **answered and built, 2026-09-09**
 
 **Where:** Phase 3, MFA (§51).
 
@@ -182,7 +183,41 @@ question, not the flag. A flag in `configuration` without deciding what happens
 to live sessions and multi-tenant members would encode an answer nobody asked
 for.
 
-**What was built instead.** Per-identity, opt-in, complete: enrol, confirm,
-recovery codes, replay refusal, disable. Nothing forecloses the tenant-level
-requirement; it adds a check at `enter`, and the three questions above are what
-it needs answered first.
+**Answered directly rather than logged.** Refuse at next tenant entry (session
+stays valid, other tenants unaffected); switching it on is refused unless the
+owner is enrolled; switching it off never needs one. Built and falsified — see
+§51 of the implementation plan.
+
+**This entry is kept as the record of the reasoning, not as an open question.**
+From 2026-09-09 these go to the user directly instead of into this file.
+
+---
+
+## 7 · "SOCPA-aligned chart of accounts" — researched, and it does not exist
+
+**Where:** Phase 4d, chart-of-accounts templates.
+
+**The finding.** The box asked for five templates including a *"SOCPA-aligned"*
+one. Looked up rather than assumed: SOCPA requires IFRS Accounting Standards as
+endorsed in Saudi Arabia, with IFRS for SMEs the default for private companies
+that are not public interest entities. Those are **accounting standards** —
+recognition, measurement, disclosure. Neither prescribes a chart of accounts,
+and Saudi Arabia mandates none for private companies.
+
+**Why this is not merely a naming quibble.** A chart shipped as "SOCPA-aligned"
+claims an alignment with a professional body that has issued nothing to align
+with. The audience for that label is Saudi accountants and auditors — precisely
+the people who would know it is not a thing, and the ones whose trust the label
+is trying to borrow. Inventing a chart is fine; naming it after a standards body
+is not.
+
+**What was built instead.** `real_estate`, which is named after what it is for,
+alongside the existing `services` and `retail`. "Generic IFRS" was also dropped:
+`services` already *is* a chart with no industry accounts in it, and a second
+copy under a standards-body name would be the same accounts and a stronger
+claim.
+
+**Not ambiguous, so not blocking** — recorded because the plan asked for
+something specific and the honest answer was "that is not a thing", which is
+worth having written down the next time somebody reads that box.
+

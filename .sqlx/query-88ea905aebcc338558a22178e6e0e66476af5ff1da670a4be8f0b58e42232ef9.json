@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE tenant\n               SET worker_lease_owner = $1,\n                   worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond'),\n                   next_visit_at      = now() + ($3::BIGINT * INTERVAL '1 millisecond')\n             WHERE id IN (\n                 SELECT id\n                   FROM tenant\n                  WHERE status = 'active'\n                    AND next_visit_at <= now()\n                    AND (worker_lease_until IS NULL OR worker_lease_until <= now())\n                  ORDER BY next_visit_at\n                  LIMIT $2\n                    FOR UPDATE SKIP LOCKED\n             )\n            RETURNING id as \"id: TenantId\", slug, display_name, status, cluster,\n                      database_name, demo_expires_at, created_at, idle_visits\n            ",
+  "query": "\n            UPDATE tenant\n               SET worker_lease_owner = $1,\n                   worker_lease_until = now() + ($3::BIGINT * INTERVAL '1 millisecond'),\n                   next_visit_at      = now() + ($3::BIGINT * INTERVAL '1 millisecond')\n             WHERE id IN (\n                 SELECT id\n                   FROM tenant\n                  WHERE status = 'active'\n                    AND next_visit_at <= now()\n                    AND (worker_lease_until IS NULL OR worker_lease_until <= now())\n                  ORDER BY next_visit_at\n                  LIMIT $2\n                    FOR UPDATE SKIP LOCKED\n             )\n            RETURNING id as \"id: TenantId\", slug, display_name, status, cluster,\n                      database_name, demo_expires_at,\n                      requires_second_factor, created_at, idle_visits\n            ",
   "describe": {
     "columns": [
       {
@@ -82,6 +82,17 @@
       },
       {
         "ordinal": 7,
+        "name": "requires_second_factor",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "requires_second_factor"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "idle_visits",
         "type_info": "Int4",
         "origin": {
@@ -119,8 +130,9 @@
       false,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "043c97efcb0a15fa0b79d7f6621e79cfaad338de156760da3e69a0f2aa64ef63"
+  "hash": "88ea905aebcc338558a22178e6e0e66476af5ff1da670a4be8f0b58e42232ef9"
 }

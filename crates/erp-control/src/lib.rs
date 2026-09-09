@@ -136,6 +136,15 @@ pub enum AccessError {
     /// exist, which is a free enumeration oracle.
     #[error("no membership for this identity in this tenant")]
     NotAMember,
+    /// **This tenant requires a second factor and this member has none.**
+    ///
+    /// Deliberately *not* rendered as `NotAMember`, unlike most access
+    /// failures: the caller is a member, they are signed in, and the only thing
+    /// they can do about it is enrol. A 404 would tell them to give up. It
+    /// leaks nothing an attacker could use — reaching this at all means already
+    /// holding a session and a live membership.
+    #[error("this tenant requires a second factor and this account has none")]
+    SecondFactorRequired,
     /// A domain this tenant has not claimed.
     #[error("{0} has not been claimed by this tenant")]
     DomainNotClaimed(String),
@@ -437,6 +446,14 @@ impl ControlPlane {
             .cached_membership(identity_id, tenant_id)
             .await?
             .ok_or(AccessError::NotAMember)?;
+
+        // **Entry to this tenant, and nothing else.** The session stays valid
+        // and the person's other tenants stay reachable: an owner turning this
+        // on asked to protect their own business, not to sign somebody out of
+        // somebody else's. Costs nothing — `tenant` came from the cache above.
+        if tenant.requires_second_factor && !self.has_second_factor(identity_id).await? {
+            return Err(AccessError::SecondFactorRequired);
+        }
 
         let mut db = self.open(&tenant, lane).await?;
         db.set_access(Some(access));
@@ -867,7 +884,8 @@ impl ControlPlane {
                     FOR UPDATE SKIP LOCKED
              )
             RETURNING id as "id: TenantId", slug, display_name, status, cluster,
-                      database_name, demo_expires_at, created_at, idle_visits
+                      database_name, demo_expires_at,
+                      requires_second_factor, created_at, idle_visits
             "#,
             owner,
             limit,
@@ -887,6 +905,7 @@ impl ControlPlane {
                     row.cluster,
                     row.database_name,
                     row.demo_expires_at,
+                    row.requires_second_factor,
                     row.created_at,
                 )
                 .map(|tenant| Claimed {
@@ -971,6 +990,46 @@ impl ControlPlane {
     /// interval, and when the API can tell it directly that a tenant just wrote
     /// something, it does so by calling this. Polling becomes the floor rather
     /// than the mechanism, and nothing downstream changes.
+    /// **Requires — or stops requiring — a second factor of this tenant's
+    /// members.**
+    ///
+    /// Turning it on is refused unless the person doing it has enrolled one
+    /// themselves. One rule, no special cases, and it guarantees that at least
+    /// one person can still get in: an owner who could switch this on from an
+    /// unprotected account would be one click from locking the business out of
+    /// its own books, at which point the only way back is platform support.
+    ///
+    /// Turning it **off** carries no such condition. Somebody has to be able to
+    /// undo this, and requiring a second factor to remove the requirement is
+    /// the trap it exists to prevent.
+    ///
+    /// # Errors
+    /// [`AccessError::SecondFactorRequired`] if the caller is switching it on
+    /// without one, or the database's own errors.
+    pub async fn set_second_factor_requirement(
+        &self,
+        tenant_id: TenantId,
+        by: IdentityId,
+        required: bool,
+    ) -> Result<(), AccessError> {
+        if required && !self.has_second_factor(by).await? {
+            return Err(AccessError::SecondFactorRequired);
+        }
+        sqlx::query!(
+            "UPDATE tenant SET requires_second_factor = $2 WHERE id = $1",
+            tenant_id.as_uuid(),
+            required,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // **The tenant row is cached and `enter` reads it from there**, so a
+        // requirement nobody forgets is a requirement nobody enforces.
+        self.forget(crate::shared::Invalidate::Tenant(tenant_id))
+            .await;
+        Ok(())
+    }
+
     pub async fn request_visit(&self, tenant_id: TenantId) -> Result<(), AccessError> {
         sqlx::query!(
             "UPDATE tenant SET next_visit_at = now()
@@ -1424,7 +1483,8 @@ impl ControlPlane {
             r#"INSERT INTO tenant (id, slug, display_name, cluster, database_name)
                VALUES ($1, $2, $3, $4, $5)
                RETURNING id as "id: TenantId", slug, display_name, status, cluster,
-                         database_name, demo_expires_at, created_at"#,
+                         database_name, demo_expires_at,
+                      requires_second_factor, created_at"#,
             id.as_uuid(),
             slug,
             display_name,
@@ -1460,6 +1520,7 @@ impl ControlPlane {
             row.cluster,
             row.database_name,
             row.demo_expires_at,
+            row.requires_second_factor,
             row.created_at,
         )
     }
@@ -1467,7 +1528,8 @@ impl ControlPlane {
     pub async fn tenant(&self, id: TenantId) -> Result<Option<Tenant>, AccessError> {
         let row = sqlx::query!(
             r#"SELECT id as "id: TenantId", slug, display_name, status, cluster,
-                      database_name, demo_expires_at, created_at
+                      database_name, demo_expires_at,
+                      requires_second_factor, created_at
                FROM tenant WHERE id = $1"#,
             id.as_uuid(),
         )
@@ -1483,6 +1545,7 @@ impl ControlPlane {
                 row.cluster,
                 row.database_name,
                 row.demo_expires_at,
+                row.requires_second_factor,
                 row.created_at,
             )
         })
@@ -1512,7 +1575,8 @@ impl ControlPlane {
         self.miss();
         let row = sqlx::query!(
             r#"SELECT t.id as "id: TenantId", t.slug, t.display_name, t.status, t.cluster,
-                      t.database_name, t.demo_expires_at, t.created_at
+                      t.database_name, t.demo_expires_at,
+                      t.requires_second_factor, t.created_at
                  FROM tenant_domain d
                  JOIN tenant t ON t.id = d.tenant
                 WHERE d.verified_at IS NOT NULL
@@ -1533,6 +1597,7 @@ impl ControlPlane {
                     row.cluster,
                     row.database_name,
                     row.demo_expires_at,
+                    row.requires_second_factor,
                     row.created_at,
                 )
             })
@@ -1544,7 +1609,8 @@ impl ControlPlane {
     pub async fn tenant_by_slug(&self, slug: &str) -> Result<Option<Tenant>, AccessError> {
         let row = sqlx::query!(
             r#"SELECT id as "id: TenantId", slug, display_name, status, cluster,
-                      database_name, demo_expires_at, created_at
+                      database_name, demo_expires_at,
+                      requires_second_factor, created_at
                FROM tenant WHERE slug = $1"#,
             slug,
         )
@@ -1560,6 +1626,7 @@ impl ControlPlane {
                 row.cluster,
                 row.database_name,
                 row.demo_expires_at,
+                row.requires_second_factor,
                 row.created_at,
             )
         })
@@ -1819,7 +1886,8 @@ impl ControlPlane {
     ) -> Result<Vec<Tenant>, AccessError> {
         let rows = sqlx::query!(
             r#"SELECT t.id as "id: TenantId", t.slug, t.display_name, t.status, t.cluster,
-                      t.database_name, t.demo_expires_at, t.created_at
+                      t.database_name, t.demo_expires_at,
+                      t.requires_second_factor, t.created_at
                  FROM tenant t
                  JOIN membership m ON m.tenant_id = t.id
                 WHERE m.identity_id = $1
@@ -1841,6 +1909,7 @@ impl ControlPlane {
                     row.cluster,
                     row.database_name,
                     row.demo_expires_at,
+                    row.requires_second_factor,
                     row.created_at,
                 )
             })
@@ -1986,6 +2055,10 @@ impl Localize for AccessError {
             Self::NoSuchIdentity => Message::new(messages::NO_SUCH_IDENTITY),
             Self::IdentitySuspended => Message::new(messages::IDENTITY_SUSPENDED),
             Self::NoSuchTenant | Self::NotAMember => Message::new(messages::ACCESS_DENIED),
+            // **Not `ACCESS_DENIED`.** The caller is a member and is signed in;
+            // the one thing they can do about this is enrol, and a message that
+            // says "denied" tells them to give up instead.
+            Self::SecondFactorRequired => Message::new(messages::TENANT_REQUIRES_SECOND_FACTOR),
             Self::TenantNotActive { status } => match status {
                 // Provisioning is a retry, and saying so saves a support ticket.
                 TenantStatus::Provisioning => Message::new(messages::TENANT_PROVISIONING),
@@ -2088,6 +2161,7 @@ pub(crate) fn tenant_from_row(
     cluster: String,
     database_name: String,
     demo_expires_at: Option<erp_types::Timestamp>,
+    requires_second_factor: bool,
     created_at: erp_types::Timestamp,
 ) -> Result<Tenant, AccessError> {
     Ok(Tenant {
@@ -2098,6 +2172,7 @@ pub(crate) fn tenant_from_row(
         cluster,
         database_name,
         demo_expires_at,
+        requires_second_factor,
         created_at,
     })
 }

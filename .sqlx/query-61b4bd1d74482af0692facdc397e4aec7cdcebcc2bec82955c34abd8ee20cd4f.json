@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id as \"id: TenantId\", slug, display_name, status, cluster,\n                      database_name, demo_expires_at, created_at\n               FROM tenant WHERE id = $1",
+  "query": "SELECT id, slug, display_name, status, cluster,\n                      database_name, demo_expires_at,\n                      requires_second_factor, created_at\n                 FROM tenant\n                WHERE demo_expires_at IS NOT NULL\n                  AND demo_expires_at <= now()\n                ORDER BY demo_expires_at\n                LIMIT $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id: TenantId",
+        "name": "id",
         "type_info": "Uuid",
         "origin": {
           "Table": {
@@ -82,6 +82,17 @@
       },
       {
         "ordinal": 7,
+        "name": "requires_second_factor",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "requires_second_factor"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -94,7 +105,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Int8"
       ]
     },
     "nullable": [
@@ -105,8 +116,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "fdf1683c6d2917a2afc3d4aaf263421ffc0de0d8f1a38ee8bf95c0ed42e3bf6a"
+  "hash": "61b4bd1d74482af0692facdc397e4aec7cdcebcc2bec82955c34abd8ee20cd4f"
 }

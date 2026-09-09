@@ -746,13 +746,37 @@ it. Nine are against a real control database, and **all six guards were
 falsified**: the password gate, the pending-enrolment gate, the replay refusal,
 the recovery-code spend, the re-enrolment purge, and the identity binding.
 
-#### Left open
+#### And a tenant can require it — *answered 2026-09-09, and built*
 
-**A tenant cannot require it.** Enrolment is per identity, because an identity
-spans tenants and a login happens before any tenant is chosen. "This tenant may
-not be entered without a second factor" is a different and larger feature —
-enforceable at `ControlPlane::enter` — and is not built. Recorded in
-`docs/AMBIGUITIES.md` §6.
+The three questions this was held on were put and answered:
+
+**What happens to somebody already signed in?** Their session stays valid and
+they are refused at the next *entry to that tenant*, with a message telling them
+to enrol. Not logged out, and their other tenants are untouched — an owner
+turning this on asked to protect their own business, not to sign somebody out of
+somebody else's.
+
+**How does an owner avoid locking themselves out?** Switching it **on** is
+refused unless the person doing it has enrolled one. One rule, no special cases,
+and it guarantees at least one person can still get in. Switching it **off**
+carries no such condition, because needing a second factor to remove the
+requirement is the trap it exists to prevent.
+
+**Where does the flag live?** On the **tenant row in the control plane**, not in
+the tenant's own configuration. `enter` already reads a cached tenant, so the
+check costs nothing — and a flag inside the tenant database would have to be
+read *after* deciding whether the caller may reach that database, which is the
+wrong way round. Setting it forgets the cached row, and there is a test that
+fails if it does not.
+
+`AccessError::SecondFactorRequired` answers **403, not the 404** every other
+access failure gets. The enumeration argument does not apply: reaching it means
+already holding a session *and* a live membership, so there is nothing left to
+discover — and a 404 tells a member to give up when the one thing they can do is
+enrol.
+
+Four more guards, all falsified: the entry check, the lockout guard, that
+switching off never needs a factor, and that the cache is forgotten.
 
 ### 50 · Exemption reasons: the invoice that called rent a financial service
 
@@ -2656,8 +2680,45 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [x] A second business module *(shipped as 4a — and it changed how
       cross-module integration works, which is the point of building one)*
 - [ ] Blueprints: browse → parameterize → materialize → edit → preview → install
-- [ ] Preview executes in a rolled-back transaction and reports resulting state
-- [ ] Chart-of-accounts templates: generic IFRS, SOCPA-aligned, retail, services, empty
+- [ ] Preview executes in a rolled-back transaction and reports resulting state.
+      **Scoped 2026-09-09, not started** — and the point of writing this down is
+      that it is a kernel change, not a route.
+
+      `TenantDb::execute` and `create` each call `self.begin()` themselves
+      (`crates/erp-tenant/src/db.rs:211,267`), so a caller cannot wrap several
+      commands in one transaction and roll it back. **The seam already exists
+      and has a name**: `ledger::post_entry_in` takes a `&mut PgConnection`
+      instead of owning its transaction, and everything that posts goes through
+      it. What preview needs is that pattern extended — `open_account_in`, and
+      then `install_chart_in` — so the whole install runs on one caller-owned
+      transaction that the preview rolls back.
+
+      **Why not compute the answer instead.** Predicting the outcome by reading
+      current state is easy and is the wrong feature: the value of a rolled-back
+      *execution* is that it runs the real code path, so a preview cannot
+      disagree with the install it is previewing. A predicted preview is a
+      second implementation of the same rules, and the two drift
+- [x] **Chart-of-accounts templates — three ship, and two of the five this box
+      named should not exist.** `services` and `retail` were already built when
+      this box was written; `real_estate` was added 2026-09-09 for Phase 20 and
+      is where a security deposit is a **liability** rather than revenue.
+
+      **"SOCPA-aligned" is not a real artefact** — looked up rather than
+      assumed. SOCPA endorses IFRS and IFRS for SMEs, which are *accounting
+      standards*, and neither prescribes a chart of accounts; Saudi Arabia
+      mandates none for private companies. Shipping an invented chart under that
+      name would imply an endorsement that does not exist, to the one audience
+      qualified to notice.
+
+      **"Empty" was already decided against, in the code**: *"not installing one
+      is already that, and a template that creates nothing is a menu item that
+      does nothing."*
+
+      **"Generic IFRS"** is what `services` is — a chart with no industry
+      accounts in it. A second one under a standards-body name would be the same
+      accounts and a stronger claim
+- [ ] A chart for whichever industry the next customer is in *(the real
+      remaining work, and it needs a customer rather than a guess)*
 - [ ] Self-service signup as a durable workflow
 - [ ] Template databases per module combination, built in CI from blueprints
 - [x] **Demo blueprint with every module enabled, as a required CI check**

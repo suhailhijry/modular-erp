@@ -407,7 +407,8 @@ impl ControlPlane {
     ) -> Result<Vec<crate::model::Tenant>, AccessError> {
         let rows = sqlx::query!(
             r#"SELECT t.id, t.slug, t.display_name, t.status, t.cluster,
-                      t.database_name, t.demo_expires_at, t.created_at
+                      t.database_name, t.demo_expires_at,
+                      t.requires_second_factor, t.created_at
                  FROM tenant t
                  JOIN entitlement e ON e.tenant_id = t.id
                 WHERE t.status IN ('active', 'suspended')
@@ -429,6 +430,7 @@ impl ControlPlane {
                     row.cluster,
                     row.database_name,
                     row.demo_expires_at,
+                    row.requires_second_factor,
                     row.created_at,
                 )
             })
@@ -541,7 +543,8 @@ impl ControlPlane {
     pub async fn expired_demos(&self, limit: i64) -> Result<Vec<Tenant>, AccessError> {
         let rows = sqlx::query!(
             r#"SELECT id, slug, display_name, status, cluster,
-                      database_name, demo_expires_at, created_at
+                      database_name, demo_expires_at,
+                      requires_second_factor, created_at
                  FROM tenant
                 WHERE demo_expires_at IS NOT NULL
                   AND demo_expires_at <= now()
@@ -562,6 +565,7 @@ impl ControlPlane {
                     row.cluster,
                     row.database_name,
                     row.demo_expires_at,
+                    row.requires_second_factor,
                     row.created_at,
                 )
             })

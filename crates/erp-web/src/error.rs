@@ -51,6 +51,13 @@ impl ApiError {
                 StatusCode::UNAUTHORIZED
             }
 
+            // **403, not 404.** The enumeration argument below does not apply:
+            // reaching this means already holding a session *and* a live
+            // membership in this tenant, so there is nothing left to discover.
+            // A 404 would tell a member to give up when the one thing they can
+            // do is enrol.
+            Self::Access(AccessError::SecondFactorRequired) => StatusCode::FORBIDDEN,
+
             // 404, not 403 — and the same 404 a genuinely missing tenant gets.
             // Distinguishing "exists but you may not" from "does not exist"
             // hands out a tenant-enumeration oracle for free.

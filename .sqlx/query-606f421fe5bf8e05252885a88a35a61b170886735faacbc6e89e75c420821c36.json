@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT t.id as \"id: TenantId\", t.slug, t.display_name, t.status, t.cluster,\n                      t.database_name, t.demo_expires_at, t.created_at\n                 FROM tenant t\n                 JOIN membership m ON m.tenant_id = t.id\n                WHERE m.identity_id = $1\n                  AND m.revoked_at IS NULL\n                  AND t.status <> 'deleted'\n                ORDER BY t.display_name",
+  "query": "SELECT id as \"id: TenantId\", slug, display_name, status, cluster,\n                      database_name, demo_expires_at,\n                      requires_second_factor, created_at\n               FROM tenant WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -82,6 +82,17 @@
       },
       {
         "ordinal": 7,
+        "name": "requires_second_factor",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tenant",
+            "name": "requires_second_factor"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -105,8 +116,9 @@
       false,
       false,
       true,
+      false,
       false
     ]
   },
-  "hash": "92d7c20bd73341b48d82e20c92b99fc20901a81956e4375fd583835864f9b7e9"
+  "hash": "606f421fe5bf8e05252885a88a35a61b170886735faacbc6e89e75c420821c36"
 }

@@ -8,11 +8,15 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use erp_control::{Actor, AuthError, ClusterRegistry, ControlPlane, PoolConfig, TenantPools, totp};
+use erp_control::{
+    AccessError, Actor, AuthError, ClusterRegistry, ControlPlane, Lane, PoolConfig, Scope,
+    TenantPools, totp,
+};
 use erp_testkit::{Schema, Template, TestDb};
-use erp_types::{IdentityId, Timestamp};
+use erp_types::{IdentityId, TenantId, Timestamp};
 
 static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
+static TENANT: Schema = Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
 
 const HANDLE: &str = "sara@bassat.test";
 const PASSWORD: &str = "hunter2hunter2";
@@ -21,6 +25,7 @@ struct Fixture {
     control: ControlPlane,
     identity: IdentityId,
     sealing: erp_eventlog::SealingKey,
+    tenant_databases: std::sync::Mutex<Vec<String>>,
     _db: TestDb,
 }
 
@@ -39,6 +44,20 @@ impl Fixture {
             db.pool().clone(),
             TenantPools::new(clusters, PoolConfig::default()),
         );
+        // Tenants are foreign-keyed to a cluster, so one has to exist before
+        // any of the tenant tests can register.
+        control
+            .register_cluster(
+                "primary",
+                "ERP_CLUSTER_PRIMARY_URL",
+                None,
+                10_000,
+                10_000,
+                Actor::system(),
+            )
+            .await
+            .expect("cluster registers");
+
         let identity = control
             .create_identity(Actor::system())
             .await
@@ -54,7 +73,64 @@ impl Fixture {
             identity,
             sealing: erp_eventlog::SealingKey::parse(&format!("test:{}", "ab".repeat(32)))
                 .expect("a sealing key"),
+            tenant_databases: std::sync::Mutex::new(Vec::new()),
             _db: db,
+        }
+    }
+
+    /// A registered, activated tenant with a real database behind it.
+    async fn tenant(&self, slug: &str) -> TenantId {
+        let tenant = self
+            .control
+            .register_tenant_on(slug, slug, "primary", Actor::system())
+            .await
+            .expect("tenant registers");
+        erp_testkit::create_named_database(&tenant.database_name, &TENANT)
+            .await
+            .expect("tenant database is created");
+        self.tenant_databases
+            .lock()
+            .expect("not poisoned")
+            .push(tenant.database_name.clone());
+        self.control
+            .activate_tenant(tenant.id, Actor::system())
+            .await
+            .expect("tenant activates");
+        tenant.id
+    }
+
+    /// Puts the fixture's own identity in a tenant as its owner.
+    async fn join(&self, tenant: TenantId) {
+        self.control
+            .grant_membership(
+                self.identity,
+                Scope::Tenant(tenant),
+                "owner",
+                Actor::system(),
+            )
+            .await
+            .expect("membership is granted");
+    }
+
+    /// Somebody else in the same tenant, with no second factor of their own.
+    async fn colleague(&self, tenant: TenantId) -> IdentityId {
+        let other = self
+            .control
+            .create_identity(Actor::system())
+            .await
+            .expect("identity is created")
+            .id;
+        self.control
+            .grant_membership(other, Scope::Tenant(tenant), "viewer", Actor::system())
+            .await
+            .expect("membership is granted");
+        other
+    }
+
+    async fn cleanup(&self) {
+        let names = self.tenant_databases.lock().expect("not poisoned").clone();
+        for name in names {
+            let _ = erp_testkit::drop_named_database(&name).await;
         }
     }
 
@@ -366,4 +442,145 @@ async fn a_secret_sealed_for_one_identity_does_not_open_for_another() {
         refused.is_err(),
         "a transplanted secret must not open, got {refused:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A tenant that requires one
+// ---------------------------------------------------------------------------
+
+/// **The whole feature, and the reason it refuses at entry rather than at
+/// login.** A person may belong to two tenants; only one of them asked for
+/// this, and the other must be unaffected.
+#[tokio::test]
+async fn a_tenant_that_requires_a_second_factor_refuses_a_member_without_one() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let strict = fixture.tenant("strict").await;
+    let relaxed = fixture.tenant("relaxed").await;
+    fixture.join(strict).await;
+    fixture.join(relaxed).await;
+
+    // An owner cannot switch it on from an unprotected account.
+    let refused = fixture
+        .control
+        .set_second_factor_requirement(strict, fixture.identity, true)
+        .await;
+    assert!(
+        matches!(refused, Err(AccessError::SecondFactorRequired)),
+        "switching it on without one is a lockout waiting to happen, got {refused:?}"
+    );
+
+    fixture.enrolled(now).await;
+    fixture
+        .control
+        .set_second_factor_requirement(strict, fixture.identity, true)
+        .await
+        .expect("an enrolled owner may switch it on");
+
+    // The enrolled owner still gets in.
+    fixture
+        .control
+        .enter(fixture.identity, strict, Lane::Interactive)
+        .await
+        .expect("an enrolled member enters");
+
+    // A colleague who has not enrolled does not — here, and only here.
+    let colleague = fixture.colleague(strict).await;
+    let refused = fixture
+        .control
+        .enter(colleague, strict, Lane::Interactive)
+        .await;
+    assert!(
+        matches!(refused, Err(AccessError::SecondFactorRequired)),
+        "an unprotected member must not enter a tenant that requires one, got {refused:?}"
+    );
+
+    let elsewhere = fixture.colleague(relaxed).await;
+    fixture
+        .control
+        .enter(elsewhere, relaxed, Lane::Interactive)
+        .await
+        .expect("a tenant that did not ask for this is unaffected");
+
+    fixture.cleanup().await;
+}
+
+/// Turning it **off** must not need one, or the requirement cannot be undone by
+/// the person it locked out.
+#[tokio::test]
+async fn the_requirement_can_always_be_switched_off() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let tenant = fixture.tenant("acme").await;
+    fixture.join(tenant).await;
+
+    fixture.enrolled(now).await;
+    fixture
+        .control
+        .set_second_factor_requirement(tenant, fixture.identity, true)
+        .await
+        .expect("switches on");
+
+    fixture
+        .control
+        .disable_second_factor(fixture.identity)
+        .await
+        .expect("the phone is gone");
+
+    // Now unprotected, and locked out — but still able to undo it.
+    assert!(matches!(
+        fixture
+            .control
+            .enter(fixture.identity, tenant, Lane::Interactive)
+            .await,
+        Err(AccessError::SecondFactorRequired)
+    ));
+    fixture
+        .control
+        .set_second_factor_requirement(tenant, fixture.identity, false)
+        .await
+        .expect("switching it off needs no second factor");
+    fixture
+        .control
+        .enter(fixture.identity, tenant, Lane::Interactive)
+        .await
+        .expect("and they are back in");
+
+    fixture.cleanup().await;
+}
+
+/// The requirement is read from a cached tenant row. A cache nobody clears is a
+/// setting nobody enforces.
+#[tokio::test]
+async fn turning_it_on_takes_effect_without_waiting_for_a_cache() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let tenant = fixture.tenant("acme").await;
+    fixture.join(tenant).await;
+    let colleague = fixture.colleague(tenant).await;
+
+    // Warm the cache by entering first.
+    fixture
+        .control
+        .enter(colleague, tenant, Lane::Interactive)
+        .await
+        .expect("enters while nothing is required");
+
+    fixture.enrolled(now).await;
+    fixture
+        .control
+        .set_second_factor_requirement(tenant, fixture.identity, true)
+        .await
+        .expect("switches on");
+
+    let refused = fixture
+        .control
+        .enter(colleague, tenant, Lane::Interactive)
+        .await;
+    assert!(
+        matches!(refused, Err(AccessError::SecondFactorRequired)),
+        "the cached tenant must have been forgotten, got {refused:?}"
+    );
+
+    fixture.cleanup().await;
 }
