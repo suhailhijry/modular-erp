@@ -407,6 +407,27 @@ which is why it is checked continuously and not at month end.
 | `GET` `PUT` | `/v1/ledger/books` | Read / ManageAccounts |
 | `GET` `PUT` | `/v1/ledger/vat-rates` | Read / ManageAccounts |
 
+### VAT rates carry more than a rate
+
+`/v1/ledger/vat-rates` also holds **why** a supply carries no tax:
+
+```json
+{ "standard": 1500, "exempt_reason": "VATEX-SA-30", "zero_reason": "VATEX-SA-32" }
+```
+
+A category says *that* there is no tax; only the taxpayer knows *which article*
+covers them. A landlord letting residential property is `VATEX-SA-30` (real
+estate transactions); an exporter is `VATEX-SA-32`. The code is stamped onto
+every line at issue time, exactly as the rate is, so a replay reproduces what
+was declared rather than what is configured today.
+
+**Issuing an exempt or zero-rated line is refused until one is set.** Not
+defaulted: this build used to derive the reason from the category, which
+declared every exempt supply in the system to be a financial service.
+
+`ledger` stores the code and never interprets it — the list is ZATCA's and
+`tax_sa` owns it, the same division `crm::TaxRegistration.scheme` already uses.
+
 `http.rs` is translation only. The aggregates, the invariant and the read models
 are the module; that file turns a request into a call and a result into JSON.
 

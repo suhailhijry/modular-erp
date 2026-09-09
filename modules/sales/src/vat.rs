@@ -23,21 +23,33 @@ use serde::{Deserialize, Serialize};
 pub use ledger::VatCategory;
 
 /// A tax treatment together with the rate that applied when it was chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vat {
     pub category: VatCategory,
     /// Basis points — 1500 is 15%. Written at issue time and never recomputed.
     pub basis_points: i32,
+    /// **Why this carries no tax**, as the tax authority's own code, stamped at
+    /// issue time from the tenant's configured [`ledger::Rates`] for the same
+    /// reason the rate is: a code that changed between the request and the
+    /// write would leave an invoice explaining itself with one that was never
+    /// current (L5).
+    ///
+    /// `None` on a standard-rated line, which has nothing to explain, and on
+    /// every invoice issued before this field existed — hence `default`.
+    /// Opaque: `sales` carries the code and never interprets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exemption_reason: Option<String>,
 }
 
 impl Vat {
     /// The treatment at today's statutory rate. The only constructor an issuing
     /// command should use.
     #[must_use]
-    pub const fn at(rates: ledger::Rates, category: VatCategory) -> Self {
+    pub fn at(rates: &ledger::Rates, category: VatCategory) -> Self {
         Self {
             category,
             basis_points: rates.of(category),
+            exemption_reason: rates.reason(category).map(str::to_owned),
         }
     }
 
@@ -45,8 +57,8 @@ impl Vat {
     /// to ask. **Never on a write path** — an invoice is stamped with the rate
     /// its tenant had configured, resolved in the command's own transaction.
     #[must_use]
-    pub const fn shipped(category: VatCategory) -> Self {
-        Self::at(ledger::Rates::saudi_arabia(), category)
+    pub fn shipped(category: VatCategory) -> Self {
+        Self::at(&ledger::Rates::saudi_arabia(), category)
     }
 
     /// Tax on an amount, rounded to the currency's minor unit.
@@ -57,7 +69,7 @@ impl Vat {
     /// what every till in the country does. `15.005` becomes `15.01`, and
     /// `-15.005` becomes `-15.01` — symmetric, so crediting an invoice line
     /// reverses it exactly instead of leaving a halala behind.
-    pub fn on(self, net: Money) -> Result<Money, TaxError> {
+    pub fn on(&self, net: Money) -> Result<Money, TaxError> {
         Ok(net.scaled_by(self.basis_points)?)
     }
 }
@@ -302,9 +314,12 @@ pub fn total(
     bands.sort_unstable_by_key(|b| (b.category, b.basis_points));
 
     for band in &mut bands {
+        // The reason plays no part in computing tax — it explains an amount
+        // that is already zero — so it is not carried into this arithmetic.
         band.tax = Vat {
             category: band.category,
             basis_points: band.basis_points,
+            exemption_reason: None,
         }
         .on(band.net)?;
     }
@@ -341,8 +356,8 @@ mod tests {
     fn a_discount_comes_off_before_the_tax_is_worked_out() {
         let standard = Vat::shipped(VatCategory::Standard);
         let totals = total(
-            [(standard, money(10_000))],
-            [(standard, money(1_500))],
+            [(standard.clone(), money(10_000))],
+            [(standard.clone(), money(1_500))],
             sar(),
         )
         .unwrap();
@@ -372,8 +387,11 @@ mod tests {
         let exempt = Vat::shipped(VatCategory::Exempt);
 
         let totals = total(
-            [(standard, money(10_000)), (exempt, money(10_000))],
-            [(exempt, money(5_000))],
+            [
+                (standard.clone(), money(10_000)),
+                (exempt.clone(), money(10_000)),
+            ],
+            [(exempt.clone(), money(5_000))],
             sar(),
         )
         .unwrap();
@@ -408,7 +426,11 @@ mod tests {
         let standard = Vat::shipped(VatCategory::Standard);
         let zero = Vat::shipped(VatCategory::Zero);
         assert_eq!(
-            total([(standard, money(10_000))], [(zero, money(100))], sar()),
+            total(
+                [(standard.clone(), money(10_000))],
+                [(zero.clone(), money(100))],
+                sar()
+            ),
             Err(TaxError::DiscountWithoutABand)
         );
     }
@@ -418,29 +440,33 @@ mod tests {
         let standard = Vat::shipped(VatCategory::Standard);
         assert_eq!(
             total(
-                [(standard, money(10_000))],
-                [(standard, money(-100))],
+                [(standard.clone(), money(10_000))],
+                [(standard.clone(), money(-100))],
                 sar()
             ),
             Err(TaxError::NotADiscount),
             "a negative discount is a charge"
         );
         assert_eq!(
-            total([(standard, money(10_000))], [(standard, money(0))], sar()),
+            total(
+                [(standard.clone(), money(10_000))],
+                [(standard.clone(), money(0))],
+                sar()
+            ),
             Err(TaxError::NotADiscount)
         );
         assert_eq!(
             total(
-                [(standard, money(10_000))],
-                [(standard, money(10_001))],
+                [(standard.clone(), money(10_000))],
+                [(standard.clone(), money(10_001))],
                 sar()
             ),
             Err(TaxError::DiscountTooLarge)
         );
         // Exactly all of it is allowed: a fully discounted line comes to zero.
         let nothing = total(
-            [(standard, money(10_000))],
-            [(standard, money(10_000))],
+            [(standard.clone(), money(10_000))],
+            [(standard.clone(), money(10_000))],
             sar(),
         )
         .unwrap();
@@ -453,7 +479,7 @@ mod tests {
     #[test]
     fn no_discount_is_absent_rather_than_zero() {
         let standard = Vat::shipped(VatCategory::Standard);
-        let totals = total([(standard, money(10_000))], [], sar()).unwrap();
+        let totals = total([(standard.clone(), money(10_000))], [], sar()).unwrap();
         assert_eq!(totals.discount, None);
         assert_eq!(totals.discount(), money(0));
         assert_eq!(totals.before_discount().unwrap(), totals.net);
@@ -549,7 +575,7 @@ mod tests {
         let per_line: i64 = (0..3)
             .map(|_| standard.on(money(3_333)).unwrap().minor())
             .sum();
-        let per_band = total((0..3).map(|_| (standard, money(3_333))), [], sar()).unwrap();
+        let per_band = total((0..3).map(|_| (standard.clone(), money(3_333))), [], sar()).unwrap();
         assert_eq!(per_line, 1_500);
         assert_eq!(per_band.tax, money(1_500));
 
@@ -558,7 +584,7 @@ mod tests {
         let per_line: i64 = (0..3)
             .map(|_| standard.on(money(10)).unwrap().minor())
             .sum();
-        let per_band = total((0..3).map(|_| (standard, money(10))), [], sar()).unwrap();
+        let per_band = total((0..3).map(|_| (standard.clone(), money(10))), [], sar()).unwrap();
         assert_eq!(per_line, 6);
         assert_eq!(per_band.tax, money(5), "banding is not the same as summing");
     }
@@ -569,13 +595,21 @@ mod tests {
         let z = Vat::shipped(VatCategory::Zero);
 
         let one = total(
-            [(a, money(100)), (z, money(200)), (a, money(300))],
+            [
+                (a.clone(), money(100)),
+                (z.clone(), money(200)),
+                (a.clone(), money(300)),
+            ],
             [],
             sar(),
         )
         .unwrap();
         let two = total(
-            [(z, money(200)), (a, money(300)), (a, money(100))],
+            [
+                (z.clone(), money(200)),
+                (a.clone(), money(300)),
+                (a.clone(), money(100)),
+            ],
             [],
             sar(),
         )
@@ -606,6 +640,7 @@ mod tests {
 
         let absurd = Vat {
             category: VatCategory::Standard,
+            exemption_reason: None,
             basis_points: i32::MAX,
         };
         assert_eq!(absurd.on(money(i64::MAX)), Err(TaxError::OutOfRange));

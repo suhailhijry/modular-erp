@@ -449,10 +449,37 @@ impl Fixture {
         self.enable_module(tenant, ledger::setup()).await;
     }
 
+    /// **Why a tenant that invoices has to say this.** A line carrying no tax
+    /// must name the ZATCA article it is untaxed under, and issuing one is
+    /// refused until somebody has chosen it. These tests invoice exports at
+    /// zero rate and rent as exempt, so they are that tenant.
+    async fn configure_vat_reasons(&self, tenant: TenantId) {
+        let db = self
+            .control
+            .enter_for_maintenance(tenant)
+            .await
+            .expect("maintenance access");
+        let mut conn = db.acquire().await.expect("a connection");
+        erp_eventlog::configuration::set(
+            &mut conn,
+            ledger::Rates::KEY,
+            &ledger::Rates {
+                standard: 1_500,
+                zero_reason: Some("VATEX-SA-32".to_owned()),
+                exempt_reason: Some("VATEX-SA-30".to_owned()),
+            },
+            Some("the-accountant"),
+            None,
+        )
+        .await
+        .expect("rates configure");
+    }
+
     /// Sales needs the ledger underneath it.
     async fn enable_sales(&self, tenant: TenantId) {
         self.enable_ledger(tenant).await;
         self.enable_module(tenant, sales::setup()).await;
+        self.configure_vat_reasons(tenant).await;
     }
 
     /// Sales and purchases together, which is what a whole VAT return needs.

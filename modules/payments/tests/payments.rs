@@ -2734,6 +2734,8 @@ impl Fixture {
             &mut conn,
             ledger::Rates::KEY,
             &ledger::Rates {
+                exempt_reason: None,
+                zero_reason: None,
                 standard: basis_points,
             },
             None,

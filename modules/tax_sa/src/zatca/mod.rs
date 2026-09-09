@@ -206,6 +206,10 @@ pub struct Line {
     /// Basis points, as stamped on the invoice. Never today's rate.
     pub rate_bp: i32,
     pub tax: Money,
+    /// Why this line carries no tax, as stamped at issue time. See
+    /// [`Band::exemption_reason`] — the band's is taken from its lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exemption_reason: Option<String>,
     /// **What came off this line** — UBL's `cac:AllowanceCharge` inside
     /// `cac:InvoiceLine`.
     ///
@@ -258,6 +262,14 @@ pub struct Band {
     pub rate_bp: i32,
     pub net: Money,
     pub tax: Money,
+    /// **Why this band carries no tax**, as ZATCA's own `VATEX-SA-*` code,
+    /// taken from the lines in it — which took it from the tenant's configured
+    /// [`ledger::Rates`] at issue time (L5).
+    ///
+    /// `None` on a standard-rated band, which has nothing to explain, and on
+    /// documents issued before the code was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exemption_reason: Option<String>,
 }
 
 /// Something taken off the whole document — UBL's `cac:AllowanceCharge`.
@@ -507,23 +519,163 @@ pub const fn category_code(category: VatCategory) -> &'static str {
     }
 }
 
-/// Why a zero-rated or exempt line carries no tax.
+/// **ZATCA's `VATEX-SA-*` exemption reason codes**, and the category each
+/// belongs to.
 ///
-/// ZATCA requires a reason on anything not at the standard rate, from its own
-/// `VATEX-SA-*` list. This build states the general article for each, which is
-/// the honest default when the reason is not something the line records.
+/// # Why this is an enum here and a string everywhere else
 ///
-/// ponytail: per-line exemption reasons want a field on the invoice line, which
-/// is a `sales` change for a tenant who has asked for one. Until then a business
-/// exporting and a business renting residential property both get the article
-/// that covers them, and neither gets a reason that is wrong.
-#[must_use]
-pub const fn exemption_reason(category: VatCategory) -> Option<(&'static str, &'static str)> {
-    match category {
-        VatCategory::Standard => None,
-        VatCategory::Zero => Some(("VATEX-SA-32", "Export of goods")),
-        VatCategory::Exempt => Some(("VATEX-SA-29", "Financial services mentioned in Article 29")),
+/// The list is the authority's. `ledger` stores the tenant's chosen code and
+/// `sales` stamps it on the line, and neither knows what any of them mean —
+/// exactly as `crm::TaxRegistration.scheme` carries ZATCA's `schemeID` without
+/// `crm` owning it. This is the country module, so this is where the list
+/// lives and where an unknown code is refused.
+///
+/// # What this replaced, and why it was a defect and not a gap
+///
+/// Until 2026-09-09 the reason was derived from the *category alone*: every
+/// exempt line in the system was declared to ZATCA as `VATEX-SA-29`,
+/// **financial services**. For a financial services business that was right.
+/// For a landlord letting residential property — `VATEX-SA-30`, real estate
+/// transactions — it was a false statement to a tax authority on every
+/// invoice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExemptionReason {
+    /// Financial services, VAT Regulations Article 29.
+    Sa29,
+    /// Life insurance services, Article 29.
+    Sa29_7,
+    /// **Real estate transactions, Article 30.** Residential rent.
+    Sa30,
+    Sa32,
+    Sa33,
+    Sa34_1,
+    Sa34_2,
+    Sa34_3,
+    Sa34_4,
+    Sa34_5,
+    Sa35,
+    Sa36,
+    /// Private education supplied to a citizen.
+    SaEdu,
+    /// Private healthcare supplied to a citizen.
+    SaHea,
+    SaMltry,
+    SaDiplomat,
+}
+
+impl ExemptionReason {
+    pub const ALL: [Self; 16] = [
+        Self::Sa29,
+        Self::Sa29_7,
+        Self::Sa30,
+        Self::Sa32,
+        Self::Sa33,
+        Self::Sa34_1,
+        Self::Sa34_2,
+        Self::Sa34_3,
+        Self::Sa34_4,
+        Self::Sa34_5,
+        Self::Sa35,
+        Self::Sa36,
+        Self::SaEdu,
+        Self::SaHea,
+        Self::SaMltry,
+        Self::SaDiplomat,
+    ];
+
+    /// The code as it goes into `cbc:TaxExemptionReasonCode`.
+    ///
+    /// **No vendor prefix.** Some tooling documents these as
+    /// `VRBL:SA:VATEX-SA-30`; that namespace is the tool's and is not in the
+    /// XML ZATCA receives.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sa29 => "VATEX-SA-29",
+            Self::Sa29_7 => "VATEX-SA-29-7",
+            Self::Sa30 => "VATEX-SA-30",
+            Self::Sa32 => "VATEX-SA-32",
+            Self::Sa33 => "VATEX-SA-33",
+            Self::Sa34_1 => "VATEX-SA-34-1",
+            Self::Sa34_2 => "VATEX-SA-34-2",
+            Self::Sa34_3 => "VATEX-SA-34-3",
+            Self::Sa34_4 => "VATEX-SA-34-4",
+            Self::Sa34_5 => "VATEX-SA-34-5",
+            Self::Sa35 => "VATEX-SA-35",
+            Self::Sa36 => "VATEX-SA-36",
+            Self::SaEdu => "VATEX-SA-EDU",
+            Self::SaHea => "VATEX-SA-HEA",
+            Self::SaMltry => "VATEX-SA-MLTRY",
+            Self::SaDiplomat => "VATEX-SA-DIPLOMAT",
+        }
     }
+
+    /// What goes in `cbc:TaxExemptionReason` beside the code — the article, in
+    /// the authority's own words.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Sa29 => "Financial services mentioned in Article 29 of the VAT Regulations",
+            Self::Sa29_7 => {
+                "Life insurance services mentioned in Article 29 of the VAT Regulations"
+            }
+            Self::Sa30 => "Real estate transactions mentioned in Article 30 of the VAT Regulations",
+            Self::Sa32 => "Export of goods",
+            Self::Sa33 => "Export of services",
+            Self::Sa34_1 => "International transport of goods",
+            Self::Sa34_2 => "International transport of passengers",
+            Self::Sa34_3 => "Services connected to international transport of passengers",
+            Self::Sa34_4 => "Supply of a qualifying means of transport",
+            Self::Sa34_5 => "Services relating to the transport of goods or passengers",
+            Self::Sa35 => "Medicines and medical equipment",
+            Self::Sa36 => "Qualifying metals",
+            Self::SaEdu => "Private education to a citizen",
+            Self::SaHea => "Private healthcare to a citizen",
+            Self::SaMltry => "Supply of qualified military goods",
+            Self::SaDiplomat => "Diplomatic",
+        }
+    }
+
+    /// **Which tax category this code may be used with.**
+    ///
+    /// A code on the wrong category is refused rather than corrected: an
+    /// exporter who set the exempt reason instead of the zero-rated one has a
+    /// misconfiguration, and silently moving their supply between categories
+    /// would change what they owe.
+    #[must_use]
+    pub const fn category(self) -> VatCategory {
+        match self {
+            Self::Sa29 | Self::Sa29_7 | Self::Sa30 => VatCategory::Exempt,
+            _ => VatCategory::Zero,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0} is not a ZATCA exemption reason code")]
+pub struct UnknownExemptionReason(pub String);
+
+impl std::str::FromStr for ExemptionReason {
+    type Err = UnknownExemptionReason;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.as_str().eq_ignore_ascii_case(s))
+            .ok_or_else(|| UnknownExemptionReason(s.to_owned()))
+    }
+}
+
+/// Why a band carries no tax, as the code and the article ZATCA prints.
+///
+/// **Taken from what the document recorded**, never from the category: the
+/// category says *that* there is no tax and the code says *why*, and only the
+/// tenant knows which article covers their business.
+#[must_use]
+pub fn exemption_reason(stamped: Option<&str>) -> Option<(&'static str, &'static str)> {
+    let reason: ExemptionReason = stamped?.parse().ok()?;
+    Some((reason.as_str(), reason.describe()))
 }
 
 #[cfg(test)]
@@ -611,15 +763,77 @@ mod tests {
     }
 
     #[test]
-    fn every_category_has_a_code_and_only_the_zero_ones_need_a_reason() {
+    fn every_category_has_a_code() {
         assert_eq!(category_code(VatCategory::Standard), "S");
         assert_eq!(category_code(VatCategory::Zero), "Z");
         assert_eq!(category_code(VatCategory::Exempt), "E");
+    }
 
-        assert!(exemption_reason(VatCategory::Standard).is_none());
-        for category in [VatCategory::Zero, VatCategory::Exempt] {
-            let (code, _) = exemption_reason(category).expect("a reason is required");
-            assert!(code.starts_with("VATEX-SA-"), "{code} is not a ZATCA code");
+    /// **The defect this replaced.** The reason used to be derived from the
+    /// category, so every exempt line in the system said `VATEX-SA-29` —
+    /// financial services — including a landlord's rent.
+    #[test]
+    fn a_reason_comes_from_what_was_stamped_and_never_from_the_category() {
+        assert_eq!(
+            exemption_reason(Some("VATEX-SA-30")),
+            Some((
+                "VATEX-SA-30",
+                "Real estate transactions mentioned in Article 30 of the VAT Regulations"
+            )),
+            "residential rent is article 30, not article 29"
+        );
+        assert_eq!(
+            exemption_reason(Some("VATEX-SA-32")),
+            Some(("VATEX-SA-32", "Export of goods"))
+        );
+    }
+
+    #[test]
+    fn a_document_that_stamped_no_reason_states_none() {
+        // Better than a wrong one: omitting is silence, and `VATEX-SA-29` on a
+        // landlord's invoice is a false statement to a tax authority.
+        assert!(exemption_reason(None).is_none());
+    }
+
+    #[test]
+    fn an_unknown_code_is_not_passed_through_to_the_authority() {
+        assert!(exemption_reason(Some("VATEX-SA-999")).is_none());
+        assert!(exemption_reason(Some("")).is_none());
+    }
+
+    #[test]
+    fn every_code_round_trips_and_names_its_category() {
+        for reason in ExemptionReason::ALL {
+            assert_eq!(
+                reason.as_str().parse::<ExemptionReason>().ok(),
+                Some(reason)
+            );
+            assert!(
+                reason.as_str().starts_with("VATEX-SA-"),
+                "{} is not a ZATCA code",
+                reason.as_str()
+            );
+            assert!(!reason.describe().is_empty());
+            assert_ne!(
+                reason.category(),
+                VatCategory::Standard,
+                "a standard-rated line has nothing to explain"
+            );
+        }
+    }
+
+    /// The three articles that make a supply exempt rather than zero-rated.
+    #[test]
+    fn only_the_article_29_and_30_codes_are_exempt() {
+        use ExemptionReason as R;
+        for reason in R::ALL {
+            let expected = matches!(reason, R::Sa29 | R::Sa29_7 | R::Sa30);
+            assert_eq!(
+                reason.category() == VatCategory::Exempt,
+                expected,
+                "{} is on the wrong category",
+                reason.as_str()
+            );
         }
     }
 }

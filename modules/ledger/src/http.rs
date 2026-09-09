@@ -633,8 +633,16 @@ fn config_problem(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem 
 // What the business charges
 // ---------------------------------------------------------------------------
 
+/// An empty string is a field a form submitted without filling in, and storing
+/// it would make "no reason chosen" indistinguishable from "the reason is the
+/// empty string" — which the issuing command would then accept.
+fn none_if_blank(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[schema(example = json!({ "standard": 1500 }))]
+#[schema(example = json!({ "standard": 1500, "exempt_reason": "VATEX-SA-30" }))]
 struct RatesView {
     /// The standard rate in **basis points**. 1500 is 15% (Saudi Arabia), 500
     /// is 5% (the UAE).
@@ -646,6 +654,26 @@ struct RatesView {
     /// carries the rate it was issued under, so changing this cannot restate a
     /// filed return.
     standard: i32,
+
+    /// **Why your zero-rated supplies carry no tax**, as the tax authority's
+    /// own code. In Saudi Arabia one of ZATCA's `VATEX-SA-*` codes — an
+    /// exporter of goods is `VATEX-SA-32`, a private school teaching citizens
+    /// is `VATEX-SA-EDU`.
+    ///
+    /// Required before a zero-rated invoice can be issued, and there is no
+    /// default: two businesses are zero-rated for entirely different articles
+    /// and a code nobody chose is a false statement to a tax authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zero_reason: Option<String>,
+
+    /// **Why your exempt supplies carry no tax.** In Saudi Arabia a landlord
+    /// letting residential property is `VATEX-SA-30` (real estate
+    /// transactions); a financial services business is `VATEX-SA-29`.
+    ///
+    /// Required before an exempt invoice can be issued. See
+    /// [`Self::zero_reason`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exempt_reason: Option<String>,
 }
 
 /// What this business charges VAT at.
@@ -684,6 +712,8 @@ async fn vat_rates(
         version,
         RatesView {
             standard: rates.standard,
+            zero_reason: rates.zero_reason.clone(),
+            exempt_reason: rates.exempt_reason.clone(),
         },
     ))
 }
@@ -742,6 +772,8 @@ async fn set_vat_rates(
         crate::Rates::KEY,
         &crate::Rates {
             standard: body.standard,
+            zero_reason: none_if_blank(body.zero_reason.as_deref()),
+            exempt_reason: none_if_blank(body.exempt_reason.as_deref()),
         },
         Some(&tenant.session.identity.to_string()),
         expected,

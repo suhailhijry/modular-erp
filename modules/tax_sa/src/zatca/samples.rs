@@ -113,6 +113,7 @@ fn sample(
             Kind::Simplified => None,
         },
         lines: vec![Line {
+            exemption_reason: None,
             allowances: Vec::new(),
             description: "بند اختبار".to_owned(),
             net,
@@ -127,6 +128,7 @@ fn sample(
             before_discount: None,
             gross: Money::from_minor(NET + TAX, currency),
             bands: vec![Band {
+                exemption_reason: None,
                 category: VatCategory::Standard,
                 rate_bp: 1_500,
                 net,

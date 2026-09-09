@@ -11,6 +11,21 @@ rather than batched — it is cheapest applied to code as it is written.
 
 **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done
 
+**A box can also be closed by deciding.** `[x]` with **decided against** or
+**deliberately not built** means the question was asked and the answer was no:
+the reasoning *is* the deliverable, and it sits beside the box so it is not
+re-litigated. `Idempotency-Key` in Phase 3c has been marked that way since it was
+written.
+
+So an unticked box is one of exactly two things, and says which: **outstanding
+work**, or work **waiting on a named condition** that has not happened yet.
+
+This matters more than bookkeeping. Reading a deliberate non-build as a gap has
+twice led to nearly building something this codebase had already decided against
+on good grounds — the WPS file below being the sharpest case, where guessing at
+an unverifiable specification is the *worst* available option and two other
+documents said so while this one did not.
+
 **Where this stands:** 1,287 tests green, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
@@ -651,6 +666,95 @@ the adapters refuse without them, naming the missing field. A shop assistant can
 act on "we need their mobile number"; they cannot act on a Tabby validation
 error.
 
+### 50 · Exemption reasons: the invoice that called rent a financial service
+
+**Built 2026-09-09.** Phase 4e's open box, and it turned out to be a defect
+rather than a gap — which is only visible once you ask what the code actually
+did rather than what the box said.
+
+#### What it was doing
+
+`modules/tax_sa/src/zatca/mod.rs` derived the ZATCA exemption reason **from the
+VAT category**:
+
+```rust
+pub const fn exemption_reason(category: VatCategory) -> Option<(&str, &str)> {
+    VatCategory::Zero => Some(("VATEX-SA-32", "Export of goods")),
+    VatCategory::Exempt => Some(("VATEX-SA-29", "Financial services mentioned in Article 29")),
+}
+```
+
+A category says *that* a supply carries no tax. Only the taxpayer knows *why*.
+So every exempt line this system has ever produced told ZATCA it was a financial
+service, and every zero-rated line told ZATCA it was an export. For a bank and
+an exporter that was right. For a landlord letting residential property —
+`VATEX-SA-30`, real estate transactions — it was a **false statement to a tax
+authority on every invoice**, and it would have been the property vertical's
+first compliance failure.
+
+The `ponytail:` comment above it had predicted the shape of the fix and
+mis-stated the risk: *"neither gets a reason that is wrong."* That holds only
+while every tenant is a bank or an exporter.
+
+#### Where the reason had to go, and why not a setting read
+
+The obvious answer — read the tenant's configured reason where the document is
+built — is wrong twice over. `ubl::render` runs inside `ZatcaDocuments::apply`
+(`modules/tax_sa/src/documents.rs:308`), so a settings read there breaks **L7**
+(no reads while applying) and **L2**: a rebuild would stamp today's article onto
+an invoice issued under last year's.
+
+So the reason is resolved **at issue time**, in the command's own transaction,
+and carried on the event — exactly where the *rate* already is, and for exactly
+the same reason `sales::Vat` documents: *"the rate that applied when it was
+issued"*. `Vat` gained a third field and nothing else moved.
+
+#### Four places, one idea
+
+- **`ledger::Rates`** gains `zero_reason` and `exempt_reason` — opaque strings.
+  `ledger` does not own the list and must not: a country-neutral module that
+  enumerated Saudi articles would need every country's. This is the
+  `crm::TaxRegistration.scheme` precedent, which carries ZATCA's `schemeID`
+  without `crm` knowing what is in it.
+- **`sales::Vat`** carries the code, stamped by `Vat::at` from those rates.
+- **`tax_sa::ExemptionReason`** is the enum: sixteen `VATEX-SA-*` codes, each
+  with its article text and the category it belongs to. The country module owns
+  the country's list.
+- **`sales` refuses at issue** (L6) when a non-standard line has no configured
+  article, naming the treatment in both languages. Not a default — a default is
+  what caused this.
+
+#### Two things that came out of it
+
+**An unknown code never reaches the authority.** `exemption_reason` parses the
+stamped string and yields nothing if it is not a code ZATCA published, so a typo
+in a settings field produces a document with no reason rather than a document
+asserting a fiction.
+
+**Nothing is better than a guess.** A document issued before this existed stamps
+no code, and now renders without the element. That is strictly better than what
+it did yesterday, which was to render `VATEX-SA-29`.
+
+#### Verified rather than remembered
+
+The code list was **looked up**, not recalled: ZATCA's four tax categories
+(`S`/`Z`/`E`/`O`) and all sixteen `VATEX-SA-*` codes, cross-confirmed against two
+independent sources. The `VRBL:SA:` prefix some tooling documents is that tool's
+namespace and is **not** in the XML ZATCA receives. Recorded in
+`docs/AMBIGUITIES.md` §0 so it is not re-derived.
+
+One rule found there is worth carrying into Phase 20a: **if the reason is
+`VATEX-SA-EDU` or `VATEX-SA-HEA`, the buyer's ID is mandatory and must be a
+national ID.** That is the `Identification { scheme: NationalId }` field §49
+designed for Ejar, wanted independently by a second obligation.
+
+#### Left open
+
+`VatCategory::OutsideScope` (ZATCA's `O`) and its `VATEX-SA-OOS` free-text
+reason are **not added**. Nothing in this system produces an out-of-scope supply,
+and a fourth category with no producer is a variant every `match` must handle to
+no purpose. The code list is complete for the three categories that exist.
+
 ### 49 · Property management — *answered 2026-09-09: a new vertical for this product*
 
 **Asked on 2026-09-09, before picking up the backlog. Checked against the code,
@@ -764,10 +868,9 @@ the one worth settling before anything else is drawn.
 #### Saudi specifics
 
 - Residential rent exempt, commercial 15% — **expressible today** (`vat.rs:31`).
-- Per-line exemption reasons — **an open box in Phase 4e**, and required rather
-  than optional: a ZATCA invoice for exempt residential rent must carry a reason
-  code, so that box has to close before a residential landlord could issue one at
-  all.
+- Per-line exemption reasons — ~~an open box in Phase 4e~~ **built 2026-09-09,
+  §50**. A landlord configures `VATEX-SA-30` (real estate transactions, Article
+  30) once and every exempt line carries it. This was the gate, and it is open.
 - **RETT at 5% on a sale** — not VAT, and there is no non-VAT tax anywhere in the
   code.
 - **Ejar**, the mandatory rental-contract registration — not built, and it would
@@ -2173,7 +2276,14 @@ modules can say what shape they need.
 - [x] `SessionToken`'s `Debug` is redacted — a token in a log line is a working
       credential
 - [x] `log_out`, `log_out_everywhere`, `sweep_sessions`
-- [ ] MFA, OIDC, API keys *(more rows in `authenticator`, not more tables)*
+- [x] **API keys — built in Phase 12c**, and the prediction beside this box was
+      half wrong. It said "more rows in `authenticator`, not more tables"; a key
+      *is* a row in `authenticator` (`crates/erp-control/src/keys.rs:260`) **and**
+      needed its own table for the public half, the scopes and the rotation
+      (`migrations/control/0012_api_keys.sql`). Left visible rather than
+      rewritten: the guess was reasonable and the correction is the useful part.
+- [ ] MFA and OIDC *(more rows in `authenticator`, and on that half the
+      prediction should hold — neither needs state a key needed)*
 
 ### 3b · The HTTP surface
 - [x] `erp-api` on axum; `bin/api` with body limit, timeout, graceful shutdown
@@ -2231,7 +2341,15 @@ Built only where the ledger produced a second consumer.
       client-chosen ids and the log's uniqueness constraint refuses the repeat, so
       a header plus a key/response store would rebuild a property the design
       already has. `erp-api/tests/idempotence.rs` enforces what makes it true.
-- [ ] `ETag`/`If-Match` *(no update-in-place endpoint yet)*
+- [x] **`ETag`/`If-Match` — built**, and the condition this box was waiting on
+      was met by settings. `crates/erp-web/src/extract.rs:992` extracts the
+      version a write is conditional on, `crates/erp-web/src/messages.rs:673`
+      refuses a malformed one in both languages, and every settings `PUT` takes
+      it (`modules/messaging/src/http.rs:446`). The box said "no update-in-place
+      endpoint yet"; settings became one and nobody came back to tick this.
+      **If it meant conditional requests on domain resources too**, that is a
+      different and larger thing — logged in `docs/AMBIGUITIES.md` §3 rather
+      than assumed either way
 - [x] `?consistent_after=<position>` — read your own write, with the write
       nudging the worker so the wait is a claim cycle rather than the idle backoff
 - [x] Cursors — keyset paging on the columns each list is ordered by, an
@@ -2483,7 +2601,20 @@ Not in the original plan at all — it was one line in 4a. It is a phase.
       documents, zero warnings
 - [ ] Verified against **simulation**, and then production *(needs a real
       taxpayer's OTP — see [What needs work now](#what-needs-work-now))*
-- [ ] Per-line exemption reasons; per-till device certificates
+- [x] **Exemption reasons — built 2026-09-09, and they closed a defect rather
+      than a gap.** A line that carries no tax now names the ZATCA article it is
+      untaxed under, stamped at issue time from the tenant's configured
+      `ledger::Rates` (L5) and carried on the event, so a replay reproduces what
+      was declared. Before this, the reason was derived from the *category*:
+      every exempt line in the system was declared to ZATCA as `VATEX-SA-29`,
+      **financial services** — right for a bank, and a false statement to a tax
+      authority for a landlord. See §50
+- [x] **Per-band, not per-line**, and that is the standard's shape rather than a
+      simplification: `cbc:TaxExemptionReasonCode` sits in `cac:TaxCategory`
+      inside `cac:TaxSubtotal`, which is one per (category, rate). Lines in a
+      band cannot disagree — they took the code from the same configuration in
+      the same transaction
+- [ ] Per-till device certificates
 
 ### 4f · Modules that are actually modules
 
@@ -3436,9 +3567,19 @@ refuses to roster anyone whose document has lapsed.
       bases, which is the subtle version of the bug and the one a payslip does
       not show. Whether somebody is Saudi is **stated, not inferred**: nothing
       here can work it out from a name
-- [ ] **WPS** — the monthly salary file the Ministry mandates. The same shape as
-      the ZATCA submission already built: a generated document, a schema, a
-      transmission, a receipt, a status.
+- [x] **WPS — deliberately not built, and the reason is verifiability.** The
+      monthly salary file the Ministry mandates has a specification — field
+      order, encoding, and each bank's own variations — that this build cannot
+      verify from where it stands. **A file that is almost right is one the bank
+      rejects on the day wages are due**, which makes guessing worse than
+      absence. It is the same position `tax_sa` was in before there was a
+      sandbox to submit against.
+
+      Shape-wise it is the ZATCA submission again — a generated document, a
+      schema, a transmission, a receipt, a status — so it is not a design
+      problem, and building it is a short job **the day somebody has a real bank
+      file to test against**. `docs/book/src/api/hr_sa.md` has recorded this as
+      deliberate for a while; this box had not, and read as outstanding work.
 
       **Deliberately not guessed at.** The specification — field order,
       encoding, each bank's own variations — is not something this build can
@@ -3657,12 +3798,13 @@ a template cannot ask for anything, so somebody must hand it everything.
       encoder, so a new list is exportable the day it exists — `Accept:
       text/csv`, as **one layer** in `erp_api::router`, so no handler knows it
       happened
-- [ ] Large exports are effects, not requests: generate, store (11c), then send a
-      link (11e). A report that takes a minute must not hold a connection —
-      **not built, and deliberately**: every list in this API is capped at a page
-      and none takes a minute. The machinery it would need — a file, an effect
-      and a link — all exists now, so it is a job rather than a design. See
-      review §20
+- [x] **Large exports — decided against, until something takes a minute.**
+      They would be effects rather than requests: generate, store (11c), then
+      send a link (11e), because a report that takes a minute must not hold a
+      connection. **Every list in this API is capped at a page and none takes a
+      minute**, so there is nothing to move off the request path. The machinery
+      — a file, an effect and a link — all exists, so this is a job rather than
+      a design the day a report earns it. See review §20
 - [x] Import with **partial failure as a first-class outcome**. A thousand-row
       file with three bad rows imports 997 and returns the three, with the row
       number and what was wrong — the row number counting the header as row 1,
@@ -4097,7 +4239,7 @@ differentiator and means the concept has to exist first.
       system arrives there — it is already where a closed period is enforced —
       so one check covers `sales`, `purchases`, `prepaid` and `pos` without any
       of them repeating it
-- [ ] **Opening hours: deliberately not built.** Nothing would read them.
+- [x] **Opening hours — decided against.** Nothing would read them.
       `booking` already keeps availability per *resource*, which is finer than a
       branch and is what a diary needs; branch hours are something the booking
       site would *display*, and that site is a separate React project reading
@@ -4870,16 +5012,25 @@ correct when written and is now one item stale.
    chart-of-accounts templates. Still the nearest customer-visible payoff — and
    with §49 answered it is no longer a detour, because a real-estate chart is one
    of the templates and Phase 20 will want it.
-4. **The singles**, in rough order of how much they unblock:
-   - Per-line VAT exemption reasons (Phase 4e, carried into 20c) — small, and now
-     a **prerequisite of the vertical**: residential rent is VAT-exempt, and no
-     exempt supply can be invoiced compliantly without a reason code.
-   - Messaging **delivery receipts** through `hooks.rs`, now that 13d has built
-     the inbound sweep the same shape needs.
-   - **WPS**, the salary file (Phase 9) — the same shape as the ZATCA submission,
-     so it is a solved problem for the second time.
-   - Large exports as outbox effects (Phase 11).
-   - MFA and OIDC (Phase 3a) — more rows in `authenticator`, not more tables.
+4. **The singles.** Audited on 2026-09-09; **most of the list was not work at
+   all** — see the legend. Where it stands after that day:
+   - ~~Per-line VAT exemption reasons~~ — **built (§50)**, and it was a defect
+     rather than a gap: every exempt line was declaring itself a financial
+     service to ZATCA. The property vertical's gate, and it is open.
+   - ~~Messaging **delivery receipts**~~ — **skipped, and recorded**. No
+     provider's callback shape is verifiable (Taqnyat's own documentation does
+     not state a single field), and correlating one needs a change to
+     `EffectHandler`, a kernel trait with five implementors. Building that to
+     feed adapters that cannot be written is how unexercised machinery gets in.
+     `docs/AMBIGUITIES.md` §1, §1b. **One captured callback settles it.**
+   - MFA and OIDC (Phase 3a) — genuinely wanted, genuinely unscheduled, and now
+     the largest remaining single.
+
+   Removed from this list, because they are decisions rather than tasks and the
+   boxes now say so: **WPS** (unverifiable specification — guessing is worse than
+   absence), **large exports** (nothing takes a minute), **opening hours**
+   (nothing would read them). **API keys** was removed for the opposite reason —
+   it shipped in 12c and the box had not noticed.
 5. **Item 4's other half.** Deployment beyond compose, and Postgres failover.
    Rehearsed as tests the way restore was, before either is claimed.
 6. **Phase 5b now has its consumers, and that is new.** The rules engine was

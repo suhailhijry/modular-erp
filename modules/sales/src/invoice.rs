@@ -736,7 +736,7 @@ mod tests {
                 allowances: Vec::new(),
                 description: "Consulting".to_owned(),
                 net,
-                vat,
+                vat: vat.clone(),
             }],
             discounts: Vec::new(),
             totals: total([(vat, net)], [], currency).unwrap_or_else(|_| unreachable!()),

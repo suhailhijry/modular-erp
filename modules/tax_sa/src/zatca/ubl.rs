@@ -564,7 +564,7 @@ fn tax_total(out: &mut String, document: &Document) -> Result<(), NotRenderable>
             percent(band.rate_bp)
         );
         // Required on anything not standard-rated, and ZATCA's own code list.
-        if let Some((code, reason)) = exemption_reason(band.category) {
+        if let Some((code, reason)) = exemption_reason(band.exemption_reason.as_deref()) {
             let _ = writeln!(
                 out,
                 "        <cbc:TaxExemptionReasonCode>{code}</cbc:TaxExemptionReasonCode>"
@@ -902,6 +902,7 @@ pub(crate) mod tests {
                 })),
             }),
             lines: vec![Line {
+                exemption_reason: None,
                 allowances: Vec::new(),
                 description: "استشارات".to_owned(),
                 net,
@@ -916,6 +917,7 @@ pub(crate) mod tests {
                 before_discount: None,
                 gross: Money::from_minor(11_500, currency),
                 bands: vec![Band {
+                    exemption_reason: None,
                     category: VatCategory::Standard,
                     rate_bp: 1_500,
                     net,
@@ -942,6 +944,7 @@ pub(crate) mod tests {
             number: "INV-00000".to_owned(),
             issued_at: at("2026-02-01T09:00:00Z"),
             bands: vec![Band {
+                exemption_reason: None,
                 category: VatCategory::Standard,
                 rate_bp: 1_500,
                 net: Money::from_minor(2_000, currency),
@@ -954,6 +957,7 @@ pub(crate) mod tests {
             gross: Money::from_minor(9_200, currency),
             before_discount: None,
             bands: vec![Band {
+                exemption_reason: None,
                 category: VatCategory::Standard,
                 rate_bp: 1_500,
                 net: Money::from_minor(8_000, currency),
@@ -1134,19 +1138,24 @@ pub(crate) mod tests {
         assert!(!plain_invoice.contains("<cac:PaymentMeans>"));
     }
 
-    /// Zero-rated and exempt lines need a reason, and they need different ones.
+    /// **A band states the article it was stamped with**, not one derived from
+    /// its category. Two bands that are both untaxed can be untaxed for
+    /// unrelated reasons, and until 2026-09-09 this rendered every exempt band
+    /// as `VATEX-SA-29`, financial services — including a landlord's rent.
     #[test]
     fn a_zero_rated_band_states_why_it_is_zero() {
         let mut document = document();
         let currency = sar();
         document.totals.bands = vec![
             Band {
+                exemption_reason: Some("VATEX-SA-32".to_owned()),
                 category: VatCategory::Zero,
                 rate_bp: 0,
                 net: Money::from_minor(5_000, currency),
                 tax: Money::zero(currency),
             },
             Band {
+                exemption_reason: Some("VATEX-SA-30".to_owned()),
                 category: VatCategory::Exempt,
                 rate_bp: 0,
                 net: Money::from_minor(5_000, currency),
@@ -1156,7 +1165,14 @@ pub(crate) mod tests {
 
         let xml = render(&document).expect("renders");
         assert!(xml.contains("<cbc:TaxExemptionReasonCode>VATEX-SA-32"));
-        assert!(xml.contains("<cbc:TaxExemptionReasonCode>VATEX-SA-29"));
+        assert!(
+            xml.contains("<cbc:TaxExemptionReasonCode>VATEX-SA-30"),
+            "residential rent is article 30; article 29 is financial services"
+        );
+        assert!(
+            !xml.contains("VATEX-SA-29"),
+            "no code the document did not stamp may reach the authority"
+        );
         assert!(xml.contains(">Z</cbc:ID>"));
         assert!(xml.contains(">E</cbc:ID>"));
     }
@@ -1455,6 +1471,7 @@ pub(crate) mod tests {
             gross: Money::from_minor(9_775, currency),
             before_discount: Some(Money::from_minor(10_000, currency)),
             bands: vec![Band {
+                exemption_reason: None,
                 category: VatCategory::Standard,
                 rate_bp: 1_500,
                 net: Money::from_minor(8_500, currency),
@@ -1575,6 +1592,7 @@ pub(crate) mod tests {
     fn a_line_allowance_is_written_inside_its_line_and_carries_no_category() {
         let mut document = document();
         document.lines = vec![Line {
+            exemption_reason: None,
             description: "استشارات".to_owned(),
             net: Money::from_minor(9_000, sar()),
             category: VatCategory::Standard,
@@ -1624,6 +1642,7 @@ pub(crate) mod tests {
     fn the_price_is_before_the_allowance_and_the_line_total_is_after() {
         let mut document = document();
         document.lines = vec![Line {
+            exemption_reason: None,
             description: "استشارات".to_owned(),
             net: Money::from_minor(9_000, sar()),
             category: VatCategory::Standard,

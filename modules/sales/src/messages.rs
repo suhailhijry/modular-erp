@@ -3,6 +3,7 @@
 use erp_i18n::{Locale, MessageCode, Template};
 
 pub const NOTHING_TO_INVOICE: MessageCode = MessageCode::new("sales.nothing_to_invoice");
+pub const NO_EXEMPTION_REASON: MessageCode = MessageCode::new("sales.no_exemption_reason");
 pub const NOT_ISSUED: MessageCode = MessageCode::new("sales.not_issued");
 pub const OVERPAYMENT: MessageCode = MessageCode::new("sales.overpayment");
 pub const PAYMENT_CURRENCY: MessageCode = MessageCode::new("sales.payment_currency");
@@ -28,6 +29,7 @@ pub const PREPAID_DOES_NOT_FIT: MessageCode = MessageCode::new("sales.prepaid_do
 pub const NO_SUCH_LINE: MessageCode = MessageCode::new("sales.no_such_line");
 
 pub static CODES: &[MessageCode] = &[
+    NO_EXEMPTION_REASON,
     PREPAID_DOES_NOT_FIT,
     NO_SUCH_LINE,
     CREDIT_WITHOUT_A_BAND,
@@ -74,6 +76,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Locale::Arabic,
         Template::Simple(
             "المحتفظ به مقابل هذه الفاتورة {held} والمبلغ المسترد {offered}. إعادة أكثر مما استُلم قرار يتخذه شخص، لا رصيد سالب.",
+        ),
+    ),
+    (
+        NO_EXEMPTION_REASON,
+        Locale::English,
+        Template::Simple(
+            "A {category} line carries no tax and must say why, and no reason is configured. Set one for this treatment at /v1/ledger/vat-rates.",
+        ),
+    ),
+    (
+        NO_EXEMPTION_REASON,
+        Locale::Arabic,
+        Template::Simple(
+            "سطر بمعاملة {category} لا يحمل ضريبة ويجب أن يذكر السبب، ولم يُضبط أي سبب. اضبط سببًا لهذه المعاملة من /v1/ledger/vat-rates.",
         ),
     ),
     (

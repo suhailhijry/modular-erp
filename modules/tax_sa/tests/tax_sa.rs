@@ -318,7 +318,11 @@ async fn re_installing_does_not_overwrite_a_rate_the_tenant_set() {
     erp_eventlog::configuration::set(
         &mut conn,
         ledger::Rates::KEY,
-        &ledger::Rates { standard: 500 },
+        &ledger::Rates {
+            standard: 500,
+            zero_reason: None,
+            exempt_reason: None,
+        },
         Some("the-accountant"),
         None,
     )

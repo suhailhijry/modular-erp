@@ -88,7 +88,48 @@ impl Fixture {
         ] {
             fixture.open(account, kind, sar()).await;
         }
+        fixture.configure_exemption_reasons().await;
         fixture
+    }
+
+    /// A tenant with accounts but **nothing configured at all**, for the tests
+    /// about what a command records when there is no configuration to resolve
+    /// against. Only standard-rated lines can be issued here, which is the
+    /// point: a line carrying no tax needs an article, and an article is
+    /// configuration.
+    async fn unconfigured() -> Self {
+        let fixture = Self::bare().await;
+        for (account, kind) in [
+            ("1010", AccountKind::Asset),
+            ("1100", AccountKind::Asset),
+            ("2100", AccountKind::Liability),
+            ("4000", AccountKind::Revenue),
+        ] {
+            fixture.open(account, kind, sar()).await;
+        }
+        fixture
+    }
+
+    /// **Why a fixture has to say this at all.** A line that carries no tax
+    /// must name the article it is exempt or zero-rated under, and this build
+    /// refuses to issue one that cannot. The codes below are the ones this
+    /// file's own test data implies: it invoices "Export" at zero rate and
+    /// "Residential rent" as exempt.
+    async fn configure_exemption_reasons(&self) {
+        let mut conn = self.db.acquire().await.expect("a connection");
+        erp_eventlog::configuration::set(
+            &mut conn,
+            ledger::Rates::KEY,
+            &ledger::Rates {
+                standard: 1_500,
+                zero_reason: Some("VATEX-SA-32".to_owned()),
+                exempt_reason: Some("VATEX-SA-30".to_owned()),
+            },
+            Some("the-accountant"),
+            None,
+        )
+        .await
+        .expect("rates configure");
     }
 
     /// The same tenant with no accounts at all, for the tests about what happens
@@ -1011,15 +1052,59 @@ async fn changing_where_sales_post_leaves_earlier_invoices_alone() {
     fixture.cleanup().await;
 }
 
+/// **A line that carries no tax must name the article it is untaxed under.**
+///
+/// Refused at issue rather than defaulted downstream. Until 2026-09-09 an
+/// exempt line was rendered to ZATCA as `VATEX-SA-29`, financial services,
+/// whatever the business actually did — right for a bank and a false statement
+/// to a tax authority for a landlord.
+#[tokio::test]
+async fn a_line_that_carries_no_tax_must_say_why() {
+    let fixture = Fixture::unconfigured().await;
+
+    for category in [VatCategory::Zero, VatCategory::Exempt] {
+        let refused = issue(
+            &fixture,
+            "INV-NOREASON",
+            vec![line("Rent", riyals(100), category)],
+        )
+        .await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommandError::Execute(ExecuteError::Rejected(
+                    SalesError::NoExemptionReason { category: refused_category }
+                ))) if refused_category == category
+            ),
+            "a {category:?} line with no configured article must be refused, got {refused:?}"
+        );
+    }
+
+    // And a standard-rated line is unaffected: it is taxed, so it has nothing
+    // to explain.
+    issue(
+        &fixture,
+        "INV-STANDARD",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("a taxed line needs no article");
+
+    fixture.cleanup().await;
+}
+
 /// A command records which generation of configuration it decided against.
 #[tokio::test]
 async fn a_command_stamps_the_configuration_it_resolved_against() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::unconfigured().await;
 
+    // **Standard-rated on purpose.** A zero-rated line needs the article it is
+    // zero-rated under, and that is configuration — which this test exists to
+    // observe the *absence* of.
     let committed = issue(
         &fixture,
         "INV-CFG-2",
-        vec![line("Consulting", riyals(100), VatCategory::Zero)],
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
     )
     .await
     .expect("issues");
@@ -1054,7 +1139,7 @@ async fn a_command_stamps_the_configuration_it_resolved_against() {
     let committed = issue(
         &fixture,
         "INV-CFG-3",
-        vec![line("Consulting", riyals(100), VatCategory::Zero)],
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
     )
     .await
     .expect("issues");
@@ -2544,7 +2629,11 @@ async fn an_invoice_carries_the_rate_the_tenant_configured() {
     erp_eventlog::configuration::set(
         &mut conn,
         ledger::Rates::KEY,
-        &ledger::Rates { standard: 500 },
+        &ledger::Rates {
+            standard: 500,
+            zero_reason: None,
+            exempt_reason: None,
+        },
         Some("the-accountant"),
         None,
     )
@@ -2603,7 +2692,11 @@ async fn changing_the_rate_leaves_earlier_invoices_alone() {
     erp_eventlog::configuration::set(
         &mut conn,
         ledger::Rates::KEY,
-        &ledger::Rates { standard: 500 },
+        &ledger::Rates {
+            standard: 500,
+            zero_reason: None,
+            exempt_reason: None,
+        },
         Some("the-accountant"),
         None,
     )

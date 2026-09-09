@@ -129,10 +129,25 @@ mod tests {
 /// per rate rather than a second number here — `VatCategory` is what a line is
 /// classified as, and two lines at different positive rates are not the same
 /// classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rates {
     /// The standard rate, in basis points. 1500 is 15%.
     pub standard: i32,
+
+    /// **Why a zero-rated line carries no tax**, as the tax authority's own
+    /// code.
+    ///
+    /// Opaque here on purpose. The list belongs to the authority and a country
+    /// module owns the enum — `tax_sa::ExemptionReason` for Saudi Arabia —
+    /// exactly as `crm::TaxRegistration.scheme` carries ZATCA's `schemeID`
+    /// without `crm` knowing what is in it. A `ledger` that enumerated one
+    /// country's exemption articles would need every country's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zero_reason: Option<String>,
+
+    /// Why an exempt line carries no tax. See [`Self::zero_reason`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exempt_reason: Option<String>,
 }
 
 impl Rates {
@@ -140,9 +155,35 @@ impl Rates {
     pub const KEY: &'static str = "ledger.vat_rates";
 
     /// 15%, since July 2020.
+    ///
+    /// **The reason codes are `None`, and that is deliberate.** There is no
+    /// sensible default: a business renting residential property and one
+    /// exporting goods are both exempt or zero-rated for entirely different
+    /// articles, and guessing produced a real defect — every exempt line in
+    /// this build was declared to ZATCA as a *financial service* until
+    /// 2026-09-09. A code nobody chose is worse than no code, because only one
+    /// of them is a false statement to a tax authority.
     #[must_use]
     pub const fn saudi_arabia() -> Self {
-        Self { standard: 1_500 }
+        Self {
+            standard: 1_500,
+            zero_reason: None,
+            exempt_reason: None,
+        }
+    }
+
+    /// The authority's reason code this category carries under these, if the
+    /// tenant has chosen one.
+    ///
+    /// `None` for [`VatCategory::Standard`] always: a standard-rated line is
+    /// taxed and has nothing to explain.
+    #[must_use]
+    pub fn reason(&self, category: VatCategory) -> Option<&str> {
+        match category {
+            VatCategory::Standard => None,
+            VatCategory::Zero => self.zero_reason.as_deref(),
+            VatCategory::Exempt => self.exempt_reason.as_deref(),
+        }
     }
 
     /// The rate a category carries under these.
@@ -150,7 +191,7 @@ impl Rates {
     /// Zero-rated and exempt are both 0% by definition and not by configuration
     /// — a jurisdiction that taxed an exempt supply would not call it exempt.
     #[must_use]
-    pub const fn of(self, category: VatCategory) -> i32 {
+    pub const fn of(&self, category: VatCategory) -> i32 {
         match category {
             VatCategory::Standard => self.standard,
             VatCategory::Zero | VatCategory::Exempt => 0,

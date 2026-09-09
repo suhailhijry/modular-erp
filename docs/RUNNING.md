@@ -377,6 +377,41 @@ asked for. The codes are the module catalogs (`erp_api::CATALOG` is their
 union), and every code has an English and an Arabic rendering, which a test
 enforces.
 
+## Before you invoice anything untaxed
+
+**A line that carries no tax must name the article it is untaxed under**, and
+only you know which one covers your business. Set it once:
+
+```bash
+# A landlord letting residential property.
+curl -X PUT "$API/v1/ledger/vat-rates" -H "$AUTH" -H 'Content-Type: application/json' -d '{
+  "standard": 1500,
+  "exempt_reason": "VATEX-SA-30"
+}'
+```
+
+Until you do, issuing an exempt or zero-rated line is **refused** — in your
+language, naming the treatment — rather than being sent to ZATCA with a reason
+somebody guessed. The common codes:
+
+| Code | What it covers | Treatment |
+|---|---|---|
+| `VATEX-SA-30` | Real estate transactions (Article 30) — **residential rent** | Exempt |
+| `VATEX-SA-29` | Financial services (Article 29) | Exempt |
+| `VATEX-SA-29-7` | Life insurance (Article 29) | Exempt |
+| `VATEX-SA-32` | Export of goods | Zero-rated |
+| `VATEX-SA-33` | Export of services | Zero-rated |
+| `VATEX-SA-35` | Medicines and medical equipment | Zero-rated |
+| `VATEX-SA-EDU` | Private education to a citizen | Zero-rated |
+| `VATEX-SA-HEA` | Private healthcare to a citizen | Zero-rated |
+
+`GET` the same path to see what is set. **Not retrospective**: every invoice
+already issued carries the article it was issued under, so correcting this
+cannot restate a filed return.
+
+Standard-rated businesses need none of this — a taxed line has nothing to
+explain.
+
 ## ZATCA, end to end
 
 Onboarding needs a six-digit OTP the taxpayer generates in the Fatoora portal.

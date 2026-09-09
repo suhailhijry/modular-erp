@@ -148,6 +148,10 @@ impl Projection for ZatcaDocuments {
                     vat_number: customer.vat_number.clone(),
                     address: customer.address.clone(),
                 };
+                // Built once: the bands' exemption reasons are read back off
+                // these, so building them twice would be building the lookup's
+                // own input twice.
+                let document_lines: Vec<Line> = lines.iter().map(line).collect();
                 let built = Built {
                     calendar: ctx.calendar(),
                     kind: Kind::of(customer.vat_number.as_ref()),
@@ -165,14 +169,14 @@ impl Projection for ZatcaDocuments {
                     issued_at: issued_on,
                     currency,
                     buyer: Some(buyer),
-                    lines: lines.iter().map(line).collect(),
+                    lines: document_lines.clone(),
                     allowances: discounts.iter().map(allowance).collect(),
-                    totals: totals_of(&totals),
+                    totals: totals_of(&totals, &document_lines),
                     reference: None,
                     // **The final invoice after a deposit** names the
                     // prepayment invoice and what it declared; the totals
                     // above are what is left. See `zatca::PrepaidRef`.
-                    prepaid: prepaid.as_ref().map(prepaid_ref),
+                    prepaid: prepaid.as_ref().map(|p| prepaid_ref(p, &document_lines)),
                     note: String::new(),
                 };
                 write(conn, ctx.event_time(), &built).await
@@ -467,6 +471,7 @@ async fn credit_part(
         return Ok(());
     };
 
+    let credited_lines: Vec<Line> = lines.iter().map(|credited| line(&credited.line)).collect();
     let built = Built {
         calendar: ctx.calendar(),
         kind: invoice.kind,
@@ -480,12 +485,12 @@ async fn credit_part(
         // an invoice line, and its description and rate were taken from there
         // — so the document says what came back rather than what somebody
         // typed.
-        lines: lines.iter().map(|credited| line(&credited.line)).collect(),
+        lines: credited_lines.clone(),
         // **No allowances.** A discount is something taken off before the tax
         // was worked out; this credits what was actually charged, stated
         // directly, so there is nothing to take off it.
         allowances: Vec::new(),
-        totals: totals_of(totals),
+        totals: totals_of(totals, &credited_lines),
         reference: Some(Reference {
             number: invoice.number.clone(),
             issued_at: invoice.issued_at,
@@ -528,7 +533,7 @@ async fn invoice_of(
 /// **The final invoice after a deposit** names the prepayment invoice and what
 /// it declared; the document's own totals are what is left. See
 /// `zatca::PrepaidRef`.
-fn prepaid_ref(prepaid: &sales::Prepaid) -> crate::zatca::PrepaidRef {
+fn prepaid_ref(prepaid: &sales::Prepaid, lines: &[Line]) -> crate::zatca::PrepaidRef {
     crate::zatca::PrepaidRef {
         number: prepaid.number.clone(),
         issued_at: prepaid.issued_on,
@@ -540,6 +545,10 @@ fn prepaid_ref(prepaid: &sales::Prepaid) -> crate::zatca::PrepaidRef {
                 rate_bp: band.basis_points,
                 net: band.net,
                 tax: band.tax,
+                // **The supply's own reason.** A deposit against residential
+                // rent is exempt for the article the rent is exempt for; the
+                // prepayment was for this supply and shares its treatment.
+                exemption_reason: reason_of(lines, band.category),
             })
             .collect(),
     }
@@ -551,6 +560,7 @@ fn line(line: &InvoiceLine) -> Line {
         net: line.net,
         category: line.vat.category,
         rate_bp: line.vat.basis_points,
+        exemption_reason: line.vat.exemption_reason.clone(),
         tax: tax_of(line),
         allowances: line
             .allowances
@@ -590,7 +600,20 @@ fn allowance(discount: &sales::Discount) -> crate::zatca::Allowance {
     }
 }
 
-fn totals_of(totals: &sales::Totals) -> Totals {
+/// **Why a band carries no tax, taken from the lines in it.**
+///
+/// They cannot disagree: every line of a given category took its code from the
+/// same [`ledger::Rates`] in the same transaction, so the first one that has a
+/// code speaks for the band. A band with no such line is standard-rated, or is
+/// from a document issued before the code was recorded.
+fn reason_of(lines: &[Line], category: ledger::VatCategory) -> Option<String> {
+    lines
+        .iter()
+        .find(|line| line.category == category && line.exemption_reason.is_some())
+        .and_then(|line| line.exemption_reason.clone())
+}
+
+fn totals_of(totals: &sales::Totals, lines: &[Line]) -> Totals {
     Totals {
         net: totals.net,
         tax: totals.tax,
@@ -606,6 +629,7 @@ fn totals_of(totals: &sales::Totals) -> Totals {
                 rate_bp: band.basis_points,
                 net: band.net,
                 tax: band.tax,
+                exemption_reason: reason_of(lines, band.category),
             })
             .collect(),
     }

@@ -144,6 +144,7 @@ fn document(kind: Kind, type_code: TypeCode, link: Link) -> Document {
             Kind::Simplified => None,
         },
         lines: vec![Line {
+            exemption_reason: None,
             allowances: Vec::new(),
             description: "اشتراك شهري".to_owned(),
             net,
@@ -158,6 +159,7 @@ fn document(kind: Kind, type_code: TypeCode, link: Link) -> Document {
             before_discount: None,
             gross: Money::from_minor(11_500, currency),
             bands: vec![Band {
+                exemption_reason: None,
                 category: VatCategory::Standard,
                 rate_bp: 1_500,
                 net,
@@ -189,6 +191,7 @@ fn discounted(mut document: Document) -> Document {
         gross: Money::from_minor(9_775, currency),
         before_discount: Some(Money::from_minor(10_000, currency)),
         bands: vec![Band {
+            exemption_reason: None,
             category: VatCategory::Standard,
             rate_bp: 1_500,
             net: Money::from_minor(8_500, currency),

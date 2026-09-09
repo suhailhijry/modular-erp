@@ -8577,13 +8577,28 @@
       },
       "RatesView": {
         "example": {
+          "exempt_reason": "VATEX-SA-30",
           "standard": 1500
         },
         "properties": {
+          "exempt_reason": {
+            "description": "**Why your exempt supplies carry no tax.** In Saudi Arabia a landlord\nletting residential property is `VATEX-SA-30` (real estate\ntransactions); a financial services business is `VATEX-SA-29`.\n\nRequired before an exempt invoice can be issued. See\n[`Self::zero_reason`].",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "standard": {
             "description": "The standard rate in **basis points**. 1500 is 15% (Saudi Arabia), 500\nis 5% (the UAE).\n\nZero-rated and exempt are 0% by definition and not configurable — a\njurisdiction that taxed an exempt supply would not call it exempt.\n\nApplies to invoices issued **from now on**. Every document already issued\ncarries the rate it was issued under, so changing this cannot restate a\nfiled return.",
             "format": "int32",
             "type": "integer"
+          },
+          "zero_reason": {
+            "description": "**Why your zero-rated supplies carry no tax**, as the tax authority's\nown code. In Saudi Arabia one of ZATCA's `VATEX-SA-*` codes — an\nexporter of goods is `VATEX-SA-32`, a private school teaching citizens\nis `VATEX-SA-EDU`.\n\nRequired before a zero-rated invoice can be issued, and there is no\ndefault: two businesses are zero-rated for entirely different articles\nand a code nobody chose is a false statement to a tax authority.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [

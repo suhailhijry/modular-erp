@@ -1003,6 +1003,31 @@ async fn install_chart(app: &axum::Router, slug: &str, token: &str) -> Result<()
         StatusCode::OK,
     )
     .await?;
+    configure_vat(app, slug, token).await?;
+    Ok(())
+}
+
+/// **What this business charges, and why some of it is untaxed.**
+///
+/// The demo exports services and lets property, so it issues both zero-rated
+/// and exempt lines — and a line carrying no tax must name the ZATCA article it
+/// is untaxed under. Without this the first invoice is refused, which is the
+/// point: the refusal is what stops a supply being declared under an article
+/// nobody chose.
+async fn configure_vat(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
+    put(
+        app,
+        slug,
+        "/v1/ledger/vat-rates",
+        token,
+        &serde_json::json!({
+            "standard": 1_500,
+            "zero_reason": "VATEX-SA-32",
+            "exempt_reason": "VATEX-SA-30",
+        }),
+        StatusCode::NO_CONTENT,
+    )
+    .await?;
     Ok(())
 }
 

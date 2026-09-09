@@ -36,6 +36,18 @@ use crate::vat::TaxError;
 pub enum SalesError {
     #[error("an invoice needs at least one line that comes to something")]
     NothingToInvoice,
+    /// **A line that carries no tax must say why**, and only the tenant knows.
+    ///
+    /// The reason is a code from the tax authority's list, configured once at
+    /// `PUT /v1/ledger/vat-rates`. Refused here rather than defaulted: this
+    /// build used to state *financial services* for every exempt line, which
+    /// was right for one kind of business and a false statement to a tax
+    /// authority for every other.
+    #[error(
+        "a {} line needs a reason, and none is configured; set one at /v1/ledger/vat-rates",
+        category.as_str()
+    )]
+    NoExemptionReason { category: ledger::VatCategory },
     #[error("invoice {0} has not been issued")]
     NotIssued(String),
     #[error("only {outstanding} is outstanding; the payment is {offered}")]
@@ -109,6 +121,8 @@ impl erp_i18n::Localize for SalesError {
         use erp_i18n::{Message, MessageArg};
         match self {
             Self::NothingToInvoice => Message::new(messages::NOTHING_TO_INVOICE),
+            Self::NoExemptionReason { category } => Message::new(messages::NO_EXEMPTION_REASON)
+                .with("category", MessageArg::text(category.as_str().to_owned())),
             Self::NoSuchCustomer(id) => Message::new(messages::NO_SUCH_CUSTOMER)
                 .with("customer", MessageArg::text(id.clone())),
             Self::NotIssued(id) => {
@@ -316,7 +330,7 @@ pub async fn issue_in(
         .await
         .map_err(|e| ExecuteError::Rejected(SalesError::Config(e)))?;
 
-    let lines = priced_lines(&draft.lines, rates)?;
+    let lines = priced_lines(&draft.lines, &rates)?;
 
     // The rate comes from the same configuration the lines' does, so a discount
     // on a standard-rated invoice reduces the tax at the rate that invoice was
@@ -327,13 +341,13 @@ pub async fn issue_in(
         .map(|discount| InvoiceDiscount {
             reason: discount.reason.clone(),
             amount: discount.amount,
-            vat: crate::vat::Vat::at(rates, discount.category),
+            vat: crate::vat::Vat::at(&rates, discount.category),
         })
         .collect();
 
     let totals = crate::vat::total(
-        lines.iter().map(|l| (l.vat, l.net)),
-        discounts.iter().map(|d| (d.vat, d.amount)),
+        lines.iter().map(|l| (l.vat.clone(), l.net)),
+        discounts.iter().map(|d| (d.vat.clone(), d.amount)),
         draft.currency,
     )
     .map_err(|e| ExecuteError::Rejected(SalesError::Tax(e)))?;
@@ -1201,11 +1215,21 @@ async fn cancel_in(
 /// twice.
 fn priced_lines(
     draft: &[DraftLine],
-    rates: ledger::Rates,
+    rates: &ledger::Rates,
 ) -> Result<Vec<InvoiceLine>, ExecuteError<SalesError>> {
     draft
         .iter()
         .map(|line| {
+            // **L6, before anything is written.** A category that carries no
+            // tax needs the authority's article, and a document that cannot
+            // say why is refused at issue rather than rendered with a guess.
+            if line.category != ledger::VatCategory::Standard
+                && rates.reason(line.category).is_none()
+            {
+                return Err(ExecuteError::Rejected(SalesError::NoExemptionReason {
+                    category: line.category,
+                }));
+            }
             if line.allowances.iter().any(|a| !a.amount.is_positive()) {
                 // A negative allowance is a surcharge, which is a different
                 // element and a different conversation.
@@ -1484,7 +1508,7 @@ pub async fn credit_part_in(
 
             let lines = priced_for_credit(state, &note.lines, invoice)?;
             let totals = crate::vat::total(
-                lines.iter().map(|l| (l.line.vat, l.line.net)),
+                lines.iter().map(|l| (l.line.vat.clone(), l.line.net)),
                 // **No allowances on a credit note.** A discount is something
                 // taken off before tax was worked out; a credit takes back what
                 // was actually charged, and the caller states that directly.
@@ -1608,7 +1632,7 @@ fn priced_for_credit(
                     net: line.net,
                     // And the invoice's rate: one issued at 5% is credited at
                     // 5% for ever (L5).
-                    vat: against.vat,
+                    vat: against.vat.clone(),
                     // **Stated at what is coming back.** The invoice's own
                     // allowances are what made this line smaller in the first
                     // place; they are not taken off a second time.
