@@ -16,6 +16,11 @@ workspace = true
 # split is deliberate and load-bearing — see the crate docs.
 erp-occupancy = { workspace = true }
 erp-recurrence = { workspace = true }
+
+# **The rules engine.** A price band is a rule, and this is where the evaluator
+# and `explain` live. See `pricing.rs` on why the wire shape did not move with
+# it.
+erp-rules = { workspace = true }
 # `crm` for the customer reference, read from the log and never from `proj_crm`.
 # **`branches`, so a resource can say where it is.** A leaf that depends on
 # nothing, checked against its log at declare time — declaring a resource posts

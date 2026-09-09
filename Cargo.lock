@@ -259,6 +259,7 @@ dependencies = [
  "erp-occupancy",
  "erp-projection",
  "erp-recurrence",
+ "erp-rules",
  "erp-tenant",
  "erp-testkit",
  "erp-types",
@@ -925,6 +926,19 @@ dependencies = [
  "erp-types",
  "serde",
  "sqlx",
+ "thiserror",
+]
+
+[[package]]
+name = "erp-rules"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "erp-occupancy",
+ "erp-recurrence",
+ "erp-types",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

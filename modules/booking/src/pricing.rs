@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use erp_occupancy::Span;
 use erp_recurrence::Availability;
 use erp_recurrence::Calendar;
+use erp_rules::{DynCondition, Facts, Rule, Rules};
 
 /// Something taken off a line, and why.
 ///
@@ -186,6 +187,19 @@ impl Billing {
     }
 }
 
+/// **Why a booking was priced the way it was.**
+///
+/// `erp_rules::Explained` borrows from the rule set it explained; a tariff
+/// builds its rules for the call, so this is the owned answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriceExplained {
+    /// The band that applied, and its uplift in basis points.
+    pub matched: Option<(String, i32)>,
+    /// Every band tried, in order, and whether it matched. At most one did, and
+    /// it is the last — the evaluator stops there.
+    pub considered: Vec<(String, bool)>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tariff {
     /// **First match wins**, so the order is the tenant's priority. A specific
@@ -218,9 +232,58 @@ impl Tariff {
     /// booking, which is what they would do at the till anyway.
     #[must_use]
     pub fn band_for(&self, span: Span, calendar: Calendar) -> Option<&Band> {
-        self.bands
-            .iter()
-            .find(|band| band.when.covers(span, calendar))
+        let at = self.explain(span, calendar);
+        // `explain` names the winner; this returns the band it names. Two
+        // implementations of "which band wins" would disagree eventually, and
+        // the disagreement would be a price nobody could account for.
+        at.matched
+            .and_then(|(name, _)| self.bands.iter().find(|band| band.name == name))
+    }
+
+    /// **Which band applies, and every one considered getting there.**
+    ///
+    /// The question a tenant asks when a price surprises them, answered by the
+    /// evaluator that decided it rather than by a second reading of the rules.
+    ///
+    /// Owned rather than borrowed: the rule set is built for the call, so
+    /// there is nothing for a borrow to point at afterwards. The names are the
+    /// tenant's own and are short.
+    ///
+    /// ponytail: builds the rule set per call — a handful of small clones
+    /// against a booking that has already made several database round trips.
+    /// Hold it on `Tariff` if a profile ever says otherwise.
+    #[must_use]
+    pub fn explain(&self, span: Span, calendar: Calendar) -> PriceExplained {
+        let rules = self.rules();
+        let decided = rules.explain(&Facts::new().over(span, calendar));
+        PriceExplained {
+            matched: decided.matched.map(|rule| (rule.name.clone(), rule.then)),
+            considered: decided
+                .considered
+                .iter()
+                .map(|c| (c.name.to_owned(), c.matched))
+                .collect(),
+        }
+    }
+
+    /// This tariff as rules the engine evaluates.
+    ///
+    /// **The wire shape did not move.** A `Band` is still `{ name, when,
+    /// uplift }` in a tenant's stored configuration, because a tariff is a
+    /// settings entry rather than an event and there is no upcaster to carry an
+    /// old one across a rename. What changed is who evaluates it.
+    #[must_use]
+    pub fn rules(&self) -> Rules<i32> {
+        Rules::new(
+            self.bands
+                .iter()
+                .map(|band| Rule {
+                    name: band.name.clone(),
+                    when: DynCondition::Covers { window: band.when },
+                    then: band.uplift,
+                })
+                .collect(),
+        )
     }
 }
 
@@ -520,5 +583,116 @@ mod tests {
             }],
         };
         assert_eq!(price(&mixed, None), Err(PriceError::MixedCurrencies));
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    fn peak() -> Band {
+        Band {
+            name: "Thursday peak".to_owned(),
+            when: Availability::from_parts(&[], &[4], &[], 17 * 60, 21 * 60, None, None)
+                .expect("a window"),
+            uplift: 2_500,
+        }
+    }
+
+    fn base() -> Band {
+        Band {
+            name: "Base".to_owned(),
+            when: Availability::from_parts(&[], &[], &[], 0, 24 * 60, None, None)
+                .expect("a window"),
+            uplift: 0,
+        }
+    }
+
+    /// One hour starting at `hour` **on the tenant's clock**, which is Riyadh
+    /// (`+03:00`) by default. A window is written in local time, so a span
+    /// built in UTC would test a different hour than the one it names — the
+    /// mistake this helper exists to stop making twice.
+    fn at(day: &str, hour: u32) -> Span {
+        let from: erp_types::Timestamp = format!("{day}T{hour:02}:00:00+03:00")
+            .parse()
+            .expect("an instant");
+        Span::new(from, from + chrono::Duration::hours(1)).expect("a span")
+    }
+
+    /// **The tariff a tenant already stored must price the same.**
+    ///
+    /// This refactor moved who evaluates a band, not what a band means. If this
+    /// fails, somebody's salon was silently repriced.
+    #[test]
+    fn the_engine_picks_the_band_the_old_matcher_would_have() {
+        let tariff = Tariff {
+            bands: vec![peak(), base()],
+        };
+        let calendar = Calendar::default();
+
+        for (span, expected) in [
+            // 2026-05-07 is a Thursday.
+            // Thursday, inside 17:00–21:00 local.
+            (at("2026-05-07", 18), Some("Thursday peak")),
+            (at("2026-05-07", 10), Some("Base")),
+            // Wednesday at the same hour: the peak band is Thursday only.
+            (at("2026-05-06", 18), Some("Base")),
+        ] {
+            let by_engine = tariff.band_for(span, calendar).map(|b| b.name.as_str());
+            // What `find(|band| band.when.covers(..))` answered before.
+            let by_hand = tariff
+                .bands
+                .iter()
+                .find(|band| band.when.covers(span, calendar))
+                .map(|b| b.name.as_str());
+            assert_eq!(by_engine, expected);
+            assert_eq!(by_engine, by_hand, "the engine and the old matcher agree");
+        }
+    }
+
+    #[test]
+    fn explain_names_the_bands_tried_and_stops_at_the_winner() {
+        let tariff = Tariff {
+            bands: vec![peak(), base()],
+        };
+        let why = tariff.explain(at("2026-05-07", 10), Calendar::default());
+
+        assert_eq!(
+            why.matched.as_ref().map(|(n, u)| (n.as_str(), *u)),
+            Some(("Base", 0))
+        );
+        assert_eq!(
+            why.considered,
+            vec![
+                ("Thursday peak".to_owned(), false),
+                ("Base".to_owned(), true)
+            ],
+            "a tenant asking why can see the peak band was tried and missed"
+        );
+    }
+
+    #[test]
+    fn band_for_and_explain_never_disagree() {
+        let tariff = Tariff {
+            bands: vec![peak(), base()],
+        };
+        let calendar = Calendar::default();
+        for hour in 0..24 {
+            let span = at("2026-05-07", hour);
+            assert_eq!(
+                tariff.band_for(span, calendar).map(|b| b.name.clone()),
+                tariff.explain(span, calendar).matched.map(|(n, _)| n),
+                "at {hour}:00"
+            );
+        }
+    }
+
+    /// An empty tariff is the shipped default: every hour the same price.
+    #[test]
+    fn an_unconfigured_tariff_matches_nothing_and_explains_that() {
+        let tariff = Tariff::default();
+        let why = tariff.explain(at("2026-05-07", 18), Calendar::default());
+        assert!(why.matched.is_none());
+        assert!(why.considered.is_empty());
     }
 }

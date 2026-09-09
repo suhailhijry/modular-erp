@@ -21,6 +21,7 @@ erp-links = { path = "crates/erp-links" }
 erp-storage = { path = "crates/erp-storage" }
 erp-payments = { path = "crates/erp-payments" }
 erp-recurrence = { path = "crates/erp-recurrence" }
+erp-rules = { path = "crates/erp-rules" }
 erp-projection = { path = "crates/erp-projection" }
 erp-types = { path = "crates/erp-types" }
 erp-testkit = { path = "crates/erp-testkit" }

@@ -1,0 +1,24 @@
+[package]
+name = "erp-rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `Money`, for a fact that is an amount. Comparing two is currency-aware, which
+# is why a fact cannot just be an integer.
+erp-types = { workspace = true }
+# **`Availability` is a condition, kept whole.** See `condition.rs` on why this
+# dependency exists rather than a span fact with operators.
+erp-recurrence = { workspace = true }
+# `Span` — the window a decision is about.
+erp-occupancy = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+chrono = { workspace = true }

@@ -3105,13 +3105,50 @@ and let two working cases describe the engine.
 
 ### 5b · The engine, once there is something to describe it
 
-- [ ] `erp-rules`: `Facts`, `DynCondition`, `FactRegistry`, `Rule<E>`
-- [ ] Authorization and pricing both on it
+- [x] **`erp-rules`: `Facts`, `DynCondition`, `FactRegistry`, `Rule<E>` — built
+      2026-09-10.** Spec at
+      `docs/superpowers/specs/2026-09-10-rules-engine-design.md`.
+
+      **`Rule<E>` is smaller than §5.6 on purpose**, and each omission is an
+      argument: `priority` duplicates list order, `effective` duplicates
+      `Availability`'s `from`/`until`, `origin` would have one value while there
+      is one authoring level, and `id`/`version` are per-rule editing the config
+      store already covers at set level. Each arrives with the consumer that
+      needs it.
+
+      **One variant of `DynCondition` is not uniform**, deliberately.
+      `Covers { window: Availability }` carries the working span evaluator
+      whole — day-walking, per-end DST offsets, the 16:59:30-is-inside-17:00
+      boundary, and a bit-packed representation where zero means *every*. The
+      uniform alternative hides the same code behind an operator and buys only
+      symmetry.
+
+      **`explain` is in the first cut, not deferred.** A rules engine whose
+      refusals cannot be interrogated makes the support tickets it was built to
+      remove. `evaluate` takes its answer from `explain`, so they cannot
+      disagree about which rule won — the property `preview_chart` and
+      `install_chart` also have
+- [~] **Pricing is on it; authorization is the next spec.** `Tariff::band_for`
+      now takes its answer from the engine, and `Tariff::explain` says which
+      bands were tried and which won.
+
+      **The wire shape did not move.** A `Band` is still `{ name, when, uplift }`
+      in a tenant's stored configuration, because a tariff is a settings entry
+      and there is no upcaster to carry an old one across a rename. What changed
+      is who evaluates it. `the_engine_picks_the_band_the_old_matcher_would_have`
+      is the guard that protects a live tenant from being silently repriced
+- [ ] Authorization on it — its three facts (amount, branch, role) and the
+      narrowing rule that a fact-based override refines `Role::allows` and never
+      widens it. Second spec
 - [ ] Per-request fact assembly with startup coverage assertions — an
       unsatisfiable condition fails the build, not a user's request
 - [ ] Authoring levels 0–3 with `origin` round-tripping
 - [ ] Rule packs as blueprints
-- [ ] `explain`-backed dry run; effective-permission inspection
+- [x] **`explain` — built** for pricing, and generic: `Rules::explain` names
+      every rule tried, in order, with whether each matched. Effective-permission
+      inspection already shipped twice (§53). The `explain`-backed **dry run**
+      is what remains, and it now has the primitive it was waiting for — 4d's
+      rolled-back transaction seam
 
 **Exit:** one engine behind every rule, and a surface most tenants never leave.
 
