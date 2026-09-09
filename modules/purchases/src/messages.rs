@@ -4,6 +4,7 @@ use erp_i18n::{Locale, MessageCode, Template};
 
 pub const NOTHING_ON_IT: MessageCode = MessageCode::new("purchases.nothing_on_it");
 pub const NOT_RECORDED: MessageCode = MessageCode::new("purchases.not_recorded");
+pub const NOT_APPROVED: MessageCode = MessageCode::new("purchases.not_approved");
 pub const OVERPAYMENT: MessageCode = MessageCode::new("purchases.overpayment");
 pub const PAYMENT_CURRENCY: MessageCode = MessageCode::new("purchases.payment_currency");
 pub const NOT_A_PAYMENT: MessageCode = MessageCode::new("purchases.not_a_payment");
@@ -18,6 +19,7 @@ pub const INVALID_REFERENCE: MessageCode = MessageCode::new("purchases.invalid_r
 pub static CODES: &[MessageCode] = &[
     NOTHING_ON_IT,
     NOT_RECORDED,
+    NOT_APPROVED,
     OVERPAYMENT,
     PAYMENT_CURRENCY,
     NOT_A_PAYMENT,
@@ -38,6 +40,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOTHING_ON_IT,
         Locale::Arabic,
         Template::Simple("تحتاج الفاتورة إلى سطر واحد على الأقل بقيمة غير صفرية."),
+    ),
+    (
+        NOT_APPROVED,
+        Locale::English,
+        Template::Simple(
+            "Approving a payment needs the {claim} claim, and you do not hold it here. Ask somebody who does, or have it granted to you.",
+        ),
+    ),
+    (
+        NOT_APPROVED,
+        Locale::Arabic,
+        Template::Simple(
+            "اعتماد الدفعة يتطلب صلاحية {claim}، وهي غير ممنوحة لك هنا. اطلب من شخص يملكها أو اطلب منحها لك.",
+        ),
     ),
     (
         NOT_RECORDED,

@@ -146,6 +146,13 @@ impl Fixture {
         ensure_group_schema::<Purchases>(&mut conn)
             .await
             .expect("purchases checkpoint");
+        // **`hr` too, because approving a payment is a claim.** The claim
+        // itself lives in the tenant migration chain, but resolving a caller to
+        // an employee reads `hr`'s read model.
+        hr::install(&mut conn).await.expect("hr schema");
+        ensure_group_schema::<hr::Hr>(&mut conn)
+            .await
+            .expect("hr checkpoint");
         drop(conn);
 
         Self {
@@ -232,6 +239,35 @@ async fn pay(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> Out
             from: code("1010"),
         },
         &Metadata::default(),
+    )
+    .await
+}
+
+/// Pays as a named person, optionally with a tenant role — the two things the
+/// claim check reads.
+async fn pay_as(
+    fixture: &mut Fixture,
+    id: &str,
+    reference: &str,
+    amount: Money,
+    actor: Option<&str>,
+    role: Option<erp_tenant::Role>,
+) -> Outcome {
+    fixture.db.set_access(role.map(erp_tenant::Access::new));
+    let metadata = Metadata {
+        actor: actor.map(str::to_owned),
+        ..Metadata::default()
+    };
+    pay_bill(
+        &fixture.db,
+        &code(id),
+        &Payment {
+            reference: reference.to_owned(),
+            amount,
+            paid_on: on("2026-03-04"),
+            from: code("1010"),
+        },
+        &metadata,
     )
     .await
 }
@@ -746,4 +782,231 @@ fn names_are_valid() {
             "{name} is not a usable event name"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Approving a payment is a claim
+// ---------------------------------------------------------------------------
+
+/// Puts two people on the org chart and gives one of them the claim.
+async fn staff_with_a_claim(fixture: &Fixture) {
+    for (id, identity) in [("EMP-KHALID", "khalid"), ("EMP-SARA", "sara")] {
+        hr::hire(
+            &fixture.db,
+            &code(id),
+            &hr::Hire {
+                details: hr::Details {
+                    name: id.to_owned(),
+                    name_latin: None,
+                    national_id: None,
+                    // An employee needs a way to be reached, like a customer.
+                    email: Some(format!("{identity}@acme.test")),
+                    phone: None,
+                },
+                reports_to: None,
+                branch: None,
+                at: on("2026-01-01"),
+            },
+            &Metadata::default(),
+        )
+        .await
+        .expect("hires");
+        hr::link_login(
+            &fixture.db,
+            &code(id),
+            identity,
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("links a login");
+    }
+    let pool = fixture.tenant_pool().await;
+    let owned = hr::projections();
+    let refs: Vec<&dyn Projection<Group = hr::Hr>> = owned.iter().map(AsRef::as_ref).collect();
+    run_to_head::<hr::Hr>(&pool, &refs, hr::upcasters(), 200)
+        .await
+        .expect("hr projects");
+
+    hr::grant_claim(
+        &fixture.db,
+        &code("EMP-KHALID"),
+        &hr::Claim {
+            name: purchases::APPROVE_PAYMENT.to_owned(),
+            branch: None,
+        },
+        false,
+    )
+    .await
+    .expect("grants the claim");
+}
+
+/// **The property §52 exists for.** Until 2026-09-09 this passed for everybody,
+/// because nothing consulted the claim.
+#[tokio::test]
+async fn approving_a_payment_needs_the_claim_once_the_tenant_uses_claims() {
+    let mut fixture = Fixture::new().await;
+    record(
+        &fixture,
+        "BILL-1",
+        vec![line(
+            "5000",
+            riyals(1_000),
+            VatCategory::Standard,
+            riyals(150),
+        )],
+    )
+    .await
+    .expect("records");
+
+    // Before any claim exists, nothing changes for anybody.
+    pay_as(
+        &mut fixture,
+        "BILL-1",
+        "P-0",
+        riyals(10),
+        Some("sara"),
+        None,
+    )
+    .await
+    .expect("no claims in this tenant means no control");
+
+    staff_with_a_claim(&fixture).await;
+
+    let refused = pay_as(
+        &mut fixture,
+        "BILL-1",
+        "P-1",
+        riyals(10),
+        Some("sara"),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                PurchaseError::NotApproved(ref c)
+            ))) if c == purchases::APPROVE_PAYMENT
+        ),
+        "sara does not hold the claim and must be refused, got {refused:?}"
+    );
+
+    pay_as(
+        &mut fixture,
+        "BILL-1",
+        "P-2",
+        riyals(10),
+        Some("khalid"),
+        None,
+    )
+    .await
+    .expect("khalid holds it");
+
+    fixture.cleanup().await;
+}
+
+/// An owner must not be locked out by a control they switched on.
+#[tokio::test]
+async fn a_tenant_owner_is_not_refused_by_a_claim_they_do_not_hold() {
+    let mut fixture = Fixture::new().await;
+    record(
+        &fixture,
+        "BILL-1",
+        vec![line(
+            "5000",
+            riyals(1_000),
+            VatCategory::Standard,
+            riyals(150),
+        )],
+    )
+    .await
+    .expect("records");
+    staff_with_a_claim(&fixture).await;
+
+    pay_as(
+        &mut fixture,
+        "BILL-1",
+        "P-1",
+        riyals(10),
+        Some("sara"),
+        Some(erp_tenant::Role::Owner),
+    )
+    .await
+    .expect("an owner is exempt");
+
+    fixture.cleanup().await;
+}
+
+/// A job is nobody. Refusing background work the moment a tenant grants a claim
+/// would stop the sweeps.
+#[tokio::test]
+async fn work_with_no_actor_is_not_refused() {
+    let mut fixture = Fixture::new().await;
+    record(
+        &fixture,
+        "BILL-1",
+        vec![line(
+            "5000",
+            riyals(1_000),
+            VatCategory::Standard,
+            riyals(150),
+        )],
+    )
+    .await
+    .expect("records");
+    staff_with_a_claim(&fixture).await;
+
+    pay_as(&mut fixture, "BILL-1", "P-1", riyals(10), None, None)
+        .await
+        .expect("a worker has no claim to hold");
+
+    fixture.cleanup().await;
+}
+
+/// **Somebody outside the org chart cannot hold a claim, so they are refused.**
+///
+/// This is the half of the design that only bites on a real deployment: an
+/// integration user, a contractor with a login and no employee record, or
+/// somebody hired in the product but not yet in `hr`. No claim can reach them,
+/// and passing them through would be a hole the size of "make a second login".
+///
+/// The owner exemption above is what stops this being a lockout.
+#[tokio::test]
+async fn somebody_with_no_employee_record_is_refused() {
+    let mut fixture = Fixture::new().await;
+    record(
+        &fixture,
+        "BILL-1",
+        vec![line(
+            "5000",
+            riyals(1_000),
+            VatCategory::Standard,
+            riyals(150),
+        )],
+    )
+    .await
+    .expect("records");
+    staff_with_a_claim(&fixture).await;
+
+    let refused = pay_as(
+        &mut fixture,
+        "BILL-1",
+        "P-1",
+        riyals(10),
+        Some("a-login-nobody-linked"),
+        Some(erp_tenant::Role::Accountant),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                PurchaseError::NotApproved(_)
+            )))
+        ),
+        "no employee record means no claim can reach them, got {refused:?}"
+    );
+
+    fixture.cleanup().await;
 }

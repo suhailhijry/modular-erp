@@ -17,6 +17,14 @@ chrono = { workspace = true }
 crm = { workspace = true }
 ledger = { workspace = true }
 
+# **Claims, for the one check that guards issuing a credit note.**
+#
+# A sibling edge and not a cycle — `hr` depends on neither `sales` nor
+# `purchases` — matching what `purchases` does for approving a payment. The
+# check is in the command rather than the route because a credit note raised by
+# anything other than a request is still a credit note.
+hr = { workspace = true }
+
 # The module ships its own routes; `erp-web` is what they are built from.
 erp-web = { workspace = true }
 tracing = { workspace = true }

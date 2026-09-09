@@ -22,12 +22,25 @@ use ledger::{LedgerError, VatCategory};
 use crate::bill::{Bill, BillEvent, BillLine, Supplier};
 use crate::posting::{PostingAccounts, entry_for_bill, entry_for_payment};
 
+/// The claim that approving a supplier payment requires. One of
+/// [`hr::SEGREGATED`].
+pub const APPROVE_PAYMENT: &str = "purchases:approve_payment";
+
 #[derive(Debug, thiserror::Error)]
 pub enum PurchaseError {
     #[error("a bill needs at least one line that comes to something")]
     NothingOnIt,
     #[error("bill {0} has not been recorded")]
     NotRecorded(String),
+    /// **Approving a payment is a claim, once this tenant uses claims.**
+    ///
+    /// `purchases:approve_payment` is one of `hr::SEGREGATED` — raising a
+    /// document and approving the money for it must not land in one pair of
+    /// hands. Until 2026-09-09 the claim could be granted, displayed and relied
+    /// on while nothing consulted it (§52); this is the first command that
+    /// does.
+    #[error("approving a payment needs the {0} claim")]
+    NotApproved(String),
     #[error("only {outstanding} is outstanding; the payment is {offered}")]
     Overpayment { outstanding: Money, offered: Money },
     #[error("the bill is in {expected} and the payment is in {found}")]
@@ -69,6 +82,9 @@ impl erp_i18n::Localize for PurchaseError {
             Self::NothingOnIt => Message::new(messages::NOTHING_ON_IT),
             Self::NotRecorded(id) => {
                 Message::new(messages::NOT_RECORDED).with("bill", MessageArg::text(id.clone()))
+            }
+            Self::NotApproved(claim) => {
+                Message::new(messages::NOT_APPROVED).with("claim", MessageArg::text(claim.clone()))
             }
             Self::Overpayment {
                 outstanding,
@@ -309,7 +325,17 @@ pub async fn pay_bill(
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
-        match pay_in(&mut tx, bill, &entry_id, payment, &memo, metadata).await {
+        match pay_in(
+            &mut tx,
+            bill,
+            &entry_id,
+            payment,
+            &memo,
+            metadata,
+            db.access(),
+        )
+        .await
+        {
             Ok(committed) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
                 return Ok(committed);
@@ -334,7 +360,21 @@ async fn pay_in(
     payment: &Payment,
     memo: &str,
     metadata: &Metadata,
+    access: Option<&erp_tenant::Access>,
 ) -> Result<Committed<BillEvent>, ExecuteError<PurchaseError>> {
+    // **Before anything is written.** Paying a supplier is the approval half of
+    // the classic segregated pair, and `hr::may` answers three things at once:
+    // whether this tenant uses claims at all, whether the caller owns the
+    // tenant, and whether they hold the claim in the branch they named.
+    if !hr::may(&mut *conn, APPROVE_PAYMENT, metadata, access)
+        .await
+        .map_err(ExecuteError::Database)?
+    {
+        return Err(ExecuteError::Rejected(PurchaseError::NotApproved(
+            APPROVE_PAYMENT.to_owned(),
+        )));
+    }
+
     let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
 
     let entry_lines = entry_for_payment(payment.amount, &payment.from, &accounts)

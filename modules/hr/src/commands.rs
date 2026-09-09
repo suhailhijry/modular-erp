@@ -28,10 +28,28 @@ use erp_types::{AggregateId, Timestamp};
 use crate::claims::{Claim, ClaimError};
 use crate::employee::{BadEmployee, Employee, EmployeeEvent};
 
+/// The claim that approving a timesheet requires. One of [`crate::SEGREGATED`],
+/// which is what stops it travelling up the org chart: a manager does not
+/// inherit the authority to sign off the hours of somebody two levels down
+/// without being given it.
+pub const APPROVE_TIMESHEET: &str = "hr:approve_timesheet";
+
 #[derive(Debug, thiserror::Error)]
 pub enum HrError {
     #[error("there is no employee {0}")]
     NoSuchEmployee(String),
+    /// **Recording a day is approving a timesheet**, once this tenant uses
+    /// claims. See §52: the claim could be granted and displayed while nothing
+    /// consulted it.
+    #[error("approving a timesheet needs the {0} claim")]
+    NotApproved(String),
+    /// **You may not sign your own hours.**
+    ///
+    /// Holding `hr:approve_timesheet` is authority; segregation of duties is
+    /// about two people. An owner is exempt, because a sole trader is their own
+    /// only employee and would otherwise be unable to record a day at all.
+    #[error("a timesheet is approved by somebody else")]
+    NotYourOwnTimesheet,
     #[error("there is no employee {0} to report to")]
     NoSuchManager(String),
     #[error("there is no open branch {0}")]
@@ -65,6 +83,10 @@ impl erp_i18n::Localize for HrError {
             Self::NoSuchEmployee(id) => {
                 Message::new(messages::NO_SUCH_EMPLOYEE).with("id", MessageArg::text(id))
             }
+            Self::NotApproved(claim) => {
+                Message::new(messages::NOT_APPROVED).with("claim", MessageArg::text(claim))
+            }
+            Self::NotYourOwnTimesheet => Message::new(messages::NOT_YOUR_OWN_TIMESHEET),
             Self::NoSuchManager(id) => {
                 Message::new(messages::NO_SUCH_MANAGER).with("id", MessageArg::text(id))
             }
@@ -701,6 +723,36 @@ pub async fn record_day(
     if minutes > 24 * 60 {
         return Err(rejected(HrError::NotADayOfWork));
     }
+
+    // **Recording a day is the approval.** The route's own comment says a
+    // supervisor doing this "is recording what happened", and what happened is
+    // what gets paid — which is why `hr:approve_timesheet` is segregated.
+    {
+        let mut conn = db.acquire().await?;
+        let approval = crate::may_for(
+            &mut conn,
+            APPROVE_TIMESHEET,
+            Some(id),
+            metadata,
+            db.access(),
+        )
+        .await
+        .map_err(|e| CommandError::from(ExecuteError::<HrError>::Database(e)))?;
+        match approval {
+            crate::Approval::Permitted => {}
+            crate::Approval::NoClaim => {
+                return Err(rejected(HrError::NotApproved(APPROVE_TIMESHEET.to_owned())));
+            }
+            // **Holding the claim is not enough when the hours are your own.**
+            // Segregation of duties is not about authority, it is about two
+            // people — and the hours somebody signs are the hours they are paid
+            // for.
+            crate::Approval::WouldBeSelfApproval => {
+                return Err(rejected(HrError::NotYourOwnTimesheet));
+            }
+        }
+    }
+
     let note = note.trim().to_owned();
 
     db.execute::<Employee, _, HrError>(id, crate::upcasters(), metadata, move |loaded| {

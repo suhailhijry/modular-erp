@@ -39,9 +39,10 @@ mod projections;
 mod vat;
 
 pub use commands::{
-    CreditLine, CreditNote, Draft, Numbered, Receipt, SalesError, attach_customer, cancel_invoice,
-    credit_entry_of, credit_in, credit_invoice_part, credit_part_in, credit_what_is_clear,
-    issue_entry_of, issue_in, issue_invoice, pay_in, record_payment, refund_in, refund_invoice,
+    APPROVE_CREDIT_NOTE, CreditLine, CreditNote, Draft, Numbered, Receipt, SalesError,
+    attach_customer, cancel_invoice, credit_entry_of, credit_in, credit_invoice_part,
+    credit_part_in, credit_what_is_clear, issue_entry_of, issue_in, issue_invoice, pay_in,
+    record_payment, refund_in, refund_invoice,
 };
 pub use invoice::{
     Address, Allowance, Customer, Discount, DraftDiscount, DraftLine, Invoice, InvoiceEvent,

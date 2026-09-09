@@ -789,16 +789,115 @@ inside a transaction that is holding a connection"*, and derives a performance
 constraint from it. **That code does not exist.** The passage describes a design
 that was specified, argued about, and never wired up.
 
-#### What to do, and why it is small
+#### What to do, and why it is small — *done 2026-09-09*
 
 One command calling `hr::holds` before it approves something. `purchases`'
-payment approval is the obvious first, because `purchases:approve_payment` is
+payment approval was the obvious first, because `purchases:approve_payment` is
 already in `SEGREGATED` and already granted by the demo.
+
+**Two decisions were taken by asking rather than guessing**, and both are the
+stronger reading:
+
+- **The control switches on with the first grant anywhere in the tenant**, not
+  per claim. Granting one claim makes every checking module start checking.
+- **An owner is exempt.** The question asked was about somebody with no employee
+  record; it applies to **any owner**, staff or not — put back to you on
+  2026-09-10 and confirmed. Exempting only non-staff strands an owner who is
+  *also* on the org chart the moment they grant the claim.
+
+  **The residual risk is accepted, not overlooked**: an owner can approve their
+  own payment, credit note and timesheet. The alternative is a control that
+  stops a one-person business working at all.
+
+**All three `SEGREGATED` claims are now checked** — the other two wired the same
+day, each a small diff because `hr::may` already existed:
+
+| Claim | Guards | Where |
+|---|---|---|
+| `purchases:approve_payment` | Paying a supplier | `purchases::pay_bill` |
+| `sales:approve_credit_note` | Cancelling *or* partly crediting an invoice | `sales::may_credit`, called by both paths |
+| `hr:approve_timesheet` | Recording a day worked | `hr::record_day` |
+
+**One helper for both credit paths**, because a full cancellation and a partial
+credit are the same authority and two copies of the check would eventually
+differ. `sales` gained an `hr` dependency for it, the same sibling edge
+`purchases` took; `hr` needed none, since it owns claims.
+
+**The check sits before the retry loop** in both credit paths. The answer cannot
+change between optimistic-concurrency attempts, and asking inside would ask
+again on every retry.
+
+**Not guarded, deliberately:** `sales::credit_what_is_clear`, which `payments`
+calls when a gateway refund lands. That is a consequence of a refund that
+already happened, not a person approving a credit note — the same reasoning that
+lets a worker with no actor through.
+
+#### Self-approval — *decided and built, 2026-09-10*
+
+A person holding `hr:approve_timesheet` could approve **their own**.
+`SEGREGATED` stops a claim travelling *up* the org chart; it never stopped
+self-approval, while the comment beside the list — *"approving your own
+timesheet is the same shape one module over"* — read as though it did.
+
+`hr::may_for` is `may` with a **subject**, and returns a reason rather than a
+`bool`, because the two refusals are different sentences: *ask somebody who
+holds it* and *ask somebody else entirely*. `may` is now the no-subject case of
+it, so there is one policy and not two.
+
+**The order matters.** Self-approval is checked *after* the claim, so somebody
+who does not hold it at all is told that — being told "not your own" would imply
+they could sign somebody else's.
+
+**And the owner exemption carries through, which is the part worth arguing.** A
+sole trader is their own only employee. Refusing self-approval outright would
+stop them recording a single day worked, with nobody on earth able to do it for
+them — the lockout shape a third time. An owner overriding a control they own is
+the accepted residual risk in every accounting system; a control that stops the
+business working is not. There is a test named for that case.
+
+Four guards, all falsified — and the last of them only after a falsification
+that **passed** revealed the "employee without the claim" path was never
+reached: the existing test used a login that named no employee, so it exited
+before the claim lookup.
+
+#### A house rule, arrived at three times
+
+**Switching a control on must not be the act that strands you.** Three controls
+in two days landed on it independently:
+
+- **Tenant second-factor** refuses to be *enabled* by somebody who has not
+  enrolled one, and can always be *disabled* without one.
+- **Claim checks** exempt an owner, so granting the first claim cannot lock the
+  person granting it out of their own books.
+- **Self-approval** exempts an owner too, because a sole trader is their own
+  only employee and the segregation the control asks for is arithmetically
+  impossible for them.
+
+Worth stating once rather than rediscovering: a control whose failure mode is
+"the business cannot operate" is worse than the risk it removes, and the owner
+is where that pressure is always relieved.
 
 It is also the thing that unblocks Phase 5b honestly — see §53.
 
-- [ ] **Wire the first claim check.** `purchases` approval consults
-      `hr::holds` before approving, and refuses without it
+- [x] **Wired 2026-09-09.** `purchases::pay_bill` consults `hr::may` before
+      anything is written, and refuses with `PurchaseError::NotApproved` in both
+      languages. `hr::holds` now has a production caller.
+
+      **In the command, not at the route**, as §9c says: a job paying a bill is
+      still approving a payment, and a route-layer check would not see it.
+
+      **The policy lives in `hr::may`**, not in `purchases`, so the next caller
+      inherits it rather than re-deriving it. Three answers in order: the tenant
+      has granted no claim at all → permitted, and nothing changes for anyone
+      who does not use claims; the caller owns the tenant → exempt; otherwise
+      they must be an employee holding the claim in the branch they named.
+
+      **A caller with no employee record is refused.** No claim can reach
+      somebody outside the org chart, and passing them through would be a hole
+      the size of "make a second login".
+
+      Five guards, all falsified — including one that only started biting after
+      a *failed* falsification revealed the non-staff path was untested.
 - [ ] Decide what a claim on a module that has no check means: today it is
       accepted and displayed. Refusing an unknown claim name needs the registry
       `http.rs:1767` deliberately declined; **surfacing** unenforced claims on
@@ -3717,9 +3816,20 @@ rather than an accident.**
       auditor requires is not a preference a tenant expresses. `grant` refuses
       to propagate one **even when asked to**, and the response says
       `propagates: false` rather than silently doing something else.
-      `a_segregated_claim_travels_nowhere` is the test
+      `a_segregated_claim_travels_nowhere` is the test.
+
+      **Non-propagation is half of segregation, and this bullet read as though
+      it were all of it.** Stopping a claim travelling *up* the tree does not
+      stop the holder exercising it *on themselves* — a supervisor granted
+      `hr:approve_timesheet` could sign their own hours, which is the same
+      control failing for a different reason. Refused since 2026-09-10 by
+      `hr::may_for`, which takes the subject; `nobody_approves_their_own_timesheet`
+      is that test. An owner is exempt, deliberately — §52
 - [x] **It is not computed on demand.** `org_claim_effective` is maintained when
       the org changes and read as one indexed lookup when a command asks.
+
+      *Until 2026-09-09 no command asked.* The table was correct, indexed and
+      unread — see §52. Three commands ask now.*
 
       The recomputation is **the whole set, not an increment**, and that is
       deliberate: an incremental update would be a second implementation of the
@@ -3747,7 +3857,18 @@ the two-plane split exist to keep clean — so it does not.
       and are checked **inside module commands** where the decision is made.
       `Capability` and `Allowed<C>` are untouched: the platform keeps answering
       *"may you reach this endpoint at all"*, and `hr` answers *"may you do this
-      particular thing"*
+      particular thing"*.
+
+      **Corrected 2026-09-10: the decision was right and the wiring did not
+      exist.** This box was ticked, and this paragraph was written in the
+      present tense, while **no command anywhere consulted a claim** — `holds`
+      had one caller and it was a test. An audit found it (§52); the tenses were
+      aspirational for months.
+
+      It is true now, and here is where: `purchases::pay_bill`,
+      `sales::may_credit` (both credit paths) and `hr::record_day`, each through
+      `hr::may` or `hr::may_for`, each inside the command and before anything is
+      written.
 - [x] **Two lines that must stay true**, now three tests in
       `modules/hr/tests/planes.rs`: no `hr` type appears in `erp-control`,
       `erp-web` or `erp-tenant` and none of them depends on the crate; nothing
@@ -3783,6 +3904,34 @@ one inside a command is not viable either.
       — `migrations/tenant/0008_org_claims.sql` — maintained in the same
       transaction as the org event that changed it. `proj_hr` exists alongside
       it for the screen that *draws* the chart, and is not what any check reads.
+
+      **Half true, found 2026-09-10 while correcting this section.** The *claim*
+      is read write-side, as written. But a command knows its caller as an
+      **identity**, and turning that into an employee goes through
+      `hr::employee_by_login`, which is `SELECT … FROM proj_hr.employee`
+      (`modules/hr/src/projections.rs:640`). So one half of every check does
+      read a model that may be a second behind.
+
+      **Which direction that fails matters, and it fails the safe way for the
+      dangerous case.** A login linked a moment ago does not resolve until the
+      projection catches up, so the answer is *refused* — fail-closed. A login
+      **un**linked a moment ago still resolves, so there is a brief window where
+      somebody who has just been detached could still act. That window is
+      bounded by the control plane, which revokes the session and the membership
+      and is the authoritative gate for somebody leaving; the claim is a second
+      layer beneath it.
+
+      **And the plane test passes on the letter.** `planes.rs` scans `claims.rs`
+      for `proj_`, and finds none, because the read is one function call away in
+      `projections.rs`. The test enforces the rule it states and not the one it
+      means.
+- [ ] **Decide whether the identity → employee link belongs write-side too.**
+      It is the only projection read on an authorization path. Moving it is a
+      column on the org-claim chain maintained beside the link event, in the
+      same transaction — the same shape the effective set already uses. Not
+      urgent, because the failure direction is fail-closed where it counts, and
+      not free, because it is a migration. Deferred with the reason written
+      down rather than discovered again
 
       **A design error the first run caught.** `PRIMARY KEY (employee, claim,
       branch)` cannot hold a nullable column, and company-wide is exactly

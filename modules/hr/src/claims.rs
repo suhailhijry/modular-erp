@@ -296,6 +296,137 @@ pub async fn holds(
     Ok(found.is_some())
 }
 
+/// **Whether the claim system is switched on in this tenant.**
+///
+/// A tenant that has never granted a claim is not asking for the control, and
+/// enforcing one against them would refuse work nobody was refusing before.
+/// The first `place` anywhere turns it on for every module that checks — which
+/// is what "grant a claim and it starts mattering" has to mean if the grant is
+/// not to be decorative.
+///
+/// # Errors
+/// If the database does.
+pub async fn any_claim_placed(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
+    // **`org_claim_granted`, the grants themselves** — not
+    // `org_claim_effective`, which is the union derived from them. A grant that
+    // reaches nobody because the org chart is empty is still a tenant saying
+    // they want the control.
+    let found: Option<i32> = sqlx::query_scalar("SELECT 1 FROM org_claim_granted LIMIT 1")
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok(found.is_some())
+}
+
+/// What [`may_for`] decided, and why.
+///
+/// A reason rather than a `bool` because the two refusals are different
+/// sentences to the person reading them: one says *ask somebody who holds it*,
+/// the other says *ask somebody else entirely*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    Permitted,
+    /// The caller does not hold the claim here.
+    NoClaim,
+    /// The caller holds it, and the subject is the caller. **Segregation of
+    /// duties is not about authority; it is about two people.**
+    WouldBeSelfApproval,
+}
+
+/// **May this caller do this, here, to this person?**
+///
+/// [`may`] with a subject. Everything [`may`] answers, plus: somebody who holds
+/// the claim still may not exercise it **on themselves**.
+///
+/// # Why the owner is exempt from this too
+///
+/// A one-person business is its own only employee. Refusing self-approval
+/// outright would stop a sole trader recording a single day worked, with nobody
+/// on earth able to do it for them — the lockout shape again. An owner
+/// overriding a control they own is the accepted residual risk in every
+/// accounting system; a control that stops the business working is not.
+///
+/// # Errors
+/// If the database does.
+pub async fn may_for(
+    conn: &mut PgConnection,
+    claim: &str,
+    subject: Option<&AggregateId>,
+    metadata: &erp_eventlog::Metadata,
+    access: Option<&erp_tenant::Access>,
+) -> Result<Approval, sqlx::Error> {
+    if !any_claim_placed(&mut *conn).await? {
+        return Ok(Approval::Permitted);
+    }
+    if access.is_some_and(|a| a.role == erp_tenant::Role::Owner) {
+        return Ok(Approval::Permitted);
+    }
+    let Some(actor) = metadata.actor.as_deref() else {
+        // A worker, a reaper or provisioning. Nobody to check, and refusing
+        // would stop background work the moment a tenant granted a claim.
+        return Ok(Approval::Permitted);
+    };
+    let Some(employee) = crate::employee_by_login(&mut *conn, actor).await? else {
+        return Ok(Approval::NoClaim);
+    };
+    let Ok(id) = erp_types::AggregateId::new(employee.id) else {
+        return Ok(Approval::NoClaim);
+    };
+    if !holds(&mut *conn, &id, claim, metadata.branch()).await? {
+        return Ok(Approval::NoClaim);
+    }
+    // **Checked after the claim, not before.** Somebody who does not hold the
+    // claim at all should be told that, not told they cannot sign their own —
+    // the second message would imply they could sign somebody else's.
+    if subject.is_some_and(|subject| *subject == id) {
+        return Ok(Approval::WouldBeSelfApproval);
+    }
+    Ok(Approval::Permitted)
+}
+
+/// **May this caller do this, here?** The question a command asks.
+///
+/// Three answers, in order:
+///
+/// 1. **Nobody has granted a claim in this tenant** — the control is not on,
+///    and everything is permitted exactly as it was before claims existed.
+/// 2. **The caller owns the tenant** — exempt. See below.
+/// 3. **Otherwise** the caller must be an employee who holds the claim, in the
+///    branch the request named. No employee record means no claim can reach
+///    them, and that is a refusal rather than a pass.
+///
+/// # Why an owner is exempt even when they are staff
+///
+/// **Asked and confirmed, 2026-09-10.** The narrower rule — exempt only
+/// somebody with no employee record — has a trap: an owner who is *also* on the
+/// org chart, which is the ordinary case in a small business, locks themselves
+/// out the moment they grant the claim to somebody else.
+///
+/// So the exemption is **by role, not by whether a record exists**.
+/// `Role::Owner` is documented as "everything", and a control an owner cannot
+/// lift is a support call.
+///
+/// This is the third control in this system to land on the same rule, and it is
+/// worth naming as one: **switching a control on must not be the act that
+/// strands you.** The tenant second-factor requirement refuses to be enabled by
+/// somebody unenrolled for it; that requirement can always be switched off
+/// without one for it; and this exemption exists for it.
+///
+/// **The residual risk is deliberate and known**: an owner can approve their
+/// own payment, credit note and timesheet. Every accounting system accepts
+/// that, because the alternative is a control that stops a one-person business
+/// working at all — see `a_sole_trader_may_record_their_own_days`.
+///
+/// # Errors
+/// If the database does.
+pub async fn may(
+    conn: &mut PgConnection,
+    claim: &str,
+    metadata: &erp_eventlog::Metadata,
+    access: Option<&erp_tenant::Access>,
+) -> Result<bool, sqlx::Error> {
+    Ok(may_for(&mut *conn, claim, None, metadata, access).await? == Approval::Permitted)
+}
+
 /// Everything one person effectively holds, and where each came from.
 pub async fn effective(
     conn: &mut PgConnection,

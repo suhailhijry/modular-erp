@@ -32,10 +32,44 @@ use crate::posting::{
 };
 use crate::vat::TaxError;
 
+/// The claim that issuing a credit note requires. One of [`hr::SEGREGATED`]:
+/// raising a document and cancelling the money for it must not land in one pair
+/// of hands.
+pub const APPROVE_CREDIT_NOTE: &str = "sales:approve_credit_note";
+
+/// Refuses unless this caller may credit an invoice here.
+///
+/// One helper for both credit paths — a full cancellation and a partial credit
+/// are the same authority, and two copies of this check would eventually differ.
+/// `hr::may` answers whether the tenant uses claims at all, whether the caller
+/// owns it, and whether they hold the claim in the branch they named.
+async fn may_credit(
+    conn: &mut sqlx::PgConnection,
+    metadata: &Metadata,
+    access: Option<&erp_tenant::Access>,
+) -> Result<(), ExecuteError<SalesError>> {
+    if hr::may(&mut *conn, APPROVE_CREDIT_NOTE, metadata, access)
+        .await
+        .map_err(ExecuteError::Database)?
+    {
+        Ok(())
+    } else {
+        Err(ExecuteError::Rejected(SalesError::NotApproved(
+            APPROVE_CREDIT_NOTE.to_owned(),
+        )))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SalesError {
     #[error("an invoice needs at least one line that comes to something")]
     NothingToInvoice,
+    /// **Crediting an invoice is a claim, once this tenant uses claims.**
+    ///
+    /// See §52: until 2026-09-09 this claim could be granted, displayed and
+    /// relied on while nothing consulted it.
+    #[error("issuing a credit note needs the {0} claim")]
+    NotApproved(String),
     /// **A line that carries no tax must say why**, and only the tenant knows.
     ///
     /// The reason is a code from the tax authority's list, configured once at
@@ -121,6 +155,9 @@ impl erp_i18n::Localize for SalesError {
         use erp_i18n::{Message, MessageArg};
         match self {
             Self::NothingToInvoice => Message::new(messages::NOTHING_TO_INVOICE),
+            Self::NotApproved(claim) => {
+                Message::new(messages::NOT_APPROVED).with("claim", MessageArg::text(claim.clone()))
+            }
             Self::NoExemptionReason { category } => Message::new(messages::NO_EXEMPTION_REASON)
                 .with("category", MessageArg::text(category.as_str().to_owned())),
             Self::NoSuchCustomer(id) => Message::new(messages::NO_SUCH_CUSTOMER)
@@ -998,6 +1035,13 @@ pub async fn cancel_invoice(
     let credit_id = derived_id("cn", &[invoice.as_str(), credit_note]).map_err(unusable)?;
     let memo = format!("Credit note {credit_note} · invoice {invoice}");
 
+    // **Before the retry loop.** The answer cannot change between attempts, and
+    // asking inside would ask again on every optimistic-concurrency retry.
+    {
+        let mut conn = db.acquire().await?;
+        may_credit(&mut conn, metadata, db.access()).await?;
+    }
+
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
         match cancel_in(
@@ -1438,6 +1482,13 @@ pub async fn credit_invoice_part(
     note: &CreditNote,
     metadata: &Metadata,
 ) -> NumberedOutcome {
+    // The same authority as a full cancellation — crediting part of an invoice
+    // is crediting an invoice.
+    {
+        let mut conn = db.acquire().await?;
+        may_credit(&mut conn, metadata, db.access()).await?;
+    }
+
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
         match credit_part_in(&mut tx, invoice, note, metadata).await {

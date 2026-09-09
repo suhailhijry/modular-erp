@@ -52,12 +52,15 @@ mod commands;
 mod employee;
 mod projections;
 
-pub use claims::{Claim, ClaimError, Held, SEGREGATED, effective, holds, is_segregated};
+pub use claims::{
+    Approval, Claim, ClaimError, Held, SEGREGATED, any_claim_placed, effective, holds,
+    is_segregated, may, may_for,
+};
 pub use commands::{
-    Hire, HrError, amend_employee, eligible_for, exists, grant_claim, hire, is_working_at,
-    link_login, may_work_on, record_day, record_document, record_leave, record_leaving,
-    record_salary, record_shifts, record_skills, reparent, revoke_claim, salary_for, transfer,
-    unlink_login,
+    APPROVE_TIMESHEET, Hire, HrError, amend_employee, eligible_for, exists, grant_claim, hire,
+    is_working_at, link_login, may_work_on, record_day, record_document, record_leave,
+    record_leaving, record_salary, record_shifts, record_skills, reparent, revoke_claim,
+    salary_for, transfer, unlink_login,
 };
 pub use employee::{
     BadEmployee, Component, Details, Document, DocumentKind, Employee, EmployeeEvent, Leave,

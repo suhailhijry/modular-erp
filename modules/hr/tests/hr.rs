@@ -10,8 +10,10 @@
 
 use std::sync::Arc;
 
-use erp_control::{Actor, ClusterRegistry, ControlPlane, PoolConfig, TenantDb, TenantPools};
-use erp_eventlog::Metadata;
+use erp_control::{
+    Actor, ClusterRegistry, CommandError, ControlPlane, PoolConfig, TenantDb, TenantPools,
+};
+use erp_eventlog::{ExecuteError, Metadata};
 use erp_projection::ensure_group_schema;
 use erp_testkit::{Schema, TestDb};
 use erp_types::{AggregateId, Timestamp};
@@ -1511,6 +1513,250 @@ async fn a_login_belongs_to_one_employee() {
     )
     .await
     .expect("the login is free once nobody holds it");
+
+    fixture.cleanup().await;
+}
+
+/// **Recording a day is approving a timesheet**, and §52 is why this test
+/// exists: `hr:approve_timesheet` could be granted and displayed while nothing
+/// consulted it.
+#[tokio::test]
+async fn approving_a_timesheet_needs_the_claim_once_the_tenant_uses_claims() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+    fixture.hire("EMP-SUP", "خالد", None, None).await;
+    hr::link_login(
+        &fixture.db,
+        &code("EMP-SUP"),
+        "khalid",
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("links a login");
+    fixture.project().await;
+
+    let by = |actor: &str| Metadata {
+        actor: Some(actor.to_owned()),
+        ..Metadata::default()
+    };
+
+    // Nothing granted anywhere: unchanged for everyone.
+    let metadata = by("khalid");
+    hr::record_day(
+        &fixture.db,
+        &code("EMP-1"),
+        date("2026-05-04"),
+        8 * 60,
+        "",
+        on("2026-05-04"),
+        &metadata,
+    )
+    .await
+    .expect("no claims in this tenant means no control");
+
+    hr::grant_claim(
+        &fixture.db,
+        &code("EMP-SUP"),
+        &claim(hr::APPROVE_TIMESHEET),
+        false,
+    )
+    .await
+    .expect("granted");
+
+    // **Somebody who is on the chart and does not hold it.** Distinct from the
+    // case below: this one reaches the claim lookup, and a falsification proved
+    // the unlinked case never did.
+    hr::link_login(
+        &fixture.db,
+        &code("EMP-1"),
+        "sara",
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("links a login");
+    fixture.project().await;
+
+    let metadata = by("sara");
+    let refused_staff = hr::record_day(
+        &fixture.db,
+        &code("EMP-SUP"),
+        date("2026-05-07"),
+        8 * 60,
+        "",
+        on("2026-05-07"),
+        &metadata,
+    )
+    .await;
+    assert!(
+        matches!(
+            refused_staff,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                hr::HrError::NotApproved(_)
+            )))
+        ),
+        "an employee without the claim is told they lack it, got {refused_staff:?}"
+    );
+
+    // And somebody with a login that names no employee at all.
+    let metadata = by("nobody-linked");
+    let refused = hr::record_day(
+        &fixture.db,
+        &code("EMP-1"),
+        date("2026-05-05"),
+        8 * 60,
+        "",
+        on("2026-05-05"),
+        &metadata,
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                hr::HrError::NotApproved(_)
+            )))
+        ),
+        "no claim means no sign-off, got {refused:?}"
+    );
+
+    // The supervisor who holds it may.
+    let metadata = by("khalid");
+    hr::record_day(
+        &fixture.db,
+        &code("EMP-1"),
+        date("2026-05-06"),
+        8 * 60,
+        "",
+        on("2026-05-06"),
+        &metadata,
+    )
+    .await
+    .expect("khalid holds the claim");
+
+    fixture.cleanup().await;
+}
+
+/// **Holding the claim is not enough when the hours are your own.**
+///
+/// Segregation of duties is not about authority; it is about two people. The
+/// comment beside `SEGREGATED` said so and nothing enforced it until now.
+#[tokio::test]
+async fn nobody_approves_their_own_timesheet() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-SUP", "خالد", None, None).await;
+    fixture.hire("EMP-1", "سارة", None, None).await;
+    hr::link_login(
+        &fixture.db,
+        &code("EMP-SUP"),
+        "khalid",
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("links a login");
+    fixture.project().await;
+
+    hr::grant_claim(
+        &fixture.db,
+        &code("EMP-SUP"),
+        &claim(hr::APPROVE_TIMESHEET),
+        false,
+    )
+    .await
+    .expect("granted");
+
+    let by = |actor: &str| Metadata {
+        actor: Some(actor.to_owned()),
+        ..Metadata::default()
+    };
+
+    // Khalid holds the claim and may sign for Sara.
+    hr::record_day(
+        &fixture.db,
+        &code("EMP-1"),
+        date("2026-05-04"),
+        8 * 60,
+        "",
+        on("2026-05-04"),
+        &by("khalid"),
+    )
+    .await
+    .expect("somebody else's hours are fine");
+
+    // The same claim, the same person, his own hours.
+    let refused = hr::record_day(
+        &fixture.db,
+        &code("EMP-SUP"),
+        date("2026-05-04"),
+        8 * 60,
+        "",
+        on("2026-05-04"),
+        &by("khalid"),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                hr::HrError::NotYourOwnTimesheet
+            )))
+        ),
+        "authority is not the point; two people is, got {refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A sole trader is their own only employee.**
+///
+/// Refusing self-approval outright would stop them recording a single day
+/// worked, with nobody on earth able to do it for them. The owner exemption is
+/// what makes the control safe to switch on.
+#[tokio::test]
+async fn a_sole_trader_may_record_their_own_days() {
+    let mut fixture = Fixture::new().await;
+    fixture.hire("EMP-OWNER", "المالك", None, None).await;
+    hr::link_login(
+        &fixture.db,
+        &code("EMP-OWNER"),
+        "owner",
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("links a login");
+    fixture.project().await;
+
+    // They grant themselves the claim, which is the only way a one-person
+    // business gets one at all.
+    hr::grant_claim(
+        &fixture.db,
+        &code("EMP-OWNER"),
+        &claim(hr::APPROVE_TIMESHEET),
+        false,
+    )
+    .await
+    .expect("granted");
+
+    fixture
+        .db
+        .set_access(Some(erp_tenant::Access::new(erp_tenant::Role::Owner)));
+    hr::record_day(
+        &fixture.db,
+        &code("EMP-OWNER"),
+        date("2026-05-04"),
+        8 * 60,
+        "",
+        on("2026-05-04"),
+        &Metadata {
+            actor: Some("owner".to_owned()),
+            ..Metadata::default()
+        },
+    )
+    .await
+    .expect("an owner is not stranded by a control they own");
 
     fixture.cleanup().await;
 }

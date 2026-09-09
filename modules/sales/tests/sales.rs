@@ -188,6 +188,12 @@ impl Fixture {
         ensure_group_schema::<Sales>(&mut conn)
             .await
             .expect("sales checkpoint");
+        // **`hr` too, because issuing a credit note is a claim.** Resolving a
+        // caller to an employee reads `hr`'s read model.
+        hr::install(&mut conn).await.expect("hr schema");
+        ensure_group_schema::<hr::Hr>(&mut conn)
+            .await
+            .expect("hr checkpoint");
         drop(conn);
 
         Self {
@@ -4701,6 +4707,185 @@ async fn a_discounted_invoice_credited_to_its_band_refuses_the_line_room_left_ov
         matches!(rejection(&refused), Some(SalesError::CreditTooLarge { .. })),
         "{refused:?}"
     );
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Issuing a credit note is a claim
+// ---------------------------------------------------------------------------
+
+/// Puts a supervisor on the chart with `sales:approve_credit_note`, and a
+/// colleague without it.
+async fn staff_with_the_credit_claim(fixture: &Fixture) {
+    for (id, identity) in [("EMP-KHALID", "khalid"), ("EMP-SARA", "sara")] {
+        hr::hire(
+            &fixture.db,
+            &code(id),
+            &hr::Hire {
+                details: hr::Details {
+                    name: id.to_owned(),
+                    name_latin: None,
+                    national_id: None,
+                    email: Some(format!("{identity}@acme.test")),
+                    phone: None,
+                },
+                reports_to: None,
+                branch: None,
+                at: "2026-01-01T00:00:00Z".parse().expect("a timestamp"),
+            },
+            &Metadata::default(),
+        )
+        .await
+        .expect("hires");
+        hr::link_login(
+            &fixture.db,
+            &code(id),
+            identity,
+            "2026-01-01T00:00:00Z".parse().expect("a timestamp"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("links a login");
+    }
+    let pool = fixture.tenant_pool().await;
+    let owned = hr::projections();
+    let refs: Vec<&dyn Projection<Group = hr::Hr>> = owned.iter().map(AsRef::as_ref).collect();
+    run_to_head::<hr::Hr>(&pool, &refs, hr::upcasters(), 200)
+        .await
+        .expect("hr projects");
+
+    hr::grant_claim(
+        &fixture.db,
+        &code("EMP-KHALID"),
+        &hr::Claim {
+            name: sales::APPROVE_CREDIT_NOTE.to_owned(),
+            branch: None,
+        },
+        false,
+    )
+    .await
+    .expect("grants the claim");
+}
+
+/// **Cancelling an invoice needs the claim, and so does crediting part of
+/// one** — the same authority, checked in one helper so the two cannot drift.
+#[tokio::test]
+async fn crediting_an_invoice_needs_the_claim_once_the_tenant_uses_claims() {
+    let fixture = Fixture::new().await;
+    let by = |actor: &str| Metadata {
+        actor: Some(actor.to_owned()),
+        ..Metadata::default()
+    };
+
+    for id in ["INV-A", "INV-B"] {
+        issue(
+            &fixture,
+            id,
+            vec![line("Consulting", riyals(100), VatCategory::Standard)],
+        )
+        .await
+        .expect("issues");
+    }
+
+    // Nothing granted: unchanged for everyone.
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("INV-A"),
+        "CN-0",
+        "a mistake",
+        on("2026-03-02"),
+        &by("sara"),
+    )
+    .await
+    .expect("no claims in this tenant means no control");
+
+    staff_with_the_credit_claim(&fixture).await;
+
+    let refused = sales::cancel_invoice(
+        &fixture.db,
+        &code("INV-B"),
+        "CN-1",
+        "a mistake",
+        on("2026-03-02"),
+        &by("sara"),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::NotApproved(_)
+            )))
+        ),
+        "sara does not hold the claim, got {refused:?}"
+    );
+
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("INV-B"),
+        "CN-2",
+        "a mistake",
+        on("2026-03-02"),
+        &by("khalid"),
+    )
+    .await
+    .expect("khalid holds it");
+
+    fixture.cleanup().await;
+}
+
+/// **Crediting part of an invoice is the same authority as cancelling all of
+/// it**, and this test exists because a falsification of the shared helper
+/// initially proved nothing — there was no test on this path at all.
+#[tokio::test]
+async fn a_partial_credit_needs_the_claim_too() {
+    let fixture = Fixture::new().await;
+    issue(
+        &fixture,
+        "INV-P",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+    staff_with_the_credit_claim(&fixture).await;
+
+    let note = |actor: &str, reference: &str| sales::CreditNote {
+        reference: reference.to_owned(),
+        lines: vec![credit_line(0, riyals(10))],
+        reason: format!("asked by {actor}"),
+        on: on("2026-03-02"),
+    };
+    let by = |actor: &str| Metadata {
+        actor: Some(actor.to_owned()),
+        ..Metadata::default()
+    };
+
+    let refused = sales::credit_invoice_part(
+        &fixture.db,
+        &code("INV-P"),
+        &note("sara", "CP-1"),
+        &by("sara"),
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::NotApproved(_)
+            )))
+        ),
+        "a partial credit is still a credit note, got {refused:?}"
+    );
+
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code("INV-P"),
+        &note("khalid", "CP-2"),
+        &by("khalid"),
+    )
+    .await
+    .expect("khalid holds the claim");
 
     fixture.cleanup().await;
 }

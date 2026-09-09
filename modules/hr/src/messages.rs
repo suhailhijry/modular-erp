@@ -5,6 +5,8 @@ use erp_i18n::{Locale, MessageCode, Template};
 pub const NO_NAME: MessageCode = MessageCode::new("hr.no_name");
 pub const NO_CONTACT: MessageCode = MessageCode::new("hr.no_contact");
 pub const NO_SUCH_EMPLOYEE: MessageCode = MessageCode::new("hr.no_such_employee");
+pub const NOT_APPROVED: MessageCode = MessageCode::new("hr.not_approved");
+pub const NOT_YOUR_OWN_TIMESHEET: MessageCode = MessageCode::new("hr.not_your_own_timesheet");
 pub const NO_SUCH_MANAGER: MessageCode = MessageCode::new("hr.no_such_manager");
 pub const NO_SUCH_BRANCH: MessageCode = MessageCode::new("hr.no_such_branch");
 pub const LEFT: MessageCode = MessageCode::new("hr.left");
@@ -25,6 +27,8 @@ pub const CODES: &[MessageCode] = &[
     NO_NAME,
     NO_CONTACT,
     NO_SUCH_EMPLOYEE,
+    NOT_APPROVED,
+    NOT_YOUR_OWN_TIMESHEET,
     NO_SUCH_MANAGER,
     NO_SUCH_BRANCH,
     LEFT,
@@ -62,6 +66,34 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_CONTACT,
         Locale::Arabic,
         Template::Simple("الموظف يحتاج إلى رقم هاتف أو بريد إلكتروني."),
+    ),
+    (
+        NOT_YOUR_OWN_TIMESHEET,
+        Locale::English,
+        Template::Simple(
+            "A timesheet is approved by somebody else. You may hold the claim, and the hours you sign must not be your own.",
+        ),
+    ),
+    (
+        NOT_YOUR_OWN_TIMESHEET,
+        Locale::Arabic,
+        Template::Simple(
+            "يعتمد سجل الدوام شخص آخر. قد تملك الصلاحية، لكن الساعات التي تعتمدها يجب ألا تكون ساعاتك.",
+        ),
+    ),
+    (
+        NOT_APPROVED,
+        Locale::English,
+        Template::Simple(
+            "Approving a timesheet needs the {claim} claim, and you do not hold it here. Ask somebody who does, or have it granted to you.",
+        ),
+    ),
+    (
+        NOT_APPROVED,
+        Locale::Arabic,
+        Template::Simple(
+            "اعتماد سجل الدوام يتطلب صلاحية {claim}، وهي غير ممنوحة لك هنا. اطلب من شخص يملكها أو اطلب منحها لك.",
+        ),
     ),
     (
         NO_SUCH_EMPLOYEE,

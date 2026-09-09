@@ -50,7 +50,7 @@ mod posting;
 mod projections;
 
 pub use bill::{Bill, BillEvent, BillLine, Supplier};
-pub use commands::{Draft, Payment, PurchaseError, pay_bill, record_bill};
+pub use commands::{APPROVE_PAYMENT, Draft, Payment, PurchaseError, pay_bill, record_bill};
 pub use posting::{PostingAccounts, entry_for_bill, entry_for_payment};
 pub use projections::{
     BillDetail, BillLineRow, BillSummary, Bills, InputBand, InputTax, Overpaid, PaymentRow,

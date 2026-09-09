@@ -16,6 +16,14 @@ workspace = true
 # lives here, in the module they both stand on.
 ledger = { workspace = true }
 
+# **Claims, for the one check that guards approving a payment.**
+#
+# A sibling edge, not a cycle — `hr` depends on neither `purchases` nor
+# `sales` — and seven modules already stand on `hr`. The check is here rather
+# than at the route because §9c says so and because it must hold for a caller
+# that is not a request: a job paying a bill is still approving a payment.
+hr = { workspace = true }
+
 # The module ships its own routes; `erp-web` is what they are built from.
 erp-web = { workspace = true }
 tracing = { workspace = true }
