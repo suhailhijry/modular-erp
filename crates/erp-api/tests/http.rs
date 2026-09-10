@@ -1996,6 +1996,14 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // The forms a tariff can be written from. Shipped strings, so whoever may
     // read the tariff may read what it could have been written with.
     ("tariff_templates", ALL_ROLES),
+    // The ready-made tariffs, and what installing one would do. Reading a pack
+    // and previewing it are both reads: the preview writes nothing, which is
+    // the same argument `preview_chart` makes.
+    ("list_packs", ALL_ROLES),
+    ("preview_pack", ALL_ROLES),
+    // Installing one writes the tariff, so it is the capability that writes the
+    // tariff — the same as `set_tariff`.
+    ("install_pack", OWNER),
     ("public_booking_settings", ALL_ROLES),
     ("billing_settings", ALL_ROLES),
     ("get_bookable", ALL_ROLES),
@@ -2381,8 +2389,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        237,
-        "expected two hundred and thirty-seven role-scoped operations"
+        240,
+        "expected two hundred and forty role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -10089,6 +10097,193 @@ async fn a_price_band_can_be_filled_into_a_form_and_reads_back_as_both() {
         "and so are its answers: {band}"
     );
     assert_eq!(band["uplift"], 4_000);
+
+    fixture.cleanup().await;
+}
+
+/// **A ready-made tariff: browse it, see exactly what it would do, take it.**
+///
+/// The blueprint story for rules — the third kind this build ships, after
+/// charts of accounts and trades. A pack writes ordinary form-authored bands,
+/// so what it installs is editable on the same screen a business types bands
+/// into, and installing twice is not an error.
+#[tokio::test]
+async fn a_ready_made_tariff_can_be_previewed_and_then_installed() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let get = |path: &'static str| {
+        Request::get(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::ACCEPT_LANGUAGE, "ar")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let post = |path: &'static str, pack: &str| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::ACCEPT_LANGUAGE, "ar")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::json!({ "pack": pack }).to_string()))
+            .unwrap()
+    };
+
+    // Browse. A pack shows every band it would write, and the answers it would
+    // fill in — which is what makes it readable before it is taken.
+    let (status, body, _) = fixture.send(get("/v1/booking/tariff/packs")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shipped = body.as_array().expect("a list");
+    let barbershop = shipped
+        .iter()
+        .find(|p| p["id"] == "barbershop")
+        .expect("the barbershop pack");
+    assert!(
+        barbershop["name"]
+            .as_str()
+            .is_some_and(|n| n.chars().any(|c| ('\u{600}'..='\u{6ff}').contains(&c))),
+        "a pack names itself in the caller's language: {barbershop}"
+    );
+    assert_eq!(barbershop["bands"][0]["template"], "weekday_evening");
+    assert_eq!(barbershop["bands"][0]["answers"]["percent"], 15);
+
+    // Preview. Says what it would do, and writes nothing.
+    let (status, would, _) = fixture
+        .send(post("/v1/booking/tariff/packs/preview", "barbershop"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{would}");
+    assert_eq!(would["added"].as_array().map(Vec::len), Some(2));
+    assert_eq!(would["skipped"], serde_json::json!([]));
+    assert_eq!(would["bands"].as_array().map(Vec::len), Some(2));
+
+    let (status, body, _) = fixture.send(get("/v1/booking/tariff")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["bands"], serde_json::json!([]), "the preview wrote");
+
+    // Install. The same answer, from the same run.
+    let (status, did, _) = fixture
+        .send(post("/v1/booking/tariff/packs", "barbershop"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{did}");
+    assert_eq!(
+        did["added"], would["added"],
+        "install and preview disagreed"
+    );
+    assert_eq!(did["bands"], would["bands"]);
+
+    // And what it wrote is an ordinary form-authored band, editable on the
+    // tariff screen like one somebody typed in.
+    let (status, body, _) = fixture.send(get("/v1/booking/tariff")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let band = &body["bands"][0];
+    assert_eq!(band["level"], "form");
+    assert_eq!(band["template"], "weekday_evening");
+    assert_eq!(band["answers"]["percent"], 15);
+    assert_eq!(band["uplift"], 1_500);
+
+    // Twice is not an error, and changes nothing.
+    let (status, again, _) = fixture
+        .send(post("/v1/booking/tariff/packs", "barbershop"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["added"], serde_json::json!([]));
+    assert_eq!(again["skipped"], did["added"]);
+    assert_eq!(again["bands"], did["bands"]);
+
+    let (status, body, _) = fixture
+        .send(post("/v1/booking/tariff/packs", "seasonal"))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "booking.no_such_pack");
+
+    fixture.cleanup().await;
+}
+
+/// **A pack goes underneath what the business already wrote, and refuses if
+/// the tariff moved while it was being read.**
+///
+/// First match wins, so appending is the only position that cannot reprice an
+/// hour somebody already decided. And installing is a read-modify-write, so an
+/// unconditional write would lose whatever landed in between — which is a
+/// second admin's whole tariff, with both requests answering success.
+#[tokio::test]
+async fn a_pack_goes_under_what_the_business_wrote_and_refuses_a_tariff_that_moved() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // Their own Thursday evening, at a discount they chose.
+    let (status, body, _) = fixture
+        .send(
+            Request::put("/v1/booking/tariff")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "bands": [{
+                        "level": "raw",
+                        "name": "عرض الخميس",
+                        "uplift": -2_000,
+                        // 17:00, deliberately not the 19:00 the pack's own
+                        // Thursday band opens at: an identical window would be
+                        // *skipped*, which is a different property and has its
+                        // own test.
+                        "hours": { "weekdays": [4], "opens_at": 1020, "closes_at": 1440 },
+                    }] })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let response = fixture
+        .raw(
+            Request::get("/v1/booking/tariff")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let stale = response.headers()[header::ETAG]
+        .to_str()
+        .expect("ascii")
+        .to_owned();
+
+    let install = |if_match: Option<&str>| {
+        let mut request = Request::post("/v1/booking/tariff/packs")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(version) = if_match {
+            request = request.header(header::IF_MATCH, version);
+        }
+        request
+            .body(Body::from(
+                serde_json::json!({ "pack": "restaurant" }).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let (status, did, _) = fixture.send(install(None)).await;
+    assert_eq!(status, StatusCode::OK, "{did}");
+    assert_eq!(
+        did["bands"][0]["name"], "عرض الخميس",
+        "the pack did not go underneath: {did}"
+    );
+    assert_eq!(did["bands"][0]["uplift"], -2_000);
+    assert_eq!(did["bands"].as_array().map(Vec::len), Some(3));
+
+    // That install moved the tariff, so the version read before it is stale.
+    let (status, body, _) = fixture.send(install(Some(&stale))).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
 
     fixture.cleanup().await;
 }

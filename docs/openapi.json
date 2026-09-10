@@ -3223,6 +3223,21 @@
         ],
         "type": "object"
       },
+      "InstallPack": {
+        "example": {
+          "pack": "barbershop"
+        },
+        "properties": {
+          "pack": {
+            "description": "The pack's id, from `GET /v1/booking/tariff/packs`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pack"
+        ],
+        "type": "object"
+      },
       "InvitationCreated": {
         "properties": {
           "accept_path": {
@@ -6666,6 +6681,123 @@
         },
         "required": [
           "outstanding"
+        ],
+        "type": "object"
+      },
+      "PackBandView": {
+        "description": "One band a ready-made tariff writes, shown before it is installed.",
+        "properties": {
+          "answers": {
+            "description": "The answers it fills in, as plain JSON scalars.",
+            "type": "object"
+          },
+          "name": {
+            "description": "Printed beside the price once installed.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Which form it fills in, from `GET /v1/booking/tariff/templates`. It\narrives as an ordinary form-written band, so it is editable afterwards\nthe same way one typed in by hand is.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "template",
+          "answers"
+        ],
+        "type": "object"
+      },
+      "PackInstalled": {
+        "description": "What installing a pack did — **or would do**.",
+        "example": {
+          "added": [
+            "مساء الخميس",
+            "مساء الأربعاء"
+          ],
+          "bands": [
+            {
+              "level": "form",
+              "name": "مساء الخميس",
+              "template": "weekday_evening",
+              "uplift": 1500
+            }
+          ],
+          "skipped": []
+        },
+        "properties": {
+          "added": {
+            "description": "Added, in the pack's own order.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "bands": {
+            "description": "**The whole tariff as it now reads, in order.**\n\nNot just what changed. First match wins, so the question a business\nneeds answered is where the new bands landed and what is above them —\nand a preview that said \"two bands would be added\" could not answer it.",
+            "items": {
+              "$ref": "#/components/schemas/TariffBandView"
+            },
+            "type": "array"
+          },
+          "skipped": {
+            "description": "**Not added, because something already prices those hours.** Not a\nfailure: installing twice is not an error, and neither is installing\nover a band you wrote yourself.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "added",
+          "skipped",
+          "bands"
+        ],
+        "type": "object"
+      },
+      "PackView": {
+        "description": "A named starting point for a tariff.",
+        "example": {
+          "bands": [
+            {
+              "answers": {
+                "from_hour": 17,
+                "name": "مساء الخميس",
+                "percent": 15,
+                "weekday": 4
+              },
+              "name": "مساء الخميس",
+              "template": "weekday_evening"
+            }
+          ],
+          "description": "الأمسيتان قبل نهاية الأسبوع، حين تمتلئ كل الكراسي.",
+          "id": "barbershop",
+          "name": "أمسيات صالون الحلاقة"
+        },
+        "properties": {
+          "bands": {
+            "description": "**Every band it would write, in the order it would write them**, so a\nbusiness can read a pack before taking it. The percentages are starting\npoints and every one is editable once installed.",
+            "items": {
+              "$ref": "#/components/schemas/PackBandView"
+            },
+            "type": "array"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "description": "What to send back as `pack`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "In the caller's language.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "bands"
         ],
         "type": "object"
       },
@@ -15101,6 +15233,365 @@
           }
         },
         "summary": "Set the whole tariff, replacing what was there.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/tariff/packs": {
+      "get": {
+        "description": "Authenticated, unlike `GET /v1/ledger/charts`: what a business charges is\nnot something a signup form has to show before anybody has an account.",
+        "operationId": "list_packs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PackView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Ready-made tariffs, in the caller's language.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**Its bands go underneath yours.** First match wins, so appending is the\nonly position that cannot change a price you have already decided — a band\na pack adds applies only in hours nothing above it claims. Bands whose\nhours something already prices are `skipped` and left exactly as they are,\nso installing twice is not an error.\n\nEvery band arrives as an ordinary form-written band: reopen it on the\ntariff screen and change the percentage, the day or the hour, or remove it\nwith `PUT /v1/booking/tariff`.",
+        "operationId": "install_pack",
+        "parameters": [
+          {
+            "description": "The `ETag` a `GET /v1/booking/tariff` answered with. Without it the write still refuses if the tariff moved since this request read it — adding to a tariff means reading it first.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallPack"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackInstalled"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such pack"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tariff moved since it was read; reload and try again"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A stored band names a template this build no longer ships"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable."
+          }
+        },
+        "summary": "Install a ready-made tariff.",
+        "tags": [
+          "booking"
+        ]
+      }
+    },
+    "/v1/booking/tariff/packs/preview": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The same answer `POST /v1/booking/tariff/packs` gives, from the same\nfunction — a pack's install is computing the resulting tariff and storing\nit, so the computed tariff *is* the preview and the two cannot disagree.",
+        "operationId": "preview_pack",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallPack"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackInstalled"
+                }
+              }
+            },
+            "description": "What would happen. Nothing was written."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such pack"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A stored band names a template this build no longer ships"
+          }
+        },
+        "summary": "**What installing a ready-made tariff would do**, without doing it.",
         "tags": [
           "booking"
         ]

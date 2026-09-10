@@ -35,7 +35,7 @@ use erp_rules::{Answers, Field, Kind, Template, Unfillable, Value};
 use crate::messages;
 use crate::pricing::Band;
 
-const NAME: Field = Field {
+pub(crate) const NAME: Field = Field {
     key: "name",
     label_en: "What to call it",
     label_ar: "الاسم",
@@ -45,21 +45,21 @@ const NAME: Field = Field {
 /// **Percent, not basis points.** "25" is what a business says; `2500` is what
 /// the arithmetic needs, and doing that conversion here is most of the reason
 /// this file exists.
-const PERCENT: Field = Field {
+pub(crate) const PERCENT: Field = Field {
     key: "percent",
     label_en: "Percent dearer (negative is cheaper)",
     label_ar: "نسبة الزيادة (بالسالب للتخفيض)",
     kind: Kind::Int,
 };
 
-const WEEKDAY: Field = Field {
+pub(crate) const WEEKDAY: Field = Field {
     key: "weekday",
     label_en: "Day of the week, 1 is Monday and 7 is Sunday",
     label_ar: "يوم الأسبوع، ١ الاثنين و٧ الأحد",
     kind: Kind::Int,
 };
 
-const FROM_HOUR: Field = Field {
+pub(crate) const FROM_HOUR: Field = Field {
     key: "from_hour",
     label_en: "From this hour until midnight, 0 to 23",
     label_ar: "من هذه الساعة حتى منتصف الليل، ٠ إلى ٢٣",

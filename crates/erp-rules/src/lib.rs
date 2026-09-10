@@ -22,10 +22,15 @@
 //!
 //! # What is deliberately not here
 //!
-//! Rule packs as blueprints, and an `explain`-backed dry run. Each is a later
-//! phase with its own consumer; see
-//! `docs/superpowers/specs/2026-09-10-rules-engine-design.md` for what each is
+//! An `explain`-backed dry run — a later phase with its own consumer; see
+//! `docs/superpowers/specs/2026-09-10-rules-engine-design.md` for what it is
 //! waiting on.
+//!
+//! **Rule packs are not here either, and that is where they belong.** A pack is
+//! a list of the same form submissions a tenant makes, against one consumer's
+//! own configuration shape — `booking::PACKS` — so nothing about it is generic
+//! until a second consumer has both templates and a screen. `erp_tenant::Limits`
+//! is not that yet: nothing writes it.
 
 pub mod authoring;
 pub mod condition;

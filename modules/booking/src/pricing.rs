@@ -236,6 +236,48 @@ impl TariffAsWritten {
                 reason: why.to_string(),
             })
     }
+
+    /// What is stored, **and the generation it is at**.
+    ///
+    /// The version comes back with the value because anything that changes a
+    /// tariff by adding to it is a read-modify-write, and the only thing that
+    /// makes one safe is handing the version it read back to [`Self::write`].
+    /// A caller that only wants the bands can ignore it; a caller that ignores
+    /// it and then writes has a lost update.
+    ///
+    /// # Errors
+    /// The stored value is unreadable, or the database is.
+    pub async fn read(
+        conn: &mut sqlx::PgConnection,
+    ) -> Result<(Self, i64), erp_eventlog::ConfigError> {
+        Ok(erp_eventlog::configuration::get::<Self>(conn, Self::KEY)
+            .await?
+            .map_or_else(
+                || (Self::default(), 0),
+                |configured| (configured.value, configured.version),
+            ))
+    }
+
+    /// **The one write.**
+    ///
+    /// Every path that changes a tariff comes through here — the settings
+    /// screen and a pack alike — so "a pack writes exactly what the screen
+    /// writes" is the call graph rather than a sentence somebody has to keep
+    /// true. It is the same move `install_chart_in` makes by looping
+    /// `open_account_in` rather than opening accounts its own way.
+    ///
+    /// # Errors
+    /// [`ConfigError::Conflict`](erp_eventlog::ConfigError::Conflict) when
+    /// `expected` names a generation that is no longer current, which is what
+    /// turns two people editing at once into a refusal rather than a loss.
+    pub async fn write(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        set_by: Option<&str>,
+        expected: Option<i64>,
+    ) -> Result<i64, erp_eventlog::ConfigError> {
+        erp_eventlog::configuration::set(conn, Self::KEY, self, set_by, expected).await
+    }
 }
 
 /// **The tariff as it applies**, which is what prices a booking.

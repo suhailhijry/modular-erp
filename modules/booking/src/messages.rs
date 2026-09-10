@@ -42,6 +42,7 @@ pub const NOT_A_WEEKDAY: MessageCode = MessageCode::new("booking.not_a_weekday")
 pub const NOT_AN_HOUR: MessageCode = MessageCode::new("booking.not_an_hour");
 pub const NOT_A_WINDOW: MessageCode = MessageCode::new("booking.not_a_window");
 pub const TEMPLATE_BROKEN: MessageCode = MessageCode::new("booking.template_broken");
+pub const NO_SUCH_PACK: MessageCode = MessageCode::new("booking.no_such_pack");
 
 pub const NOT_A_PHONE: MessageCode = MessageCode::new("booking.not_a_phone");
 pub const CODE_TOO_SOON: MessageCode = MessageCode::new("booking.code_too_soon");
@@ -100,9 +101,20 @@ pub static CODES: &[MessageCode] = &[
     NOT_AN_HOUR,
     NOT_A_WINDOW,
     TEMPLATE_BROKEN,
+    NO_SUCH_PACK,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NO_SUCH_PACK,
+        Locale::English,
+        Template::Simple("There is no ready-made tariff called {pack}."),
+    ),
+    (
+        NO_SUCH_PACK,
+        Locale::Arabic,
+        Template::Simple("لا توجد تسعيرة جاهزة باسم {pack}."),
+    ),
     (
         NO_SUCH_TEMPLATE,
         Locale::English,

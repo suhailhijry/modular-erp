@@ -241,6 +241,15 @@ Steps being commands means everything a blueprint produces is provably reachable
 through the real domain, and a broken blueprint fails at build time rather than
 in front of a customer.
 
+Three ship: `ledger::CHARTS`, `booking::TRADES`, `booking::PACKS`. The third is
+a blueprint of the **catalogue** shape rather than the command-script shape, and
+`booking::packs` says so rather than arguing it away: its steps genuinely are the
+authoring calls the settings screen makes, but a tariff is one configuration
+value and writing it is not a command — where a chart is eighteen independently
+refusable `open_account_in` calls against the log. What holds for all three is
+that a blueprint installs through the one write its own screen uses, so nothing
+a blueprint produces is reachable only by being a blueprint.
+
 ### 1.8 Effects as values (D9)
 
 No domain code performs I/O. A command returns events *and* effects; both are

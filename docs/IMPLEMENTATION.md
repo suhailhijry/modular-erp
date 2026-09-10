@@ -3248,7 +3248,72 @@ and let two working cases describe the engine.
       much easier to commit. It takes the winner by position now.
       And `the_same_answers_serialise_the_same_way` was a tautology that could
       not be falsified: it compared two values equal by construction
-- [ ] Rule packs as blueprints
+- [x] **Rule packs as blueprints — built 2026-09-10.** `booking::PACKS` is five
+      ready-made tariffs; `GET /v1/booking/tariff/packs` browses them,
+      `POST /v1/booking/tariff/packs/preview` says what one would do, and
+      `POST /v1/booking/tariff/packs` takes it. The third blueprint kind this
+      build ships, after charts of accounts and trades.
+
+      **A pack is a form already filled in.** Each step is a template id and
+      the answers to fill it with — the same pair `PUT /v1/booking/tariff`
+      takes from a person — so `Authored::written` builds every band and a pack
+      cannot write one the form would have refused. Which is also why this may
+      ship numbers while `templates.rs` still ships no presets: **a preset's
+      number is unreachable** without abandoning the preset, and a pack's lands
+      in the box a business already edits numbers in.
+
+      **D8, honestly.** Half of "a versioned, parameterized list of commands"
+      is literally true here and half is not, and the module doc says which:
+      the steps really are the authoring calls the screen makes, but a tariff
+      is one configuration value and writing it is not a command — where a
+      chart is eighteen independently refusable `open_account_in` calls against
+      the log. So this is a blueprint of the *catalogue* shape. What survives
+      and matters is that `TariffAsWritten::write` is the one write and both
+      paths go through it: "a pack writes what the screen writes" is the call
+      graph, not a comment.
+
+      **Preview shares one implementation with install without a transaction.**
+      `Pack::onto` is pure and returns the tariff an install stores, so preview
+      *is* that function and install is that function plus one write — the
+      property `preview_chart` buys with a rollback. It buys it without one on
+      purpose: a chart install is eighteen commands that can each refuse and
+      only a real run is honest about it, while a tariff is one value. And a
+      rolled-back transaction would burn a `configuration_version` per preview,
+      because `nextval` does not roll back.
+
+      **A pack goes underneath.** First match wins, so appending is the only
+      position that cannot reprice an hour the business already decided.
+      Bands whose hours something already prices are skipped **by window, not
+      by name** — a business that renamed the band covering Thursday evening
+      has still answered the question the pack was about to ask, and keying on
+      the name is the bug `band_for` already paid for.
+
+      **Installing is a read-modify-write, so it can never write blind.** It
+      hands `write` the generation it read, and a caller's own `If-Match` is
+      answered *before* the nothing-to-do shortcut — somebody who asked "only
+      if it is still at N" and got `200` back would have been handed a tariff
+      at `N+1` they had never seen. That second part was a real bug, found by
+      the test that expected a `412` and got a `200`.
+
+      **`every_pack_builds_every_band_it_promises` is the blueprint-validity
+      check** ARCHITECTURE §1138 asks for, and it needs no database — the whole
+      path from a pack's answers to a band is pure, which makes it stronger
+      than the same check for a chart or a trade.
+
+      **No Ramadan or Eid pack**, which the market would rank first. Both are
+      Hijri and drift about eleven days a Gregorian year, and nothing here can
+      compute one: `erp_types::Calendar` is a time zone and nothing else —
+      checked, not assumed. A pack with the dates typed in would work for one
+      year and be wrong the next.
+
+      **No taking a pack back out**, declined in the shape `charts.rs` declines
+      editing before install: every band a pack writes is an ordinary band the
+      moment it exists, and `PUT /v1/booking/tariff` already replaces the whole
+      list. What it would cost is named so it is not re-derived — provenance
+      beside each band, because neither cheap key works: not the name (two
+      bands may share one), not the content (an edited band stops matching,
+      which is when somebody most wants it gone). And that decision has a
+      deadline: the stored shape moves for free today and will not after launch
 - [x] **`explain` — built** for pricing, and generic: `Rules::explain` names
       every rule tried, in order, with whether each matched. Effective-permission
       inspection already shipped twice (§53). The `explain`-backed **dry run**

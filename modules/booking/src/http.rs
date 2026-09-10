@@ -57,6 +57,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(public_reserve))
         .routes(routes!(tariff, set_tariff))
         .routes(routes!(tariff_templates))
+        .routes(routes!(list_packs, install_pack))
+        .routes(routes!(preview_pack))
         .routes(routes!(
             public_booking_settings,
             set_public_booking_settings
@@ -2086,26 +2088,34 @@ async fn tariff(
     Ok(Versioned(
         version,
         TariffView {
-            // Zipped, because `resolve` maps over the same list in the same
-            // order — the band beside the answers that built it.
-            bands: written
-                .bands
-                .iter()
-                .zip(resolved.bands)
-                .map(|(authored, band)| TariffBandView {
-                    level: authored.level(),
-                    template: authored.template().map(str::to_owned),
-                    answers: match authored {
-                        erp_rules::Authored::Form { answers, .. } => Some(given(answers)),
-                        _ => None,
-                    },
-                    name: band.name,
-                    uplift: band.uplift,
-                    hours: hours(&band.when),
-                })
-                .collect(),
+            bands: shown(&written, &resolved),
         },
     ))
+}
+
+/// A tariff as it reads back: how each band was written, beside what it comes
+/// to.
+///
+/// Zipped, because `resolve` maps over the same list in the same order — the
+/// band beside the answers that built it. One function, because the tariff
+/// screen and every pack route answer in the same shape.
+fn shown(written: &crate::TariffAsWritten, resolved: &crate::Tariff) -> Vec<TariffBandView> {
+    written
+        .bands
+        .iter()
+        .zip(&resolved.bands)
+        .map(|(authored, band)| TariffBandView {
+            level: authored.level(),
+            template: authored.template().map(str::to_owned),
+            answers: match authored {
+                erp_rules::Authored::Form { answers, .. } => Some(given(answers)),
+                _ => None,
+            },
+            name: band.name.clone(),
+            uplift: band.uplift,
+            hours: hours(&band.when),
+        })
+        .collect()
 }
 
 /// The ready-made bands, in the caller's language.
@@ -2364,6 +2374,229 @@ const fn answer_kind(of: erp_rules::Kind) -> &'static str {
         erp_rules::Kind::Bool => "bool",
         erp_rules::Kind::Money => "money",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ready-made tariffs
+// ---------------------------------------------------------------------------
+
+/// One band a ready-made tariff writes, shown before it is installed.
+#[derive(Debug, Serialize, ToSchema)]
+struct PackBandView {
+    /// Printed beside the price once installed.
+    name: &'static str,
+    /// Which form it fills in, from `GET /v1/booking/tariff/templates`. It
+    /// arrives as an ordinary form-written band, so it is editable afterwards
+    /// the same way one typed in by hand is.
+    template: &'static str,
+    /// The answers it fills in, as plain JSON scalars.
+    #[schema(value_type = Object)]
+    answers: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A named starting point for a tariff.
+#[derive(Debug, Serialize, ToSchema)]
+#[schema(example = json!({
+    "id": "barbershop",
+    "name": "أمسيات صالون الحلاقة",
+    "description": "الأمسيتان قبل نهاية الأسبوع، حين تمتلئ كل الكراسي.",
+    "bands": [{
+        "name": "مساء الخميس",
+        "template": "weekday_evening",
+        "answers": { "name": "مساء الخميس", "weekday": 4, "from_hour": 17, "percent": 15 }
+    }]
+}))]
+struct PackView {
+    /// What to send back as `pack`.
+    id: &'static str,
+    /// In the caller's language.
+    name: &'static str,
+    description: &'static str,
+    /// **Every band it would write, in the order it would write them**, so a
+    /// business can read a pack before taking it. The percentages are starting
+    /// points and every one is editable once installed.
+    bands: Vec<PackBandView>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "pack": "barbershop" }))]
+struct InstallPack {
+    /// The pack's id, from `GET /v1/booking/tariff/packs`.
+    pack: String,
+}
+
+/// What installing a pack did — **or would do**.
+#[derive(Debug, Serialize, ToSchema)]
+#[schema(example = json!({
+    "added": ["مساء الخميس", "مساء الأربعاء"],
+    "skipped": [],
+    "bands": [{ "level": "form", "template": "weekday_evening", "name": "مساء الخميس", "uplift": 1500 }]
+}))]
+struct PackInstalled {
+    /// Added, in the pack's own order.
+    added: Vec<String>,
+    /// **Not added, because something already prices those hours.** Not a
+    /// failure: installing twice is not an error, and neither is installing
+    /// over a band you wrote yourself.
+    skipped: Vec<String>,
+    /// **The whole tariff as it now reads, in order.**
+    ///
+    /// Not just what changed. First match wins, so the question a business
+    /// needs answered is where the new bands landed and what is above them —
+    /// and a preview that said "two bands would be added" could not answer it.
+    bands: Vec<TariffBandView>,
+}
+
+/// Ready-made tariffs, in the caller's language.
+///
+/// Authenticated, unlike `GET /v1/ledger/charts`: what a business charges is
+/// not something a signup form has to show before anybody has an account.
+#[utoipa::path(
+    get,
+    path = "/v1/booking/tariff/packs",
+    tag = "booking",
+    responses(
+        (status = OK, body = Vec<PackView>),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+    ),
+)]
+async fn list_packs(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<Vec<PackView>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    Ok(Json(
+        crate::PACKS
+            .iter()
+            .map(|shipped| PackView {
+                id: shipped.id,
+                name: shipped.name(locale),
+                description: shipped.description(locale),
+                bands: shipped
+                    .bands
+                    .iter()
+                    .map(|band| PackBandView {
+                        name: band.name(locale),
+                        template: band.template,
+                        answers: given(&band.answers(locale)),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    ))
+}
+
+/// **What installing a ready-made tariff would do**, without doing it.
+///
+/// The same answer `POST /v1/booking/tariff/packs` gives, from the same
+/// function — a pack's install is computing the resulting tariff and storing
+/// it, so the computed tariff *is* the preview and the two cannot disagree.
+#[utoipa::path(
+    post,
+    path = "/v1/booking/tariff/packs/preview",
+    tag = "booking",
+    request_body = InstallPack,
+    responses(
+        (status = OK, description = "What would happen. Nothing was written.", body = PackInstalled),
+        (status = BAD_REQUEST, description = "No such pack", body = Problem),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = INTERNAL_SERVER_ERROR, description = "A stored band names a template this build no longer ships", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+    ),
+)]
+async fn preview_pack(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    Json(body): Json<InstallPack>,
+) -> Result<Json<PackInstalled>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let shipped = found(&body.pack, locale)?;
+    let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
+
+    let would = crate::packs::preview(&mut conn, shipped, locale)
+        .await
+        .map_err(|e| config(&e, locale))?;
+
+    reported(&would, locale)
+}
+
+/// Install a ready-made tariff.
+///
+/// **Its bands go underneath yours.** First match wins, so appending is the
+/// only position that cannot change a price you have already decided — a band
+/// a pack adds applies only in hours nothing above it claims. Bands whose
+/// hours something already prices are `skipped` and left exactly as they are,
+/// so installing twice is not an error.
+///
+/// Every band arrives as an ordinary form-written band: reopen it on the
+/// tariff screen and change the percentage, the day or the hour, or remove it
+/// with `PUT /v1/booking/tariff`.
+#[utoipa::path(
+    post,
+    path = "/v1/booking/tariff/packs",
+    tag = "booking",
+    params(("If-Match" = Option<String>, Header, description = "The `ETag` a `GET /v1/booking/tariff` answered with. Without it the write still refuses if the tariff moved since this request read it — adding to a tariff means reading it first.")),
+    request_body = InstallPack,
+    responses(
+        (status = OK, body = PackInstalled),
+        (status = BAD_REQUEST, description = "No such pack", body = Problem),
+        (status = PRECONDITION_FAILED, description = "The tariff moved since it was read; reload and try again", body = Problem),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = INTERNAL_SERVER_ERROR, description = "A stored band names a template this build no longer ships", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
+    ),
+)]
+async fn install_pack(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+    IfMatch(expected): IfMatch,
+    Json(body): Json<InstallPack>,
+) -> Result<Json<PackInstalled>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let shipped = found(&body.pack, locale)?;
+    let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
+
+    let did = crate::packs::install(
+        &mut conn,
+        shipped,
+        locale,
+        Some(&tenant.session.identity.to_string()),
+        expected,
+    )
+    .await
+    .map_err(|e| config(&e, locale))?;
+
+    reported(&did, locale)
+}
+
+fn found(id: &str, locale: Locale) -> Result<&'static crate::Pack, Problem> {
+    crate::pack(id).ok_or_else(|| {
+        Problem::new(
+            StatusCode::BAD_REQUEST,
+            &erp_i18n::Message::new(crate::messages::NO_SUCH_PACK)
+                .with("pack", erp_i18n::MessageArg::text(id.to_owned())),
+            locale,
+            &CATALOG,
+        )
+    })
+}
+
+/// The answer both pack routes give, from the one they both ran.
+fn reported(
+    what: &crate::packs::Installed,
+    locale: Locale,
+) -> Result<Json<PackInstalled>, Problem> {
+    let resolved = what.tariff.resolve().map_err(|e| config(&e, locale))?;
+    Ok(Json(PackInstalled {
+        added: what.added.clone(),
+        skipped: what.skipped.clone(),
+        bands: shown(&what.tariff, &resolved),
+    }))
 }
 
 /// Ready-made rotas, in the caller's language.

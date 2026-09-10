@@ -188,7 +188,11 @@ salon.
   deciding (whether the answers or the condition are the truth) and the answer
   is the whole shape.
 - **Rule packs as blueprints.** Rides on 4d's pipeline, whose preview step now
-  exists.
+  exists. **Built 2026-09-10** — `booking::packs`, and *not* in this crate: a
+  pack is a list of form submissions against one consumer's own configuration
+  shape, and there is one consumer. It turned out not to need 4d's rolled-back
+  transaction after all: a tariff is one value, so the computed value is the
+  preview.
 - **Per-request fact assembly with startup coverage assertions.** Needs a
   consumer whose facts are assembled per request, which authorization is and
   pricing is not.

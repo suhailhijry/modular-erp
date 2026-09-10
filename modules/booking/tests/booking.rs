@@ -1254,6 +1254,60 @@ async fn a_booking_is_priced_against_the_tenants_bands() {
     fixture.cleanup().await;
 }
 
+/// **Adding to a tariff is a read-modify-write, and the version it read is what
+/// makes one safe.**
+///
+/// `packs::install` computes the new tariff *from* the stored one, so an
+/// unconditional write would lose whatever landed in between — a second
+/// admin's whole tariff, with both requests answering success. It therefore
+/// hands `write` the generation it read.
+///
+/// That window is between two statements of one call and cannot be opened on
+/// purpose from a test, so this exercises the guard the composition depends on,
+/// and shows what the unconditional write would have done instead.
+#[tokio::test]
+async fn a_tariff_written_against_the_version_it_was_read_at_refuses_an_edit_that_landed_since() {
+    let fixture = Fixture::new().await;
+    // Read and let the connection go: what is held across the edit is the
+    // *generation*, which is the whole of what makes the later write safe.
+    let (mine, version) = {
+        let mut conn = fixture.pool.acquire().await.expect("connection");
+        booking::TariffAsWritten::read(&mut conn)
+            .await
+            .expect("an unwritten tariff still has a generation")
+    };
+
+    // Somebody else sets the tariff in the meantime.
+    set_bands(&fixture, vec![thursday_peak()]).await;
+
+    let mut conn = fixture.pool.acquire().await.expect("connection");
+    let refused = mine
+        .write(&mut conn, None, Some(version))
+        .await
+        .expect_err("the tariff moved");
+    assert!(
+        matches!(
+            refused,
+            erp_eventlog::ConfigError::Conflict { ref key, .. } if key == booking::TariffAsWritten::KEY
+        ),
+        "{refused:?}"
+    );
+
+    // And unconditionally it would have gone straight through, taking their
+    // bands with it — which is what the version is there to prevent.
+    mine.write(&mut conn, None, None)
+        .await
+        .expect("an unconditional write lands");
+    let (after, _) = booking::TariffAsWritten::read(&mut conn)
+        .await
+        .expect("read");
+    assert!(after.bands.is_empty(), "their bands survived a blind write");
+
+    // Let it go before the database is dropped out from under it.
+    drop(conn);
+    fixture.cleanup().await;
+}
+
 /// **"All producing the same artifact."**
 ///
 /// The same band written two ways — filled into a form, and written out by

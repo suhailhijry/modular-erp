@@ -50,6 +50,7 @@ pub mod messages;
 
 mod bars;
 mod commands;
+pub mod packs;
 pub mod pricing;
 mod projections;
 mod reservation;
@@ -69,6 +70,7 @@ pub use commands::{
     reschedule, reserve, restore_resource, schedule_resource, secure_in, withdraw_resource,
 };
 pub use erp_recurrence::{Availability, BadRule, Calendar, NotAZone, any_covers};
+pub use packs::{PACKS, Pack, PackBand, pack};
 pub use pricing::{
     Allowance, Applied, Band, Billing, Charge, Charged, PriceError, PublicBooking, Tariff,
     TariffAsWritten, price,

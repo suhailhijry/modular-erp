@@ -694,6 +694,9 @@ curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
 
 | | | Capability |
 |---|---|---|
+| `GET /v1/booking/tariff/packs` | Ready-made tariffs, and every band each would write | Read |
+| `POST /v1/booking/tariff/packs/preview` | What taking one would do. Writes nothing | Read |
+| `POST /v1/booking/tariff/packs` | Take one | ManageTenant |
 | `GET /v1/booking/tariff/templates` | Ready-made bands, and the blanks they ask you to fill in | Read |
 | `GET /v1/booking/tariff` | Which hours cost more, and by how much | Read |
 | `PUT /v1/booking/tariff` | Set the whole thing | ManageTenant |
@@ -748,6 +751,52 @@ ones twice.
 **Bands, not prices.** What a service costs is yours to send on the line; when
 it costs more is the tenant's to configure, and that is the half a client must
 not be able to decide for itself.
+
+#### Ready-made tariffs
+
+Five, by trade. Each is a small list of bands, already filled in — read one
+before you take it, and every band it writes is an ordinary band afterwards.
+
+```bash
+curl -s "${AUTH[@]}" -H 'Accept-Language: ar' \
+  http://localhost:8080/v1/booking/tariff/packs
+```
+
+```bash
+# What it would do. Writes nothing.
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/tariff/packs/preview -d '{"pack":"barbershop"}'
+```
+
+```bash
+# Take it.
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/tariff/packs -d '{"pack":"barbershop"}'
+```
+
+Both answer the same shape, from the same run: `added`, `skipped`, and **the
+whole tariff as it then reads, in order** — because first match wins, so where
+the new bands landed is the thing you need to see.
+
+**A pack goes underneath what you wrote.** A band it adds applies only in hours
+nothing above it already claims, so taking one can never change a price you had
+already decided. Bands whose hours something already prices are `skipped` and
+left exactly as they are — so taking the same pack twice is not an error, and
+neither is taking one over a band you wrote yourself.
+
+Every band arrives as a form: reopen it on the tariff screen and change the
+percentage, the day or the hour. To remove one, `PUT` the tariff back without
+it.
+
+**The percentages are starting points, not measurements.** Thursday evening is
+the Saudi weekend eve and a barbershop's busiest; a city hotel fills Sunday to
+Wednesday while a resort fills Friday and Saturday. No public source gives an
+hour-by-hour figure for any of it, which is why every number arrives in a field
+you can edit.
+
+**To take a price *down* instead**, send a negative `percent` — `-15` is a
+sixth off. That is an ordinary band and the form takes one; there is no pack of
+them, because taking one would cut a week of prices in a single click.
 
 Bookings already taken keep the price they were given. The band is frozen onto
 the line when the booking is written, so moving your peak hours changes what the
