@@ -684,6 +684,354 @@ impl ControlPlane {
     }
 }
 
+/// How settled a tenant database must be before its absence from the control
+/// plane is worth reporting.
+///
+/// A day. **Not a safety margin** — nothing here deletes anything, so there is
+/// nothing to be safe from. It is a noise filter: something created minutes ago
+/// and not yet visible is a race with whoever is looking, not a finding.
+pub const ORPHAN_GRACE_SECONDS: i64 = 24 * 60 * 60;
+
+impl ControlPlane {
+    /// **Reports tenant databases that no `tenant` row claims. Deletes
+    /// nothing.**
+    ///
+    /// # Why this reports rather than reaps, which is a reversal
+    ///
+    /// It was written as a sweep that dropped them, on the reasoning that a run
+    /// dying between `CREATE DATABASE` and the row naming it leaves rubbish
+    /// nothing else will ever find. **That reasoning was backwards and the
+    /// window does not exist**: `provision` writes the row first (`:159`) and
+    /// creates the database second (`:187`), so a provisioning that dies leaves
+    /// a row with no database — which `abandon` already handles — and never a
+    /// database with no row.
+    ///
+    /// So an unclaimed tenant database has essentially one cause, and it is the
+    /// opposite of rubbish: **a control plane that has lost rows.** A restore to
+    /// a point before a tenant existed, a failover to a stale replica, a
+    /// mis-pointed `CONTROL_DATABASE_URL`. This repo already names that state
+    /// and calls it dangerous —
+    /// `restore.rs::a_tenant_database_without_its_control_row_is_unreachable`
+    /// asserts the events are all still there, *"which is what makes this
+    /// dangerous"*. Deleting on that signal converts a recoverable incident into
+    /// permanent loss of the one thing this system says is irreplaceable, on a
+    /// schedule, while an operator is already mid-restore.
+    ///
+    /// Nothing here can tell those two apart, so it does not guess. It tells
+    /// somebody. That is the same answer `charts.rs` gives about editing before
+    /// install and the same one L6 gives everywhere else: refuse rather than
+    /// degrade.
+    ///
+    /// **What a caller does with the answer** is drop them by hand after
+    /// looking — which is what the 1139 on a development cluster got, and the
+    /// looking is the part that mattered.
+    ///
+    /// # Errors
+    /// If the control plane or the cluster is unreachable.
+    pub async fn find_orphaned_databases(
+        &self,
+        cluster: &str,
+        grace_seconds: i64,
+    ) -> Result<Vec<Unclaimed>, AccessError> {
+        let options = self
+            .tenants
+            .maintenance_options(cluster)?
+            .database("postgres");
+        let mut maintenance = PgConnection::connect_with(&options)
+            .await
+            .map_err(AccessError::Database)?;
+
+        let present: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT datname as "name!" FROM pg_database
+                WHERE datname LIKE 'erp\_tenant\_%'
+                ORDER BY datname"#,
+        )
+        .fetch_all(&mut maintenance)
+        .await
+        .map_err(AccessError::Database)?;
+        maintenance.close().await.ok();
+
+        let mut unclaimed = Vec::new();
+        for name in present {
+            let Some(age) = orphan_age_seconds(&name) else {
+                continue;
+            };
+            if age < grace_seconds {
+                continue;
+            }
+            if self.database_is_claimed(&name).await? {
+                continue;
+            }
+            unclaimed.push(self.look_inside(cluster, name).await);
+        }
+
+        Ok(unclaimed)
+    }
+
+    /// **Opens the database and asks what is in it.**
+    ///
+    /// The one question that separates a provisioning that died from a tenant
+    /// whose control-plane row was lost, and it is asked of the database rather
+    /// than of the control plane — which is the thing that may be wrong.
+    ///
+    /// Two tables answer it:
+    ///
+    /// - **`event`.** `RUNNING.md` calls the log the thing "nothing else can
+    ///   reconstruct". One row in it and this is somebody's business.
+    /// - **`configuration`, excluding what a module seeded.** An install writes
+    ///   `set_by = 'module:tax_sa'` and `refresh_module` writes it again, so
+    ///   those come back by themselves. A row set by anybody else is a decision
+    ///   a person made, and nothing recreates that.
+    ///
+    /// Anything that cannot be opened or read is [`Unclaimed::Unreadable`] and
+    /// is never dropped. **Not knowing is not the same as knowing it is empty**,
+    /// and this is the one place that distinction is worth a whole variant.
+    async fn look_inside(&self, cluster: &str, database: String) -> Unclaimed {
+        match self.occupancy_of(cluster, &database).await {
+            Ok(None) => Unclaimed::Empty(database),
+            Ok(Some(why)) => Unclaimed::Occupied { database, why },
+            Err(why) => Unclaimed::Unreadable { database, why },
+        }
+    }
+
+    /// **Every way looking can fail is one error**, so there is one place that
+    /// decides what not-knowing means and it cannot be got right for the
+    /// connection and wrong for the query.
+    async fn occupancy_of(
+        &self,
+        cluster: &str,
+        database: &str,
+    ) -> Result<Option<&'static str>, String> {
+        let options = self
+            .tenants
+            .maintenance_options(cluster)
+            .map_err(|e| e.to_string())?
+            .database(database);
+        let mut conn = PgConnection::connect_with(&options)
+            .await
+            .map_err(|e| e.to_string())?;
+        let verdict = occupancy(&mut conn).await.map_err(|e| e.to_string());
+        conn.close().await.ok();
+        verdict
+    }
+
+    /// **Drops the unclaimed databases that hold nothing a person made.**
+    ///
+    /// # The refusal that matters
+    ///
+    /// If *any* unclaimed database on this cluster turns out to be occupied, or
+    /// cannot be looked inside, **nothing is dropped at all**. One database full
+    /// of events that no row claims does not mean one row was lost; it means the
+    /// control plane is not a description of this cluster, and the next database
+    /// in the list is not evidence of anything either. The answer to that is a
+    /// person, not a batch.
+    ///
+    /// `limit` is a batch size for the ordinary case, so a first run on a
+    /// cluster with a thousand leftovers takes several passes rather than
+    /// holding a connection open through all of them.
+    ///
+    /// # Errors
+    /// [`AccessError::Corrupt`] when the cluster holds an unclaimed database
+    /// that is occupied or unreadable — which is a refusal, not a fault.
+    pub async fn drop_empty_orphans(
+        &self,
+        cluster: &str,
+        grace_seconds: i64,
+        limit: usize,
+    ) -> Result<Vec<String>, AccessError> {
+        let unclaimed = self.find_orphaned_databases(cluster, grace_seconds).await?;
+
+        let doubtful: Vec<&Unclaimed> = unclaimed
+            .iter()
+            .filter(|u| !matches!(u, Unclaimed::Empty(_)))
+            .collect();
+        if !doubtful.is_empty() {
+            return Err(AccessError::Corrupt(format!(
+                "{cluster}: {} unclaimed tenant database(s) that this cannot call rubbish \
+                 ({doubtful:?}); dropping nothing. A tenant database with data in it and no \
+                 control-plane row means the control plane is behind reality — check that \
+                 before restoring anything else",
+                doubtful.len(),
+            )));
+        }
+
+        let options = self
+            .tenants
+            .maintenance_options(cluster)?
+            .database("postgres");
+        let mut maintenance = PgConnection::connect_with(&options)
+            .await
+            .map_err(AccessError::Database)?;
+
+        let mut dropped = Vec::new();
+        for name in unclaimed
+            .into_iter()
+            .filter_map(Unclaimed::empty)
+            .take(limit)
+        {
+            let quoted = quote_ident(&name)?;
+            let sql = format!("DROP DATABASE IF EXISTS {quoted}");
+            match sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .execute(&mut maintenance)
+                .await
+            {
+                Ok(_) => dropped.push(name),
+                // Without `WITH (FORCE)`, unlike `drop_database`: there a tenant
+                // is being deliberately destroyed and a session is a leak; here
+                // the database is only believed to be rubbish, and a connection
+                // is evidence the belief is wrong.
+                Err(e) => tracing::warn!(
+                    database = %name,
+                    error = %e,
+                    "an empty unclaimed database would not drop; leaving it"
+                ),
+            }
+        }
+
+        maintenance.close().await.ok();
+        Ok(dropped)
+    }
+
+    /// Whether any tenant row names this database, **whatever state it is in**.
+    ///
+    /// Not filtered by cluster, though `UNIQUE (cluster, database_name)` would
+    /// allow one name on two of them. Names come from `TenantId`, so a
+    /// collision needs somebody to have built one by hand — and answering
+    /// "claimed" for a name claimed anywhere is the direction that reports
+    /// less, which is the right way to be wrong.
+    async fn database_is_claimed(&self, name: &str) -> Result<bool, AccessError> {
+        Ok(sqlx::query_scalar!(
+            "SELECT EXISTS (SELECT 1 FROM tenant WHERE database_name = $1)",
+            name,
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .unwrap_or(true))
+    }
+
+    /// Every cluster tenants may live on, so a check can visit each.
+    ///
+    /// # Errors
+    /// If the control plane is unreachable.
+    pub async fn cluster_names(&self) -> Result<Vec<String>, AccessError> {
+        Ok(
+            sqlx::query_scalar!(r#"SELECT name as "name!" FROM cluster ORDER BY name"#)
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
+}
+
+/// A tenant database no `tenant` row claims, and what is inside it.
+///
+/// The distinction the whole feature turns on: an unclaimed database is either
+/// a provisioning that died before it wrote anything, or a tenant whose
+/// control-plane row was lost. They look identical from the control plane, and
+/// completely different from inside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unclaimed {
+    /// No events and no setting anybody chose. Nothing here cannot be made
+    /// again.
+    Empty(String),
+    /// **Somebody's business.** A lost control-plane row, and the database is
+    /// the only place that tenant still exists.
+    Occupied { database: String, why: &'static str },
+    /// Could not be opened or read, so nothing is known about it — which is not
+    /// the same as knowing it is empty.
+    Unreadable { database: String, why: String },
+}
+
+impl Unclaimed {
+    /// The name, if this one holds nothing.
+    #[must_use]
+    pub fn empty(self) -> Option<String> {
+        match self {
+            Self::Empty(database) => Some(database),
+            Self::Occupied { .. } | Self::Unreadable { .. } => None,
+        }
+    }
+
+    /// The database this is about, whatever it turned out to be.
+    #[must_use]
+    pub fn database(&self) -> &str {
+        match self {
+            Self::Empty(database)
+            | Self::Occupied { database, .. }
+            | Self::Unreadable { database, .. } => database,
+        }
+    }
+}
+
+/// Why a database is somebody's, or `None` if it is nobody's.
+///
+/// `to_regclass` first, because a database created and never migrated has
+/// neither table and asking directly would be a parse error rather than an
+/// answer.
+async fn occupancy(conn: &mut PgConnection) -> Result<Option<&'static str>, sqlx::Error> {
+    let has_log: Option<String> = sqlx::query_scalar("SELECT to_regclass('public.event')::text")
+        .fetch_one(&mut *conn)
+        .await?;
+    if has_log.is_some() {
+        let events: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM public.event)")
+            .fetch_one(&mut *conn)
+            .await?;
+        if events {
+            return Ok(Some("it has events in it"));
+        }
+    }
+
+    let has_config: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.configuration')::text")
+            .fetch_one(&mut *conn)
+            .await?;
+    if has_config.is_some() {
+        // `module:` is what an install and a refresh write, and both write it
+        // again by themselves. Anything else is a person.
+        let chosen: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM public.configuration
+                  WHERE set_by IS NULL OR set_by NOT LIKE 'module:%'
+             )",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if chosen {
+            return Ok(Some("it has a setting somebody chose"));
+        }
+    }
+
+    Ok(None)
+}
+
+/// [`orphan_age_seconds`], for the test that proves what it refuses to age.
+#[must_use]
+pub fn orphan_age_seconds_for_tests(datname: &str) -> Option<i64> {
+    orphan_age_seconds(datname)
+}
+
+/// How long ago a tenant database was named, from its own name.
+///
+/// `None` for anything this must not speak about: a name that is not
+/// `tenant_database_name`'s shape, a UUID that will not parse, or one that is
+/// not version 7.
+fn orphan_age_seconds(datname: &str) -> Option<i64> {
+    let hex = datname.strip_prefix("erp_tenant_")?;
+    if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let id = uuid::Uuid::parse_str(hex).ok()?;
+    // **Version seven specifically.** `get_timestamp` answers for v1 and v6
+    // too — both carry a real time and both convert to a plausible Unix second
+    // — so leaning on it to mean "one of ours" would age a name this system
+    // never minted.
+    if id.get_version_num() != 7 {
+        return None;
+    }
+    let (seconds, _) = id.get_timestamp()?.to_unix();
+    let named = i64::try_from(seconds).ok()?;
+    Some(chrono::Utc::now().timestamp() - named)
+}
+
 /// Runs the tenant-plane migrations, taking and returning the connection.
 ///
 /// Owned in and owned out, which is the point. `Migrator::run` is generic over

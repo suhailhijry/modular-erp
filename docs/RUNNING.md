@@ -85,7 +85,30 @@ four tests failing, and `just redis` is the one that matches. Either that or set
 | `bin/worker` | projections, both outboxes, health checks, the ZATCA sweeps | the same, plus `SEALING_KEY` for ZATCA and `SMTP_URL` for email |
 | `bin/migrator` | brings tenant schemas up to this build; **run before a deploy** | the same |
 
-`bin/reaper` destroys expired demo tenants. Schedule it; it exits when done.
+`bin/reaper` destroys expired demo tenants, sweeps unanswered signups and
+expired password-reset links, and **reports tenant databases that no `tenant`
+row claims**. Schedule it; it exits when done.
+
+That last one deletes nothing, deliberately. An unclaimed tenant database is
+almost never rubbish: `provision` writes the row before it creates the database,
+so a provisioning that dies leaves a row with no database and never the reverse.
+What is left over is a control plane that has *lost* rows — a restore to a point
+before a tenant existed, a failover to a stale replica, a mis-pointed
+`CONTROL_DATABASE_URL` — and those databases are full of events. See "Control
+plane older than the tenant" below: that state is recoverable by putting the row
+back, and it stops being recoverable the moment something drops the database.
+
+So the reaper asks the database rather than the control plane. It drops one
+only when the database itself says it holds nothing: **no events, and no setting
+anybody chose** — a module's own seed does not count, because installing the
+module writes it again.
+
+Anything with data in it, or anything it cannot open, **refuses the whole
+cluster's sweep** and is logged at `error`. Nothing is dropped that run, empty
+ones included. If you see that: check whether the control plane is behind
+reality before you restore anything else. A tenant database with events and no
+control-plane row is recoverable by putting the row back, and only until
+something deletes it.
 
 ## Environment
 

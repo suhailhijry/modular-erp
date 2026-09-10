@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT datname as \"name!\" FROM pg_database\n                WHERE datname LIKE 'erp\\_tenant\\_%'\n                ORDER BY datname",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_database",
+            "name": "datname"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "435e1cfb8189372ff84eed4497ea1bf372aca2b27b990922499ce8a440b6b2fc"
+}

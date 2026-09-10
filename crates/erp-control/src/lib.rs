@@ -78,6 +78,7 @@ pub use passwords::{
 pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
 pub use pools::{ClusterRegistry, PoolConfig, TenantPools};
 pub use provision::SignedUp as ProvisionedTenant;
+pub use provision::{ORPHAN_GRACE_SECONDS, Unclaimed, orphan_age_seconds_for_tests};
 pub use signup::{
     Confirmed, PendingSignup, REQUEST_INTERVAL, SIGNUP_LIFETIME, SignupError, SignupRequest,
 };

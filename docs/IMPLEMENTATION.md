@@ -908,6 +908,80 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       against the three call sites — `purchases/commands.rs:369`,
       `sales/commands.rs:46` (from both credit paths) and `hr/commands.rs:732`
 
+### 56 · Databases nothing accounts for — and a sweep that was wrong at the root
+
+**Built and then reversed, 2026-09-11**, which is the part worth writing down.
+
+A development cluster had accumulated **1139** `erp_tenant_*` databases and the
+contention made a suite run fail. Every sweep this system has iterates *rows*,
+so a database no row claims is in none of them. The obvious fix was a sweep that
+finds and drops them, and that is what was built: five conditions, each
+falsified, a day of grace, no `WITH (FORCE)`.
+
+**A review found the premise backwards.** The sweep was justified by "a run that
+dies between `CREATE DATABASE` and the row that names it". `provision` writes the
+row **first** (`provision.rs:159`) and creates the database **second** (`:187`),
+and `abandon` drops the database before deleting the row. A provisioning that
+dies leaves a row with no database — which `abandon` handles — and never a
+database with no row. **The window the whole design was calibrated against does
+not exist**, and the grace protected the wrong thing: it measures age since
+*signup*, so the older and larger a tenant, the less protection it had.
+
+So an unclaimed tenant database has one realistic cause and it is the opposite
+of rubbish: **a control plane that has lost rows.** A restore to a point before a
+tenant existed, a stale replica, a mis-pointed DSN. This repo already names that
+state — `restore.rs::a_tenant_database_without_its_control_row_is_unreachable`
+asserts the events are all still there, *"which is what makes this dangerous"* —
+and the sweep converted that recoverable incident into permanent loss of the one
+thing `RUNNING.md` calls irreplaceable, on a schedule, while an operator is
+mid-restore. A reviewer reproduced it on a scratch server at the production
+grace: a three-day-old unclaimed database, destroyed.
+
+**It asks the database now.** The control plane cannot tell a dead provisioning
+from a lost row — they are the same absence — so the question goes to the one
+party that is not in doubt. `find_orphaned_databases` classifies each unclaimed
+database as `Empty`, `Occupied` or `Unreadable`, and `drop_empty_orphans` acts
+only on the first.
+
+**Two tables answer it.** `event`, because `RUNNING.md` calls the log the thing
+"nothing else can reconstruct" — one row and this is somebody's business. And
+`configuration` *excluding what a module seeded*: an install writes
+`set_by = 'module:tax_sa'` and `refresh_module` writes it again, so those come
+back by themselves, while a rate a business corrected does not and nothing else
+remembers it.
+
+**One doubtful database refuses the whole cluster.** A tenant with data and no
+row does not mean one row was lost; it means the control plane is not a
+description of this cluster, and the next name in the list is not evidence of
+anything either. `Unreadable` counts as doubtful: **not knowing is not knowing
+it is empty**, which is worth a whole variant and is the arm that fails safe.
+
+Every way looking can fail is one `Err`, so there is one place that decides what
+not-knowing means — it cannot be got right for the connection and wrong for the
+query. That collapse came out of falsification: with two arms, only the
+connect-failure one had a test.
+
+**Two of my own tests were the bug in miniature.**
+`a_claimed_database_survives_a_sweep_with_no_grace_at_all` ran a destructive
+sweep at zero grace against the shared test cluster, so it deleted *other tests'*
+tenant databases whenever the suite ran in parallel — and passed, because it only
+asserted about the two databases it knew of. A reviewer reproduced that too:
+three seeded databases destroyed, test green.
+
+**What survived the reversal**, because it was right: `orphan_age_seconds` reads
+the age out of the UUIDv7 in the name rather than any clock or catalogue; it
+requires **version 7 specifically**, since `get_timestamp` answers for v1 and v6
+as well and both convert to plausible times; and it refuses the hyphenated UUID
+form, which `Uuid::parse_str` otherwise accepts. The version check was missing
+from the first version — documented as a condition and never enforced, which is
+the fourth time this session a comment claimed something the code did not do.
+
+**What still is not claimed:** that a production orphan exists. None of this
+makes one, because the row precedes the database. The population this actually
+serves is leftovers from crashed test runs and from control-plane clones — and
+for those, `Empty` is exactly what they are. If a real one ever appears it will
+be `Occupied`, and the sweep will refuse and say so.
+
 ### 55 · No way back in, and a way around the second factor
 
 **Built 2026-09-10.** Two things, and the second was found while designing the

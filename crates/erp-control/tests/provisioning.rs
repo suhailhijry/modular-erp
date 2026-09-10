@@ -833,3 +833,474 @@ async fn a_refresh_does_not_drop_tables_under_a_projection_run() {
 
     fixture.cleanup_tenant(&tenant).await;
 }
+
+// ---------------------------------------------------------------------------
+// Databases no tenant row claims
+// ---------------------------------------------------------------------------
+
+/// **The age gate is read out of the name, and it is the whole safety of this.**
+///
+/// `provision` creates a database and writes the row that claims it in separate
+/// statements, so there is briefly a database nothing points at. A sweep that
+/// ran inside that window would delete a business on its first day — so a fresh
+/// name is never a candidate, whatever else is true of it.
+///
+/// DB-free: the name is a `UUIDv7` and its timestamp is its age, so this needs no
+/// cluster and no clock but the one in the id.
+#[test]
+fn only_an_old_unmistakable_tenant_database_is_ever_a_candidate() {
+    let fresh = format!("erp_tenant_{}", uuid::Uuid::now_v7().simple());
+    let age = erp_control::orphan_age_seconds_for_tests(&fresh)
+        .expect("a name this process just minted is readable");
+    assert!(
+        age < 5,
+        "a database named seconds ago read as {age} seconds old"
+    );
+    assert!(
+        age < erp_control::ORPHAN_GRACE_SECONDS,
+        "a fresh database is inside the grace and therefore never swept"
+    );
+
+    // An id from a day and a half ago is past it.
+    let old = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+        uuid::NoContext,
+        u64::try_from(chrono::Utc::now().timestamp() - 36 * 60 * 60).expect("after 1970"),
+        0,
+    ));
+    let old = format!("erp_tenant_{}", old.simple());
+    assert!(
+        erp_control::orphan_age_seconds_for_tests(&old).expect("readable")
+            >= erp_control::ORPHAN_GRACE_SECONDS,
+        "a day-and-a-half-old database is outside the grace"
+    );
+
+    // **Everything else is left alone**, and each of these is a way an operator
+    // loses a database to a sweep that was too clever.
+    for untouchable in [
+        // Not this system's naming at all.
+        "postgres",
+        "erp_control",
+        // An operator's own copy, which is exactly what somebody makes before
+        // an upgrade and exactly what they would not forgive losing.
+        "erp_tenant_backup_before_upgrade",
+        // The right shape, wrong length.
+        "erp_tenant_01a086d2daaa72a2b4974af36080",
+        // Hex-looking but not hex.
+        "erp_tenant_01a086d2daaa72a2b4974af3608096zz",
+        // **The hyphenated form of a real v7 id.** `Uuid::parse_str` accepts
+        // it happily, so without the length check this parses, gets an age and
+        // becomes a candidate — and it is not a name this system ever mints.
+        "erp_tenant_01a086d2-daaa-72a2-b497-4af3608096b2",
+    ] {
+        assert!(
+            erp_control::orphan_age_seconds_for_tests(untouchable).is_none(),
+            "{untouchable} was given an age, and anything with an age can be swept"
+        );
+    }
+
+    // **Only version 7.** A v4 has no timestamp at all, and v1 and v6 have one
+    // that `get_timestamp` will happily convert — so the version has to be
+    // checked rather than inferred from "did a timestamp come back". The v1
+    // below reads as December 2023, which is to say: already past any grace.
+    for wrong_version in [
+        format!("erp_tenant_{}", uuid::Uuid::new_v4().simple()),
+        "erp_tenant_2c1a5d3e9f1b11ee8c900242ac120002".to_owned(),
+        "erp_tenant_1ee9f1b2c1a56d3e8c900242ac120002".to_owned(),
+    ] {
+        assert!(
+            erp_control::orphan_age_seconds_for_tests(&wrong_version).is_none(),
+            "{wrong_version} was given an age, and this system only ever mints v7"
+        );
+    }
+}
+
+/// **Something created moments ago is not a finding.**
+///
+/// The grace is a noise filter, not a safety margin — nothing here deletes. A
+/// database that appeared seconds ago and is not yet in the control plane is a
+/// race with whoever is looking, and reporting it would train an operator to
+/// ignore the message.
+#[tokio::test]
+async fn a_fresh_unclaimed_database_is_not_reported() {
+    let fixture = Fixture::new().await;
+
+    // Precisely the state a provisioning is in a millisecond before it writes
+    // its row: the real naming, no row, seconds old.
+    let in_flight = format!("erp_tenant_{}", uuid::Uuid::now_v7().simple());
+    erp_testkit::create_named_database(&in_flight, &CONTROL)
+        .await
+        .expect("created");
+
+    let found = fixture
+        .control
+        .find_orphaned_databases("primary", erp_control::ORPHAN_GRACE_SECONDS)
+        .await
+        .expect("the check runs");
+
+    assert!(
+        !found.iter().any(|u| u.database() == in_flight),
+        "something created seconds ago was reported as unclaimed: {found:?}"
+    );
+
+    let _ = erp_testkit::drop_named_database(&in_flight).await;
+}
+
+/// **A claimed database is never reported, and an unclaimed one is.**
+///
+/// Run at zero grace so the age filter is switched off and the claim is the
+/// only thing separating the two — which is the distinction that matters.
+///
+/// **Nothing is dropped by any of this.** The first version of this test ran a
+/// destructive sweep at zero grace against the shared test cluster, which meant
+/// it deleted other tests' tenant databases whenever the suite ran in parallel.
+/// It passed while doing it, because it only asserted about the two databases
+/// it knew of.
+#[tokio::test]
+async fn an_unclaimed_database_is_reported_and_a_claimed_one_is_not() {
+    let fixture = Fixture::new().await;
+    let signed_up = fixture
+        .control
+        .sign_up(
+            "sara@bassat.test".to_owned(),
+            "hunter2hunter2".to_owned(),
+            "bassat".to_owned(),
+            "Bassat".to_owned(),
+            vec![toy_module()],
+        )
+        .await
+        .expect("signs up");
+    let tenant = fixture
+        .control
+        .tenant(signed_up.tenant.id)
+        .await
+        .expect("reads")
+        .expect("exists");
+
+    // Beside it: the right shape, old enough, and named by nothing.
+    let unclaimed = format!(
+        "erp_tenant_{}",
+        uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+            uuid::NoContext,
+            u64::try_from(chrono::Utc::now().timestamp() - 48 * 60 * 60).expect("after 1970"),
+            0,
+        ))
+        .simple()
+    );
+    erp_testkit::create_named_database(&unclaimed, &CONTROL)
+        .await
+        .expect("created");
+
+    let found = fixture
+        .control
+        .find_orphaned_databases("primary", 0)
+        .await
+        .expect("the check runs");
+
+    assert!(
+        found
+            .iter()
+            .any(|u| matches!(u, erp_control::Unclaimed::Empty(d) if *d == unclaimed)),
+        "an unclaimed, empty database was not reported as empty: {found:?}"
+    );
+    assert!(
+        !found.iter().any(|u| u.database() == tenant.database_name),
+        "a live tenant's database was reported as unclaimed: {found:?}"
+    );
+    // And both are still there, because this reports and does not delete.
+    assert!(fixture.database_exists(&unclaimed).await);
+    assert!(fixture.database_exists(&tenant.database_name).await);
+
+    let _ = erp_testkit::drop_named_database(&unclaimed).await;
+    fixture.cleanup_tenant(&tenant).await;
+}
+
+/// A direct connection to a tenant database by name.
+async fn connect_named(database: &str) -> sqlx::PgConnection {
+    use sqlx::Connection as _;
+    let url = erp_testkit::database_url();
+    let base = url.rsplit_once('/').map_or(url.as_str(), |(head, _)| head);
+    sqlx::PgConnection::connect(&format!("{base}/{database}"))
+        .await
+        .expect("connects")
+}
+
+/// Appends `n` events to a tenant's log, so there is something to lose.
+///
+/// Through `append`, not an `INSERT`: the log's shape is its own business and a
+/// test that wrote rows by hand would be testing a different table.
+async fn write_events(database: &str, n: i64) {
+    use erp_eventlog::Metadata;
+    use erp_eventlog::{NewEvent, append};
+    use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Sequence, StreamId};
+
+    let mut conn = connect_named(database).await;
+    let stream = StreamId::new(
+        DomainName::new("toy").expect("valid"),
+        AggregateId::new("thing").expect("valid"),
+    );
+    for i in 0..n {
+        append(
+            &mut conn,
+            &stream,
+            Sequence::new(i).expect("valid"),
+            &[NewEvent::new(
+                EventName::new("toy.happened").expect("valid"),
+                SchemaVersion::new(1).expect("valid"),
+                serde_json::json!({ "n": i }),
+            )],
+            &Metadata::default(),
+        )
+        .await
+        .expect("appends");
+    }
+}
+
+async fn event_count(database: &str) -> i64 {
+    let mut conn = connect_named(database).await;
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM event")
+        .fetch_one(&mut conn)
+        .await
+        .expect("counts")
+}
+
+/// **The data loss this feature was reverted for, now refused.**
+///
+/// A tenant that has been running is restored away — the control plane rolls
+/// back to a point before its row existed. The database is untouched and full
+/// of events, which is precisely the state
+/// `restore.rs::a_tenant_database_without_its_control_row_is_unreachable` calls
+/// dangerous.
+///
+/// The first version of this sweep destroyed it: the name was right, the age
+/// was old, no row claimed it, nothing was connected. It asks the database now,
+/// and the database says whose it is.
+///
+/// **And one occupied database refuses the whole cluster**, empty ones
+/// included. A tenant with data and no row does not mean one row was lost; it
+/// means the control plane is not a description of this cluster, and the next
+/// name in the list is not evidence of anything either.
+#[tokio::test]
+async fn a_tenant_whose_control_row_was_lost_is_never_dropped() {
+    let fixture = Fixture::new().await;
+    let signed_up = fixture
+        .control
+        .sign_up(
+            "sara@bassat.test".to_owned(),
+            "hunter2hunter2".to_owned(),
+            "bassat".to_owned(),
+            "Bassat".to_owned(),
+            vec![toy_module()],
+        )
+        .await
+        .expect("signs up");
+    let database = signed_up.tenant.database_name.clone();
+    write_events(&database, 3).await;
+
+    // Also an empty leftover, so the refusal can be shown to cover it too.
+    let empty = format!(
+        "erp_tenant_{}",
+        uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+            uuid::NoContext,
+            u64::try_from(chrono::Utc::now().timestamp() - 48 * 60 * 60).expect("after 1970"),
+            0,
+        ))
+        .simple()
+    );
+    erp_testkit::create_named_database(&empty, &CONTROL)
+        .await
+        .expect("created");
+
+    // The control plane restored to a point before this tenant existed.
+    sqlx::query("DELETE FROM tenant WHERE id = $1")
+        .bind(signed_up.tenant.id.as_uuid())
+        .execute(fixture.control.pool())
+        .await
+        .expect("deletes the control row");
+
+    let found = fixture
+        .control
+        .find_orphaned_databases("primary", 0)
+        .await
+        .expect("the check runs");
+    assert!(
+        found.iter().any(|u| matches!(
+            u,
+            erp_control::Unclaimed::Occupied { database: d, .. } if *d == database
+        )),
+        "a database with three events in it was not called occupied: {found:?}"
+    );
+
+    let refused = fixture
+        .control
+        .drop_empty_orphans("primary", 0, 100)
+        .await
+        .expect_err("a cluster with an occupied orphan is not swept");
+    assert!(
+        matches!(refused, erp_control::AccessError::Corrupt(_)),
+        "{refused:?}"
+    );
+
+    // Both are still there: the tenant's, and the empty one the refusal covered.
+    assert!(
+        fixture.database_exists(&database).await,
+        "a restored-away tenant's database was destroyed"
+    );
+    assert_eq!(event_count(&database).await, 3, "its events are gone");
+    assert!(fixture.database_exists(&empty).await);
+
+    let _ = erp_testkit::drop_named_database(&empty).await;
+    let _ = erp_testkit::drop_named_database(&database).await;
+}
+
+/// **A setting somebody chose is not rubbish either**, even with no events.
+///
+/// A module's own seed comes back by itself — `install` and `refresh_module`
+/// both write it, marked `module:`. A rate a business corrected does not, and
+/// nothing else in the system remembers it.
+#[tokio::test]
+async fn a_setting_somebody_chose_keeps_a_database_alive() {
+    let fixture = Fixture::new().await;
+    let signed_up = fixture
+        .control
+        .sign_up(
+            "sara@bassat.test".to_owned(),
+            "hunter2hunter2".to_owned(),
+            "bassat".to_owned(),
+            "Bassat".to_owned(),
+            vec![toy_module()],
+        )
+        .await
+        .expect("signs up");
+    let database = signed_up.tenant.database_name.clone();
+
+    {
+        use sqlx::Connection as _;
+        let mut conn = fixture.tenant_connection(&signed_up.tenant).await;
+        // What a module install writes: recreated by `refresh_module`.
+        sqlx::query(
+            "INSERT INTO public.configuration (key, value, version, set_by)
+             VALUES ('toy.seeded', '{}'::jsonb, nextval('public.configuration_version'),
+                     'module:toy')",
+        )
+        .execute(&mut conn)
+        .await
+        .expect("seeds");
+        conn.close().await.ok();
+    }
+
+    sqlx::query("DELETE FROM tenant WHERE id = $1")
+        .bind(signed_up.tenant.id.as_uuid())
+        .execute(fixture.control.pool())
+        .await
+        .expect("deletes the control row");
+
+    // A module's own seed does not make it somebody's.
+    let found = fixture
+        .control
+        .find_orphaned_databases("primary", 0)
+        .await
+        .expect("the check runs");
+    assert!(
+        found.iter().any(|u| matches!(
+            u,
+            erp_control::Unclaimed::Empty(d) if *d == database
+        )),
+        "a database holding only module seeds was not called empty: {found:?}"
+    );
+
+    // Now a person sets one.
+    {
+        use sqlx::Connection as _;
+        let mut conn = connect_named(&database).await;
+        sqlx::query(
+            "INSERT INTO public.configuration (key, value, version, set_by)
+             VALUES ('ledger.vat_rates', '{\"standard\":500}'::jsonb,
+                     nextval('public.configuration_version'),
+                     '018f5c1e-0000-7000-8000-000000000000')",
+        )
+        .execute(&mut conn)
+        .await
+        .expect("sets");
+        conn.close().await.ok();
+    }
+
+    let found = fixture
+        .control
+        .find_orphaned_databases("primary", 0)
+        .await
+        .expect("the check runs");
+    assert!(
+        found.iter().any(|u| matches!(
+            u,
+            erp_control::Unclaimed::Occupied { database: d, why }
+                if *d == database && why.contains("setting")
+        )),
+        "a rate a business corrected did not keep its database alive: {found:?}"
+    );
+
+    let _ = erp_testkit::drop_named_database(&database).await;
+}
+
+/// **Not knowing is not the same as knowing it is empty.**
+///
+/// A database that cannot be opened tells this nothing, and nothing is not
+/// evidence of rubbish. `ALLOW_CONNECTIONS false` is a real state — an operator
+/// locking one during a restore, which is exactly when the control plane is
+/// least likely to be a description of the cluster.
+#[tokio::test]
+async fn a_database_that_cannot_be_opened_is_never_dropped() {
+    let fixture = Fixture::new().await;
+    let shut = format!(
+        "erp_tenant_{}",
+        uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+            uuid::NoContext,
+            u64::try_from(chrono::Utc::now().timestamp() - 48 * 60 * 60).expect("after 1970"),
+            0,
+        ))
+        .simple()
+    );
+    erp_testkit::create_named_database(&shut, &CONTROL)
+        .await
+        .expect("created");
+
+    // Closed to everybody, superusers included.
+    // The name is a UUIDv7 this test just minted, so `AssertSqlSafe` is true.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER DATABASE \"{shut}\" WITH ALLOW_CONNECTIONS false"
+    )))
+    .execute(fixture.control.pool())
+    .await
+    .expect("closes it");
+
+    let found = fixture
+        .control
+        .find_orphaned_databases("primary", 0)
+        .await
+        .expect("the check runs");
+    assert!(
+        found.iter().any(|u| matches!(
+            u,
+            erp_control::Unclaimed::Unreadable { database: d, .. } if *d == shut
+        )),
+        "a database that cannot be opened was not called unreadable: {found:?}"
+    );
+
+    let refused = fixture
+        .control
+        .drop_empty_orphans("primary", 0, 100)
+        .await
+        .expect_err("a cluster holding one it cannot read is not swept");
+    assert!(
+        matches!(refused, erp_control::AccessError::Corrupt(_)),
+        "{refused:?}"
+    );
+    assert!(fixture.database_exists(&shut).await);
+
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER DATABASE \"{shut}\" WITH ALLOW_CONNECTIONS true"
+    )))
+    .execute(fixture.control.pool())
+    .await
+    .ok();
+    let _ = erp_testkit::drop_named_database(&shut).await;
+}

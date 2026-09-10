@@ -76,5 +76,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let reaped = control.reap_expired_demos(PER_RUN).await?;
     tracing::info!(reaped, "demo sweep finished");
 
+    // **Databases no tenant row claims.**
+    //
+    // Dropped only when the database itself says it holds nothing: no events,
+    // and no setting anybody chose. The control plane cannot answer this —
+    // `provision` writes the row before it creates the database, so an
+    // unclaimed database is not a dead provisioning, it is usually a control
+    // plane that has lost rows. Asking the database is asking the one party
+    // that is not in doubt.
+    //
+    // One occupied or unreadable database refuses the whole cluster's sweep,
+    // which is the case `restore.rs` calls dangerous and is right to.
+    for cluster in control.cluster_names().await? {
+        match control
+            .drop_empty_orphans(
+                &cluster,
+                erp_control::ORPHAN_GRACE_SECONDS,
+                usize::try_from(PER_RUN).unwrap_or(usize::MAX),
+            )
+            .await
+        {
+            Ok(dropped) if dropped.is_empty() => {}
+            Ok(dropped) => tracing::warn!(
+                cluster = %cluster,
+                dropped = dropped.len(),
+                names = ?dropped,
+                "empty unclaimed tenant databases dropped"
+            ),
+            Err(e) => tracing::error!(
+                cluster = %cluster,
+                error = %e,
+                "unclaimed tenant databases on this cluster were not swept"
+            ),
+        }
+    }
+
     Ok(())
 }
