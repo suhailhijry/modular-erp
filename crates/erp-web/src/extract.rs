@@ -723,6 +723,68 @@ pub struct Allowed<C: Capability> {
     capability: std::marker::PhantomData<C>,
 }
 
+impl<C: Capability> Allowed<C> {
+    /// **Narrows again, with a fact the edge could not know.**
+    ///
+    /// An amount is in the request body, which the extractor has not read when
+    /// it decides. So a limit like *"a bookkeeper may post entries under ten
+    /// thousand riyals"* is checked here, by the handler that has parsed one.
+    ///
+    /// The branch and the capability are supplied again, so a rule naming any
+    /// combination of the three sees all of them.
+    ///
+    /// # Errors
+    /// `403` naming the capability when a limit refuses, or `503` when the
+    /// tenant's limits cannot be read — refused rather than ignored, for the
+    /// reason `TenantDb::permits` gives.
+    pub async fn still_permits(
+        &self,
+        module: Option<&erp_types::ModuleId>,
+        extra: impl IntoIterator<Item = (&'static str, erp_rules::Value)>,
+        locale: Locale,
+    ) -> Result<(), Problem> {
+        let mut facts = erp_tenant::limits::facts_for(C::CAPABILITY);
+        if let Some(branch) = &self.branch {
+            facts = facts.with(
+                erp_tenant::limits::BRANCH,
+                erp_rules::Value::Text(branch.as_str().to_owned()),
+            );
+        }
+        for (name, value) in extra {
+            facts = facts.with(name, value);
+        }
+
+        let permitted = self
+            .tenant
+            .db
+            .permits(C::CAPABILITY, module, &facts)
+            .await
+            .map_err(|e| {
+                Problem::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &erp_i18n::Message::new(erp_control::messages::INTERNAL)
+                        .with("detail", erp_i18n::MessageArg::text(e.to_string())),
+                    locale,
+                    &crate::CATALOG,
+                )
+            })?;
+
+        if permitted {
+            Ok(())
+        } else {
+            Err(Problem::new(
+                StatusCode::FORBIDDEN,
+                &erp_i18n::Message::new(erp_control::messages::NOT_PERMITTED).with(
+                    "capability",
+                    erp_i18n::MessageArg::text(C::CAPABILITY.as_str()),
+                ),
+                locale,
+                &crate::CATALOG,
+            ))
+        }
+    }
+}
+
 impl<C: Capability> std::ops::Deref for Allowed<C> {
     type Target = Tenant;
     fn deref(&self) -> &Self::Target {
@@ -809,7 +871,50 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
             ));
         }
 
-        if !tenant.db.allows_in(C::CAPABILITY, module.as_ref()) {
+        // **Parsed before the check, because it is one of the facts.** A limit
+        // like "only their own branch" cannot be evaluated by a check that has
+        // not yet read `X-Branch`.
+        let branch = parts
+            .headers
+            .get(BRANCH_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| {
+                AggregateId::new(raw).map_err(|_| {
+                    crate::wire::bad_request(crate::messages::INVALID_ID, "branch", raw, locale)
+                })
+            })
+            .transpose()?;
+
+        // **What the edge knows.** An amount is in a body this extractor has
+        // not read, so a limit about one is narrowed later by the handler that
+        // learns it — see `Allowed::still_permits`.
+        let mut facts = erp_tenant::limits::facts_for(C::CAPABILITY);
+        if let Some(branch) = &branch {
+            facts = facts.with(
+                erp_tenant::limits::BRANCH,
+                erp_rules::Value::Text(branch.as_str().to_owned()),
+            );
+        }
+
+        let permitted = tenant
+            .db
+            .permits(C::CAPABILITY, module.as_ref(), &facts)
+            .await
+            .map_err(|e| {
+                // **Refused, not ignored.** A tenant who configured limits and
+                // stored something unusable must not get the unlimited answer.
+                Problem::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &erp_i18n::Message::new(erp_control::messages::INTERNAL)
+                        .with("detail", erp_i18n::MessageArg::text(e.to_string())),
+                    locale,
+                    &crate::CATALOG,
+                )
+            })?;
+
+        if !permitted {
             // 403, not 404. The caller has already proved they are a member, so
             // hiding the tenant's existence buys nothing — and "you cannot do
             // this" is the answer they need in order to ask someone who can.
@@ -826,18 +931,7 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
 
         Ok(Self {
             tenant,
-            branch: parts
-                .headers
-                .get(BRANCH_HEADER)
-                .and_then(|value| value.to_str().ok())
-                .map(str::trim)
-                .filter(|raw| !raw.is_empty())
-                .map(|raw| {
-                    AggregateId::new(raw).map_err(|_| {
-                        crate::wire::bad_request(crate::messages::INVALID_ID, "branch", raw, locale)
-                    })
-                })
-                .transpose()?,
+            branch,
             capability: std::marker::PhantomData,
         })
     }

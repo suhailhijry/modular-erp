@@ -26,6 +26,8 @@ workspace = true
 # to sit under this one.
 branches = { workspace = true }
 erp-web = { workspace = true }
+# The amount a permission limit may be about. See `post_entry`.
+erp-rules = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
 utoipa = { workspace = true }

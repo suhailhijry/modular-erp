@@ -124,6 +124,48 @@ impl TenantDb {
             .is_some_and(|access| access.allows(capability, module))
     }
 
+    /// **The role's answer, narrowed by this tenant's own limits.**
+    ///
+    /// One indexed read of a configuration row, and it happens on a request
+    /// that is about to do database work anyway. An empty limit set — every
+    /// tenant's default — short-circuits after that read.
+    ///
+    /// ponytail: reads per call. Cache it beside `Access` if a profile ever
+    /// says the row lookup shows, and invalidate on write like every other
+    /// cached authorization answer.
+    ///
+    /// # Errors
+    /// If the configuration row cannot be read or is unusable. **Refused, not
+    /// ignored**: a tenant who configured limits and stored something this
+    /// build cannot parse must not silently get the unlimited answer.
+    pub async fn permits(
+        &self,
+        capability: crate::Capability,
+        module: Option<&ModuleId>,
+        facts: &erp_rules::Facts,
+    ) -> Result<bool, erp_eventlog::ConfigError> {
+        let allowed = self.allows_in(capability, module);
+        if !allowed {
+            // **The role already said no**, and a limit cannot widen. Skipping
+            // the read here is not just an optimisation: it is why a refusal
+            // costs nothing to serve.
+            return Ok(false);
+        }
+        let mut conn = self
+            .acquire()
+            .await
+            .map_err(|e| erp_eventlog::ConfigError::Invalid {
+                key: crate::Limits::KEY.to_owned(),
+                reason: e.to_string(),
+            })?;
+        let limits =
+            erp_eventlog::configuration::get::<crate::Limits>(&mut conn, crate::Limits::KEY)
+                .await?
+                .map_or_else(crate::Limits::default, |configured| configured.value);
+        drop(conn);
+        Ok(limits.narrow(allowed, facts))
+    }
+
     #[must_use]
     pub const fn tenant(&self) -> TenantId {
         self.tenant

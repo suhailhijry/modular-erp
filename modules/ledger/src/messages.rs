@@ -3,6 +3,7 @@
 use erp_i18n::{Locale, MessageCode, Template};
 
 pub const ACCOUNT_EXISTS: MessageCode = MessageCode::new("ledger.account_exists");
+pub const ENTRY_TOO_LARGE: MessageCode = MessageCode::new("ledger.entry_too_large");
 pub const NO_SUCH_ACCOUNT: MessageCode = MessageCode::new("ledger.no_such_account");
 pub const ACCOUNT_CLOSED: MessageCode = MessageCode::new("ledger.account_closed");
 pub const ALREADY_POSTED: MessageCode = MessageCode::new("ledger.already_posted");
@@ -18,6 +19,7 @@ pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("ledger.amount_out
 pub const PERIOD_CLOSED: MessageCode = MessageCode::new("ledger.period_closed");
 
 pub static CODES: &[MessageCode] = &[
+    ENTRY_TOO_LARGE,
     ACCOUNT_EXISTS,
     NO_SUCH_ACCOUNT,
     ACCOUNT_CLOSED,
@@ -46,6 +48,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Locale::Arabic,
         Template::Simple(
             "أُقفلت الدفاتر قبل {closed_before}، وتاريخ هذا القيد {on}.              سجّل التصحيح في الفترة المفتوحة.",
+        ),
+    ),
+    (
+        ENTRY_TOO_LARGE,
+        Locale::English,
+        Template::Simple(
+            "The amounts on this entry are too large to add up. Split it, or check for a misplaced decimal.",
+        ),
+    ),
+    (
+        ENTRY_TOO_LARGE,
+        Locale::Arabic,
+        Template::Simple(
+            "المبالغ في هذا القيد أكبر من أن تُجمع. قسّم القيد أو تحقق من موضع الفاصلة العشرية.",
         ),
     ),
     (

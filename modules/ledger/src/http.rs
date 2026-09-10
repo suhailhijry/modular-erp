@@ -309,6 +309,24 @@ async fn post_entry(
         .map_err(|e| ApiError::BadRequest(e.message()).into_problem(locale, &CATALOG))?;
     let line_count = balanced.len();
 
+    // **The amount the edge could not know.** `Allowed<PostEntries>` decided
+    // before this body was read, so a limit like "a bookkeeper may post entries
+    // under ten thousand riyals" — the example `erp_tenant::roles` names — is
+    // narrowed here, by the handler that has one. Debits, because debits equal
+    // credits and either would do; the debit side is what an accountant means
+    // by the size of an entry.
+    let size = balanced.total_debits().map_err(|_| {
+        ApiError::BadRequest(erp_i18n::Message::new(crate::messages::ENTRY_TOO_LARGE))
+            .into_problem(locale, &CATALOG)
+    })?;
+    tenant
+        .still_permits(
+            Some(&crate::module_id()),
+            [(erp_tenant::limits::AMOUNT, erp_rules::Value::Money(size))],
+            locale,
+        )
+        .await?;
+
     let committed = crate::post_entry(
         &tenant.db,
         &id,

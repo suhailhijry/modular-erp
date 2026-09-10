@@ -12,6 +12,12 @@ workspace = true
 
 [dependencies]
 erp-control = { workspace = true }
+# **The permission limits a request is narrowed by**, and the engine that
+# evaluates them. `erp-control` already re-exports much of `erp-tenant`; this is
+# named directly because the extractor assembles facts, which is a rules
+# concern rather than a control-plane one.
+erp-tenant = { workspace = true }
+erp-rules = { workspace = true }
 erp-eventlog = { workspace = true }
 erp-projection = { workspace = true }
 futures-util = { workspace = true }

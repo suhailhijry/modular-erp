@@ -3161,11 +3161,37 @@ and let two working cases describe the engine.
       a window of time, so the authorization kernel does not compile the booking
       calendar to answer one; `booking` asks for the feature and `erp-tenant`
       does not
-- [ ] **Per-request fact assembly** — supplying `amount` and `branch` at the
-      `Allowed<C>` extractor, so a limit about an amount can see one. The facts
-      and the evaluator exist; what is missing is the caller that fills them in,
-      and the startup coverage assertion that a declared fact is one somebody
-      supplies
+- [x] **Per-request fact assembly, and the coverage assertion — built
+      2026-09-10.**
+
+      **In two places, because an amount is not knowable at the edge.**
+      `Allowed<C>` decides before the request body is read, so it supplies what
+      the edge knows — `capability`, and `branch` from `X-Branch`, which had to
+      move above the check to be a fact at all. A handler that has parsed a body
+      supplies the rest through `Allowed::still_permits`, and
+      `ledger::post_entry` is the first: it narrows on the entry's total debits,
+      which is exactly *"a bookkeeper may post entries under ten thousand
+      riyals"* — the example `roles.rs` named and could not express.
+
+      **A refusal costs nothing to serve.** `TenantDb::permits` returns before
+      reading anything when the role already said no, which is possible only
+      because a limit can never widen.
+
+      **Unusable limits are refused, not ignored.** A tenant who configured
+      limits and stored something this build cannot parse gets a `503`, not the
+      unlimited answer.
+
+      **The coverage assertion is `crates/erp-web/tests/facts.rs`**, and it is
+      the phase's own words — *"an unsatisfiable condition fails the build, not
+      a user's request"*. A fact declared and never assembled lets a tenant
+      author a rule that validates, stores, reads back, and **is never once
+      true**: the worst kind of broken, because every part of it looks like it
+      works. The reverse is checked too, so a fact assembled and never declared
+      is work nobody asked for.
+
+      It scans the **whole workspace**, not the extractor — which its first run
+      taught me, by correctly failing on `amount` while I was scanning one of
+      the two places facts come from
 - [ ] Per-request fact assembly with startup coverage assertions — an
       unsatisfiable condition fails the build, not a user's request
 - [ ] Authoring levels 0–3 with `origin` round-tripping
