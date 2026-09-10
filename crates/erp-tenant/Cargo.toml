@@ -10,6 +10,11 @@ publish.workspace = true
 erp-types.workspace = true
 erp-i18n.workspace = true
 erp-eventlog.workspace = true
+
+# **The rules engine, without its calendar.** A permission is narrowed by a
+# rule; a booking window is not a permission, so the `spans` feature stays off
+# and this kernel crate does not compile a diary to answer "may I post this".
+erp-rules.workspace = true
 serde.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
@@ -18,3 +23,7 @@ tracing.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The round-trip test: a stored limit set must read back as itself.
+serde_json = { workspace = true }

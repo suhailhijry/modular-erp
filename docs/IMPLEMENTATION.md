@@ -3137,9 +3137,35 @@ and let two working cases describe the engine.
       and there is no upcaster to carry an old one across a rename. What changed
       is who evaluates it. `the_engine_picks_the_band_the_old_matcher_would_have`
       is the guard that protects a live tenant from being silently repriced
-- [ ] Authorization on it — its three facts (amount, branch, role) and the
-      narrowing rule that a fact-based override refines `Role::allows` and never
-      widens it. Second spec
+- [x] **Authorization on it — built 2026-09-10.** `erp_tenant::Limits` is
+      `Rules<Verdict>` over three facts — `amount`, `branch`, `capability` —
+      stored as tenant configuration under `tenant.permission_limits`, empty by
+      default so roles decide alone until somebody says otherwise.
+
+      **A limit narrows and never widens**, and it is a shape rather than a
+      convention: `Limits::narrow(allowed, facts)` takes the role's own answer
+      as its input and returns early when it is already `false`. No arrangement
+      of rules can grant a capability a role withholds, so the worst a
+      misconfigured limit does is refuse work — visible, and fixed by an owner.
+      `a_limit_never_widens_what_a_role_allows` is the guard.
+
+      **`Verdict::Allow` exists so an exception can sit above a refusal**, first
+      match winning — "Olaya is exempt" above "everything else over ten
+      thousand". It only ever restores what the role already permitted.
+
+      **The example `roles.rs` named now works**: *"a bookkeeper may post
+      entries under ten thousand riyals"* is one rule, and it leaves reading
+      alone because the capability is a fact.
+
+      **`erp-rules` grew a `spans` feature for this.** A permission is not about
+      a window of time, so the authorization kernel does not compile the booking
+      calendar to answer one; `booking` asks for the feature and `erp-tenant`
+      does not
+- [ ] **Per-request fact assembly** — supplying `amount` and `branch` at the
+      `Allowed<C>` extractor, so a limit about an amount can see one. The facts
+      and the evaluator exist; what is missing is the caller that fills them in,
+      and the startup coverage assertion that a declared fact is one somebody
+      supplies
 - [ ] Per-request fact assembly with startup coverage assertions — an
       unsatisfiable condition fails the build, not a user's request
 - [ ] Authoring levels 0–3 with `origin` round-tripping

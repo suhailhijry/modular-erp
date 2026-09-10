@@ -7,18 +7,28 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# **Conditions about a window of time.** Pulls in the booking calendar, which
+# `booking` wants and the authorization kernel does not — `erp-tenant` uses the
+# engine to narrow a permission and has no use for a recurrence rule. Off by
+# default so a crate pays for what it asks for.
+spans = ["dep:erp-recurrence", "dep:erp-occupancy"]
+
 [dependencies]
 # `Money`, for a fact that is an amount. Comparing two is currency-aware, which
 # is why a fact cannot just be an integer.
 erp-types = { workspace = true }
 # **`Availability` is a condition, kept whole.** See `condition.rs` on why this
 # dependency exists rather than a span fact with operators.
-erp-recurrence = { workspace = true }
+erp-recurrence = { workspace = true, optional = true }
 # `Span` — the window a decision is about.
-erp-occupancy = { workspace = true }
+erp-occupancy = { workspace = true, optional = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# The tests cover both halves, so they need the optional one.
+erp-rules = { workspace = true, features = ["spans"] }
 serde_json = { workspace = true }
 chrono = { workspace = true }

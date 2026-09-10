@@ -936,6 +936,7 @@ dependencies = [
  "chrono",
  "erp-occupancy",
  "erp-recurrence",
+ "erp-rules",
  "erp-types",
  "serde",
  "serde_json",
@@ -964,8 +965,10 @@ version = "0.1.0"
 dependencies = [
  "erp-eventlog",
  "erp-i18n",
+ "erp-rules",
  "erp-types",
  "serde",
+ "serde_json",
  "sqlx",
  "thiserror",
  "tokio",

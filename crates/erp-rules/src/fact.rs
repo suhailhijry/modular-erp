@@ -76,6 +76,7 @@ pub enum Kind {
 #[derive(Debug, Clone, Default)]
 pub struct Facts {
     values: BTreeMap<FactName, Value>,
+    #[cfg(feature = "spans")]
     span: Option<(erp_occupancy::Span, erp_types::Calendar)>,
 }
 
@@ -92,6 +93,7 @@ impl Facts {
     }
 
     /// The window this decision is about, on the tenant's clock.
+    #[cfg(feature = "spans")]
     #[must_use]
     pub fn over(mut self, span: erp_occupancy::Span, calendar: erp_types::Calendar) -> Self {
         self.span = Some((span, calendar));
@@ -103,6 +105,7 @@ impl Facts {
         self.values.get(name)
     }
 
+    #[cfg(feature = "spans")]
     #[must_use]
     pub const fn span(&self) -> Option<&(erp_occupancy::Span, erp_types::Calendar)> {
         self.span.as_ref()

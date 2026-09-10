@@ -19,12 +19,14 @@
 
 pub mod budget;
 pub mod db;
+pub mod limits;
 pub mod messages;
 pub mod modules;
 pub mod roles;
 
 pub use budget::{Budget, Conn, Lane, PoolError, Tx};
 pub use db::{CommandError, TenantDb};
+pub use limits::{Limits, Verdict};
 pub use modules::{EnabledModules, ModuleSetup};
 pub use roles::{Access, Capability, Role, UnknownRole};
 

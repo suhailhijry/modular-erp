@@ -1,5 +1,6 @@
 //! When a rule applies.
 
+#[cfg(feature = "spans")]
 use erp_recurrence::Availability;
 use serde::{Deserialize, Serialize};
 
@@ -59,7 +60,9 @@ pub enum DynCondition {
         op: Op,
         value: Value,
     },
-    /// A span falls inside a repeating window.
+    /// A span falls inside a repeating window. See the type docs on why this
+    /// one variant is not like the others.
+    #[cfg(feature = "spans")]
     Covers {
         window: Availability,
     },
@@ -95,6 +98,7 @@ impl DynCondition {
             Self::Always => Ok(()),
             Self::All { of } | Self::Any { of } => of.iter().try_for_each(|c| c.validate(registry)),
             Self::Not { of } => of.validate(registry),
+            #[cfg(feature = "spans")]
             Self::Covers { .. } => {
                 if registry.takes_spans() {
                     Ok(())
@@ -142,6 +146,7 @@ impl DynCondition {
             Self::All { of } => of.iter().all(|c| c.holds(facts)),
             Self::Any { of } => of.iter().any(|c| c.holds(facts)),
             Self::Not { of } => !of.holds(facts),
+            #[cfg(feature = "spans")]
             Self::Covers { window } => facts
                 .span()
                 .is_some_and(|(span, calendar)| window.covers(*span, *calendar)),
