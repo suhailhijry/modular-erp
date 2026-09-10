@@ -105,9 +105,28 @@ impl ControlPlane {
         &self,
         identity: IdentityId,
         code: &str,
+        previous: Option<&str>,
         now: Timestamp,
         sealing: &erp_eventlog::SealingKey,
     ) -> Result<Enrolled, AuthError> {
+        // **Replacing a factor is removing one**, and the removal happens
+        // below without any proof of what is being removed. A session alone was
+        // enough to point an enrolment at somebody else's authenticator app and
+        // destroy all ten recovery codes on the way — worse than
+        // `disable_second_factor` was, because the attacker ends up *holding* a
+        // factor rather than merely dropping one, and the paper that would have
+        // let the owner back in is gone.
+        //
+        // Proved before anything is deleted, and a recovery code counts: losing
+        // the phone is the case re-enrolling exists for.
+        if self.has_second_factor(identity).await? {
+            let Some(previous) = previous else {
+                return Err(AuthError::SecondFactorRequired);
+            };
+            self.verify_second_factor(identity, previous, now, sealing)
+                .await?;
+        }
+
         let pending = self
             .stored_secret(identity, "totp_pending", sealing)
             .await?;
@@ -233,9 +252,44 @@ impl ControlPlane {
 
     /// **Turns the second factor off**, and takes the recovery codes with it.
     ///
+    /// # Why this asks for the factor it is about to remove
+    ///
+    /// It used to need a live session and nothing else, which made a stolen one
+    /// enough to strip the control the theft was supposed to run into. A
+    /// session is a bearer token left on shared machines and in browser
+    /// history; the factor is the thing somebody has to *hold*.
+    ///
+    /// **The factor rather than the password**, because an attacker who has
+    /// worked their way to a session may well have the password too — that is
+    /// the usual way they got close. Only the factor is evidence they do not
+    /// have.
+    ///
+    /// **And it strands nobody**, which is what keeps it inside *switching a
+    /// control on must not be the act that strands you*: anybody who cannot
+    /// present a code or a recovery code cannot log in to reach this route
+    /// either. It closes no door that was open.
+    ///
+    /// `code` is `None` only for an identity with nothing live to prove —
+    /// somebody abandoning an enrolment they started and never confirmed.
+    ///
     /// # Errors
-    /// If the database does.
-    pub async fn disable_second_factor(&self, identity: IdentityId) -> Result<(), AuthError> {
+    /// [`AuthError::SecondFactorRequired`] when one is enrolled and no code
+    /// came, [`AuthError::InvalidCredentials`] when it is wrong.
+    pub async fn disable_second_factor(
+        &self,
+        identity: IdentityId,
+        code: Option<&str>,
+        now: Timestamp,
+        sealing: &erp_eventlog::SealingKey,
+    ) -> Result<(), AuthError> {
+        if self.has_second_factor(identity).await? {
+            let Some(code) = code else {
+                return Err(AuthError::SecondFactorRequired);
+            };
+            self.verify_second_factor(identity, code, now, sealing)
+                .await?;
+        }
+
         sqlx::query!(
             "DELETE FROM authenticator
               WHERE identity_id = $1 AND kind IN ('totp', 'totp_pending', 'recovery')",

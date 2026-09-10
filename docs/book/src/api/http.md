@@ -802,6 +802,76 @@ Bookings already taken keep the price they were given. The band is frozen onto
 the line when the booking is written, so moving your peak hours changes what the
 next booking costs and nothing that was already agreed.
 
+### The second factor
+
+Turning one **off**, or replacing one, now costs a code from the app or one of
+the recovery codes — a session on its own is not proof, because a session is a
+bearer token left on shared machines and in browser history.
+
+```bash
+# Off. Send `{}` only when nothing is enrolled.
+curl -sX DELETE "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/sessions/second-factor -d '{"code":"123456"}'
+```
+
+```bash
+# Replacing one: `code` is from the new app, `previous` proves the old factor.
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/sessions/second-factor/confirmation \
+  -d '{"code":"654321","previous":"123456"}'
+```
+
+Replacing an enrolment destroys it **and all ten recovery codes**, so it asks
+for proof of what it is about to destroy. A first enrolment removes nothing and
+needs no `previous`. Lost the phone? A recovery code works anywhere a code
+does — that is what they are for.
+
+### Passwords
+
+| | | Capability |
+|---|---|---|
+| `POST /v1/password-resets` | Send a link to somebody who cannot get in | — |
+| `POST /v1/password-resets/redemption` | Choose the new password | — |
+| `POST /v1/sessions/current/password` | Change the one you are signed in with | Any |
+
+```bash
+curl -sX POST -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/password-resets -d '{"email":"sara@bassat.test"}'
+```
+
+Always `202`, whether or not that address has an account — and an address with
+no account is sent nothing.
+
+```bash
+curl -sX POST -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/password-resets/redemption \
+  -d '{"token":"…","password":"correcthorsebattery"}'
+```
+
+The token goes in the **body**, not the path: a path lands in access logs,
+browser history and the `Referer` of every asset a page loads, and this one is
+worth what a password is worth.
+
+**If the account has a second factor you get `401 auth.second_factor_required`,
+and the link is still good.** Ask for a code — from the authenticator app or one
+of the recovery codes — and send the same token back with `"code"`. Resetting a
+password does not switch a second factor off, because the mailbox is exactly
+what a second factor is there to survive.
+
+**No session comes back.** Log in afterwards, which is also what makes the
+second factor still count. Every session the account had ends, because a reset
+means the old password is not trusted.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/sessions/current/password \
+  -d '{"current":"hunter2hunter2","new":"correcthorsebattery"}'
+```
+
+Changing it ends every session including the one you sent this with. Twelve
+characters minimum, the same floor as a signup.
+
+
 ### The diary
 
 | | | Capability |

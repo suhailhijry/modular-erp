@@ -34,6 +34,7 @@ mod members;
 pub mod messages;
 mod model;
 mod otp;
+mod passwords;
 mod placement;
 mod pools;
 mod provision;
@@ -69,6 +70,10 @@ pub use otp::{
     CODE_LIFETIME_SECONDS, MAX_ATTEMPTS as MAX_CODE_ATTEMPTS, OtpError,
     REQUEST_INTERVAL_SECONDS as CODE_REQUEST_INTERVAL_SECONDS, Requested,
     normalise as normalise_phone,
+};
+pub use passwords::{
+    MAX_ATTEMPTS as RESET_MAX_ATTEMPTS, PasswordError, RESET_INTERVAL_SECONDS,
+    RESET_LIFETIME_SECONDS,
 };
 pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
 pub use pools::{ClusterRegistry, PoolConfig, TenantPools};

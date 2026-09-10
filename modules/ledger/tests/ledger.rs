@@ -640,6 +640,73 @@ async fn installing_a_chart_opens_its_accounts() {
     fixture.cleanup().await;
 }
 
+/// **Every shipped chart, against a real tenant.**
+///
+/// ARCHITECTURE §1147 asks for exactly this — *"every shipped blueprint
+/// previewed against a fresh tenant in CI"* — and until now only `booking`'s
+/// trades had it. `real_estate` had never once been installed against a
+/// database, which is the chart the whole property vertical posts into.
+///
+/// What it adds over the unit tests in `charts.rs`: those read the static
+/// array, and this runs every account through `open_account_in`. A chart
+/// declaring a code the domain refuses, a name too long for an aggregate, or a
+/// kind that will not post fails here rather than in front of the first
+/// business to pick it.
+#[tokio::test]
+async fn every_shipped_chart_installs_into_a_fresh_tenant_and_twice_is_harmless() {
+    for chart in ledger::CHARTS {
+        let fixture = Fixture::new().await;
+
+        let installed = ledger::install_chart(
+            &fixture.db,
+            chart,
+            sar(),
+            erp_i18n::Locale::Arabic,
+            &Metadata::default(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{} does not install: {e}", chart.id));
+        assert_eq!(
+            installed.opened(),
+            chart.accounts.len(),
+            "{} did not open every account it declares",
+            chart.id
+        );
+        assert_eq!(installed.skipped(), 0, "{}", chart.id);
+
+        let again = ledger::install_chart(
+            &fixture.db,
+            chart,
+            sar(),
+            erp_i18n::Locale::Arabic,
+            &Metadata::default(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{} does not install twice: {e}", chart.id));
+        assert_eq!(again.opened(), 0, "{} opened something twice", chart.id);
+        assert_eq!(again.skipped(), chart.accounts.len(), "{}", chart.id);
+
+        fixture.project().await;
+        let mut conn = fixture.db.acquire().await.expect("connection");
+        let accounts = account_balances(&mut conn).await.expect("reads");
+        drop(conn);
+        assert_eq!(accounts.len(), chart.accounts.len(), "{}", chart.id);
+        // The names came out in Arabic, which is what the locale asked for.
+        assert!(
+            accounts.iter().all(|a| !a.name.trim().is_empty()),
+            "{} opened an account with no name",
+            chart.id
+        );
+        assert!(
+            fixture.imbalances().await.is_empty(),
+            "{} does not balance from the first minute",
+            chart.id
+        );
+
+        fixture.cleanup().await;
+    }
+}
+
 /// **The property that makes a half-finished install recoverable.**
 #[tokio::test]
 async fn installing_a_chart_twice_changes_nothing() {

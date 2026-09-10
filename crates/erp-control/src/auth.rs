@@ -140,6 +140,17 @@ link_token! {
 }
 
 link_token! {
+    /// The link that lets somebody who has forgotten their password choose a
+    /// new one.
+    ///
+    /// Worth what a password is worth and live for a great deal less time:
+    /// holding it rewrites the password of the account it names. It does not
+    /// touch that account's second factor and it issues no session — see
+    /// `crate::passwords`, where both of those are the whole design.
+    ResetToken
+}
+
+link_token! {
     /// The link that proves a signup's email address.
     ///
     /// Worth more than it looks: holding it is what turns a request into an
@@ -291,12 +302,9 @@ impl crate::ControlPlane {
         password: &str,
     ) -> Result<(SessionToken, Session), AuthError> {
         let identity = self.authenticate(handle, password).await?;
-        // **Refused here rather than in the caller**, so that a path which
-        // never heard of a second factor cannot issue a session that skipped
-        // one. `log_in_with_second_factor` is the way past this.
-        if self.has_second_factor(identity).await? {
-            return Err(AuthError::SecondFactorRequired);
-        }
+        // The refusal is `start_session`'s now, so this is one call rather than
+        // a check somebody could forget to copy. `log_in_with_second_factor` is
+        // the way past it.
         self.start_session(identity).await
     }
 
@@ -328,7 +336,10 @@ impl crate::ControlPlane {
             self.verify_second_factor(identity, code, now, sealing)
                 .await?;
         }
-        self.start_session(identity).await
+        // **`issue_session`, because both factors are behind us.** Going back
+        // through `start_session` would refuse the very identity that just
+        // proved itself.
+        self.issue_session(identity).await
     }
 
     /// Checks a password without issuing anything.
@@ -371,7 +382,42 @@ impl crate::ControlPlane {
     ///
     /// For flows that have already established who this is another way —
     /// signup, and later OIDC.
+    /// **Mints a session, and cannot skip a second factor doing it.**
+    ///
+    /// The gate is here rather than in each caller because it *was* in each
+    /// caller, and three of them did not have it. `log_in` carried the comment
+    /// *"a path which never heard of a second factor cannot issue a session
+    /// that skipped one"* while `otp::verify_code` and both signup paths for
+    /// an address that already has an account minted sessions without ever
+    /// asking — which made an enrolled identity takeable by anybody holding
+    /// the password and the mailbox, the exact pair a second factor exists to
+    /// survive.
+    ///
+    /// A promise every caller has to keep is one a caller eventually breaks.
+    /// This is the same move the engine made when `evaluate` started taking
+    /// its answer from `explain`: one implementation, so there is nothing to
+    /// disagree with.
+    ///
+    /// # Errors
+    /// [`AuthError::SecondFactorRequired`] when the identity has one. The way
+    /// past it is to present it — [`Self::log_in_with_second_factor`].
     pub async fn start_session(
+        &self,
+        identity: IdentityId,
+    ) -> Result<(SessionToken, Session), AuthError> {
+        if self.has_second_factor(identity).await? {
+            return Err(AuthError::SecondFactorRequired);
+        }
+        self.issue_session(identity).await
+    }
+
+    /// Mints a session for a caller that has **already** checked both factors.
+    ///
+    /// Private, and its two callers are both in this file, so the complete list
+    /// of paths allowed to skip the gate is one screen long and stays that way.
+    /// `issue_sessions_only_after_both_factors` is the test that keeps it one
+    /// screen long.
+    async fn issue_session(
         &self,
         identity: IdentityId,
     ) -> Result<(SessionToken, Session), AuthError> {

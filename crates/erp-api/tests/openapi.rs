@@ -203,6 +203,8 @@ fn only_the_deliberately_public_routes_are_public() {
         ("get", "/v1/openapi.json"),
         ("post", "/v1/sessions"),
         ("post", "/v1/signups"),
+        ("post", "/v1/password-resets"),
+        ("post", "/v1/password-resets/redemption"),
         // The token in the path is the credential, and the person holding it
         // has no account yet — that is what confirming creates.
         ("post", "/v1/signups/{token}"),

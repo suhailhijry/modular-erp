@@ -327,6 +327,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         ))
         .routes(routes!(confirm_second_factor))
         .routes(routes!(tenant))
+        .merge(crate::passwords::routes())
         .merge(crate::signup::routes())
         .merge(crate::members::routes())
         .merge(crate::invitations::routes())
@@ -617,9 +618,30 @@ struct EnrolmentStarted {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "code": "123456" }))]
 struct SecondFactorCode {
     /// Six digits from the app.
     code: String,
+    /// **Only when replacing a factor you already have**: a code from the *old*
+    /// one, or one of its recovery codes. Replacing an enrolment destroys it
+    /// and all ten recovery codes, so it asks for proof of the thing it is
+    /// about to destroy. A `401 auth.second_factor_required` means send this
+    /// too.
+    ///
+    /// Not needed for a first enrolment, which removes nothing.
+    #[serde(default)]
+    previous: Option<String>,
+}
+
+/// What turning a second factor off costs: proof that you hold it.
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "code": "123456" }))]
+struct DisableSecondFactor {
+    /// A code from the app, or one of the recovery codes. Absent only when
+    /// there is nothing enrolled to prove — abandoning an enrolment that was
+    /// started and never confirmed.
+    #[serde(default)]
+    code: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -711,7 +733,7 @@ async fn begin_second_factor(
     request_body = SecondFactorCode,
     responses(
         (status = CREATED, description = "Enrolled. Keep the recovery codes — they are not shown again.", body = RecoveryCodes),
-        (status = UNAUTHORIZED, description = "The code is wrong, or nothing is waiting to be confirmed", body = Problem),
+        (status = UNAUTHORIZED, description = "The code is wrong, nothing is waiting to be confirmed, or a factor is already enrolled and `previous` did not prove it. `auth.second_factor_required` means send `previous`.", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
 )]
@@ -727,6 +749,7 @@ async fn confirm_second_factor(
         .confirm_second_factor(
             auth.session.identity,
             &body.code,
+            body.previous.as_deref(),
             chrono::Utc::now(),
             sealing,
         )
@@ -741,23 +764,45 @@ async fn confirm_second_factor(
 }
 
 /// Turn the second factor off, taking the recovery codes with it.
+///
+/// **Send a code from the app, or one of the recovery codes.** A session used
+/// to be enough, which made a stolen one all it took to strip the control the
+/// theft was supposed to run into — and the factor, unlike the password, is
+/// the one thing somebody who worked their way to a session does not have.
+///
+/// Absence fails closed: no code with a factor enrolled is
+/// `401 auth.second_factor_required`, never a removal. Send `{}` when there is
+/// nothing enrolled — an enrolment started and never confirmed.
 #[utoipa::path(
     delete,
     path = "/v1/sessions/second-factor",
     tag = "sessions",
+    request_body = DisableSecondFactor,
     responses(
         (status = NO_CONTENT, description = "Off. The password is the whole login again."),
-        (status = UNAUTHORIZED, body = Problem),
+        (status = UNAUTHORIZED, description = "No code came, or it was wrong. `auth.second_factor_required` means send one.", body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "This deployment has no sealing key, so a code cannot be checked", body = Problem),
     ),
 )]
 async fn disable_second_factor(
     State(state): State<AppState>,
     Language(locale): Language,
     auth: Authenticated,
+    Json(body): Json<DisableSecondFactor>,
 ) -> Result<StatusCode, Problem> {
+    let sealing = sealing_key(&state, locale)?;
+    // **No code is not a shortcut**: an identity with a factor still has to
+    // prove it, and one with only an unconfirmed enrolment has nothing to
+    // prove.
+    let code = body.code;
     state
         .control
-        .disable_second_factor(auth.session.identity)
+        .disable_second_factor(
+            auth.session.identity,
+            code.as_deref(),
+            chrono::Utc::now(),
+            sealing,
+        )
         .await
         .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
     Ok(StatusCode::NO_CONTENT)
@@ -767,7 +812,7 @@ async fn disable_second_factor(
 /// it there is nowhere safe to keep a shared secret, and keeping one in the
 /// clear because an environment variable is missing is the "log a warning and
 /// continue" this system does not do (L6).
-fn sealing_key(
+pub(crate) fn sealing_key(
     state: &AppState,
     locale: erp_i18n::Locale,
 ) -> Result<&erp_eventlog::SealingKey, Problem> {

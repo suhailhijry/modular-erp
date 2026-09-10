@@ -137,6 +137,17 @@ impl Fixture {
     /// Enrols and confirms, returning the secret so a test can compute codes,
     /// and the recovery codes.
     async fn enrolled(&self, now: Timestamp) -> (Vec<u8>, Vec<String>) {
+        self.enrolling(now, None).await
+    }
+
+    /// The same, **replacing** a factor that is already there — which costs a
+    /// code from the old one, or one of its recovery codes. A stolen phone is
+    /// what the paper is for.
+    async fn re_enrolled(&self, now: Timestamp, previous: &str) -> (Vec<u8>, Vec<String>) {
+        self.enrolling(now, Some(previous)).await
+    }
+
+    async fn enrolling(&self, now: Timestamp, previous: Option<&str>) -> (Vec<u8>, Vec<String>) {
         let enrolment = self
             .control
             .begin_second_factor(self.identity, "Bassat", HANDLE, &self.sealing)
@@ -146,7 +157,7 @@ impl Fixture {
         let code = totp::code_at(&secret, seconds(now), totp::DIGITS).expect("a code");
         let confirmed = self
             .control
-            .confirm_second_factor(self.identity, &code, now, &self.sealing)
+            .confirm_second_factor(self.identity, &code, previous, now, &self.sealing)
             .await
             .expect("enrolment confirms");
         (secret, confirmed.recovery_codes)
@@ -231,7 +242,7 @@ async fn a_wrong_code_does_not_confirm_an_enrolment() {
 
     let refused = fixture
         .control
-        .confirm_second_factor(fixture.identity, "000000", now, &fixture.sealing)
+        .confirm_second_factor(fixture.identity, "000000", None, now, &fixture.sealing)
         .await;
     assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
     assert!(
@@ -323,6 +334,11 @@ async fn a_recovery_code_signs_in_and_is_spent() {
 
 /// Re-enrolling replaces the old phone and invalidates the old paper. Somebody
 /// whose phone was stolen has to be able to make everything they had useless.
+///
+/// **And it now costs one of those recovery codes**, because replacing a factor
+/// destroys it and all ten — so it asks for proof of what it destroys. The
+/// stolen phone is exactly why the paper exists, which is why requiring it
+/// strands nobody.
 #[tokio::test]
 async fn re_enrolling_retires_the_old_secret_and_the_old_recovery_codes() {
     let fixture = Fixture::new().await;
@@ -330,7 +346,8 @@ async fn re_enrolling_retires_the_old_secret_and_the_old_recovery_codes() {
     let (old_secret, old_recovery) = fixture.enrolled(now).await;
 
     let later = at(1_700_000_600);
-    let (new_secret, new_recovery) = fixture.enrolled(later).await;
+    let paper = old_recovery.first().expect("a code").clone();
+    let (new_secret, new_recovery) = fixture.re_enrolled(later, &paper).await;
     assert_ne!(old_secret, new_secret);
 
     let stale = totp::code_at(&old_secret, seconds(later), totp::DIGITS).unwrap();
@@ -343,7 +360,7 @@ async fn re_enrolling_retires_the_old_secret_and_the_old_recovery_codes() {
         "the stolen phone must stop working"
     );
 
-    let old_paper = old_recovery.first().expect("a code");
+    let old_paper = old_recovery.get(1).expect("a second code");
     let refused = fixture
         .control
         .log_in_with_second_factor(HANDLE, PASSWORD, old_paper, later, &fixture.sealing)
@@ -366,11 +383,13 @@ async fn re_enrolling_retires_the_old_secret_and_the_old_recovery_codes() {
 async fn turning_it_off_gives_the_password_back() {
     let fixture = Fixture::new().await;
     let now = at(1_700_000_000);
-    fixture.enrolled(now).await;
+    let (_secret, recovery) = fixture.enrolled(now).await;
 
+    // Turning it off now costs a code — see
+    // `turning_it_off_needs_the_factor_being_turned_off`.
     fixture
         .control
-        .disable_second_factor(fixture.identity)
+        .disable_second_factor(fixture.identity, Some(&recovery[0]), now, &fixture.sealing)
         .await
         .expect("disables");
 
@@ -505,8 +524,13 @@ async fn a_tenant_that_requires_a_second_factor_refuses_a_member_without_one() {
     fixture.cleanup().await;
 }
 
-/// Turning it **off** must not need one, or the requirement cannot be undone by
-/// the person it locked out.
+/// Turning it **off** must not need the *tenant requirement* switched off
+/// first, or the requirement cannot be undone by the person it locked out.
+///
+/// It does now cost a code, since a stolen session used to be enough — and the
+/// phone being gone is what the recovery codes are for. That adds no stranding:
+/// somebody with neither could not have reached this route, because they could
+/// not have logged in.
 #[tokio::test]
 async fn the_requirement_can_always_be_switched_off() {
     let fixture = Fixture::new().await;
@@ -514,7 +538,7 @@ async fn the_requirement_can_always_be_switched_off() {
     let tenant = fixture.tenant("acme").await;
     fixture.join(tenant).await;
 
-    fixture.enrolled(now).await;
+    let (_secret, recovery) = fixture.enrolled(now).await;
     fixture
         .control
         .set_second_factor_requirement(tenant, fixture.identity, true)
@@ -523,9 +547,9 @@ async fn the_requirement_can_always_be_switched_off() {
 
     fixture
         .control
-        .disable_second_factor(fixture.identity)
+        .disable_second_factor(fixture.identity, Some(&recovery[0]), now, &fixture.sealing)
         .await
-        .expect("the phone is gone");
+        .expect("the phone is gone, and the paper is what that is for");
 
     // Now unprotected, and locked out — but still able to undo it.
     assert!(matches!(
@@ -581,6 +605,521 @@ async fn turning_it_on_takes_effect_without_waiting_for_a_cache() {
         matches!(refused, Err(AccessError::SecondFactorRequired)),
         "the cached tenant must have been forgotten, got {refused:?}"
     );
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// No session without both factors
+// ---------------------------------------------------------------------------
+
+/// **The takeover this closed, run end to end.**
+///
+/// An attacker holding the password and the mailbox — the exact pair a second
+/// factor exists to survive — used to be able to walk around it: signing up a
+/// throwaway company under the victim's address calls `authenticate`, which is
+/// the credential half with no factor in it, and confirming the link called
+/// `start_session` directly. That handed back a full session as the victim,
+/// and `DELETE /v1/sessions/second-factor` needs nothing but a session, so the
+/// enrolment and all ten recovery codes went with it.
+///
+/// **And it is refused before anything is built.** Reaching `start_session`
+/// with the tenant already provisioned would answer `500` and leave an orphan
+/// database behind, with the confirmation link unclaimed and the slug taken
+/// forever — a worse bug than the one being fixed.
+#[tokio::test]
+async fn signing_up_a_second_company_cannot_walk_around_a_second_factor() {
+    let fixture = Fixture::new().await;
+    fixture.enrolled(at(1_700_000_000)).await;
+
+    let refused = fixture
+        .control
+        .sign_up(
+            HANDLE.to_owned(),
+            PASSWORD.to_owned(),
+            "throwaway".to_owned(),
+            "Throwaway".to_owned(),
+            Vec::new(),
+        )
+        .await
+        .expect_err("a password alone must not walk past a second factor");
+
+    assert!(
+        matches!(
+            refused,
+            erp_control::AccessError::Auth(erp_control::AuthError::SecondFactorRequired)
+        ),
+        "{refused:?}"
+    );
+
+    // Nothing was built on the way to being refused.
+    assert!(
+        fixture
+            .control
+            .tenant_by_slug("throwaway")
+            .await
+            .expect("the lookup works")
+            .is_none(),
+        "a refused signup left a tenant behind"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A phone code is one factor.**
+///
+/// `verify_code` minted a session for whatever identity the number belonged to,
+/// having asked for nothing else. An identity that signs in by phone *and* has
+/// enrolled a second factor was therefore one SMS away from a session that
+/// skipped it.
+#[tokio::test]
+async fn a_phone_code_cannot_walk_around_a_second_factor() {
+    let fixture = Fixture::new().await;
+    fixture.enrolled(at(1_700_000_000)).await;
+
+    let refused = fixture
+        .control
+        .start_session(fixture.identity)
+        .await
+        .expect_err("an enrolled identity needs its second factor");
+
+    assert!(
+        matches!(refused, erp_control::AuthError::SecondFactorRequired),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The law, checked in the source rather than promised in a comment.**
+///
+/// `log_in` used to carry the promise — *"a path which never heard of a second
+/// factor cannot issue a session that skipped one"* — while three other callers
+/// of `start_session` minted sessions without ever asking: the phone code, and
+/// both signup paths for an address that already has an account. An enrolled
+/// identity was takeable by anybody holding the password and the mailbox, which
+/// is the exact pair a second factor exists to survive.
+///
+/// The gate is inside `start_session` now, and `issue_session` is the only way
+/// round it. This counts the ways round: **two, both in `auth.rs`, both having
+/// just checked.** A third is either a mistake or a decision somebody has to
+/// come here and write down.
+#[test]
+fn only_two_paths_may_issue_a_session_without_checking_the_second_factor() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut callers: Vec<String> = Vec::new();
+
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src is readable") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("readable");
+            for (n, line) in text.lines().enumerate() {
+                // The definition is not a call.
+                if line.contains("async fn issue_session") {
+                    continue;
+                }
+                if line.contains("issue_session(") {
+                    let file = path
+                        .strip_prefix(&root)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string();
+                    callers.push(format!("{file}:{}", n + 1));
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        callers.len(),
+        2,
+        "the ways past the second-factor gate are: {callers:?}. \
+         Two are sanctioned, both in auth.rs and both after a check. \
+         A third needs an argument written beside it and this number changed."
+    );
+    assert!(
+        callers.iter().all(|c| c.starts_with("auth.rs")),
+        "something outside auth.rs issues a session without the gate: {callers:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Getting back in
+// ---------------------------------------------------------------------------
+
+const LINK_BASE: &str = "https://erp.test/reset/";
+
+/// **The whole point: somebody who has forgotten their password gets back in.**
+///
+/// And every session they had ends, because a reset means the old password is
+/// not trusted and a session minted under it is that password still working.
+#[tokio::test]
+async fn a_reset_link_sets_a_new_password_and_ends_every_session() {
+    let fixture = Fixture::new().await;
+    let (old_token, _) = fixture
+        .control
+        .log_in(HANDLE, PASSWORD)
+        .await
+        .expect("the old password works");
+
+    let link = fixture
+        .control
+        .request_password_reset(HANDLE, erp_i18n::Locale::English, LINK_BASE)
+        .await
+        .expect("a known address gets a link")
+        .expect("and it is a link");
+
+    fixture
+        .control
+        .reset_password(
+            link.expose(),
+            "correcthorsebattery",
+            None,
+            at(1_700_000_000),
+            &fixture.sealing,
+        )
+        .await
+        .expect("the new password is set");
+
+    fixture
+        .control
+        .log_in(HANDLE, "correcthorsebattery")
+        .await
+        .expect("the new password works");
+    assert!(
+        fixture.control.log_in(HANDLE, PASSWORD).await.is_err(),
+        "the old password still works"
+    );
+    assert!(
+        fixture.control.session(old_token.expose()).await.is_err(),
+        "a session minted under the old password survived the reset"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A link works once.**
+#[tokio::test]
+async fn a_reset_link_cannot_be_spent_twice() {
+    let fixture = Fixture::new().await;
+    let link = fixture
+        .control
+        .request_password_reset(HANDLE, erp_i18n::Locale::English, LINK_BASE)
+        .await
+        .expect("a link")
+        .expect("a link");
+
+    fixture
+        .control
+        .reset_password(
+            link.expose(),
+            "correcthorsebattery",
+            None,
+            at(1_700_000_000),
+            &fixture.sealing,
+        )
+        .await
+        .expect("the first time");
+
+    let refused = fixture
+        .control
+        .reset_password(
+            link.expose(),
+            "anotherpasswordentirely",
+            None,
+            at(1_700_000_000),
+            &fixture.sealing,
+        )
+        .await
+        .expect_err("the second time");
+    assert!(
+        matches!(refused, erp_control::PasswordError::NotValid),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **An address with no account is answered the same, and mailed nothing.**
+///
+/// Not `Err`, because the caller must not learn which addresses are registered;
+/// and `None`, because writing and mailing for any address anybody types is an
+/// unauthenticated mail cannon aimed at strangers — and the cost lands on the
+/// sending domain that carries every tenant's signup and invitation mail.
+#[tokio::test]
+async fn an_address_with_no_account_is_answered_the_same_and_sent_nothing() {
+    let fixture = Fixture::new().await;
+
+    let nothing = fixture
+        .control
+        .request_password_reset("nobody@bassat.test", erp_i18n::Locale::English, LINK_BASE)
+        .await
+        .expect("answered, not refused");
+
+    assert!(nothing.is_none(), "a stranger's address got a link");
+
+    fixture.cleanup().await;
+}
+
+/// **A reset replaces the password. It does not replace the second factor.**
+///
+/// The mailbox is exactly what a second factor exists to survive: whoever holds
+/// the password, or the laptop with a mail client signed in, holds the link. If
+/// that were enough, enrolling would protect the login form and nothing else.
+///
+/// And **the link is left unspent** when no code came, because "this account
+/// has a factor" is the next screen rather than a failure.
+#[tokio::test]
+async fn a_reset_cannot_walk_around_a_second_factor() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let (_secret, recovery) = fixture.enrolled(now).await;
+
+    let link = fixture
+        .control
+        .request_password_reset(HANDLE, erp_i18n::Locale::English, LINK_BASE)
+        .await
+        .expect("a link")
+        .expect("a link");
+
+    let refused = fixture
+        .control
+        .reset_password(
+            link.expose(),
+            "correcthorsebattery",
+            None,
+            now,
+            &fixture.sealing,
+        )
+        .await
+        .expect_err("no code, no reset");
+    assert!(
+        matches!(
+            refused,
+            erp_control::PasswordError::Auth(erp_control::AuthError::SecondFactorRequired)
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        fixture
+            .control
+            .log_in(HANDLE, "correcthorsebattery")
+            .await
+            .is_err(),
+        "the refused reset wrote the password anyway"
+    );
+
+    // **A recovery code is the door**, and it is the door those codes exist for.
+    fixture
+        .control
+        .reset_password(
+            link.expose(),
+            "correcthorsebattery",
+            Some(&recovery[0]),
+            now,
+            &fixture.sealing,
+        )
+        .await
+        .expect("the link survived the refusal and the code opens it");
+
+    fixture.cleanup().await;
+}
+
+/// **A reset issues nothing.**
+///
+/// `disable_second_factor` takes a live session and nothing else, so a reset
+/// that handed one back would be a two-call factor removal: open the link, get
+/// a session, delete the enrolment. The signature is the guard — there is no
+/// session in it to return — and this is the test that notices if one appears.
+#[tokio::test]
+async fn a_reset_leaves_the_second_factor_standing() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let (_secret, recovery) = fixture.enrolled(now).await;
+
+    let link = fixture
+        .control
+        .request_password_reset(HANDLE, erp_i18n::Locale::English, LINK_BASE)
+        .await
+        .expect("a link")
+        .expect("a link");
+    fixture
+        .control
+        .reset_password(
+            link.expose(),
+            "correcthorsebattery",
+            Some(&recovery[0]),
+            now,
+            &fixture.sealing,
+        )
+        .await
+        .expect("reset");
+
+    // Still enrolled, and the new password alone still will not open it.
+    assert!(
+        fixture
+            .control
+            .has_second_factor(fixture.identity)
+            .await
+            .expect("asks"),
+        "the reset took the second factor with it"
+    );
+    let refused = fixture
+        .control
+        .log_in(HANDLE, "correcthorsebattery")
+        .await
+        .expect_err("the factor still stands");
+    assert!(
+        matches!(refused, erp_control::AuthError::SecondFactorRequired),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Changing a password needs the one being replaced.**
+///
+/// A session left open on a shared machine is not proof of anything.
+#[tokio::test]
+async fn changing_a_password_needs_the_current_one() {
+    let fixture = Fixture::new().await;
+
+    let refused = fixture
+        .control
+        .change_password(fixture.identity, "not the password", "correcthorsebattery")
+        .await
+        .expect_err("a guess is not the current password");
+    assert!(
+        matches!(
+            refused,
+            erp_control::PasswordError::Auth(erp_control::AuthError::InvalidCredentials)
+        ),
+        "{refused:?}"
+    );
+
+    fixture
+        .control
+        .change_password(fixture.identity, PASSWORD, "correcthorsebattery")
+        .await
+        .expect("the current password opens it");
+    fixture
+        .control
+        .log_in(HANDLE, "correcthorsebattery")
+        .await
+        .expect("the new one works");
+
+    fixture.cleanup().await;
+}
+
+/// **A stolen session cannot strip the control the theft was meant to run
+/// into.**
+///
+/// Turning a second factor off used to need a live session and nothing else,
+/// and a session is a bearer token left on shared machines and in browser
+/// history. The factor is the one thing somebody who worked their way to a
+/// session does not have — which is why it asks for that rather than the
+/// password, the thing they probably do.
+#[tokio::test]
+async fn turning_it_off_needs_the_factor_being_turned_off() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let (secret, _recovery) = fixture.enrolled(now).await;
+
+    let refused = fixture
+        .control
+        .disable_second_factor(fixture.identity, None, now, &fixture.sealing)
+        .await
+        .expect_err("a session alone is not proof");
+    assert!(
+        matches!(refused, erp_control::AuthError::SecondFactorRequired),
+        "{refused:?}"
+    );
+
+    let wrong = fixture
+        .control
+        .disable_second_factor(fixture.identity, Some("000000"), now, &fixture.sealing)
+        .await
+        .expect_err("a guess is not a code");
+    assert!(
+        matches!(wrong, erp_control::AuthError::InvalidCredentials),
+        "{wrong:?}"
+    );
+
+    assert!(
+        fixture
+            .control
+            .has_second_factor(fixture.identity)
+            .await
+            .expect("asks"),
+        "a refused removal removed it anyway"
+    );
+
+    // The real code takes it off.
+    let code = totp::code_at(&secret, seconds(now), totp::DIGITS).expect("a code");
+    fixture
+        .control
+        .disable_second_factor(fixture.identity, Some(&code), now, &fixture.sealing)
+        .await
+        .expect("the factor turns off its own factor");
+
+    fixture.cleanup().await;
+}
+
+/// **Replacing a factor is removing one, and it asks for what it destroys.**
+///
+/// This was worse than turning it off. `confirm_second_factor` deleted the live
+/// enrolment *and all ten recovery codes* with no proof of either, so one
+/// transient session pointed the account at the attacker's authenticator app
+/// and took away the paper that would have let the owner back in — leaving them
+/// *holding* a factor rather than merely dropping one.
+#[tokio::test]
+async fn replacing_a_factor_needs_the_one_being_replaced() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let (secret, recovery) = fixture.enrolled(now).await;
+
+    let enrolment = fixture
+        .control
+        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &fixture.sealing)
+        .await
+        .expect("a second enrolment may be started");
+    let waiting = totp::unbase32(&enrolment.secret).expect("base32");
+    let fresh = totp::code_at(&waiting, seconds(now), totp::DIGITS).expect("a code");
+
+    let refused = fixture
+        .control
+        .confirm_second_factor(fixture.identity, &fresh, None, now, &fixture.sealing)
+        .await
+        .expect_err("a session alone must not repoint the factor");
+    assert!(
+        matches!(refused, erp_control::AuthError::SecondFactorRequired),
+        "{refused:?}"
+    );
+
+    // The old factor and its paper are untouched by the refusal.
+    assert_eq!(
+        fixture
+            .control
+            .recovery_codes_left(fixture.identity)
+            .await
+            .expect("counts"),
+        i64::try_from(recovery.len()).expect("small"),
+        "a refused replacement burned the recovery codes"
+    );
+    let old = totp::code_at(&secret, seconds(now), totp::DIGITS).expect("a code");
+    fixture
+        .control
+        .verify_second_factor(fixture.identity, &old, now, &fixture.sealing)
+        .await
+        .expect("the old factor still verifies");
 
     fixture.cleanup().await;
 }

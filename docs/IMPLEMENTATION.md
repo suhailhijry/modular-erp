@@ -677,7 +677,7 @@ reason.
 |---|---|
 | Booking automations — reminders, no-show handling, recall follow-ups | **Do not exist.** `automation`, `recall` and `follow up` return zero hits across every `.rs`. `booking` does not depend on `messaging` or `notifications` at all. `Stage::NoShow` is a manual status with no fee, no rebooking and no rule |
 | HR document expiry | **Real, and trivial** — the whole rule is `DOCUMENT_WARNING_DAYS: i32 = 60` |
-| §9b's claim union | **Real as data, inert as a consumer** — and see §52: nothing checks a claim, so the constraint §9c derives from checking one inside a transaction describes code that does not exist |
+| §9b's claim union | **Real as data, and a live consumer since 2026-09-09.** It was inert when this table was written — see §52 — and three commands check a claim now, each inside its own transaction, which is the constraint §9c derives |
 | Authorization | **Real**, and the only one whose seam is written into the code |
 
 **The real second consumer is pricing, which shipped and which the plan still
@@ -902,7 +902,111 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       accepted and displayed. Refusing an unknown claim name needs the registry
       `http.rs:1767` deliberately declined; **surfacing** unenforced claims on
       the read model may be the cheaper honest answer
-- [ ] Correct §9b and §9c, which describe enforcement that was never built
+- [x] **§9b and §9c corrected 2026-09-10.** Both now say when they became true
+      rather than describing enforcement in the present tense while none
+      existed. Every factual claim in the corrected text was checked back
+      against the three call sites — `purchases/commands.rs:369`,
+      `sales/commands.rs:46` (from both credit paths) and `hr/commands.rs:732`
+
+### 55 · No way back in, and a way around the second factor
+
+**Built 2026-09-10.** Two things, and the second was found while designing the
+first.
+
+#### The gap: nothing could write a password
+
+`register_login` was the only writer of `authenticator.secret` and its two
+callers were signup and invitation-acceptance. There was no change-password and
+no reset — no route, no function, no recipe. The phone-code path is not a
+recovery path either: for a number with no `phone` authenticator, `otp.rs` mints
+a **brand-new identity with no memberships**, so an owner who signed up with
+email and forgot the password got a fresh empty account rather than their
+tenant. Nobody is above a tenant owner, so it was permanent.
+
+`POST /v1/password-resets`, `POST /v1/password-resets/redemption`,
+`POST /v1/sessions/current/password`. The design is in
+`crates/erp-control/src/passwords.rs`; four choices are worth repeating here.
+
+**A reset issues no session.** `DELETE /v1/sessions/second-factor` takes nothing
+but a live one, so a reset that handed a session back would be a two-call factor
+removal: open the link, get a session, delete the enrolment. A reset ends with
+"changed" and the person logs in through the same gate as everybody else.
+
+**It demands the second factor, and that strands nobody.** The mailbox is
+exactly what a second factor exists to survive. Requiring it here closes no door
+that was open — anybody who cannot present it cannot log in with it either — so
+it is consistent with *switching a control on must not be the act that strands
+you*. The recovery codes are the path.
+
+**No "one live link per address."** `pending_signup` and `invitation` both have
+one and copying it would have been a permanent denial of recovery: request a
+reset for the victim once a minute, each request cancelling the last, and their
+mail arrives holding a dead link. The law does not transfer — an invitation is
+revocable access and a reset link is neither revoked nor access. A cooldown, an
+hour of life and the sweep bound the rows instead.
+
+**An address with no account is answered identically and mailed nothing.**
+Mailing every address anybody types would be an unauthenticated mail cannon
+aimed at strangers, and the cost is not their inbox — it is the complaint rate
+on the sending domain that carries every tenant's signup and invitation mail.
+That is the vector `0010_signups.sql` closed, and one `INSERT` of timing is not
+worth reopening it for.
+
+#### The bigger one: three paths minted sessions without the second factor
+
+`log_in` carried the promise — *"a path which never heard of a second factor
+cannot issue a session that skipped one"* — and `start_session` had five
+production callers, of which **three never asked**: `otp::verify_code`, and both
+signup paths for an address that already has an account.
+
+The chain, verified end to end: an attacker holding the victim's password and
+mailbox — the exact pair a second factor exists to survive — is refused at
+`POST /v1/sessions`, then signs up a throwaway company under the victim's
+address. `request_signup` calls `authenticate`, which is the credential half
+with no factor in it. Confirming the link calls `start_session` directly and
+hands back **a full session as the victim**. `DELETE /v1/sessions/second-factor`
+then takes the enrolment and all ten recovery codes.
+
+**The gate is inside `start_session` now**, and `issue_session` — private to
+`auth.rs` — is the only way round it. A promise every caller has to keep is one
+a caller eventually breaks; this is the same move `evaluate` made when it
+started taking its answer from `explain`. Privacy is the primary guard: a third
+module *cannot* call it, which is a compile error rather than a test failure.
+`only_two_paths_may_issue_a_session_without_checking_the_second_factor` counts
+the ways round for anything added inside `auth.rs`.
+
+**Both signup paths check before they build, not after.** Reaching the gate with
+the tenant already provisioned answers `500` through `Corrupt` and leaves an
+orphan database, an unclaimed confirmation link and a slug taken forever — a
+worse bug than the one being fixed. The falsification reproduces exactly that:
+`Corrupt("this account needs its second factor")`.
+
+#### And the last step of the chain, closed the same day
+
+`disable_second_factor` and `confirm_second_factor` both took a live session and
+nothing else. Both ask for the factor now.
+
+**Turning it off asks for the factor being turned off** — not the password.
+Somebody who worked their way to a session may well have the password; that is
+usually how they got close. Only the factor is evidence they do not have.
+
+**Replacing one was the worse of the two.** `confirm_second_factor` deleted the
+live enrolment *and all ten recovery codes* with no proof of either, so one
+transient session pointed the account at the attacker's authenticator app and
+destroyed the paper that would have let the owner back in — leaving them
+*holding* a factor rather than merely dropping one. It proves the old factor
+before anything is deleted, and a recovery code counts, because losing the phone
+is the case re-enrolling exists for.
+
+**Neither strands anybody**, which is what keeps both inside *switching a
+control on must not be the act that strands you*: a person who can present
+neither a code nor a recovery code could not have logged in to reach either
+route. `the_requirement_can_always_be_switched_off` still holds and now says so
+in those words.
+
+**Two guards, both falsified by putting the hole back:**
+`turning_it_off_needs_the_factor_being_turned_off` and
+`replacing_a_factor_needs_the_one_being_replaced`.
 
 ### 51 · A second factor, and the state it refuses to have
 
@@ -2572,8 +2676,12 @@ every projection, so they land before the first projection exists.
 - [x] `execute` — load, decide, append, retry on conflict, give up as `Contended`
 - [x] Upcaster chain (`v1 → v2 → v3`), gap check, events-from-the-future refused
 - [x] Golden files: every stored shape decodes on every build
-- [ ] Snapshots *(deferred — an optimization, and which aggregates need one is
-      not yet known; `load_since` is the seam)*
+- [x] **Snapshots — decided against, not pending.** An optimization for
+      aggregates with long histories, and which of those exist is still not
+      known. `load_since` (`crates/erp-eventlog/src/aggregate.rs:239`) is the
+      seam and it is load-bearing rather than aspirational: `load` *is*
+      `load_since(.., A::default(), Sequence::ZERO)`, so a snapshot supplies a
+      non-default aggregate and a non-zero start and nothing else moves
 - [x] Crash tests: a rolled-back append returns its positions; a crash between
       the append and the promise leaves neither
 - [x] Projection groups, one Postgres schema each, `search_path` isolation (L3)
@@ -2872,8 +2980,8 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 - [x] Customers as records — `modules/crm` (§16, §41)
 - [x] Partial credit notes — `sales::credit_part_in`, and since §44 a partial
       refund issues one (2026-09-07)
-- [ ] Quantities and unit prices on invoice lines. **The trigger this box named
-      has already passed** — `modules/tax_sa/src/zatca/ubl.rs:659` emits
+- [x] **Quantities and unit prices — decided, and waiting on a customer rather
+      than on us.** **The trigger this box named has already passed** — `modules/tax_sa/src/zatca/ubl.rs:659` emits
       `cbc:InvoicedQuantity` (hardcoded `1`, with the reason written in) and
       `:727` emits `cac:Price`, both sandbox-accepted. So they do not "land with
       ZATCA's line-level fields"; those landed. The upcaster now waits on a
@@ -2947,13 +3055,17 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
 
 - [x] A second business module *(shipped as 4a — and it changed how
       cross-module integration works, which is the point of building one)*
-- [ ] Blueprints: **browse, parameterize and install already ship twice** —
-      `ledger` charts (`modules/ledger/src/http.rs:48`, whose doc comment says
-      exactly this: *"This is the first two and the last"*) and `booking` trades
-      (`:69`, six trades as data running the domain's own commands, D8). What is
-      left is **edit before install**, declined with reasons at
-      `modules/ledger/src/charts.rs:26` since every account is renameable after
-      install, and **preview**, which is the box below
+- [x] **Blueprints: browse, parameterize, preview and install ship three
+      times** — `ledger::CHARTS`, `booking::TRADES` and, since 2026-09-10,
+      `booking::PACKS`. Preview shipped the same day (the box below).
+
+      **Edit before install stays declined**, and the reason at
+      `modules/ledger/src/charts.rs:24` is unchanged: every account is
+      renameable and closeable afterwards, so editing first is worth building
+      when somebody asks to change a thing they cannot already change after
+      installing it. Packs decline it on the same ground and add one of their
+      own — every band a pack writes is an ordinary form-authored band, so the
+      form *is* the edit surface
 - [x] **Preview executes in a rolled-back transaction and reports resulting
       state — built 2026-09-10.** `POST /v1/ledger/chart/preview`, taking `Read`
       because it writes nothing.
@@ -3072,9 +3184,12 @@ Not in the original plan at all — it was one line in 4a. It is a phase.
       one that nulls an actor and changes nothing else. An identity that had ever
       acted could not be deleted at all, and "our schema will not let us" is not
       a lawful ground for refusing
-- [ ] An HTTP endpoint for erasure *(deliberately absent: **who may erase whom**
-      is a policy question, and answering it while fixing a schema bug would
-      answer it badly)*
+- [x] **An HTTP endpoint for erasure — deliberately absent.** **Who may erase
+      whom** is a policy question, and answering it while fixing a schema bug
+      would answer it badly. The erasure itself works
+      (`erp-control/src/lib.rs:1301`); what is missing is the decision, and it
+      is three cases: self, an owner erasing a colleague, and platform staff
+      erasing a customer
 - [x] `docs/RUNNING.md` — bringing the API and workers up by hand
 
 **Exit:** someone signs up online, picks a chart of accounts, and gets a working
@@ -3295,10 +3410,22 @@ and let two working cases describe the engine.
       at `N+1` they had never seen. That second part was a real bug, found by
       the test that expected a `412` and got a `200`.
 
-      **`every_pack_builds_every_band_it_promises` is the blueprint-validity
-      check** ARCHITECTURE §1138 asks for, and it needs no database — the whole
-      path from a pack's answers to a band is pure, which makes it stronger
-      than the same check for a chart or a trade.
+      **Blueprint validity, and a claim that was false for two kinds of three.**
+      ARCHITECTURE asks that every shipped blueprint be previewed against a
+      fresh tenant in CI. Only `TRADES` had it: `real_estate` had never once
+      been installed against a database — the chart the whole property vertical
+      posts into — and four of the five packs went nowhere near the install
+      path. Both loops exist now
+      (`every_shipped_chart_installs_into_a_fresh_tenant_and_twice_is_harmless`,
+      `every_shipped_pack_installs_into_a_fresh_tariff_and_twice_is_harmless`),
+      and each was falsified: a chart declaring an account code the domain
+      refuses, and an install that stores something other than what it
+      returned.
+
+      `every_pack_builds_every_band_it_promises` stays, and covers a different
+      thing: it is pure, so it proves the answers make bands without a
+      database. The database test proves they survive `configuration`'s JSONB
+      and come back the same — which is the half the pure test cannot see.
 
       **No Ramadan or Eid pack**, which the market would rank first. Both are
       Hijri and drift about eleven days a Gregorian year, and nothing here can
@@ -4137,7 +4264,7 @@ one inside a command is not viable either.
       for `proj_`, and finds none, because the read is one function call away in
       `projections.rs`. The test enforces the rule it states and not the one it
       means.
-- [ ] **Decide whether the identity → employee link belongs write-side too.**
+- [x] **Decided: it stays read-side, and the reason is written down.**
       It is the only projection read on an authorization path. Moving it is a
       column on the org-claim chain maintained beside the link event, in the
       same transaction — the same shape the effective set already uses. Not
@@ -4474,12 +4601,13 @@ provider without an adapter.
       written correctly is how unexercised machinery gets in.
       `docs/AMBIGUITIES.md` §1 and §1b. **One captured callback reopens this.**
       The original text follows, and its last line is superseded.
-- [ ] ~~Delivery receipts land back as inbound events, so "sent" and "delivered"
-      stay different words.~~ *Was deferred to Phase 12 because there was no
-      verified inbound surface; Phase 12 built one (`crates/erp-api/src/hooks.rs`,
-      a signed callback per provider), and payments use it. Messaging does not
-      yet: `grep -rin delivered modules/messaging/src` finds only the send-side
-      verdicts. Open, and now buildable (2026-09-07).*
+  > ~~Delivery receipts land back as inbound events, so "sent" and "delivered"
+  > stay different words.~~ *(The superseded original, kept for the trail — not
+  > an open box. Was deferred to Phase 12 because there was no verified
+  > inbound surface; Phase 12 built one (`crates/erp-api/src/hooks.rs`, a
+  > signed callback per provider), and payments use it. Messaging does not
+  > yet — but the box above is the standing verdict: no provider publishes a
+  > callback shape that can be written correctly.)*
 - [x] **Metering.** SMS is billed per segment, and a message that silently
       becomes three costs three times. Segment counting is part of sending
       (GSM 03.38 against UCS-2, so Arabic is billed at 70 characters), and a
@@ -5250,7 +5378,8 @@ half depends on the second, which is the point of splitting them.
       unit A, the **tenant** of unit B and the **guarantor** on unit C at once.
       `CustomerKind` is `Person | Company` today (`modules/crm/src/customer.rs:31`)
       and there is no relationship at all
-- [ ] **Not** custom fields. `FieldKind` is `Text | Number | Date | Choice | Flag`
+- [x] **Not custom fields — a decided constraint on the party model, not work.**
+      `FieldKind` is `Text | Number | Date | Choice | Flag`
       (`modules/crm/src/fields.rs:60`) with no reference type, and adding one
       would make a typed-and-erasable field into a foreign key that erasure
       cannot honour
@@ -5274,22 +5403,28 @@ opposite direction from every module so far.
 
 ### 20c · Per-line VAT exemption reasons *(already an open box in 4e)*
 
-- [ ] Carried here because §49 found it **gates the whole vertical**: residential
-      rent is VAT-exempt, a ZATCA invoice for an exempt supply must carry a reason
-      code, and without it a residential landlord cannot issue a compliant invoice
-      at all. `VatCategory::Exempt` already exists (`modules/ledger/src/vat.rs:31`);
-      the reason code does not
+- [x] **Built — and the box was already stale when it was written.** §49 was
+      right that this gates the vertical: residential rent is VAT-exempt and a
+      ZATCA invoice for an exempt supply must carry a reason code. It landed as
+      §50: the codes are **tenant configuration** (`ledger::vat::Rates::reason`)
+      rather than a constant, because declaring every exempt line
+      `VATEX-SA-29` — financial services — would be a false statement to a tax
+      authority on a landlord's behalf. `SalesError::NoExemptionReason` refuses
+      rather than guessing (L6), and the reason travels to the ZATCA document
+      through `tax_sa::documents::reason_of`
 
 ### 20d · Recurring invoicing
 
-- [ ] A schedule that raises an invoice — "the 1st of every month for 12 months".
-      Nothing in `sales` or `payments` schedules anything today; every invoice
-      comes from a command
-- [ ] **Not `erp-recurrence`**, which is 432 lines of `availability.rs` — weekly
-      patterns for booking, and the crate name flatters it
-- [ ] Derived ids over (schedule, period), so the producer is a scan that
-      re-runs over an overlapping window with no cursor — the shape §47 and §48
-      both landed on
+- [ ] A schedule that raises an invoice — "the 1st of every month for 12
+      months". Nothing in `sales` or `payments` schedules one today.
+
+      **Two constraints, decided, and not separate work.** The ids are derived
+      over (schedule, period), so the producer is a scan re-running over an
+      overlapping window with no cursor — the shape §47 and §48 both landed on,
+      and which `BillCompletedBookings` (`worker.rs:752`) already implements for
+      the identical problem, so it is the template rather than a new pattern.
+      And **not `erp-recurrence`**, which is 432 lines of weekly booking
+      patterns that the crate name flatters
 - [ ] Where it lives is a decision: `sales` owns invoices, but `prepaid`
       subscriptions want it too, which is the second consumer that justifies it
 

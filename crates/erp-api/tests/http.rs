@@ -1906,7 +1906,7 @@ async fn an_unknown_chart_is_refused() {
 /// would be a route this matrix stopped checking.
 fn role_scoped_operations() -> Vec<(String, String, bool)> {
     /// Authenticated, and about the caller rather than a company.
-    const NO_TENANT: &[&str] = &["log_out"];
+    const NO_TENANT: &[&str] = &["log_out", "change_password"];
 
     let document = serde_json::to_value(erp_api::openapi()).expect("the document serializes");
     let mut found = Vec::new();

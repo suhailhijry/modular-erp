@@ -68,6 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let forgotten = control.sweep_signups().await?;
     tracing::info!(forgotten, "unanswered signups swept");
 
+    // An hour after it was minted a spent reset link and an unopened one are
+    // both rubbish, and both are a row naming somebody who forgot a password.
+    let stale = control.sweep_password_resets().await?;
+    tracing::info!(stale, "expired reset links swept");
+
     let reaped = control.reap_expired_demos(PER_RUN).await?;
     tracing::info!(reaped, "demo sweep finished");
 

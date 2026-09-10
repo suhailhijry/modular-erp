@@ -65,6 +65,10 @@ pub const SIGNUP_TOO_SOON: MessageCode = MessageCode::new("signups.too_soon");
 pub const SIGNUP_SUBJECT: MessageCode = MessageCode::new("mail.signup_subject");
 /// The body of a signup confirmation.
 pub const SIGNUP_BODY: MessageCode = MessageCode::new("mail.signup_body");
+pub const RESET_SUBJECT: MessageCode = MessageCode::new("mail.reset_subject");
+pub const RESET_BODY: MessageCode = MessageCode::new("mail.reset_body");
+pub const RESET_NOT_VALID: MessageCode = MessageCode::new("auth.reset_not_valid");
+pub const RESET_TOO_SOON: MessageCode = MessageCode::new("auth.reset_too_soon");
 pub const LAST_OWNER: MessageCode = MessageCode::new("members.last_owner");
 /// Not a phone number this system can send to.
 pub const NOT_A_PHONE_NUMBER: MessageCode = MessageCode::new("codes.not_a_phone_number");
@@ -125,6 +129,10 @@ pub static CODES: &[MessageCode] = &[
     SIGNUP_TOO_SOON,
     SIGNUP_SUBJECT,
     SIGNUP_BODY,
+    RESET_SUBJECT,
+    RESET_BODY,
+    RESET_NOT_VALID,
+    RESET_TOO_SOON,
     NOT_A_SCOPE,
     OUT_OF_SCOPE,
     NO_SUCH_KEY,
@@ -600,6 +608,63 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
             many: Some("رسالة التأكيد في طريقها إليك. أعد المحاولة بعد {seconds} ثانية."),
             other: "رسالة التأكيد في طريقها إليك. أعد المحاولة بعد {seconds} ثانية.",
         },
+    ),
+    (
+        RESET_SUBJECT,
+        Locale::English,
+        Template::Simple("Choose a new password"),
+    ),
+    (
+        RESET_SUBJECT,
+        Locale::Arabic,
+        Template::Simple("اختر كلمة مرور جديدة"),
+    ),
+    (
+        RESET_BODY,
+        Locale::English,
+        Template::Simple(
+            "Somebody asked to reset the password for this address.\n\n\
+             Open this link to choose a new one:\n{link}\n\n\
+             The link works once and expires within an hour. If your account \
+             uses an authenticator app, you will be asked for a code as well — \
+             resetting a password does not switch that off. Nothing has \
+             changed yet, so if this was not you, ignore this message and \
+             nothing will.",
+        ),
+    ),
+    (
+        RESET_BODY,
+        Locale::Arabic,
+        Template::Simple(
+            "طلب أحدهم إعادة تعيين كلمة المرور لهذا البريد.\n\n\
+             افتح هذا الرابط لاختيار كلمة مرور جديدة:\n{link}\n\n\
+             يعمل الرابط مرة واحدة وتنتهي صلاحيته خلال ساعة. إذا كان حسابك \
+             يستخدم تطبيق المصادقة فسيُطلب منك رمز أيضًا — إعادة تعيين كلمة \
+             المرور لا توقف ذلك. لم يتغير شيء بعد، فإن لم تكن أنت من طلب ذلك \
+             فتجاهل هذه الرسالة ولن يتغير شيء.",
+        ),
+    ),
+    (
+        RESET_NOT_VALID,
+        Locale::English,
+        Template::Simple("That reset link is not valid. Ask for a new one."),
+    ),
+    (
+        RESET_NOT_VALID,
+        Locale::Arabic,
+        Template::Simple("رابط إعادة التعيين غير صالح. اطلب رابطًا جديدًا."),
+    ),
+    (
+        RESET_TOO_SOON,
+        Locale::English,
+        Template::Simple(
+            "A link was sent to this address {sent} seconds ago. Try again in {retry_in}.",
+        ),
+    ),
+    (
+        RESET_TOO_SOON,
+        Locale::Arabic,
+        Template::Simple("أُرسل رابط إلى هذا البريد قبل {sent} ثانية. حاول بعد {retry_in}."),
     ),
     (
         SIGNUP_SUBJECT,

@@ -189,3 +189,17 @@ pub fn signup_messages(company: &str, link: &str) -> (Message, Message) {
             .with("link", MessageArg::text(link.to_owned())),
     )
 }
+
+/// Subject and body for a password-reset link.
+///
+/// **No company name and no person's name**, unlike a signup or an invitation:
+/// this message goes to an address that asked for it and to nobody else, and
+/// naming the tenants an address belongs to would make a leaked mailbox a map
+/// of them.
+#[must_use]
+pub fn reset_messages(link: &str) -> (Message, Message) {
+    (
+        Message::new(crate::messages::RESET_SUBJECT),
+        Message::new(crate::messages::RESET_BODY).with("link", MessageArg::text(link.to_owned())),
+    )
+}

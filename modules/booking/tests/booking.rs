@@ -1254,6 +1254,84 @@ async fn a_booking_is_priced_against_the_tenants_bands() {
     fixture.cleanup().await;
 }
 
+/// **Every shipped pack, against a real tenant.**
+///
+/// ARCHITECTURE §1147 asks for *"every shipped blueprint previewed against a
+/// fresh tenant in CI"*, and `every_pack_builds_every_band_it_promises` is not
+/// that: it is pure, so it proves a pack's answers make bands and nothing
+/// about storing them.
+///
+/// **The round trip through the database is what this adds.** A pack whose
+/// answers do not survive `configuration`'s JSONB — a `Value` that serialises
+/// one way and reads back another — passes the pure test and fails here.
+///
+/// The tariff is reset between packs rather than the tenant, because a tariff
+/// is the only thing a pack touches, and two packs that both price Thursday
+/// evening would otherwise have the second one correctly skipped.
+#[tokio::test]
+async fn every_shipped_pack_installs_into_a_fresh_tariff_and_twice_is_harmless() {
+    let fixture = Fixture::new().await;
+
+    for shipped in booking::PACKS {
+        set_tariff(&fixture, Vec::new()).await;
+
+        let did = {
+            let mut conn = fixture.pool.acquire().await.expect("connection");
+            booking::packs::install(&mut conn, shipped, erp_i18n::Locale::Arabic, None, None)
+                .await
+                .unwrap_or_else(|e| panic!("{} does not install: {e}", shipped.id))
+        };
+        assert_eq!(
+            did.added.len(),
+            shipped.bands.len(),
+            "{} did not add every band it promises",
+            shipped.id
+        );
+        assert!(
+            did.skipped.is_empty(),
+            "{} skipped on a fresh tariff",
+            shipped.id
+        );
+
+        // What came back out of the database is what went in, and it resolves.
+        let (stored, _) = {
+            let mut conn = fixture.pool.acquire().await.expect("connection");
+            booking::TariffAsWritten::read(&mut conn)
+                .await
+                .unwrap_or_else(|e| panic!("{} wrote a tariff that will not read: {e}", shipped.id))
+        };
+        assert_eq!(
+            stored, did.tariff,
+            "{} did not survive the round trip through storage",
+            shipped.id
+        );
+        let priced = stored
+            .resolve()
+            .unwrap_or_else(|e| panic!("{} stored bands that will not resolve: {e}", shipped.id));
+        assert_eq!(priced.bands.len(), shipped.bands.len(), "{}", shipped.id);
+        assert!(
+            priced.bands.iter().all(|b| !b.name.trim().is_empty()),
+            "{} stored a nameless band",
+            shipped.id
+        );
+
+        let again = {
+            let mut conn = fixture.pool.acquire().await.expect("connection");
+            booking::packs::install(&mut conn, shipped, erp_i18n::Locale::Arabic, None, None)
+                .await
+                .unwrap_or_else(|e| panic!("{} does not install twice: {e}", shipped.id))
+        };
+        assert!(
+            again.added.is_empty(),
+            "{} added something twice",
+            shipped.id
+        );
+        assert_eq!(again.skipped, did.added, "{}", shipped.id);
+    }
+
+    fixture.cleanup().await;
+}
+
 /// **Adding to a tariff is a read-modify-write, and the version it read is what
 /// makes one safe.**
 ///

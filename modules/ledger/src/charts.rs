@@ -23,10 +23,12 @@
 //! # What this deliberately is not
 //!
 //! The architecture describes blueprints: browse, parameterize, materialize,
-//! edit, preview, install. This is the first two and the last. ponytail: editing
-//! before install is worth building when someone asks to change a chart they
-//! cannot already change *after* installing it — which, since every account here
-//! is renameable and closeable, is nobody yet.
+//! edit, preview, install. **Edit is the one that is missing** — preview
+//! shipped 2026-09-10 as `preview_chart`, which runs the real install against
+//! a transaction it rolls back. ponytail: editing before install is worth
+//! building when someone asks to change a chart they cannot already change
+//! *after* installing it — which, since every account here is renameable and
+//! closeable, is nobody yet.
 
 use erp_i18n::Locale;
 

@@ -98,6 +98,19 @@ impl ControlPlane {
             self.authenticate(&email, &password)
                 .await
                 .map_err(AccessError::Auth)?;
+            // **Refused before anything is built, not after.** `start_session`
+            // below would refuse an enrolled identity anyway — but by then a
+            // tenant row, a database and a whole migration chain exist, and
+            // the refusal arrives as a `500` through `Corrupt` with an orphan
+            // left behind. A password alone must not walk past a second factor
+            // *and* it must not cost a database to be told so.
+            if self
+                .has_second_factor(existing)
+                .await
+                .map_err(AccessError::Auth)?
+            {
+                return Err(AccessError::Auth(crate::AuthError::SecondFactorRequired));
+            }
             existing
         } else {
             let created = self.create_identity(Actor::system()).await?;

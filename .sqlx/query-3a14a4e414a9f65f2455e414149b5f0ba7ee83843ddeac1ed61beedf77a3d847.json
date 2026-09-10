@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE authenticator SET secret = $2\n              WHERE identity_id = $1 AND kind = 'password'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3a14a4e414a9f65f2455e414149b5f0ba7ee83843ddeac1ed61beedf77a3d847"
+}

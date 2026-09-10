@@ -485,6 +485,16 @@ impl ControlPlane {
             }
         };
 
+        // **Refused before anything is built.** `start_session` refuses an
+        // enrolled identity, and reaching it from here would mean a tenant, a
+        // database and a migration chain already exist — with the refusal
+        // arriving as a `500` through `Corrupt`, and `confirm_signup` putting
+        // the link back so the next attempt fails on a slug that is now taken.
+        // Asking first costs one query.
+        if self.has_second_factor(identity).await? {
+            return Err(AuthError::SecondFactorRequired.into());
+        }
+
         let tenant = self.provision(slug, company, identity, modules).await?;
 
         let (token, session) = self

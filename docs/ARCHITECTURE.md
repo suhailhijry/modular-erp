@@ -1144,7 +1144,7 @@ doesn't.
 | Tenant isolation (D1) | Two provisioned tenants; assert no code path reaches across |
 | Authorization | Matrix over (role × capability × facts); deny-by-default for unlisted pairs |
 | Module composition | Demo build with every module enabled, as a required CI check |
-| Blueprint validity | Every shipped blueprint previewed against a fresh tenant in CI |
+| Blueprint validity | Every shipped blueprint installed against a fresh tenant in CI — one loop per kind: `every_shipped_chart_installs_…`, `every_trade_installs_…`, `every_shipped_pack_installs_…` |
 | API contract | OpenAPI drift; generated-client round-trip; problem+json shape |
 | Connection strategy | `soak.rs` — asserts open connections track active tenants, busy connections track the lane budget, and neither tracks request count |
 | Entry-path cost | A cold `enter` costs exactly 4 lookups; 200 warm ones cost 0 |

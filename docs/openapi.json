@@ -1383,6 +1383,27 @@
         ],
         "type": "object"
       },
+      "Change": {
+        "example": {
+          "current": "hunter2hunter2",
+          "new": "correcthorsebattery"
+        },
+        "properties": {
+          "current": {
+            "description": "The password being replaced. Asked for because a session left open on a\nshared machine is not proof of anything.",
+            "type": "string"
+          },
+          "new": {
+            "description": "The new one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "current",
+          "new"
+        ],
+        "type": "object"
+      },
       "ChargedLine": {
         "description": "What a line came to, as it was priced.",
         "properties": {
@@ -2266,6 +2287,22 @@
           "currency",
           "paid"
         ],
+        "type": "object"
+      },
+      "DisableSecondFactor": {
+        "description": "What turning a second factor off costs: proof that you hold it.",
+        "example": {
+          "code": "123456"
+        },
+        "properties": {
+          "code": {
+            "description": "A code from the app, or one of the recovery codes. Absent only when\nthere is nothing enrolled to prove — abandoning an enrolment that was\nstarted and never confirmed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "DocumentView": {
@@ -8828,6 +8865,34 @@
         ],
         "type": "object"
       },
+      "Redemption": {
+        "example": {
+          "password": "hunter2hunter2",
+          "token": "…"
+        },
+        "properties": {
+          "code": {
+            "description": "A code from the authenticator app, or one of the recovery codes.\nRequired when the account has a second factor — ask for it after a\n`401` says so.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "description": "The new password. Twelve characters, the same floor as a signup's.",
+            "type": "string"
+          },
+          "token": {
+            "description": "The token from the link, **sent in the body rather than the path**: a\npath lands in access logs, browser history and the `Referer` of every\nasset the page loads, and this one is worth what a password is worth.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "password"
+        ],
+        "type": "object"
+      },
       "RefusalView": {
         "properties": {
           "at": {
@@ -9180,6 +9245,21 @@
           "from",
           "until",
           "takes"
+        ],
+        "type": "object"
+      },
+      "ResetRequest": {
+        "example": {
+          "email": "sara@bassat.test"
+        },
+        "properties": {
+          "email": {
+            "description": "The address to send a link to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
         ],
         "type": "object"
       },
@@ -9643,10 +9723,20 @@
         "type": "object"
       },
       "SecondFactorCode": {
+        "example": {
+          "code": "123456"
+        },
         "properties": {
           "code": {
             "description": "Six digits from the app.",
             "type": "string"
+          },
+          "previous": {
+            "description": "**Only when replacing a factor you already have**: a code from the *old*\none, or one of its recovery codes. Replacing an enrolment destroys it\nand all ten recovery codes, so it asks for proof of the thing it is\nabout to destroy. A `401 auth.second_factor_required` means send this\ntoo.\n\nNot needed for a first enrolment, which removes nothing.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -31278,6 +31368,236 @@
         }
       ]
     },
+    "/v1/password-resets": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "The answer is `202` whether or not the address has an account, and an\naddress with no account is sent nothing. Telling a stranger which addresses\nare registered is one thing; mailing every address they type is a worse one,\nbecause the cost lands on the sending domain that carries every tenant's\nsignup and invitation mail.",
+        "operationId": "request_password_reset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "If that address has an account, a link is on its way. Nothing has changed."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A link went to this address moments ago, or too many attempts came from here. Retryable, and the message says when."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "security": [],
+        "summary": "**Send a link to somebody who has forgotten their password.**",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/v1/password-resets/redemption": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Issues no session: log in afterwards. That is not an oversight — turning a\nreset into a session would let somebody holding the link disable the\naccount's second factor, which needs nothing but a session.",
+        "operationId": "redeem_password_reset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Redemption"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Changed. Every session ended; log in with the new password."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A password under 12 characters"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The account has a second factor and no code came, or the code was wrong. `auth.second_factor_required` means ask for one and retry."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That link is wrong, expired, already used, or has had too many wrong codes"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "See `code`."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This deployment has no sealing key, so a second factor cannot be checked"
+          }
+        },
+        "security": [],
+        "summary": "**Choose the new password.**",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/payments": {
       "get": {
         "operationId": "list_payments",
@@ -41817,9 +42137,119 @@
         }
       ]
     },
+    "/v1/sessions/current/password": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Ends every session, this one included. A password is changed because it may\nbe known, and a session minted under it is that password still working.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Change"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Changed. Every session ended, including this one; log in again."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A password under 12 characters"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The current password did not match, or this account has no password to change"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "**Change the password you are signed in with.**",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/v1/sessions/second-factor": {
       "delete": {
+        "description": "**Send a code from the app, or one of the recovery codes.** A session used\nto be enough, which made a stolen one all it took to strip the control the\ntheft was supposed to run into — and the factor, unlike the password, is\nthe one thing somebody who worked their way to a session does not have.\n\nAbsence fails closed: no code with a factor enrolled is\n`401 auth.second_factor_required`, never a removal. Send `{}` when there is\nnothing enrolled — an enrolment started and never confirmed.",
         "operationId": "disable_second_factor",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisableSecondFactor"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "204": {
             "description": "Off. The password is the whole login again."
@@ -41842,7 +42272,37 @@
                 }
               }
             },
-            "description": "No session, or one that has expired. Log in again."
+            "description": "No code came, or it was wrong. `auth.second_factor_required` means send one."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
           },
           "500": {
             "content": {
@@ -41853,6 +42313,16 @@
               }
             },
             "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This deployment has no sealing key, so a code cannot be checked"
           }
         },
         "summary": "Turn the second factor off, taking the recovery codes with it.",
@@ -42041,7 +42511,7 @@
                 }
               }
             },
-            "description": "The code is wrong, or nothing is waiting to be confirmed"
+            "description": "The code is wrong, nothing is waiting to be confirmed, or a factor is already enrolled and `previous` did not prove it. `auth.second_factor_required` means send `previous`."
           },
           "413": {
             "content": {
