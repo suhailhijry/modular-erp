@@ -991,22 +991,50 @@ this" rather than an unexplained failure.
 
 ```rust
 pub struct Rule<E> {
-    pub id: RuleId,
-    pub version: Version,      // events cite this (L5)
+    pub name: String,          // what the business calls it, printed beside the outcome
     pub when: DynCondition,    // validated against FactRegistry at authoring time
     pub then: E,
-    pub priority: i32,
-    pub effective: DateRange,
-    pub origin: RuleOrigin,    // Preset | Form(TemplateId) | Builder | Raw
 }
 ```
 
-`Rule<Scale>` is a permission. `Rule<DiscountValue>` is pricing.
-`Rule<Vec<LineTemplate>>` is a posting rule. `Rule<ApprovalChain>` is routing.
-One evaluator, one validator, one `explain`.
+`Rule<Verdict>` is a permission (`erp_tenant::limits`). `Rule<i32>` is pricing
+(`booking::Tariff`). One evaluator, one validator, one `explain`.
 
-Four authoring levels — presets, forms, builder, raw JSON — all producing the
-same artifact. `origin` lets a form-authored rule render back as its form.
+The sketch this replaced also had `id`, `version`, `priority`, `effective` and
+`origin`. Each was dropped with an argument rather than by oversight, and
+`rule.rs` records them: order *is* priority, `Availability` already carries
+`from`/`until`, a whole rule set is one versioned configuration entry, and
+`origin` is a wrapper rather than a field — see below.
+
+**Four authoring levels, one artifact** (`erp_rules::authoring`):
+
+```rust
+pub enum Authored<A> {
+    Preset  { template: String },                     // 0 — a template with no blanks
+    Form    { template: String, answers: Answers },   // 1 — the blanks, filled in
+    Builder { rule: A },                              // 2 — composed on a screen
+    Raw     { rule: A },                              // 3 — written out
+}
+```
+
+Two things fall out of that shape:
+
+- **A preset is a form with no blanks**, so levels 0 and 1 are one mechanism.
+  The same code renders both, checks their answers and builds their artifact.
+- **The answers are the truth.** A templated rule stores its answers and
+  *nothing else*; the artifact is rebuilt from them on every read. A screen
+  cannot show a form whose answers no longer describe the rule, because there
+  is no second copy to fall behind — a structural guarantee rather than a
+  discipline somebody has to remember.
+
+Editing a templated rule's artifact is therefore not an edit: it replaces the
+rule with a `Raw` one and drops the form. A rule somebody hand-edited is no
+longer that form's rule.
+
+`A` is the tenant's own configuration shape — `booking::Band`, not `Rule<i32>`
+— so a module that already stores something keeps storing it. `booking` ships
+two forms (`weekday`, `weekday_evening`) and no presets: how much dearer is the
+one number a business must choose for itself.
 
 ### 5.7 API
 

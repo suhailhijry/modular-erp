@@ -19,6 +19,10 @@ spans = ["dep:erp-recurrence", "dep:erp-occupancy"]
 # `Money`, for a fact that is an amount. Comparing two is currency-aware, which
 # is why a fact cannot just be an integer.
 erp-types = { workspace = true }
+# `MessageCode` and `Locale`. A template's labels are shown to a person and its
+# refusals are read by one, so both are in the tenant's language rather than in
+# whatever language the rule was written in.
+erp-i18n = { workspace = true }
 # **`Availability` is a condition, kept whole.** See `condition.rs` on why this
 # dependency exists rather than a span fact with operators.
 erp-recurrence = { workspace = true, optional = true }

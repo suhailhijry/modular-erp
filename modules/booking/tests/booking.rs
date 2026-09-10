@@ -1085,17 +1085,56 @@ async fn a_rebuild_reproduces_the_diary() {
 }
 
 /// Sets the tenant's price bands. Configuration, like the VAT rate.
+///
+/// Written out rather than filled in from a template, which is what most of
+/// these tests are about — see `a_band_written_from_a_template_prices_a_booking`
+/// for the other authoring level.
 async fn set_bands(fixture: &Fixture, bands: Vec<booking::Band>) {
+    set_tariff(
+        fixture,
+        bands
+            .into_iter()
+            .map(|rule| erp_rules::Authored::Raw { rule })
+            .collect(),
+    )
+    .await;
+}
+
+async fn set_tariff(fixture: &Fixture, bands: Vec<erp_rules::Authored<booking::Band>>) {
     let mut conn = fixture.pool.acquire().await.expect("connection");
     erp_eventlog::configuration::set(
         &mut conn,
-        booking::Tariff::KEY,
-        &booking::Tariff { bands },
+        booking::TariffAsWritten::KEY,
+        &booking::TariffAsWritten { bands },
         None,
         None,
     )
     .await
     .expect("the tariff is set");
+}
+
+/// The same band, filled into the shipped form instead.
+///
+/// Percent rather than basis points, an hour rather than minutes past
+/// midnight, and a weekday rather than a bitmask — which is the whole
+/// difference a form makes.
+fn thursday_peak_from_a_form() -> erp_rules::Authored<booking::Band> {
+    let answers = [
+        ("name", erp_rules::Value::Text("ذروة الخميس".to_owned())),
+        ("weekday", erp_rules::Value::Int(4)),
+        ("from_hour", erp_rules::Value::Int(17)),
+        ("percent", erp_rules::Value::Int(25)),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect();
+
+    erp_rules::Authored::written(
+        booking::templates::TARIFF_TEMPLATES,
+        "weekday_evening",
+        answers,
+    )
+    .expect("the form is filled in")
 }
 
 /// Thursday evening costs a quarter more.
@@ -1211,6 +1250,101 @@ async fn a_booking_is_priced_against_the_tenants_bands() {
     );
     assert_eq!(priced.rate, money(8_000), "the list rate is kept beside it");
     assert_eq!(priced.net, money(10_000));
+
+    fixture.cleanup().await;
+}
+
+/// **"All producing the same artifact."**
+///
+/// The same band written two ways — filled into a form, and written out by
+/// hand — prices the same booking to the same number, and puts the same name
+/// on the line. That is the claim the four authoring levels make, checked here
+/// against a real booking rather than against a `Band` literal.
+#[tokio::test]
+async fn a_band_filled_into_a_form_prices_exactly_as_one_written_out() {
+    let fixture = Fixture::new().await;
+    fixture.declare("chair-2", &place("كرسي ٢", 1)).await;
+    set_tariff(&fixture, vec![thursday_peak_from_a_form()]).await;
+
+    reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(
+            Some("CUST-1"),
+            vec![charged("قص", thursday("18", "19"), "chair-1", 8_000, 1, 0)],
+        ),
+        &Metadata::default(),
+    )
+    .await
+    .expect("booked");
+
+    // The same band, written out rather than filled in. A second chair and a
+    // walk-in, because a customer is a resource too — so the two bookings are
+    // the same hour of the same Thursday and differ in nothing that touches
+    // the price but how their band was written.
+    set_bands(&fixture, vec![thursday_peak()]).await;
+    reserve(
+        &fixture.db,
+        &code("BK-2"),
+        &booking_for(
+            None,
+            vec![charged("قص", thursday("18", "19"), "chair-2", 8_000, 1, 0)],
+        ),
+        &Metadata::default(),
+    )
+    .await
+    .expect("booked");
+    fixture.project().await;
+
+    let from_a_form = fixture.get("BK-1").await.expect("there");
+    let written_out = fixture.get("BK-2").await.expect("there");
+    let filled = from_a_form.lines[0].charge.as_ref().expect("priced");
+    let written = written_out.lines[0].charge.as_ref().expect("priced");
+
+    assert_eq!(
+        filled.band.as_ref().map(|b| b.name.as_str()),
+        Some("ذروة الخميس"),
+        "the form's band did not apply"
+    );
+    assert_eq!(filled.band, written.band, "two ways of writing one band");
+    assert_eq!(filled.net, written.net);
+    assert_eq!(filled.net, money(10_000));
+
+    fixture.cleanup().await;
+}
+
+/// **A template this build no longer ships stops the booking.**
+///
+/// Not a booking priced without its peak band: that is a month of underbilling
+/// nobody notices, and L6 refuses on its behalf. The refusal names the
+/// configuration key, so whoever reads the log knows which setting to fix.
+#[tokio::test]
+async fn a_band_whose_template_is_gone_refuses_the_booking() {
+    let fixture = Fixture::new().await;
+    set_tariff(
+        &fixture,
+        vec![erp_rules::Authored::Preset {
+            template: "seasonal".to_owned(),
+        }],
+    )
+    .await;
+
+    let refused = reserve(
+        &fixture.db,
+        &code("BK-1"),
+        &booking_for(
+            Some("CUST-1"),
+            vec![charged("قص", thursday("18", "19"), "chair-1", 8_000, 1, 0)],
+        ),
+        &Metadata::default(),
+    )
+    .await
+    .expect_err("there is no such template");
+
+    assert!(
+        format!("{refused}").contains(booking::TariffAsWritten::KEY),
+        "the refusal does not say which setting is wrong: {refused}"
+    );
 
     fixture.cleanup().await;
 }

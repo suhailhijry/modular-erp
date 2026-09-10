@@ -1993,6 +1993,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // What the hours cost. A viewer may read the tariff for the same reason
     // they may read the VAT rate: it is on every quote they give a customer.
     ("tariff", ALL_ROLES),
+    // The forms a tariff can be written from. Shipped strings, so whoever may
+    // read the tariff may read what it could have been written with.
+    ("tariff_templates", ALL_ROLES),
     ("public_booking_settings", ALL_ROLES),
     ("billing_settings", ALL_ROLES),
     ("get_bookable", ALL_ROLES),
@@ -2378,8 +2381,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        236,
-        "expected two hundred and thirty-six role-scoped operations"
+        237,
+        "expected two hundred and thirty-seven role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -9963,6 +9966,282 @@ async fn public_booking_settings_can_be_set_and_a_deposit_over_the_price_cannot(
     assert_eq!(body["deposit_bp"], 2_500);
     assert_eq!(body["hold_minutes"], 30);
     assert_eq!(body["verify_phone"], false);
+
+    fixture.cleanup().await;
+}
+
+/// **A price band filled into a form reads back as the form and as the band.**
+///
+/// The round trip the four authoring levels exist for: a business writes
+/// "Thursday, from 17:00, 25% dearer" and never meets a bitmask of weekdays, a
+/// minute count past midnight or a basis point. What comes back carries both —
+/// the answers so the form can be reopened, and the band so a calendar can be
+/// drawn without holding the templates.
+#[tokio::test]
+async fn a_price_band_can_be_filled_into_a_form_and_reads_back_as_both() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // The templates a settings screen would draw the form from.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/booking/tariff/templates")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::ACCEPT_LANGUAGE, "ar")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let templates = body.as_array().expect("a list");
+    let evening = templates
+        .iter()
+        .find(|t| t["id"] == "weekday_evening")
+        .expect("the shipped evening template");
+    assert!(
+        evening["name"]
+            .as_str()
+            .is_some_and(|n| n.chars().any(|c| ('\u{600}'..='\u{6ff}').contains(&c))),
+        "a template names itself in the caller's language: {evening}"
+    );
+    assert_eq!(
+        evening["fields"]
+            .as_array()
+            .expect("blanks")
+            .iter()
+            .map(|f| f["key"].as_str().expect("a key"))
+            .collect::<Vec<_>>(),
+        vec!["name", "weekday", "from_hour", "percent"]
+    );
+
+    let put = |band: serde_json::Value| {
+        Request::put("/v1/booking/tariff")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "bands": [band] }).to_string(),
+            ))
+            .unwrap()
+    };
+    let filled = serde_json::json!({
+        "level": "form",
+        "template": "weekday_evening",
+        "answers": { "name": "ذروة الخميس", "weekday": 4, "from_hour": 17, "percent": 25 },
+    });
+
+    let (status, body, _) = fixture.send(put(filled)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/booking/tariff")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let band = &body["bands"][0];
+    // The form, so the screen can reopen it exactly as it was saved.
+    assert_eq!(band["level"], "form");
+    assert_eq!(band["template"], "weekday_evening");
+    assert_eq!(band["answers"]["percent"], 25);
+    assert_eq!(band["answers"]["name"], "ذروة الخميس");
+    // And the band, derived from those answers rather than stored beside them.
+    assert_eq!(band["name"], "ذروة الخميس");
+    assert_eq!(band["uplift"], 2_500, "25 percent in basis points");
+    assert_eq!(band["hours"]["weekdays"], serde_json::json!([4]));
+    assert_eq!(band["hours"]["opens_at"], 17 * 60);
+    assert_eq!(band["hours"]["closes_at"], 24 * 60);
+
+    // **Hand-editing drops the form.** A band sent back as `raw` is no longer
+    // that template's band, and says so rather than showing a form whose
+    // answers no longer describe it.
+    let (status, body, _) = fixture
+        .send(put(serde_json::json!({
+            "level": "raw",
+            "name": "ذروة الخميس",
+            "uplift": 4_000,
+            "hours": { "weekdays": [4], "opens_at": 1020, "closes_at": 1440 },
+        })))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/booking/tariff")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let band = &body["bands"][0];
+    assert_eq!(band["level"], "raw");
+    assert!(band.get("template").is_none(), "the form is gone: {band}");
+    assert!(
+        band.get("answers").is_none(),
+        "and so are its answers: {band}"
+    );
+    assert_eq!(band["uplift"], 4_000);
+
+    fixture.cleanup().await;
+}
+
+/// **A band whose template this build stopped shipping is a `500`, not a
+/// quietly shorter tariff.**
+///
+/// Two wrong answers avoided at once. It is not a `400`: the caller sent
+/// nothing, and a template withdrawn by a deploy is our doing. And it is not a
+/// `200` with the band missing: a tariff silently short of its peak rate is a
+/// month of underbilling nobody notices, which is what L6 refuses on behalf of.
+#[tokio::test]
+async fn a_stored_band_whose_template_is_gone_is_refused_rather_than_dropped() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // Written straight into the setting, which is what a deploy that withdrew
+    // `seasonal` would leave behind.
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let mut conn = db.acquire().await.expect("connection");
+    erp_eventlog::configuration::set(
+        &mut conn,
+        booking::TariffAsWritten::KEY,
+        &serde_json::json!({ "bands": [{ "level": "preset", "template": "seasonal" }] }),
+        None,
+        None,
+    )
+    .await
+    .expect("stored");
+    drop(conn);
+
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/booking/tariff")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+    fixture.cleanup().await;
+}
+
+/// **Answers that describe no band are refused while their author is still
+/// looking at them**, rather than at the next booking.
+#[tokio::test]
+async fn a_price_band_form_refuses_answers_that_describe_no_band() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let put = |band: serde_json::Value| {
+        Request::put("/v1/booking/tariff")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "bands": [band] }).to_string(),
+            ))
+            .unwrap()
+    };
+    let filled = serde_json::json!({
+        "level": "form",
+        "template": "weekday_evening",
+        "answers": { "name": "ذروة الخميس", "weekday": 4, "from_hour": 17, "percent": 25 },
+    });
+
+    // Answers that describe no band are refused while the person who wrote them
+    // is still looking at the screen.
+    let mut absurd = filled.clone();
+    absurd["answers"]["weekday"] = serde_json::json!(9);
+    let (status, body, _) = fixture.send(put(absurd)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "booking.not_a_weekday");
+
+    // A blank left blank names itself and the template that asked.
+    let mut short = filled.clone();
+    short["answers"]
+        .as_object_mut()
+        .expect("answers")
+        .remove("percent");
+    let (status, body, _) = fixture.send(put(short)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "booking.unanswered");
+
+    // An answer of the wrong shape is not silently coerced.
+    let mut mistyped = filled.clone();
+    mistyped["answers"]["percent"] = serde_json::json!("twenty five");
+    let (status, body, _) = fixture.send(put(mistyped)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "booking.not_an_answer");
+
+    // A template this build does not ship.
+    let (status, body, _) = fixture
+        .send(put(
+            serde_json::json!({ "level": "preset", "template": "seasonal" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "booking.no_such_template");
+
+    // An answer nobody asked for is a mistake, not spare data. It is how a
+    // renamed field goes unnoticed: the old answer sits there unread and the
+    // new one is missing, and only one of those is otherwise reported.
+    let mut spare = filled.clone();
+    spare["answers"]["percentage"] = serde_json::json!(25);
+    let (status, body, _) = fixture.send(put(spare)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "booking.not_an_answer");
+
+    // **A tariff is set whole.** One bad band among good ones refuses the lot
+    // rather than storing the ones that happened to parse — a tenant who fixes
+    // the typo and resends must not find their first band written twice.
+    let mut bad = filled.clone();
+    bad["answers"]["from_hour"] = serde_json::json!(24);
+    let (status, body, _) = fixture
+        .send(
+            Request::put("/v1/booking/tariff")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "bands": [filled, bad] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "booking.not_an_hour");
+
+    // So none of that wrote anything.
+    let (status, body, _) = fixture
+        .send(
+            Request::get("/v1/booking/tariff")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["bands"], serde_json::json!([]));
 
     fixture.cleanup().await;
 }

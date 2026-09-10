@@ -694,22 +694,56 @@ curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
 
 | | | Capability |
 |---|---|---|
+| `GET /v1/booking/tariff/templates` | Ready-made bands, and the blanks they ask you to fill in | Read |
 | `GET /v1/booking/tariff` | Which hours cost more, and by how much | Read |
 | `PUT /v1/booking/tariff` | Set the whole thing | ManageTenant |
 
+**Two ways to write a band, and one band comes out.** Fill in a form, or write
+it out. Every band carries a `level` saying which.
+
 ```bash
+# Fill one in. "Thursday, from 17:00, a quarter dearer."
 curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
   http://localhost:8080/v1/booking/tariff -d '{
     "bands": [
-      {"name":"ذروة المساء", "uplift":2500,
+      {"level":"form", "template":"weekday_evening",
+       "answers":{"name":"ذروة الخميس","weekday":4,"from_hour":17,"percent":25}}
+    ]
+  }'
+```
+
+```bash
+# Or write it out.
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/booking/tariff -d '{
+    "bands": [
+      {"level":"raw", "name":"ذروة المساء", "uplift":2500,
        "hours":{"weekdays":[3,4],"opens_at":1020,"closes_at":1260}}
     ]
   }'
 ```
 
 `uplift` is basis points: `2500` is a quarter more, `-1000` is a tenth off,
-which is what an off-peak band is. **First match wins**, so the order is your
-priority — a public holiday goes above a general evening band.
+which is what an off-peak band is. A form asks for **percent** instead — `25`,
+not `2500` — which is most of the reason to use one. **First match wins**, so
+the order is your priority: a public holiday goes above a general evening band.
+
+`GET` returns both halves of a form-written band — the `answers`, so the form
+can be reopened exactly as it was saved, and the `name`/`uplift`/`hours` it
+comes to, so a calendar can be drawn without holding the templates. **The
+answers are what is stored**; the band is rebuilt from them every time it is
+read, so the two cannot come apart.
+
+**Editing the band of a form-written one drops the form.** Send it back as
+`raw` and it stops being that template's band, which is the truth about a band
+somebody has hand-edited — better than a form whose answers no longer describe
+what it does.
+
+Answers are checked when you send them, not when a booking is priced: a weekday
+outside 1–7, an hour outside 0–23, a percentage below `-100`, a blank left
+blank, or an answer the template never asked for is a `400` naming the field.
+One bad band refuses the whole tariff, so a fix-and-resend never writes the good
+ones twice.
 
 **Bands, not prices.** What a service costs is yours to send on the line; when
 it costs more is the tenant's to configure, and that is the half a client must

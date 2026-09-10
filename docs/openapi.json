@@ -9673,6 +9673,22 @@
         ],
         "type": "object"
       },
+      "SetTariff": {
+        "description": "What a tariff is set from.",
+        "properties": {
+          "bands": {
+            "description": "**First match wins**, so the order is your priority. A public holiday\ngoes above a general evening band.",
+            "items": {
+              "$ref": "#/components/schemas/TariffBand"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "bands"
+        ],
+        "type": "object"
+      },
       "SettingsView": {
         "example": {
           "business": "صالون بسمة",
@@ -10253,47 +10269,240 @@
         "type": "object"
       },
       "TariffBand": {
-        "description": "A price band on the wire.",
+        "description": "**A price band on the wire, and how it was written.**\n\nThe four authoring levels (`erp_rules::authoring`). A band written from a\ntemplate carries its *answers*, and the band itself is rebuilt from them —\nso reopening the form shows what was actually saved and there is no second\ncopy to fall behind. Editing the band directly is not an edit to the form:\nsend it back as `raw` and it stops being that template's band, which is the\ntruth about a rule somebody has hand-edited.",
+        "oneOf": [
+          {
+            "description": "A ready-made band, picked rather than filled in. **This build ships\nnone**: how much dearer is the one number a business must choose for\nitself, and a preset would be choosing it for them.",
+            "properties": {
+              "level": {
+                "enum": [
+                  "preset"
+                ],
+                "type": "string"
+              },
+              "template": {
+                "description": "Which one, from `GET /v1/booking/tariff/templates`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "template",
+              "level"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A template with its blanks filled in.",
+            "properties": {
+              "answers": {
+                "description": "One entry per field the template declares, as a plain JSON scalar\nof the field's kind: `{ \"name\": \"ذروة الخميس\", \"weekday\": 4,\n\"from_hour\": 17, \"percent\": 25 }`.",
+                "type": "object"
+              },
+              "level": {
+                "enum": [
+                  "form"
+                ],
+                "type": "string"
+              },
+              "template": {
+                "description": "Which template, from `GET /v1/booking/tariff/templates`.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "template",
+              "answers",
+              "level"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Composed on a builder screen rather than from a template.",
+            "properties": {
+              "hours": {
+                "$ref": "#/components/schemas/OpeningHours"
+              },
+              "level": {
+                "enum": [
+                  "builder"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "uplift": {
+                "format": "int32",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "uplift",
+              "hours",
+              "level"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Written out directly.",
+            "properties": {
+              "hours": {
+                "$ref": "#/components/schemas/OpeningHours",
+                "description": "When it applies, in local time. The same shape as a resource's\nhours."
+              },
+              "level": {
+                "enum": [
+                  "raw"
+                ],
+                "type": "string"
+              },
+              "name": {
+                "description": "Printed beside the price, so a person recognises it on a receipt.",
+                "type": "string"
+              },
+              "uplift": {
+                "description": "What it does to the rate, in basis points. `2500` is a quarter\nmore; `-1000` is a tenth off, which is what an off-peak band is.",
+                "format": "int32",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "uplift",
+              "hours",
+              "level"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "TariffBandView": {
+        "description": "A band as it reads back: how it was written, **and what it comes to**.\n\nBoth, because a client that only draws a calendar should not have to hold\nthe templates to know when a band applies. The band half is derived on the\nway out rather than stored, so it cannot disagree with the answers half.",
         "example": {
+          "answers": {
+            "from_hour": 17,
+            "name": "ذروة الخميس",
+            "percent": 25,
+            "weekday": 4
+          },
           "hours": {
-            "closes_at": 1260,
+            "closes_at": 1440,
             "opens_at": 1020,
             "weekdays": [
-              3,
               4
             ]
           },
-          "name": "ذروة المساء",
+          "level": "form",
+          "name": "ذروة الخميس",
+          "template": "weekday_evening",
           "uplift": 2500
         },
         "properties": {
+          "answers": {
+            "description": "What was filled in. Absent unless the level is `form`.",
+            "type": "object"
+          },
           "hours": {
             "$ref": "#/components/schemas/OpeningHours",
-            "description": "When it applies, in local time. The same shape as a resource's hours."
+            "description": "When it applies, in local time."
           },
-          "name": {
-            "description": "Printed beside the price, so a person recognises it on a receipt.",
+          "level": {
+            "description": "`preset`, `form`, `builder` or `raw`.",
             "type": "string"
           },
+          "name": {
+            "description": "Printed beside the price.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Which template it was written from. Absent for `builder` and `raw`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "uplift": {
-            "description": "What it does to the rate, in basis points. `2500` is a quarter more;\n`-1000` is a tenth off, which is what an off-peak band is.",
+            "description": "What it does to the rate, in basis points.",
             "format": "int32",
             "type": "integer"
           }
         },
         "required": [
+          "level",
           "name",
           "uplift",
           "hours"
         ],
         "type": "object"
       },
+      "TariffFieldView": {
+        "description": "One blank a template asks a business to fill in.",
+        "properties": {
+          "key": {
+            "description": "The key to use in `answers`.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`int`, `text`, `bool` or `money` — what kind of JSON scalar the answer\nis.",
+            "type": "string"
+          },
+          "label": {
+            "description": "What to call it on the screen, in the caller's language.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "TariffTemplateView": {
+        "description": "A ready-made band, and what it needs to know.",
+        "example": {
+          "fields": [
+            {
+              "key": "name",
+              "kind": "text",
+              "label": "What to call it"
+            }
+          ],
+          "id": "weekday_evening",
+          "name": "An evening costs more"
+        },
+        "properties": {
+          "fields": {
+            "description": "**Empty means a preset**: a band you pick rather than fill in.",
+            "items": {
+              "$ref": "#/components/schemas/TariffFieldView"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "What to send back as `template`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "In the caller's language.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "fields"
+        ],
+        "type": "object"
+      },
       "TariffView": {
+        "description": "What a tariff reads back as.",
         "properties": {
           "bands": {
             "description": "**First match wins**, so the order is your priority. A public holiday\ngoes above a general evening band.",
             "items": {
-              "$ref": "#/components/schemas/TariffBand"
+              "$ref": "#/components/schemas/TariffBandView"
             },
             "type": "array"
           }
@@ -14689,7 +14898,7 @@
                 }
               }
             },
-            "description": "An empty list means every hour is the same price.",
+            "description": "An empty list means every hour is the same price. A band written from a template carries both its `answers` and the band they build.",
             "headers": {
               "ETag": {
                 "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
@@ -14747,7 +14956,7 @@
                 }
               }
             },
-            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+            "description": "A stored band names a template this build no longer ships"
           }
         },
         "summary": "The tenant's price bands: which hours cost more, and by how much.",
@@ -14790,7 +14999,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/TariffView"
+                "$ref": "#/components/schemas/SetTariff"
               }
             }
           },
@@ -14896,6 +15105,95 @@
           "booking"
         ]
       }
+    },
+    "/v1/booking/tariff/templates": {
+      "get": {
+        "description": "Authenticated, unlike `/v1/booking/trades`: a price band is a thing a\nbusiness configures rather than something a signup form has to show before\nanybody has an account.",
+        "operationId": "tariff_templates",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TariffTemplateView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable booking"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "The ready-made bands, in the caller's language.",
+        "tags": [
+          "booking"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/booking/trades": {
       "get": {

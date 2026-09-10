@@ -3111,10 +3111,10 @@ and let two working cases describe the engine.
 
       **`Rule<E>` is smaller than §5.6 on purpose**, and each omission is an
       argument: `priority` duplicates list order, `effective` duplicates
-      `Availability`'s `from`/`until`, `origin` would have one value while there
-      is one authoring level, and `id`/`version` are per-rule editing the config
-      store already covers at set level. Each arrives with the consumer that
-      needs it.
+      `Availability`'s `from`/`until`, and `id`/`version` are per-rule editing
+      the config store already covers at set level. `origin` did arrive — as a
+      wrapper rather than a field, for the reason below. Each arrives with the
+      consumer that needs it.
 
       **One variant of `DynCondition` is not uniform**, deliberately.
       `Covers { window: Availability }` carries the working span evaluator
@@ -3128,15 +3128,18 @@ and let two working cases describe the engine.
       remove. `evaluate` takes its answer from `explain`, so they cannot
       disagree about which rule won — the property `preview_chart` and
       `install_chart` also have
-- [~] **Pricing is on it; authorization is the next spec.** `Tariff::band_for`
-      now takes its answer from the engine, and `Tariff::explain` says which
-      bands were tried and which won.
+- [x] **Pricing is on it.** `Tariff::band_for` takes its answer from the
+      engine, and `Tariff::explain` says which bands were tried and which won.
 
-      **The wire shape did not move.** A `Band` is still `{ name, when, uplift }`
-      in a tenant's stored configuration, because a tariff is a settings entry
-      and there is no upcaster to carry an old one across a rename. What changed
-      is who evaluates it. `the_engine_picks_the_band_the_old_matcher_would_have`
-      is the guard that protects a live tenant from being silently repriced
+      **A `Band` is still `{ name, when, uplift }`.** What a tenant writes did
+      not change when the engine took over evaluating it, and did not change
+      again when templates arrived — which is what "all producing the same
+      artifact" means. What *did* change is the envelope: the stored shape is
+      `TariffAsWritten { bands: Vec<Authored<Band>> }`, and `Tariff` is now what
+      resolving it produces. Everything downstream works on the resolved form,
+      so how a band was authored is a question only the settings screen asks.
+      `the_engine_picks_the_band_the_old_matcher_would_have` is the guard that
+      protects a live tenant from being silently repriced
 - [x] **Authorization on it — built 2026-09-10.** `erp_tenant::Limits` is
       `Rules<Verdict>` over three facts — `amount`, `branch`, `capability` —
       stored as tenant configuration under `tenant.permission_limits`, empty by
@@ -3192,9 +3195,59 @@ and let two working cases describe the engine.
       It scans the **whole workspace**, not the extractor — which its first run
       taught me, by correctly failing on `amount` while I was scanning one of
       the two places facts come from
-- [ ] Per-request fact assembly with startup coverage assertions — an
-      unsatisfiable condition fails the build, not a user's request
-- [ ] Authoring levels 0–3 with `origin` round-tripping
+- [x] **Authoring levels 0–3 with `origin` round-tripping — built
+      2026-09-10.** `erp_rules::Authored<A>` is the four levels, and `booking`
+      is the consumer: `GET /v1/booking/tariff/templates` draws the form,
+      `PUT /v1/booking/tariff` accepts any level, `GET` reads it back.
+
+      **A preset is a form with no blanks**, so levels 0 and 1 are one
+      mechanism rather than two. `Template::fields` being empty is the whole
+      difference, and the same code renders, checks and builds both.
+
+      **The answers are the truth.** A templated rule stores its answers and
+      *nothing else*; the artifact is rebuilt from them on every read. There is
+      no second copy to fall behind, which makes drift structurally impossible
+      rather than something a future reader has to remember to avoid.
+      `a_form_stores_its_answers_and_not_what_they_build` asserts the absence —
+      it fails the moment a built artifact appears in the stored JSON.
+
+      **So editing a templated rule's artifact is not an edit**: it replaces the
+      rule with a `Raw` one and drops the form. That is the honest outcome — a
+      rule somebody hand-edited is no longer that form's rule, and rendering it
+      as one is how a settings screen starts lying.
+
+      **Generic over the artifact, not the consequence.** `A` is
+      `booking::Band`, not `Rule<i32>`: a module that already has a
+      configuration shape keeps it, and `authoring.rs` never learns what a
+      condition is. `a_band_filled_into_a_form_prices_exactly_as_one_written_out`
+      books the same hour of the same Thursday twice, one band written each
+      way, and compares the price — which is "all producing the same artifact"
+      checked against a real booking.
+
+      **`booking` ships two forms and no presets.** How much dearer is the one
+      number a business must choose for itself; a preset that picked 25% would
+      be inventing their pricing. Presets earn their place where the *shape* is
+      the answer.
+
+      **A withdrawn template refuses rather than vanishing** (L6). A tariff
+      silently missing its peak band is a month of underbilling nobody notices,
+      so `TariffAsWritten::resolve` returns `ConfigError::Invalid` naming the
+      key, and the booking stops.
+
+      **The stored shape moved and nothing carries an old one across.** A
+      `booking.tariff` written before this reads back as a `500`, not a
+      degraded tariff. That is deliberate for a pre-launch system with a
+      disposable database; the alternative — deserialising a bare band as
+      `Raw` — costs a second declaration of the same enum, which is the drift
+      this codebase argues against everywhere else. If a tenant's tariff ever
+      needs carrying, that is the shape of the fix.
+
+      **Two things this found on the way.** `Tariff::band_for` looked the
+      winner up *by name*, so two bands a tenant called the same thing would
+      have priced the second at the first one's rate — a mistake forms make
+      much easier to commit. It takes the winner by position now.
+      And `the_same_answers_serialise_the_same_way` was a tautology that could
+      not be falsified: it compared two values equal by construction
 - [ ] Rule packs as blueprints
 - [x] **`explain` — built** for pricing, and generic: `Rules::explain` names
       every rule tried, in order, with whether each matched. Effective-permission

@@ -56,6 +56,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(public_availability))
         .routes(routes!(public_reserve))
         .routes(routes!(tariff, set_tariff))
+        .routes(routes!(tariff_templates))
         .routes(routes!(
             public_booking_settings,
             set_public_booking_settings
@@ -1723,21 +1724,111 @@ async fn lift_bar(
     }))
 }
 
-/// A price band on the wire.
+/// **A price band on the wire, and how it was written.**
+///
+/// The four authoring levels (`erp_rules::authoring`). A band written from a
+/// template carries its *answers*, and the band itself is rebuilt from them —
+/// so reopening the form shows what was actually saved and there is no second
+/// copy to fall behind. Editing the band directly is not an edit to the form:
+/// send it back as `raw` and it stops being that template's band, which is the
+/// truth about a rule somebody has hand-edited.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "level", rename_all = "snake_case")]
+enum TariffBand {
+    /// A ready-made band, picked rather than filled in. **This build ships
+    /// none**: how much dearer is the one number a business must choose for
+    /// itself, and a preset would be choosing it for them.
+    Preset {
+        /// Which one, from `GET /v1/booking/tariff/templates`.
+        template: String,
+    },
+    /// A template with its blanks filled in.
+    Form {
+        /// Which template, from `GET /v1/booking/tariff/templates`.
+        template: String,
+        /// One entry per field the template declares, as a plain JSON scalar
+        /// of the field's kind: `{ "name": "ذروة الخميس", "weekday": 4,
+        /// "from_hour": 17, "percent": 25 }`.
+        #[schema(value_type = Object)]
+        answers: serde_json::Map<String, serde_json::Value>,
+    },
+    /// Composed on a builder screen rather than from a template.
+    Builder {
+        name: String,
+        uplift: i32,
+        hours: OpeningHours,
+    },
+    /// Written out directly.
+    Raw {
+        /// Printed beside the price, so a person recognises it on a receipt.
+        name: String,
+        /// What it does to the rate, in basis points. `2500` is a quarter
+        /// more; `-1000` is a tenth off, which is what an off-peak band is.
+        uplift: i32,
+        /// When it applies, in local time. The same shape as a resource's
+        /// hours.
+        hours: OpeningHours,
+    },
+}
+
+/// A band as it reads back: how it was written, **and what it comes to**.
+///
+/// Both, because a client that only draws a calendar should not have to hold
+/// the templates to know when a band applies. The band half is derived on the
+/// way out rather than stored, so it cannot disagree with the answers half.
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[schema(example = json!({
-    "name": "ذروة المساء",
+    "level": "form",
+    "template": "weekday_evening",
+    "answers": { "name": "ذروة الخميس", "weekday": 4, "from_hour": 17, "percent": 25 },
+    "name": "ذروة الخميس",
     "uplift": 2500,
-    "hours": { "weekdays": [3, 4], "opens_at": 1020, "closes_at": 1260 }
+    "hours": { "weekdays": [4], "opens_at": 1020, "closes_at": 1440 }
 }))]
-struct TariffBand {
-    /// Printed beside the price, so a person recognises it on a receipt.
+struct TariffBandView {
+    /// `preset`, `form`, `builder` or `raw`.
+    level: &'static str,
+    /// Which template it was written from. Absent for `builder` and `raw`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<String>,
+    /// What was filled in. Absent unless the level is `form`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    answers: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Printed beside the price.
     name: String,
-    /// What it does to the rate, in basis points. `2500` is a quarter more;
-    /// `-1000` is a tenth off, which is what an off-peak band is.
+    /// What it does to the rate, in basis points.
     uplift: i32,
-    /// When it applies, in local time. The same shape as a resource's hours.
+    /// When it applies, in local time.
     hours: OpeningHours,
+}
+
+/// One blank a template asks a business to fill in.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+struct TariffFieldView {
+    /// The key to use in `answers`.
+    key: &'static str,
+    /// What to call it on the screen, in the caller's language.
+    label: &'static str,
+    /// `int`, `text`, `bool` or `money` — what kind of JSON scalar the answer
+    /// is.
+    kind: &'static str,
+}
+
+/// A ready-made band, and what it needs to know.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[schema(example = json!({
+    "id": "weekday_evening",
+    "name": "An evening costs more",
+    "fields": [{ "key": "name", "label": "What to call it", "kind": "text" }]
+}))]
+struct TariffTemplateView {
+    /// What to send back as `template`.
+    id: &'static str,
+    /// In the caller's language.
+    name: &'static str,
+    /// **Empty means a preset**: a band you pick rather than fill in.
+    fields: Vec<TariffFieldView>,
 }
 
 /// What a stranger may do on this tenant's public booking site.
@@ -1940,8 +2031,17 @@ async fn set_billing_settings(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Debug, Deserialize, Serialize, ToSchema)]
+/// What a tariff reads back as.
+#[derive(Debug, Serialize, ToSchema)]
 struct TariffView {
+    /// **First match wins**, so the order is your priority. A public holiday
+    /// goes above a general evening band.
+    bands: Vec<TariffBandView>,
+}
+
+/// What a tariff is set from.
+#[derive(Debug, Deserialize, ToSchema)]
+struct SetTariff {
     /// **First match wins**, so the order is your priority. A public holiday
     /// goes above a general evening band.
     bands: Vec<TariffBand>,
@@ -1953,7 +2053,8 @@ struct TariffView {
     path = "/v1/booking/tariff",
     tag = "booking",
     responses(
-        (status = OK, description = "An empty list means every hour is the same price.", body = TariffView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
+        (status = OK, description = "An empty list means every hour is the same price. A band written from a template carries both its `answers` and the band they build.", body = TariffView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
+        (status = INTERNAL_SERVER_ERROR, description = "A stored band names a template this build no longer ships", body = Problem),
         (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
@@ -1965,26 +2066,86 @@ async fn tariff(
 ) -> Result<Versioned<TariffView>, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
-    let version = erp_eventlog::configuration::version_of(&mut conn, crate::Tariff::KEY)
+    let key = crate::TariffAsWritten::KEY;
+    let version = erp_eventlog::configuration::version_of(&mut conn, key)
         .await
         .map_err(|e| config(&e, locale))?;
-    let resolved = crate::Tariff::resolve(&mut conn)
+    // The written form rather than the resolved one: this screen shows a
+    // business what they wrote, and what it comes to.
+    let written = erp_eventlog::configuration::get::<crate::TariffAsWritten>(&mut conn, key)
         .await
-        .map_err(|e| config(&e, locale))?;
+        .map_err(|e| config(&e, locale))?
+        .map(|configured| configured.value)
+        .unwrap_or_default();
+
+    // **A stored tariff that no longer resolves is a `500`, not a `400`.** The
+    // caller sent nothing; a template this build stopped shipping is our
+    // problem, and `config` is how every other unusable setting says so.
+    let resolved = written.resolve().map_err(|e| config(&e, locale))?;
 
     Ok(Versioned(
         version,
         TariffView {
-            bands: resolved
+            // Zipped, because `resolve` maps over the same list in the same
+            // order — the band beside the answers that built it.
+            bands: written
                 .bands
                 .iter()
-                .map(|b| TariffBand {
-                    name: b.name.clone(),
-                    uplift: b.uplift,
-                    hours: hours(&b.when),
+                .zip(resolved.bands)
+                .map(|(authored, band)| TariffBandView {
+                    level: authored.level(),
+                    template: authored.template().map(str::to_owned),
+                    answers: match authored {
+                        erp_rules::Authored::Form { answers, .. } => Some(given(answers)),
+                        _ => None,
+                    },
+                    name: band.name,
+                    uplift: band.uplift,
+                    hours: hours(&band.when),
                 })
                 .collect(),
         },
+    ))
+}
+
+/// The ready-made bands, in the caller's language.
+///
+/// Authenticated, unlike `/v1/booking/trades`: a price band is a thing a
+/// business configures rather than something a signup form has to show before
+/// anybody has an account.
+#[utoipa::path(
+    get,
+    path = "/v1/booking/tariff/templates",
+    tag = "booking",
+    responses(
+        (status = OK, body = Vec<TariffTemplateView>),
+        (status = NOT_FOUND, description = "The tenant did not enable booking", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+    ),
+)]
+async fn tariff_templates(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<Vec<TariffTemplateView>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    Ok(Json(
+        crate::templates::TARIFF_TEMPLATES
+            .iter()
+            .map(|template| TariffTemplateView {
+                id: template.id,
+                name: template.name(locale),
+                fields: template
+                    .fields
+                    .iter()
+                    .map(|field| TariffFieldView {
+                        key: field.key,
+                        label: field.label(locale),
+                        kind: answer_kind(field.kind),
+                    })
+                    .collect(),
+            })
+            .collect(),
     ))
 }
 
@@ -1999,7 +2160,7 @@ async fn tariff(
     path = "/v1/booking/tariff",
     tag = "booking",
     params(("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.")),
-    request_body = TariffView,
+    request_body = SetTariff,
     responses(
         (status = NO_CONTENT, description = "Set."),
         (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
@@ -2013,47 +2174,21 @@ async fn set_tariff(
     tenant: Allowed<ManageTenant>,
     Language(locale): Language,
     IfMatch(expected): IfMatch,
-    Json(body): Json<TariffView>,
+    Json(body): Json<SetTariff>,
 ) -> Result<StatusCode, Problem> {
     require_module(&tenant.db, &crate::module_id(), locale)?;
 
     let bands = body
         .bands
-        .iter()
-        .map(|b| {
-            // Below -100% the business would be paying the customer to come in.
-            if b.uplift < -10_000 {
-                return Err(Problem::new(
-                    StatusCode::BAD_REQUEST,
-                    &erp_i18n::Message::new(crate::messages::NOT_A_RATE),
-                    locale,
-                    &CATALOG,
-                ));
-            }
-            Ok(crate::Band {
-                name: b.name.clone(),
-                when: Availability::from_parts(
-                    &b.hours.months,
-                    &b.hours.weekdays,
-                    &b.hours.days,
-                    b.hours.opens_at,
-                    b.hours.closes_at,
-                    b.hours.from,
-                    b.hours.until,
-                )
-                .map_err(|e| {
-                    Problem::new(StatusCode::BAD_REQUEST, &e.message(), locale, &CATALOG)
-                })?,
-                uplift: b.uplift,
-            })
-        })
+        .into_iter()
+        .map(|band| authored(band, locale))
         .collect::<Result<Vec<_>, Problem>>()?;
 
     let mut conn = tenant.db.acquire().await.map_err(|e| pool(&e, locale))?;
     erp_eventlog::configuration::set(
         &mut conn,
-        crate::Tariff::KEY,
-        &crate::Tariff { bands },
+        crate::TariffAsWritten::KEY,
+        &crate::TariffAsWritten { bands },
         Some(&tenant.session.identity.to_string()),
         expected,
     )
@@ -2061,6 +2196,174 @@ async fn set_tariff(
     .map_err(|e| config(&e, locale))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// One band on the wire, as it will be stored.
+///
+/// **A templated band is built here and thrown away.** The answers are what is
+/// kept; building is how answers that describe no band are refused while the
+/// person who wrote them is still looking at the screen, rather than at the
+/// next booking.
+fn authored(band: TariffBand, locale: Locale) -> Result<erp_rules::Authored<crate::Band>, Problem> {
+    let templates = crate::templates::TARIFF_TEMPLATES;
+    match band {
+        TariffBand::Preset { template } => {
+            erp_rules::Authored::written(templates, &template, erp_rules::Answers::new())
+                .map_err(|why| unfillable(&why, locale))
+        }
+        TariffBand::Form { template, answers } => {
+            // Looked up here as well as inside `written`, because reading the
+            // answers needs the kinds the template declares.
+            let found = crate::templates::find(&template).ok_or_else(|| {
+                unfillable(
+                    &erp_rules::Unfillable::NoSuchTemplate(template.clone()),
+                    locale,
+                )
+            })?;
+            let filled = answers_of(found, &answers, locale)?;
+            erp_rules::Authored::written(templates, &template, filled)
+                .map_err(|why| unfillable(&why, locale))
+        }
+        TariffBand::Builder {
+            name,
+            uplift,
+            hours,
+        } => Ok(erp_rules::Authored::Builder {
+            rule: written_band(name, uplift, &hours, locale)?,
+        }),
+        TariffBand::Raw {
+            name,
+            uplift,
+            hours,
+        } => Ok(erp_rules::Authored::Raw {
+            rule: written_band(name, uplift, &hours, locale)?,
+        }),
+    }
+}
+
+/// A band somebody wrote out rather than filled in.
+fn written_band(
+    name: String,
+    uplift: i32,
+    when: &OpeningHours,
+    locale: Locale,
+) -> Result<crate::Band, Problem> {
+    // Below -100% the business would be paying the customer to come in.
+    if uplift < -10_000 {
+        return Err(Problem::new(
+            StatusCode::BAD_REQUEST,
+            &erp_i18n::Message::new(crate::messages::NOT_A_RATE),
+            locale,
+            &CATALOG,
+        ));
+    }
+    Ok(crate::Band {
+        name,
+        when: Availability::from_parts(
+            &when.months,
+            &when.weekdays,
+            &when.days,
+            when.opens_at,
+            when.closes_at,
+            when.from,
+            when.until,
+        )
+        .map_err(|e| Problem::new(StatusCode::BAD_REQUEST, &e.message(), locale, &CATALOG))?,
+        uplift,
+    })
+}
+
+/// **Plain JSON scalars in, typed answers out.**
+///
+/// A settings screen sends `{"weekday": 4}`; what is stored is
+/// `{"weekday": {"type": "int", "of": 4}}`. The field's declared kind is what
+/// bridges them, which is most of what declaring a kind is for.
+///
+/// A missing answer is not caught here — `Authored::written` reports which
+/// template asked for what, and it reports every answer against one list
+/// rather than two.
+fn answers_of(
+    template: &erp_rules::Template<crate::Band>,
+    given: &serde_json::Map<String, serde_json::Value>,
+    locale: Locale,
+) -> Result<erp_rules::Answers, Problem> {
+    let mut answers = erp_rules::Answers::new();
+    for (key, raw) in given {
+        let field = template
+            .fields
+            .iter()
+            .find(|f| f.key == key)
+            .ok_or_else(|| not_an_answer(key, locale))?;
+        let value = match (field.kind, raw) {
+            (erp_rules::Kind::Int, serde_json::Value::Number(n)) => {
+                n.as_i64().map(erp_rules::Value::Int)
+            }
+            (erp_rules::Kind::Text, serde_json::Value::String(s)) => {
+                Some(erp_rules::Value::Text(s.clone()))
+            }
+            (erp_rules::Kind::Bool, serde_json::Value::Bool(b)) => Some(erp_rules::Value::Bool(*b)),
+            // **An amount is not a plain scalar** and no band template asks for
+            // one. The day a template does, this arm is where it goes, and this
+            // refusal is what says so.
+            _ => None,
+        }
+        .ok_or_else(|| not_an_answer(key, locale))?;
+        answers.insert(key.clone(), value);
+    }
+    Ok(answers)
+}
+
+/// The reverse, for reading a form back.
+fn given(answers: &erp_rules::Answers) -> serde_json::Map<String, serde_json::Value> {
+    answers
+        .iter()
+        .map(|(key, value)| {
+            let raw = match value {
+                erp_rules::Value::Int(n) => serde_json::json!(n),
+                erp_rules::Value::Text(s) => serde_json::json!(s),
+                erp_rules::Value::Bool(b) => serde_json::json!(b),
+                erp_rules::Value::Money(m) => serde_json::json!({
+                    "minor": m.minor(),
+                    "currency": m.currency().to_string(),
+                }),
+            };
+            (key.clone(), raw)
+        })
+        .collect()
+}
+
+fn not_an_answer(field: &str, locale: Locale) -> Problem {
+    Problem::new(
+        StatusCode::BAD_REQUEST,
+        &erp_i18n::Message::new(crate::messages::NOT_AN_ANSWER)
+            .with("field", erp_i18n::MessageArg::text(field.to_owned())),
+        locale,
+        &CATALOG,
+    )
+}
+
+/// A set of answers that produces no band.
+///
+/// **A bad request, because the caller just sent it.** The other way this
+/// fails — a stored band whose template this build no longer ships — is not
+/// the caller's doing and goes out as a `500` through `config`, the way every
+/// other unusable setting does.
+fn unfillable(why: &erp_rules::Unfillable, locale: Locale) -> Problem {
+    Problem::new(
+        StatusCode::BAD_REQUEST,
+        &crate::templates::refusal(why),
+        locale,
+        &CATALOG,
+    )
+}
+
+const fn answer_kind(of: erp_rules::Kind) -> &'static str {
+    match of {
+        erp_rules::Kind::Int => "int",
+        erp_rules::Kind::Text => "text",
+        erp_rules::Kind::Bool => "bool",
+        erp_rules::Kind::Money => "money",
+    }
 }
 
 /// Ready-made rotas, in the caller's language.

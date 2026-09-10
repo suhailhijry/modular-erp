@@ -22,15 +22,17 @@
 //!
 //! # What is deliberately not here
 //!
-//! Authorization on the engine, the four authoring levels with `origin`
-//! round-tripping, and rule packs as blueprints. Each is a later phase with its
-//! own consumer; see `docs/superpowers/specs/2026-09-10-rules-engine-design.md`
-//! for what each is waiting on.
+//! Rule packs as blueprints, and an `explain`-backed dry run. Each is a later
+//! phase with its own consumer; see
+//! `docs/superpowers/specs/2026-09-10-rules-engine-design.md` for what each is
+//! waiting on.
 
+pub mod authoring;
 pub mod condition;
 pub mod fact;
 pub mod rule;
 
+pub use authoring::{Answers, Authored, Field, Template, Unfillable};
 pub use condition::{DynCondition, Invalid, Op};
 pub use fact::{FactName, FactRegistry, Facts, Kind, Value};
 pub use rule::{Considered, Explained, Rule, Rules};

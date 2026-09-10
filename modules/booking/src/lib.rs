@@ -54,6 +54,7 @@ pub mod pricing;
 mod projections;
 mod reservation;
 mod resource;
+pub mod templates;
 pub mod trades;
 pub mod verification;
 
@@ -69,7 +70,8 @@ pub use commands::{
 };
 pub use erp_recurrence::{Availability, BadRule, Calendar, NotAZone, any_covers};
 pub use pricing::{
-    Allowance, Applied, Band, Billing, Charge, Charged, PriceError, PublicBooking, Tariff, price,
+    Allowance, Applied, Band, Billing, Charge, Charged, PriceError, PublicBooking, Tariff,
+    TariffAsWritten, price,
 };
 pub use projections::{
     Bar, Barred, Booking, Lapsed, Performed, ReservationDetail, ReservationLine,

@@ -934,6 +934,7 @@ name = "erp-rules"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "erp-i18n",
  "erp-occupancy",
  "erp-recurrence",
  "erp-rules",

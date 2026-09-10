@@ -125,7 +125,7 @@ ARCHITECTURE §5.6 also lists `id`, `version`, `priority`, `effective` and
 |---|---|
 | `priority` | The list is ordered and first match wins, which is what `Tariff::band_for` already does. A priority *and* an order is two ways to say one thing, and they disagree eventually |
 | `effective: DateRange` | `Availability` already carries `from`/`until`. A second date range on the rule would be a second answer to the same question |
-| `origin` | Records which authoring level produced a rule. There is one level today — a JSON body — so it would have one value |
+| `origin` | Records which authoring level produced a rule. There is one level today — a JSON body — so it would have one value. **Since delivered, and not as a field**: `Authored<A>` wraps the artifact, because a form-authored rule has no condition of its own to carry — it has answers, and the condition is rebuilt from them |
 | `id`, `version` | The whole rule set is one versioned configuration entry with an `ETag`, which is what pricing already uses. Per-rule versioning is for when rules are edited individually |
 
 Each arrives with the consumer that needs it. Adding them now means five fields
@@ -182,7 +182,11 @@ salon.
 - **Authorization on the engine.** Its three facts, and the narrowing rule that
   a fact-based override refines `Role::allows` and never widens it. Second spec.
 - **Authoring levels 0–3 and `origin` round-tripping.** Third spec, and the one
-  that decides whether most tenants ever see JSON.
+  that decides whether most tenants ever see JSON. **Built 2026-09-10** —
+  `erp_rules::authoring`, with the design recorded in that module and in
+  ARCHITECTURE §5.6 rather than in a separate spec: one question needed
+  deciding (whether the answers or the condition are the truth) and the answer
+  is the whole shape.
 - **Rule packs as blueprints.** Rides on 4d's pipeline, whose preview step now
   exists.
 - **Per-request fact assembly with startup coverage assertions.** Needs a

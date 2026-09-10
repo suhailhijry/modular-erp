@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use erp_occupancy::Span;
 use erp_recurrence::Availability;
 use erp_recurrence::Calendar;
-use erp_rules::{DynCondition, Facts, Rule, Rules};
+use erp_rules::{Authored, DynCondition, Facts, Rule, Rules};
 
 /// Something taken off a line, and why.
 ///
@@ -200,17 +200,57 @@ pub struct PriceExplained {
     pub considered: Vec<(String, bool)>,
 }
 
+/// **The tariff as the tenant wrote it**, which is what is stored.
+///
+/// A band written from a template holds its *answers*, and the band is rebuilt
+/// from them by [`Self::resolve`] on every read. Nothing here holds both, so a
+/// screen showing somebody their form and the engine pricing their booking are
+/// reading the same thing. See `crate::templates`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Tariff {
+pub struct TariffAsWritten {
     /// **First match wins**, so the order is the tenant's priority. A specific
     /// window — a public holiday — goes above a general one.
+    pub bands: Vec<Authored<Band>>,
+}
+
+impl TariffAsWritten {
+    /// Where a tenant's choice is stored.
+    pub const KEY: &'static str = "booking.tariff";
+
+    /// The bands these come to, rebuilding every templated one.
+    ///
+    /// # Errors
+    /// [`ConfigError::Invalid`](erp_eventlog::ConfigError::Invalid) if a band
+    /// names a template this build no longer ships, or its answers no longer
+    /// fill one. **Refuses rather than dropping the band** (L6): a tariff
+    /// silently missing its peak rate is a month of underbilling nobody
+    /// notices.
+    pub fn resolve(&self) -> Result<Tariff, erp_eventlog::ConfigError> {
+        self.bands
+            .iter()
+            .map(|band| band.rule(crate::templates::TARIFF_TEMPLATES))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|bands| Tariff { bands })
+            .map_err(|why| erp_eventlog::ConfigError::Invalid {
+                key: Self::KEY.to_owned(),
+                reason: why.to_string(),
+            })
+    }
+}
+
+/// **The tariff as it applies**, which is what prices a booking.
+///
+/// Not stored and not on the wire: it is what [`TariffAsWritten::resolve`]
+/// produces. Everything downstream — [`Self::band_for`], [`price`] — works on
+/// this, so how a band was authored is a question only the settings screen
+/// ever asks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tariff {
+    /// First match wins, in the order the tenant wrote them.
     pub bands: Vec<Band>,
 }
 
 impl Tariff {
-    /// Where a tenant's choice is stored.
-    pub const KEY: &'static str = "booking.tariff";
-
     /// What this tenant has configured, or nothing.
     ///
     /// An empty tariff is the shipped default and it means every hour is the
@@ -218,9 +258,10 @@ impl Tariff {
     /// with. A tenant who *has* configured one and stored something unusable
     /// gets an error rather than silently losing their peak rates.
     pub async fn resolve(conn: &mut sqlx::PgConnection) -> Result<Self, erp_eventlog::ConfigError> {
-        Ok(erp_eventlog::configuration::get::<Self>(conn, Self::KEY)
+        erp_eventlog::configuration::get::<TariffAsWritten>(conn, TariffAsWritten::KEY)
             .await?
-            .map_or_else(Self::default, |configured| configured.value))
+            .map_or_else(TariffAsWritten::default, |configured| configured.value)
+            .resolve()
     }
 
     /// The band a span falls in, if any.
@@ -233,11 +274,17 @@ impl Tariff {
     #[must_use]
     pub fn band_for(&self, span: Span, calendar: Calendar) -> Option<&Band> {
         let at = self.explain(span, calendar);
-        // `explain` names the winner; this returns the band it names. Two
+        at.matched.as_ref()?;
+        // `explain` decides; this returns the band it decided on. Two
         // implementations of "which band wins" would disagree eventually, and
         // the disagreement would be a price nobody could account for.
-        at.matched
-            .and_then(|(name, _)| self.bands.iter().find(|band| band.name == name))
+        //
+        // **By position, not by name.** `considered` is every band tried in
+        // order up to and including the winner, so the winner is its last
+        // entry — and two bands a tenant happened to give the same name stay
+        // two bands. Looking the name up would have quietly priced the second
+        // at the first one's rate.
+        self.bands.get(at.considered.len() - 1)
     }
 
     /// **Which band applies, and every one considered getting there.**
@@ -268,10 +315,10 @@ impl Tariff {
 
     /// This tariff as rules the engine evaluates.
     ///
-    /// **The wire shape did not move.** A `Band` is still `{ name, when,
-    /// uplift }` in a tenant's stored configuration, because a tariff is a
-    /// settings entry rather than an event and there is no upcaster to carry an
-    /// old one across a rename. What changed is who evaluates it.
+    /// **A `Band` is still `{ name, when, uplift }`.** What a tenant writes did
+    /// not change when the engine took over evaluating it, and did not change
+    /// again when templates arrived — a templated band produces exactly this,
+    /// which is what "all producing the same artifact" means.
     #[must_use]
     pub fn rules(&self) -> Rules<i32> {
         Rules::new(
@@ -685,6 +732,102 @@ mod engine_tests {
                 "at {hour}:00"
             );
         }
+    }
+
+    /// **Two bands a tenant gave the same name stay two bands.**
+    ///
+    /// A form makes this easy to do by accident — two evenings, both called
+    /// "Peak" — and looking the winner up by name would have quietly priced
+    /// the second at the first one's rate.
+    #[test]
+    fn two_bands_with_the_same_name_stay_two_bands() {
+        let tariff = Tariff {
+            bands: vec![
+                Band {
+                    name: "Peak".to_owned(),
+                    when: Availability::from_parts(&[], &[4], &[], 17 * 60, 21 * 60, None, None)
+                        .expect("a window"),
+                    uplift: 2_500,
+                },
+                Band {
+                    name: "Peak".to_owned(),
+                    when: Availability::from_parts(&[], &[], &[], 0, 24 * 60, None, None)
+                        .expect("a window"),
+                    uplift: 500,
+                },
+            ],
+        };
+
+        // 10:00 Thursday: outside the first band, inside the second.
+        assert_eq!(
+            tariff.band_for(at("2026-05-07", 10), Calendar::default()),
+            Some(&tariff.bands[1]),
+            "the second band applied, so its own uplift is what is charged"
+        );
+    }
+
+    /// A band written from a template comes back as the band its answers
+    /// describe, and prices exactly as a hand-written one would.
+    #[test]
+    fn a_templated_band_resolves_to_what_its_answers_describe() {
+        let answers = [
+            ("name", erp_rules::Value::Text("ذروة الخميس".to_owned())),
+            ("weekday", erp_rules::Value::Int(4)),
+            ("from_hour", erp_rules::Value::Int(17)),
+            ("percent", erp_rules::Value::Int(25)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        let written = TariffAsWritten {
+            bands: vec![
+                Authored::written(
+                    crate::templates::TARIFF_TEMPLATES,
+                    "weekday_evening",
+                    answers,
+                )
+                .expect("filled in"),
+            ],
+        };
+
+        let tariff = written.resolve().expect("it builds");
+
+        assert_eq!(
+            tariff.band_for(at("2026-05-07", 18), Calendar::default()),
+            Some(&tariff.bands[0])
+        );
+        assert_eq!(tariff.bands[0].uplift, 2_500);
+    }
+
+    /// **A withdrawn template does not quietly drop the band.**
+    ///
+    /// A tariff silently missing its peak rate is a month of underbilling
+    /// nobody notices, which is what L6 refuses on behalf of.
+    #[test]
+    fn a_band_naming_a_template_this_build_does_not_ship_refuses_the_whole_tariff() {
+        let written = TariffAsWritten {
+            bands: vec![Authored::Preset {
+                template: "seasonal".to_owned(),
+            }],
+        };
+
+        let why = written.resolve().expect_err("there is no such template");
+
+        assert!(
+            matches!(why, erp_eventlog::ConfigError::Invalid { ref key, .. }
+                if key == TariffAsWritten::KEY),
+            "{why:?}"
+        );
+    }
+
+    /// A tariff nobody has written is empty rather than an error, which is what
+    /// every tenant starts with.
+    #[test]
+    fn an_unwritten_tariff_resolves_to_no_bands() {
+        assert_eq!(
+            TariffAsWritten::default().resolve().expect("no bands"),
+            Tariff::default()
+        );
     }
 
     /// An empty tariff is the shipped default: every hour the same price.

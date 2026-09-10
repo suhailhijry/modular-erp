@@ -21,8 +21,11 @@ use crate::{
 /// - **`effective`** — [`Availability`](erp_recurrence::Availability) already
 ///   carries `from` and `until`. A second date range on the rule would be a
 ///   second answer to the same question.
-/// - **`origin`** — records which authoring level produced a rule. There is one
-///   today, so it would have one value.
+/// - **`origin`** — records which authoring level produced a rule, and it is
+///   [`Authored`](crate::Authored) rather than a field. A rule written from a
+///   form has no condition of its own to carry: it has answers, and the
+///   condition is rebuilt from them. A field beside the condition would be the
+///   second copy that arrangement exists to avoid.
 /// - **`id`/`version`** — a whole rule set is one versioned configuration entry
 ///   with an `ETag`. Per-rule versions are for editing rules individually.
 ///

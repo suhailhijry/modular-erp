@@ -34,6 +34,15 @@ pub const ALLOWANCE_TOO_LARGE: MessageCode = MessageCode::new("booking.allowance
 pub const MIXED_CURRENCIES: MessageCode = MessageCode::new("booking.mixed_currencies");
 pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("booking.amount_out_of_range");
 
+// Writing a price band from a template. See `crate::templates`.
+pub const NO_SUCH_TEMPLATE: MessageCode = MessageCode::new("booking.no_such_template");
+pub const UNANSWERED: MessageCode = MessageCode::new("booking.unanswered");
+pub const NOT_AN_ANSWER: MessageCode = MessageCode::new("booking.not_an_answer");
+pub const NOT_A_WEEKDAY: MessageCode = MessageCode::new("booking.not_a_weekday");
+pub const NOT_AN_HOUR: MessageCode = MessageCode::new("booking.not_an_hour");
+pub const NOT_A_WINDOW: MessageCode = MessageCode::new("booking.not_a_window");
+pub const TEMPLATE_BROKEN: MessageCode = MessageCode::new("booking.template_broken");
+
 pub const NOT_A_PHONE: MessageCode = MessageCode::new("booking.not_a_phone");
 pub const CODE_TOO_SOON: MessageCode = MessageCode::new("booking.code_too_soon");
 pub const CODE_NOT_VALID: MessageCode = MessageCode::new("booking.code_not_valid");
@@ -84,9 +93,88 @@ pub static CODES: &[MessageCode] = &[
     ALLOWANCE_TOO_LARGE,
     MIXED_CURRENCIES,
     AMOUNT_OUT_OF_RANGE,
+    NO_SUCH_TEMPLATE,
+    UNANSWERED,
+    NOT_AN_ANSWER,
+    NOT_A_WEEKDAY,
+    NOT_AN_HOUR,
+    NOT_A_WINDOW,
+    TEMPLATE_BROKEN,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NO_SUCH_TEMPLATE,
+        Locale::English,
+        Template::Simple("There is no price band template {template}."),
+    ),
+    (
+        NO_SUCH_TEMPLATE,
+        Locale::Arabic,
+        Template::Simple("لا يوجد قالب شريحة سعر باسم {template}."),
+    ),
+    (
+        UNANSWERED,
+        Locale::English,
+        Template::Simple("{template} asks for {field} and it was left blank."),
+    ),
+    (
+        UNANSWERED,
+        Locale::Arabic,
+        Template::Simple("{template} يطلب {field} وقد تُرك فارغًا."),
+    ),
+    (
+        NOT_AN_ANSWER,
+        Locale::English,
+        Template::Simple("{field} is not an answer this template takes."),
+    ),
+    (
+        NOT_AN_ANSWER,
+        Locale::Arabic,
+        Template::Simple("{field} ليس إجابة يقبلها هذا القالب."),
+    ),
+    (
+        NOT_A_WEEKDAY,
+        Locale::English,
+        Template::Simple("A day of the week is 1 for Monday through 7 for Sunday."),
+    ),
+    (
+        NOT_A_WEEKDAY,
+        Locale::Arabic,
+        Template::Simple("يوم الأسبوع من ١ للاثنين إلى ٧ للأحد."),
+    ),
+    (
+        NOT_AN_HOUR,
+        Locale::English,
+        Template::Simple("An hour of the day is 0 to 23."),
+    ),
+    (
+        NOT_AN_HOUR,
+        Locale::Arabic,
+        Template::Simple("ساعة اليوم من ٠ إلى ٢٣."),
+    ),
+    (
+        NOT_A_WINDOW,
+        Locale::English,
+        Template::Simple("Those answers do not describe a window of time."),
+    ),
+    (
+        NOT_A_WINDOW,
+        Locale::Arabic,
+        Template::Simple("هذه الإجابات لا تصف نافذة زمنية."),
+    ),
+    (
+        TEMPLATE_BROKEN,
+        Locale::English,
+        Template::Simple(
+            "This price band template is broken and cannot be used. Please report it.",
+        ),
+    ),
+    (
+        TEMPLATE_BROKEN,
+        Locale::Arabic,
+        Template::Simple("هذا القالب معطوب ولا يمكن استخدامه. الرجاء إبلاغنا."),
+    ),
     (
         NOTHING_TO_BILL,
         Locale::English,
