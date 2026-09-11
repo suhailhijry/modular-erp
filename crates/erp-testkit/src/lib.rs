@@ -65,6 +65,21 @@ pub(crate) const TEMPLATE_DB_PREFIX: &str = "erp_tmpl_";
 /// the check needs no extra bookkeeping.
 pub(crate) const SWEEP_GRACE_MILLIS: u128 = 60 * 1000;
 
+/// How stale a **tenant** database must be before a run will drop one.
+///
+/// Two hours against the minute above, and the difference is what the
+/// connection check can be trusted to prove. A leftover `erp_test_*` database
+/// is held by a pool for as long as its test runs, so "idle" means finished.
+/// An `erp_tenant_*` database is made by `provision` and may sit untouched for
+/// minutes in the middle of a test that is very much still using it.
+///
+/// So the age is the guard here, and it has to be wider than a **whole run**
+/// rather than wider than a gap: `nextest` starts binaries throughout a run, so
+/// a late-starting one can see a database an early-starting one made. The suite
+/// takes about twenty minutes; two hours leaves room for a slow machine and
+/// still clears yesterday's leftovers on the first run of the day.
+pub(crate) const TENANT_SWEEP_GRACE_MILLIS: i64 = 2 * 60 * 60 * 1000;
+
 /// Where to reach Postgres.
 ///
 /// Resolution order, first hit wins:

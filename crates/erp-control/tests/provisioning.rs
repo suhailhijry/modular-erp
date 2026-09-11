@@ -838,80 +838,32 @@ async fn a_refresh_does_not_drop_tables_under_a_projection_run() {
 // Databases no tenant row claims
 // ---------------------------------------------------------------------------
 
-/// **The age gate is read out of the name, and it is the whole safety of this.**
+/// The grace arithmetic, over the rule that decides what may be dated at all.
 ///
-/// `provision` creates a database and writes the row that claims it in separate
-/// statements, so there is briefly a database nothing points at. A sweep that
-/// ran inside that window would delete a business on its first day — so a fresh
-/// name is never a candidate, whatever else is true of it.
-///
-/// DB-free: the name is a `UUIDv7` and its timestamp is its age, so this needs no
-/// cluster and no clock but the one in the id.
+/// **The rule itself is tested where it lives** —
+/// `erp_types::TenantId::named_in_database`, beside the id whose shape it
+/// reads. This checks only what this crate adds: that a name minted now is
+/// inside the grace and one minted yesterday is outside it.
 #[test]
-fn only_an_old_unmistakable_tenant_database_is_ever_a_candidate() {
+fn a_fresh_name_is_inside_the_grace_and_an_old_one_is_not() {
     let fresh = format!("erp_tenant_{}", uuid::Uuid::now_v7().simple());
-    let age = erp_control::orphan_age_seconds_for_tests(&fresh)
-        .expect("a name this process just minted is readable");
-    assert!(
-        age < 5,
-        "a database named seconds ago read as {age} seconds old"
-    );
-    assert!(
-        age < erp_control::ORPHAN_GRACE_SECONDS,
-        "a fresh database is inside the grace and therefore never swept"
-    );
+    let age = erp_control::orphan_age_seconds_for_tests(&fresh).expect("readable");
+    assert!(age < 5, "a name minted now read as {age} seconds old");
+    assert!(age < erp_control::ORPHAN_GRACE_SECONDS);
 
-    // An id from a day and a half ago is past it.
     let old = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
         uuid::NoContext,
         u64::try_from(chrono::Utc::now().timestamp() - 36 * 60 * 60).expect("after 1970"),
         0,
     ));
-    let old = format!("erp_tenant_{}", old.simple());
     assert!(
-        erp_control::orphan_age_seconds_for_tests(&old).expect("readable")
-            >= erp_control::ORPHAN_GRACE_SECONDS,
-        "a day-and-a-half-old database is outside the grace"
+        erp_control::orphan_age_seconds_for_tests(&format!("erp_tenant_{}", old.simple()))
+            .expect("readable")
+            >= erp_control::ORPHAN_GRACE_SECONDS
     );
 
-    // **Everything else is left alone**, and each of these is a way an operator
-    // loses a database to a sweep that was too clever.
-    for untouchable in [
-        // Not this system's naming at all.
-        "postgres",
-        "erp_control",
-        // An operator's own copy, which is exactly what somebody makes before
-        // an upgrade and exactly what they would not forgive losing.
-        "erp_tenant_backup_before_upgrade",
-        // The right shape, wrong length.
-        "erp_tenant_01a086d2daaa72a2b4974af36080",
-        // Hex-looking but not hex.
-        "erp_tenant_01a086d2daaa72a2b4974af3608096zz",
-        // **The hyphenated form of a real v7 id.** `Uuid::parse_str` accepts
-        // it happily, so without the length check this parses, gets an age and
-        // becomes a candidate — and it is not a name this system ever mints.
-        "erp_tenant_01a086d2-daaa-72a2-b497-4af3608096b2",
-    ] {
-        assert!(
-            erp_control::orphan_age_seconds_for_tests(untouchable).is_none(),
-            "{untouchable} was given an age, and anything with an age can be swept"
-        );
-    }
-
-    // **Only version 7.** A v4 has no timestamp at all, and v1 and v6 have one
-    // that `get_timestamp` will happily convert — so the version has to be
-    // checked rather than inferred from "did a timestamp come back". The v1
-    // below reads as December 2023, which is to say: already past any grace.
-    for wrong_version in [
-        format!("erp_tenant_{}", uuid::Uuid::new_v4().simple()),
-        "erp_tenant_2c1a5d3e9f1b11ee8c900242ac120002".to_owned(),
-        "erp_tenant_1ee9f1b2c1a56d3e8c900242ac120002".to_owned(),
-    ] {
-        assert!(
-            erp_control::orphan_age_seconds_for_tests(&wrong_version).is_none(),
-            "{wrong_version} was given an age, and this system only ever mints v7"
-        );
-    }
+    // And a name it refuses to date has no age to compare at all.
+    assert!(erp_control::orphan_age_seconds_for_tests("erp_tenant_backup").is_none());
 }
 
 /// **Something created moments ago is not a finding.**
@@ -979,12 +931,11 @@ async fn an_unclaimed_database_is_reported_and_a_claimed_one_is_not() {
     // Beside it: the right shape, old enough, and named by nothing.
     let unclaimed = format!(
         "erp_tenant_{}",
-        uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
-            uuid::NoContext,
-            u64::try_from(chrono::Utc::now().timestamp() - 48 * 60 * 60).expect("after 1970"),
-            0,
-        ))
-        .simple()
+        // **A fresh name, not a backdated one.** These call the check with a
+        // grace of zero, so age is not what makes it a candidate — and a name
+        // backdated past `TENANT_SWEEP_GRACE_MILLIS` is one the harness's own
+        // sweep would drop out from under this test.
+        uuid::Uuid::now_v7().simple()
     );
     erp_testkit::create_named_database(&unclaimed, &CONTROL)
         .await
@@ -1099,12 +1050,11 @@ async fn a_tenant_whose_control_row_was_lost_is_never_dropped() {
     // Also an empty leftover, so the refusal can be shown to cover it too.
     let empty = format!(
         "erp_tenant_{}",
-        uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
-            uuid::NoContext,
-            u64::try_from(chrono::Utc::now().timestamp() - 48 * 60 * 60).expect("after 1970"),
-            0,
-        ))
-        .simple()
+        // **A fresh name, not a backdated one.** These call the check with a
+        // grace of zero, so age is not what makes it a candidate — and a name
+        // backdated past `TENANT_SWEEP_GRACE_MILLIS` is one the harness's own
+        // sweep would drop out from under this test.
+        uuid::Uuid::now_v7().simple()
     );
     erp_testkit::create_named_database(&empty, &CONTROL)
         .await
@@ -1252,12 +1202,11 @@ async fn a_database_that_cannot_be_opened_is_never_dropped() {
     let fixture = Fixture::new().await;
     let shut = format!(
         "erp_tenant_{}",
-        uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
-            uuid::NoContext,
-            u64::try_from(chrono::Utc::now().timestamp() - 48 * 60 * 60).expect("after 1970"),
-            0,
-        ))
-        .simple()
+        // **A fresh name, not a backdated one.** These call the check with a
+        // grace of zero, so age is not what makes it a candidate — and a name
+        // backdated past `TENANT_SWEEP_GRACE_MILLIS` is one the harness's own
+        // sweep would drop out from under this test.
+        uuid::Uuid::now_v7().simple()
     );
     erp_testkit::create_named_database(&shut, &CONTROL)
         .await

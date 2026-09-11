@@ -12,6 +12,11 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+# `TenantId::named_in_database`, so what counts as a tenant database is decided
+# in one place and not guessed at a second time here.
+erp-types = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
 sqlx = { workspace = true }
 dotenvy = "0.15"
 tokio = { workspace = true }

@@ -981,10 +981,13 @@ name = "erp-testkit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dotenvy",
+ "erp-types",
  "sqlx",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

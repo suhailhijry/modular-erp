@@ -908,6 +908,49 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       against the three call sites — `purchases/commands.rs:369`,
       `sales/commands.rs:46` (from both credit paths) and `hr/commands.rs:732`
 
+### 57 · The leftovers, reclaimed where they are made
+
+**Built 2026-09-11.** The production sweep (§56) refuses to touch a test
+cluster's leftovers, and rightly: they are unclaimed, most have events, and one
+occupied database refuses the whole run. So the accumulation carried on — 65 to
+235 to 324 across a single day's runs.
+
+**The harness already had this mechanism.** `erp_testkit::sweep_once` drops
+leftover `erp_test_*` databases once per process, on two conditions that were
+already exactly right: no active connections, and older than a grace. It simply
+did not cover `erp_tenant_*`, because those are made by `provision` rather than
+by the harness and carry no timestamp the harness put there. I had written a
+second sweep from scratch before finding it — the reuse rung of the ladder,
+missed.
+
+The extension is one more query with the same two conditions. What differs is
+the grace, and the reason is worth stating: for an `erp_test_*` database the
+connection check *is* the guard, because a pool is held for as long as its test
+runs. An `erp_tenant_*` database is provisioned and may then sit untouched for
+minutes inside a test that is very much still using it, so there the **age** is
+the guard — and it has to be wider than a whole **run**, not wider than a gap,
+because `nextest` starts binaries throughout a run and a late one can see an
+early one's databases. Two hours against a twenty-minute suite.
+
+**The age rule moved to `erp_types::TenantId::named_in_database`**, beside the
+id it reads. It was in `erp-control` and the harness needed the same answer for
+a different reason; two copies of "is this one of ours, and how old" is the
+second declaration that eventually disagrees with the first. Its exclusions are
+tested where it now lives: the operator's `erp_tenant_backup_before_upgrade`,
+the wrong length, the hyphenated form `Uuid::parse_str` accepts, and **v1 and v6
+— which carry timestamps that convert to plausible times**, so the version has
+to be checked rather than inferred from "did a timestamp come back".
+
+**Three of my own tests failed on the first full run afterwards**, and the cause
+was mine: they fabricated forty-eight-hour-old names to look like old orphans,
+and the new harness sweep ate them mid-test. The fix made them smaller — they
+already pass a grace of zero, so age was never what made those fixtures
+candidates, and the backdating was decoration that happened to be dangerous.
+
+Measured rather than asserted: three six-hour-old databases seeded by hand,
+gone after one test binary ran; `erp_tenant_backup_before_upgrade` and a
+v1-named database beside them, untouched.
+
 ### 56 · Databases nothing accounts for — and a sweep that was wrong at the root
 
 **Built and then reversed, 2026-09-11**, which is the part worth writing down.

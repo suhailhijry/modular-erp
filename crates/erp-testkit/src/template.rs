@@ -10,7 +10,9 @@ use sqlx::{AssertSqlSafe, ConnectOptions, Connection, PgPool};
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::schema::Schema;
-use crate::{SWEEP_GRACE_MILLIS, TEMPLATE_DB_PREFIX, TEST_DB_PREFIX, database_url};
+use crate::{
+    SWEEP_GRACE_MILLIS, TEMPLATE_DB_PREFIX, TENANT_SWEEP_GRACE_MILLIS, TEST_DB_PREFIX, database_url,
+};
 
 static TEMPLATES: OnceLock<Mutex<HashMap<String, &'static Template>>> = OnceLock::new();
 static SWEPT: OnceCell<()> = OnceCell::const_new();
@@ -397,6 +399,21 @@ fn advisory_key(name: &str) -> i64 {
 ///    `CREATE DATABASE` and the first connection.
 ///
 /// Templates are never swept — they are the cache that makes this fast.
+///
+/// # Tenant databases too, and with a much wider grace
+///
+/// `erp_tenant_*` databases are made by `provision`, not by this harness, so
+/// they carry no timestamp this file put there and nothing here drops them when
+/// a test panics or a run is killed. They had reached **1139** before anybody
+/// looked, and the contention made a suite run fail.
+///
+/// Their age comes from `TenantId::named_in_database` — the id is a `UUIDv7`, so
+/// the name dates itself — and the grace is [`TENANT_SWEEP_GRACE_MILLIS`],
+/// hours rather than a minute. **The connection check is doing less work for
+/// these.** A test that provisions a tenant and then goes on to do something
+/// else may hold no connection to it for minutes at a time, so "idle" is not
+/// evidence it is finished with. The age has to be wider than a whole run
+/// rather than wider than a gap.
 async fn sweep_once() -> anyhow::Result<()> {
     SWEPT
         .get_or_try_init(|| async {
@@ -433,6 +450,45 @@ async fn sweep_once() -> anyhow::Result<()> {
                     dropped += 1;
                 }
             }
+            // The same two conditions, against the databases `provision`
+            // made. Asked separately because the age of these is read out of
+            // the name by a different rule, and lives in a different crate.
+            let tenants: Vec<(String,)> = sqlx::query_as(
+                "SELECT d.datname
+                   FROM pg_database d
+                  WHERE d.datname LIKE $1
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname
+                    )",
+            )
+            .bind(format!("{}%", erp_types::TenantId::DATABASE_PREFIX))
+            .fetch_all(&mut admin)
+            .await?;
+
+            let stale =
+                chrono::Utc::now() - chrono::TimeDelta::milliseconds(TENANT_SWEEP_GRACE_MILLIS);
+            for (name,) in tenants {
+                // Decides this is one of ours at all: the prefix, thirty-two
+                // hex characters, and a version-7 id. Anything else is
+                // somebody's own database.
+                let Some(minted) = erp_types::TenantId::named_in_database(&name) else {
+                    continue;
+                };
+                if minted > stale {
+                    continue;
+                }
+                let Ok(sql) = drop_database_sql(&name) else {
+                    continue;
+                };
+                if sqlx::raw_sql(AssertSqlSafe(sql))
+                    .execute(&mut admin)
+                    .await
+                    .is_ok()
+                {
+                    dropped += 1;
+                }
+            }
+
             admin.close().await?;
 
             if dropped > 0 {
@@ -455,6 +511,57 @@ fn age_from_name(name: &str, now: u128) -> Option<u128> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **What the tenant sweep may and may not touch**, decided without a
+    /// database.
+    ///
+    /// The live half is the one that matters: a tenant database made during
+    /// this run must be outside the grace, or a late-starting binary would
+    /// sweep an early-starting one's.
+    #[test]
+    fn the_tenant_grace_is_wider_than_a_run() {
+        let stale =
+            chrono::Utc::now() - chrono::TimeDelta::milliseconds(crate::TENANT_SWEEP_GRACE_MILLIS);
+
+        let mine = format!(
+            "{}{}",
+            erp_types::TenantId::DATABASE_PREFIX,
+            erp_types::TenantId::new().as_uuid().simple()
+        );
+        let named = erp_types::TenantId::named_in_database(&mine).expect("dated");
+        assert!(named > stale, "a database made in this run is sweepable");
+
+        // The suite takes about twenty minutes; an hour in it is still safe.
+        let hour_ago = erp_types::TenantId::named_in_database(&format!(
+            "{}{}",
+            erp_types::TenantId::DATABASE_PREFIX,
+            uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+                uuid::NoContext,
+                u64::try_from(chrono::Utc::now().timestamp() - 60 * 60).expect("after 1970"),
+                0,
+            ))
+            .simple()
+        ))
+        .expect("dated");
+        assert!(hour_ago > stale, "an hour into a run is already sweepable");
+
+        // Yesterday's is not.
+        let yesterday = erp_types::TenantId::named_in_database(&format!(
+            "{}{}",
+            erp_types::TenantId::DATABASE_PREFIX,
+            uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+                uuid::NoContext,
+                u64::try_from(chrono::Utc::now().timestamp() - 24 * 60 * 60).expect("after 1970"),
+                0,
+            ))
+            .simple()
+        ))
+        .expect("dated");
+        assert!(
+            yesterday < stale,
+            "yesterday's leftovers are never reclaimed"
+        );
+    }
 
     #[test]
     fn age_is_read_from_the_name() {

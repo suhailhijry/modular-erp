@@ -1011,25 +1011,14 @@ pub fn orphan_age_seconds_for_tests(datname: &str) -> Option<i64> {
 
 /// How long ago a tenant database was named, from its own name.
 ///
-/// `None` for anything this must not speak about: a name that is not
-/// `tenant_database_name`'s shape, a UUID that will not parse, or one that is
-/// not version 7.
+/// **The rule itself lives with the id**, in `TenantId::named_in_database`: the
+/// name is derived from the id, so what a name means is the id's business. It
+/// was here, and `erp-testkit` needed the same answer for a different reason —
+/// two copies of "is this one of ours and how old is it" is exactly the second
+/// declaration that eventually disagrees with the first.
 fn orphan_age_seconds(datname: &str) -> Option<i64> {
-    let hex = datname.strip_prefix("erp_tenant_")?;
-    if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let id = uuid::Uuid::parse_str(hex).ok()?;
-    // **Version seven specifically.** `get_timestamp` answers for v1 and v6
-    // too — both carry a real time and both convert to a plausible Unix second
-    // — so leaning on it to mean "one of ours" would age a name this system
-    // never minted.
-    if id.get_version_num() != 7 {
-        return None;
-    }
-    let (seconds, _) = id.get_timestamp()?.to_unix();
-    let named = i64::try_from(seconds).ok()?;
-    Some(chrono::Utc::now().timestamp() - named)
+    let named = erp_types::TenantId::named_in_database(datname)?;
+    Some(chrono::Utc::now().timestamp() - named.timestamp())
 }
 
 /// Runs the tenant-plane migrations, taking and returning the connection.
