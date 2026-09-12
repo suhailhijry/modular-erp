@@ -177,6 +177,10 @@ async fn sign_up(
 /// operation that compensates if any part of it fails. The response is a
 /// working bearer token: confirming logs you in.
 ///
+/// The build finishes even if this request does not: a timeout or a closed
+/// connection ends in the company, which the password logs into, or in a
+/// failure undone and the link working again.
+///
 /// There is deliberately no `GET` beside this. `/v1/join/{token}` has one
 /// because whoever opens an invitation did not write it and has to be told what
 /// they are joining; whoever opens this one filled the form in themselves, and

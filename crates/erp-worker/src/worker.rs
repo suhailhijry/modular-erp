@@ -295,9 +295,10 @@ async fn sleep_or_cancel(cancel: &CancellationToken, pause: Duration) -> bool {
 struct Work {
     worked: bool,
     failed: bool,
-    /// The lease lapsed under the visit. Whoever holds the tenant now — or
-    /// claims it when it is next due — is responsible for it; this visit must
-    /// not reschedule it and must not keep working beside them.
+    /// The lease lapsed under the visit, or the tenant was suspended during it.
+    /// Whoever holds the tenant now — or claims it when it is next due — is
+    /// responsible for it; this visit must not reschedule it and must not keep
+    /// working beside them.
     lost: bool,
 }
 
@@ -363,7 +364,7 @@ impl Visit {
                 tracing::warn!(
                     tenant = %self.tenant,
                     owner = %self.owner,
-                    "the lease lapsed mid-visit; stopping so whoever holds it now works alone"
+                    "the lease lapsed or the tenant stopped being active mid-visit; stopping"
                 );
                 false
             }

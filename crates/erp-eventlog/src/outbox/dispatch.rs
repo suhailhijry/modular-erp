@@ -256,8 +256,9 @@ impl Dispatcher {
     /// rollout.
     ///
     /// If *nobody* ever picks them up, the rows age and the backlog-age health
-    /// check fires. That is the correct place for "no worker can handle this" to
-    /// surface: an alarm about a stalled queue, not a storm of dead letters.
+    /// check fires, in either plane. That is the correct place for "no worker
+    /// can handle this" to surface: an alarm about a stalled queue, not a storm
+    /// of dead letters.
     pub async fn dispatch_once(
         &self,
         pool: &PgPool,

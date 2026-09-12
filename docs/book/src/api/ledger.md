@@ -167,6 +167,9 @@ pub async fn reverse_entry(db: &TenantDb, original: &AggregateId,
     reversal: &AggregateId, occurred_on: Timestamp, memo: &str, metadata: &Metadata)
     -> Outcome<JournalEntryEvent>;
 
+pub async fn posted_lines(db: &TenantDb, id: &AggregateId)
+    -> Result<BalancedLines, CommandError<LedgerError>>;
+
 pub async fn install_chart(db: &TenantDb, chart: &Chart, currency: CurrencyCode,
     locale: Locale, metadata: &Metadata) -> Result<Installed, CommandError<LedgerError>>;
 ```
@@ -193,6 +196,11 @@ been reported.
 
 `reverse_entry` posts the opposite entry under `reversal` and records on the
 original that it was reversed and by what. Both, or neither.
+
+**Both routes show a permission limit the entry's size first.** Debits, which
+equal credits. A reversal is as large as the entry it undoes, so the route reads
+that entry with `posted_lines` before reversing it; without that, a bookkeeper
+limited to ten thousand riyals could post anybody's fifty thousand backwards.
 
 ### install_chart skips, and does not refuse
 

@@ -452,6 +452,210 @@ async fn an_invitation_is_promised_by_the_control_plane_and_delivered_by_the_wor
 }
 
 // ---------------------------------------------------------------------------
+// The control plane's outbox is watched, and forgets, like a tenant's
+// ---------------------------------------------------------------------------
+
+/// A relay that refuses everything, which is how a real dead letter is made:
+/// `Refused` is permanent, so one pass gives up on it.
+struct Refusing;
+
+#[async_trait::async_trait]
+impl erp_worker::mail::Mailer for Refusing {
+    async fn send(
+        &self,
+        _email: &erp_control::mail::Email,
+        _key: &str,
+    ) -> Result<(), erp_worker::mail::MailError> {
+        Err(erp_worker::mail::MailError::Refused(
+            "550 no such mailbox".to_owned(),
+        ))
+    }
+}
+
+/// One platform pass, through `mailer`.
+async fn platform_pass(control: &ControlPlane, mailer: Arc<dyn erp_worker::mail::Mailer>) {
+    let dispatcher = Arc::new(
+        erp_eventlog::Dispatcher::new(erp_eventlog::RetryPolicy::default())
+            .register(Arc::new(erp_worker::mail::EmailHandler::new(mailer))),
+    );
+    erp_worker::PlatformJob::tick(&erp_worker::PlatformOutboxJob::new(dispatcher, 32), control)
+        .await
+        .expect("dispatches");
+}
+
+/// A tenant, and an owner of it who can invite.
+async fn inviter(fixture: &mut Fixture) -> (TenantId, erp_types::IdentityId) {
+    let tenant = fixture.tenant("acme").await;
+    let owner = fixture
+        .control
+        .create_identity(Actor::system())
+        .await
+        .expect("identity");
+    fixture
+        .control
+        .grant_membership(
+            owner.id,
+            erp_control::Scope::Tenant(tenant),
+            "owner",
+            Actor::system(),
+        )
+        .await
+        .expect("membership");
+    (tenant, owner.id)
+}
+
+/// Invites somebody the way the product does, which promises their email on
+/// the control plane.
+async fn invite(
+    control: &ControlPlane,
+    (tenant, owner): (TenantId, erp_types::IdentityId),
+    email: &str,
+) {
+    control
+        .invite(
+            tenant,
+            email.to_owned(),
+            erp_control::Role::Clerk,
+            owner,
+            "https://acme.erp.test/v1/join/",
+            erp_i18n::Locale::English,
+        )
+        .await
+        .expect("invites");
+}
+
+/// Who each control-plane outbox row is addressed to, sorted. A read.
+async fn addressed(control: &ControlPlane) -> Vec<String> {
+    sqlx::query_scalar("SELECT payload ->> 'to' FROM outbox ORDER BY 1")
+        .fetch_all(control.pool())
+        .await
+        .expect("reads")
+}
+
+/// **A dead letter in the control plane is a finding**, and stops being one
+/// when somebody deals with it. Nothing checked this plane before, though its
+/// outbox carries every signup, invitation, reset and sign-in code.
+#[tokio::test]
+async fn a_dead_letter_in_the_control_plane_is_a_finding() {
+    let mut fixture = Fixture::new().await;
+    let by = inviter(&mut fixture).await;
+    invite(&fixture.control, by, "sara@acme.test").await;
+    platform_pass(&fixture.control, Arc::new(Refusing)).await;
+
+    let findings = HealthJob::control_findings(&fixture.control)
+        .await
+        .expect("checks");
+    assert_eq!(
+        findings.iter().map(|f| f.check).collect::<Vec<_>>(),
+        ["no_dead_letters"],
+        "{findings:?}"
+    );
+
+    let dead = fixture.control.dead_letters(10).await.expect("lists");
+    assert_eq!(dead.len(), 1);
+    assert!(
+        fixture
+            .control
+            .requeue_dead_letter(dead[0].id, Actor::system())
+            .await
+            .expect("requeues")
+    );
+    let recorder = Arc::new(Recorder::default());
+    platform_pass(&fixture.control, recorder.clone()).await;
+    assert_eq!(
+        recorder
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "the requeued invitation did not go out"
+    );
+    assert_eq!(
+        HealthJob::control_findings(&fixture.control)
+            .await
+            .expect("checks"),
+        []
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The control plane has its own turn on the interval.** Platform jobs run
+/// every claim cycle; checked on each, a quarter-second loop would log an
+/// error storm. And a tenant just checked must not use up the control plane's
+/// turn, or its outbox would go unwatched on any worker with tenants.
+#[tokio::test]
+async fn the_control_plane_has_its_own_turn_on_an_interval() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.tenant("acme").await;
+    let db = fixture.db(tenant).await;
+    let health = HealthJob::every(Duration::from_mins(5));
+
+    assert_eq!(
+        Job::tick(&health, &db).await.expect("checks"),
+        Activity::Idle
+    );
+
+    // With nowhere to check, running the check is an error — which is how this
+    // test sees whether it ran.
+    fixture.control.pool().close().await;
+    assert!(
+        erp_worker::PlatformJob::tick(&health, &fixture.control)
+            .await
+            .is_err(),
+        "the control plane was not checked, because a tenant just was — or a \
+         check that cannot run read as healthy"
+    );
+    assert_eq!(
+        erp_worker::PlatformJob::tick(&health, &fixture.control)
+            .await
+            .expect("not due, so not checked"),
+        Activity::Idle,
+    );
+
+    drop(db);
+    fixture.cleanup().await;
+}
+
+/// **The control plane forgets what it delivered, and nothing else.** A
+/// delivered invitation email is a receipt; a dead one and a pending one are
+/// promises still open.
+#[tokio::test]
+async fn the_control_plane_forgets_what_it_delivered_and_nothing_else() {
+    let mut fixture = Fixture::new().await;
+    let by = inviter(&mut fixture).await;
+    invite(&fixture.control, by, "dead@acme.test").await;
+    platform_pass(&fixture.control, Arc::new(Refusing)).await;
+    invite(&fixture.control, by, "sent@acme.test").await;
+    platform_pass(&fixture.control, Arc::new(Recorder::default())).await;
+    invite(&fixture.control, by, "waiting@acme.test").await;
+
+    let now = erp_types::Timestamp::from(chrono::Utc::now());
+    assert_eq!(
+        Retention::sweep_control(&fixture.control, now)
+            .await
+            .expect("sweeps"),
+        0,
+        "a receipt younger than the window is kept"
+    );
+    let later = now + erp_worker::DELIVERED_EFFECTS + chrono::Duration::days(1);
+    assert_eq!(
+        Retention::sweep_control(&fixture.control, later)
+            .await
+            .expect("sweeps"),
+        1,
+        "the delivered one goes"
+    );
+    assert_eq!(
+        addressed(&fixture.control).await,
+        ["dead@acme.test", "waiting@acme.test"]
+    );
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
 // One visit at a time, and one job's failure is one job's
 // ---------------------------------------------------------------------------
 

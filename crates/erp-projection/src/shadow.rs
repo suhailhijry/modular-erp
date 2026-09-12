@@ -300,7 +300,8 @@ async fn diff_table(
 ///    arrived during the build, which is the only part of this that scales with
 ///    write rate
 /// 3. drop the live schema and rename staging over it
-/// 4. set the checkpoint to that head
+/// 4. set the checkpoint to that head, and its read-model version to
+///    [`ProjectionGroup::VERSION`] — the shape just built
 ///
 /// Postgres makes DDL transactional, so a failure anywhere leaves the live
 /// schema exactly as it was. **Readers block only for step 3**, which is two
@@ -398,11 +399,17 @@ pub async fn rebuild_swap<G: ProjectionGroup>(
             .await?;
     }
 
-    sqlx::query("UPDATE projection_checkpoint SET position = $2 WHERE group_name = $1")
-        .bind(G::NAME)
-        .bind(reached.get())
-        .execute(&mut *tx)
-        .await?;
+    // The version with the rename, in the same transaction: nobody can see
+    // the new tables under the old stamp, or the old tables under the new one.
+    sqlx::query(
+        "UPDATE projection_checkpoint SET position = $2, read_model_version = $3
+          WHERE group_name = $1",
+    )
+    .bind(G::NAME)
+    .bind(reached.get())
+    .bind(G::VERSION)
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
     Ok(reached)

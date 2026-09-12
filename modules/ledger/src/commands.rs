@@ -399,6 +399,27 @@ pub async fn reverse_entry(
     .into())
 }
 
+/// What an entry posted.
+///
+/// For the reversal route, which must show a permission limit the size of the
+/// entry it is about to post before posting it. Read outside the reversal's
+/// transaction, which is safe because a posted entry's lines never change.
+///
+/// # Errors
+/// [`LedgerError::NoSuchEntry`] when nothing was posted under `id`.
+pub async fn posted_lines(
+    db: &TenantDb,
+    id: &AggregateId,
+) -> Result<BalancedLines, CommandError<LedgerError>> {
+    let mut conn = db.acquire().await?;
+    let loaded = erp_eventlog::load::<JournalEntry>(&mut conn, id, crate::upcasters())
+        .await
+        .map_err(ExecuteError::from)?;
+    loaded.aggregate.lines.ok_or_else(|| {
+        ExecuteError::Rejected(LedgerError::NoSuchEntry(id.as_str().to_owned())).into()
+    })
+}
+
 /// One attempt at reversing, in the caller's transaction.
 ///
 /// Public for the same reason [`post_entry_in`] is: a module that reverses its

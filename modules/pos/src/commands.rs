@@ -231,12 +231,16 @@ impl Basket {
 /// Idempotent under retry on `sale`. A repeat re-reports the number the document
 /// was issued under and takes no capacity in the drawer twice, because
 /// `sales::issue_in` recognises the retry and this shift remembers what it rang.
+///
+/// `authority` is whoever is at the till, and `sales` judges the sale against
+/// the tenant's document limit with it.
 pub async fn sell(
     db: &TenantDb,
     shift: &AggregateId,
     sale: &AggregateId,
     basket: &Basket,
     metadata: &Metadata,
+    authority: sales::Authority,
 ) -> Result<Rung, Refusal> {
     if basket.lines.is_empty() {
         return Err(rejected(PosError::NothingSold));
@@ -271,6 +275,7 @@ pub async fn sell(
                 &draft_from(basket),
                 &format!("Till {} · sale {sale}", held.aggregate.till),
                 metadata,
+                authority,
             )
             .await
             .map_err(lift)?;
@@ -365,12 +370,16 @@ pub struct Return {
 /// `sales` gained a refund, the rule became *"nothing is still held"*, and this
 /// hands the money back and credits the document in the same transaction —
 /// which is also the only order in which the books are never briefly wrong.
+///
+/// Each refund, and the credit note, is judged against the tenant's document
+/// limit with `authority`, in `sales`.
 pub async fn take_back(
     db: &TenantDb,
     shift: &AggregateId,
     sale: &AggregateId,
     returning: &Return,
     metadata: &Metadata,
+    authority: sales::Authority,
 ) -> Outcome {
     // A return that hands nothing back is not a return, and it is also the only
     // input for which the currency below is unanswerable.
@@ -421,8 +430,8 @@ pub async fn take_back(
             .await?;
 
             if committed.at.is_some() {
-                give_the_money_back(&mut *conn, sale, returning, metadata).await?;
-                credit_the_sale(&mut *conn, sale, returning, currency, metadata).await?;
+                give_the_money_back(&mut *conn, sale, returning, metadata, authority).await?;
+                credit_the_sale(&mut *conn, sale, returning, currency, metadata, authority).await?;
             }
             Ok(committed)
         }
@@ -450,6 +459,7 @@ async fn credit_the_sale(
     returning: &Return,
     currency: erp_types::CurrencyCode,
     metadata: &Metadata,
+    authority: sales::Authority,
 ) -> Result<(), ExecuteError<PosError>> {
     if returning.lines.is_empty() {
         sales::credit_in(
@@ -459,6 +469,7 @@ async fn credit_the_sale(
             &returning.why,
             returning.at,
             metadata,
+            authority,
         )
         .await
         .map_err(lift)?;
@@ -470,7 +481,7 @@ async fn credit_the_sale(
         reason: returning.why.clone(),
         on: returning.at,
     };
-    let credited = sales::credit_part_in(&mut *conn, sale, &note, metadata)
+    let credited = sales::credit_part_in(&mut *conn, sale, &note, metadata, authority)
         .await
         .map_err(lift)?;
     let gross = credited.committed.events.iter().find_map(|e| match e {
@@ -494,6 +505,7 @@ async fn give_the_money_back(
     sale: &AggregateId,
     returning: &Return,
     metadata: &Metadata,
+    authority: sales::Authority,
 ) -> Result<(), ExecuteError<PosError>> {
     let accounts = accounts(&mut *conn).await?;
     for (n, tender) in returning.tenders.iter().enumerate() {
@@ -510,6 +522,7 @@ async fn give_the_money_back(
             &receipt,
             &format!("Refund {reference} · sale {sale}"),
             metadata,
+            authority,
         )
         .await
         .map_err(lift)?;

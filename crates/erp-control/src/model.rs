@@ -68,6 +68,19 @@ pub enum TenantStatus {
     Deleted,
 }
 
+impl TenantStatus {
+    /// The stored form, for messages.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provisioning => "provisioning",
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tenant {
     pub id: TenantId,
@@ -82,10 +95,11 @@ pub struct Tenant {
     /// **This tenant refuses members who have not enrolled a second factor.**
     ///
     /// Checked at `ControlPlane::enter`, so it costs nothing — this row is
-    /// already cached there. It refuses *entry to this tenant* and nothing
-    /// else: the session stays valid and the person's other tenants stay
-    /// reachable, because being thrown out of everything is not what an owner
-    /// asked for when they turned this on.
+    /// already cached there. It refuses *entry to this tenant*: the session
+    /// stays valid and the person's other tenants stay reachable, because
+    /// being thrown out of everything is not what an owner asked for when they
+    /// turned this on. It also keeps its members' factors: while it holds,
+    /// `ControlPlane::disable_second_factor` refuses them.
     pub requires_second_factor: bool,
     pub created_at: Timestamp,
 }
@@ -159,6 +173,30 @@ impl Actor {
             on_behalf_of: Some(subject),
         }
     }
+}
+
+/// One entry in the audit trail, as a reader gets it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuditEntry {
+    /// Where it sits in the trail. Allocated in order, so it is what a page
+    /// resumes after.
+    pub id: i64,
+    pub at: Timestamp,
+    /// `None` for the system, and for somebody since erased.
+    pub actor: Option<IdentityId>,
+    /// The actor's login, **only where they are or were a member of the
+    /// tenant the entry concerns** — and, for staff reading, always. A
+    /// customer is shown a staff member's address only where that staff member
+    /// is, or was, a member of the tenant too.
+    pub actor_handle: Option<String>,
+    pub on_behalf_of: Option<IdentityId>,
+    /// The company it concerns. `None` for a person, a cluster, or the
+    /// platform's own outbox.
+    pub tenant: Option<TenantId>,
+    pub action: String,
+    pub subject_type: String,
+    pub subject_id: String,
+    pub detail: serde_json::Value,
 }
 
 #[cfg(test)]

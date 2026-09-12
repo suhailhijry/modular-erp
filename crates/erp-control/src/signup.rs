@@ -44,6 +44,8 @@
 //! What is fixed here is the part that was never about rate limiting: one
 //! request no longer costs a database, and no longer takes an address.
 
+use std::sync::Arc;
+
 use erp_types::{IdentityId, Timestamp};
 use uuid::Uuid;
 
@@ -266,6 +268,7 @@ impl ControlPlane {
         // looking at a burst of these can see what was being aimed at.
         self.record(
             Actor::system(),
+            None,
             "signup.requested",
             "handle",
             &handle,
@@ -375,10 +378,8 @@ impl ControlPlane {
 
     /// Proves the address, and builds everything the request asked for.
     ///
-    /// The account, the tenant, its database, its modules and a session, in the
-    /// operation that compensates if any part of it fails — which is what
-    /// [`Self::sign_up`] has always been. This is the only caller that reaches
-    /// it from outside.
+    /// The account, the tenant, its database, its modules and a session,
+    /// through [`Self::provision`], which compensates if any part of it fails.
     ///
     /// # The claim comes first
     ///
@@ -391,8 +392,34 @@ impl ControlPlane {
     /// in the meantime, and burning the link over that would turn a recoverable
     /// error into a support ticket.
     ///
+    /// # It finishes when the caller stops waiting
+    ///
+    /// The work runs on a task of its own, and the caller only awaits it. A
+    /// request cut off by the API's 30-second timeout, or by a client that went
+    /// away, drops the caller's future — and used to drop the build and its
+    /// compensation with it, leaving the tenant `provisioning`, its name taken
+    /// and the link spent. Now the task goes on to one of the two ends it
+    /// would have reached anyway: a working company, which the person logs
+    /// into with their password, or a failure compensated and the link
+    /// unclaimed. Only a process that dies mid-build leaves it half-done, and
+    /// that is [`Self::reap_stuck_provisioning`]'s — which frees the name and
+    /// leaves the link spent, so the person asks again.
+    ///
     /// [`NotValid`]: SignupError::NotValid
     pub async fn confirm_signup(
+        self: &Arc<Self>,
+        token: &str,
+        modules: Vec<ModuleSetup>,
+    ) -> Result<Confirmed, SignupError> {
+        let control = Arc::clone(self);
+        let token = token.to_owned();
+        tokio::spawn(async move { control.claim_and_build(&token, modules).await })
+            .await
+            .map_err(|e| AccessError::Corrupt(format!("the signup task did not finish: {e}")))?
+    }
+
+    /// [`Self::confirm_signup`], on the task it spawns.
+    async fn claim_and_build(
         &self,
         token: &str,
         modules: Vec<ModuleSetup>,
@@ -414,8 +441,8 @@ impl ControlPlane {
 
         let built = self
             .build_signup(
-                claimed.identity_id,
-                claimed.password_hash,
+                claimed.id,
+                (claimed.identity_id, claimed.password_hash),
                 claimed.handle.clone(),
                 claimed.slug.clone(),
                 claimed.company,
@@ -427,6 +454,7 @@ impl ControlPlane {
             Ok(confirmed) => {
                 self.record(
                     Actor::identity(confirmed.identity),
+                    Some(confirmed.tenant.id),
                     "signup.confirmed",
                     "tenant",
                     &confirmed.tenant.id.to_string(),
@@ -450,20 +478,20 @@ impl ControlPlane {
 
     /// The account and everything under it, once the address is proved.
     ///
-    /// Split out so [`Self::confirm_signup`] can put the claim on one side of
+    /// Split out so [`Self::claim_and_build`] can put the claim on one side of
     /// it and the unclaim on the other, and so the two ways an owner is named —
     /// an account that already existed, or a hash waiting to become one — are
     /// resolved in one place.
     async fn build_signup(
         &self,
-        existing: Option<IdentityId>,
-        secret: Option<String>,
+        pending: Uuid,
+        owner: (Option<IdentityId>, Option<String>),
         handle: String,
         slug: String,
         company: String,
         modules: Vec<ModuleSetup>,
     ) -> Result<Confirmed, SignupError> {
-        let identity = match (existing, secret) {
+        let identity = match owner {
             // An account that was already there and proved its password when
             // the request was made. Nothing to create.
             (Some(id), _) => id,
@@ -471,6 +499,19 @@ impl ControlPlane {
                 let created = self.create_identity(Actor::system()).await?;
                 self.register_hashed_login(created.id, handle, secret)
                     .await?;
+                // **The request names the account from here on.** A build that
+                // fails after this unclaims the link, and without this the
+                // next click would try to make the account again and meet its
+                // own handle, taken — so the link that "still works" would not.
+                sqlx::query!(
+                    "UPDATE pending_signup SET identity_id = $2, password_hash = NULL
+                      WHERE id = $1",
+                    pending,
+                    created.id.as_uuid(),
+                )
+                .execute(&self.pool)
+                .await
+                .map_err(AccessError::Database)?;
                 created.id
             }
             // The constraint refuses both-null and both-set, so this is a row

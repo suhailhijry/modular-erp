@@ -213,6 +213,7 @@ impl Fixture {
                 note: String::new(),
             },
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .expect("issues");
@@ -248,6 +249,7 @@ impl Fixture {
             },
             when(),
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .expect("starts");
@@ -268,6 +270,7 @@ impl Fixture {
             },
             when(),
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .expect("starts");
@@ -381,6 +384,7 @@ impl Fixture {
             },
             when(),
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .expect("records the request");
@@ -2649,6 +2653,7 @@ impl Fixture {
             },
             when(),
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .map(|_| ());
@@ -2691,6 +2696,7 @@ impl Fixture {
             },
             when(),
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .map(|_| ());
@@ -2986,6 +2992,7 @@ impl Fixture {
             "the customer changed their mind",
             when(),
             &Metadata::default(),
+            sales::Authority::Member { owner: false },
         )
         .await
         .map(|_| ());
@@ -3251,5 +3258,300 @@ async fn an_awaited_refund_reserves_its_amount() {
             ExecuteError::Rejected(PaymentsError::RefundAwaited(_))
         ),
         "{kept:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The document limit: a member is judged when they ask, the gateway never
+// ---------------------------------------------------------------------------
+
+/// **Nobody issues a deposit's documents by hand, so neither is limited; a
+/// member asking for the money back is.**
+///
+/// The customer's own deposit is billed when the gateway settles it, over the
+/// limit or not, and so is the credit note for a refund the gateway already
+/// made. A member asking a gateway for a refund over the limit is refused
+/// before the gateway is asked, and nothing is recorded; under it, the request
+/// stands. This tenant has no `hr`, so no member can hold the claim.
+#[tokio::test]
+async fn a_members_refund_is_judged_when_asked_and_the_gateways_answers_are_not() {
+    let fixture = Fixture::new("limited").await;
+    fixture.limit(riyals(50)).await;
+
+    for id in ["pay_1", "pay_2"] {
+        fixture
+            .start_deposit(id, "moyasar", "BOOK-1", riyals(100), riyals(115))
+            .await;
+        fixture
+            .settle(id, &charged(id, Status::Paid, riyals(115), None))
+            .await
+            .expect("a customer's own deposit is billed, over the limit or not");
+    }
+
+    let asked = |reference: &'static str, amount: Money| clerk_asks(&fixture, reference, amount);
+    let refused = asked("back-all", riyals(115)).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ExecuteError::Rejected(PaymentsError::Refused(
+                sales::SalesError::OverDocumentLimit { .. }
+            )))
+        ),
+        "{refused:?}"
+    );
+    asked("back-some", riyals(40))
+        .await
+        .expect("40 is within the limit");
+    fixture.project().await;
+    assert_eq!(
+        fixture
+            .refund_outcomes("pay_1")
+            .await
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .collect::<Vec<_>>(),
+        vec!["back-some".to_owned()],
+        "the refused request left nothing for the worker to carry to the gateway"
+    );
+
+    // What the gateway confirms is recorded, and its credit note issued, over
+    // the limit or not: the money has already gone.
+    fixture
+        .refund("pay_2", "refund-1", riyals(115))
+        .await
+        .expect("the gateway's answer is the books'");
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let invoice = sales::invoice(&mut conn, "dep-pay_2")
+        .await
+        .expect("reads")
+        .expect("there");
+    assert!(invoice.summary.credit_note.is_some());
+}
+
+/// A clerk asking for part of `pay_1` back, committed only when it is not
+/// refused.
+async fn clerk_asks(
+    fixture: &Fixture,
+    reference: &str,
+    amount: Money,
+) -> Result<(), ExecuteError<PaymentsError>> {
+    let mut tx = fixture.db.begin().await.expect("transaction");
+    let outcome = payments::request_refund_in(
+        &mut tx,
+        &code("pay_1"),
+        reference,
+        amount,
+        "the customer changed their mind",
+        when(),
+        &Metadata {
+            actor: Some("clerk".to_owned()),
+            ..Metadata::default()
+        },
+        sales::Authority::Member { owner: false },
+    )
+    .await
+    .map(|_| ());
+    if outcome.is_ok() {
+        tx.commit().await.expect("commits");
+    }
+    outcome
+}
+
+impl Fixture {
+    /// The owner's per-document limit, after VAT, as the `PUT` writes it.
+    async fn limit(&self, limit: Money) {
+        let mut conn = self.db.acquire().await.expect("a connection");
+        erp_eventlog::configuration::set(
+            &mut conn,
+            sales::DocumentLimit::KEY,
+            &Some(sales::DocumentLimit::new(limit, sales::Basis::AfterVat).expect("a limit")),
+            Some("the-owner"),
+            None,
+        )
+        .await
+        .expect("the limit is set");
+    }
+
+    /// A member charging a deposit to a saved card, which is `request_in` with
+    /// them behind it.
+    async fn clerk_charges(
+        &self,
+        payment: &str,
+        against: &str,
+        net: Money,
+        amount: Money,
+    ) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::request_in(
+            &mut tx,
+            &code(payment),
+            &payments::Collection {
+                checkout: None,
+                card: Some(code("card_1")),
+                provider: "moyasar".to_owned(),
+                collects: payments::Collects::Advance(payments::Advance {
+                    against: code(against),
+                    net,
+                    buyer: payments::Buyer {
+                        name: "سارة".to_owned(),
+                        vat_number: None,
+                    },
+                }),
+                amount,
+                callback_url: "https://bassat.sa/paid".to_owned(),
+            },
+            when(),
+            &clerk(),
+            sales::Authority::Member { owner: false },
+        )
+        .await
+        .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+
+    /// A member recording a charge a gateway already has, which is `start_in`
+    /// with them behind it.
+    async fn clerk_records(
+        &self,
+        payment: &str,
+        against: &str,
+        net: Money,
+        amount: Money,
+    ) -> Result<(), ExecuteError<PaymentsError>> {
+        let mut tx = self.db.begin().await.expect("transaction");
+        let outcome = payments::start_in(
+            &mut tx,
+            &code(payment),
+            &Attempt {
+                pay_at: None,
+                provider: "moyasar".to_owned(),
+                gateway_id: payment.to_owned(),
+                collects: payments::Collects::Advance(payments::Advance {
+                    against: code(against),
+                    net,
+                    buyer: payments::Buyer {
+                        name: "سارة".to_owned(),
+                        vat_number: None,
+                    },
+                }),
+                amount,
+            },
+            when(),
+            &clerk(),
+            sales::Authority::Member { owner: false },
+        )
+        .await
+        .map(|_| ());
+        if outcome.is_ok() {
+            tx.commit().await.expect("commits");
+        } else {
+            tx.rollback().await.expect("rolls back");
+        }
+        outcome
+    }
+}
+
+fn clerk() -> Metadata {
+    Metadata {
+        actor: Some("clerk".to_owned()),
+        ..Metadata::default()
+    }
+}
+
+fn over_the_limit(outcome: &Result<(), ExecuteError<PaymentsError>>) -> bool {
+    matches!(
+        outcome,
+        Err(ExecuteError::Rejected(PaymentsError::Refused(
+            sales::SalesError::OverDocumentLimit { .. }
+        )))
+    )
+}
+
+/// **A deposit a member charges is judged on the invoice its settlement will
+/// raise.**
+///
+/// The prepayment invoice is raised with `System` when the gateway settles,
+/// because by then the customer has paid and refusing it would leave the money
+/// undeclared. So the member is judged when they ask — at `request_in`, which
+/// the saved-card route calls, and at `start_in`, which `POST /v1/payments`
+/// calls — on the deposit's net and what the customer is charged, which is what
+/// that invoice will come to. A customer paying their own deposit is nobody
+/// asking, and is not judged.
+#[tokio::test]
+async fn a_members_deposit_charge_is_judged_on_the_invoice_it_will_raise() {
+    let fixture = Fixture::new("deposit-limit").await;
+    fixture.limit(riyals(50)).await;
+
+    let charged_card = fixture
+        .clerk_charges("pay_1", "BOOK-1", riyals(100), riyals(115))
+        .await;
+    assert!(over_the_limit(&charged_card), "{charged_card:?}");
+    let recorded = fixture
+        .clerk_records("pay_2", "BOOK-2", riyals(100), riyals(115))
+        .await;
+    assert!(over_the_limit(&recorded), "{recorded:?}");
+
+    fixture.project().await;
+    assert_eq!(fixture.stage_of("pay_1").await, "missing");
+    assert_eq!(fixture.stage_of("pay_2").await, "missing");
+
+    // Under it, the same member's charge stands — and the booking it was
+    // refused for is still free to be charged, which the refusal rolling back
+    // is what makes true.
+    fixture
+        .clerk_charges("pay_3", "BOOK-1", riyals(40), riyals(46))
+        .await
+        .expect("46 is within the limit");
+
+    // And the customer paying for their own booking is not judged at all.
+    fixture
+        .request_deposit("pay_4", "BOOK-3", riyals(100), riyals(115))
+        .await
+        .expect("nobody is asking");
+}
+
+/// **A refund is judged on the credit note it will leave owing**, not only on
+/// the money.
+///
+/// A refund that leaves an invoice holding nothing issues a **whole-invoice**
+/// credit note, and `payments::refund_in` issues it with `System` because the
+/// gateway has already handed the money back. So the member is judged on that
+/// document when they ask: 40 riyals back is within a 50 limit, and the 115
+/// credit note clearing the invoice would not be. A refund that leaves the
+/// invoice holding something is judged on the partial credit note instead,
+/// which is the money that went back.
+#[tokio::test]
+async fn a_refund_that_clears_an_invoice_is_judged_on_its_whole_credit_note() {
+    let fixture = Fixture::new("clearing-refund").await;
+    fixture.invoice("INV-1").await;
+    fixture.limit(riyals(50)).await;
+    fixture.start("pay_1", "moyasar", "INV-1", riyals(40)).await;
+    fixture
+        .settle("pay_1", &charged("pay_1", Status::Paid, riyals(40), None))
+        .await
+        .expect("the customer paid part of it");
+
+    let clears = clerk_asks(&fixture, "back-all", riyals(40)).await;
+    assert!(over_the_limit(&clears), "{clears:?}");
+
+    clerk_asks(&fixture, "back-some", riyals(30))
+        .await
+        .expect("30 back leaves the invoice holding 10, and credits only the 30");
+    fixture.project().await;
+    assert_eq!(
+        fixture
+            .refund_outcomes("pay_1")
+            .await
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .collect::<Vec<_>>(),
+        vec!["back-some".to_owned()],
+        "the refused request left nothing for the worker to carry to the gateway"
     );
 }

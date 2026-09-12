@@ -375,6 +375,8 @@ async fn record(
         },
         chrono::Utc::now(),
         &publicly(key),
+        // **The customer, paying their own deposit.** No member is asking.
+        sales::Authority::System,
     )
     .await;
 

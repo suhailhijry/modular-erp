@@ -191,7 +191,7 @@ async fn event_stream(
             setup
                 .groups
                 .iter()
-                .map(move |(group, _)| ((*group).to_owned(), setup.module.clone()))
+                .map(move |(group, _, _)| ((*group).to_owned(), setup.module.clone()))
         })
         .collect();
     let mut groups = serde_json::Map::new();

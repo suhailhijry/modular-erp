@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT secret, sealed_with FROM authenticator WHERE identity_id = $1 AND kind = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "secret",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "authenticator",
+            "name": "secret"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "sealed_with",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "authenticator",
+            "name": "sealed_with"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "a53d26c2778b0c71224bd71e2dbfa16c154edb495689bf328fece3a6a6993ee1"
+}

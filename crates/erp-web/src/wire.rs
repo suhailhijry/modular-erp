@@ -48,22 +48,71 @@ where
         let locale = spoken_in(request.headers());
         match axum::Json::<T>::from_request(request, state).await {
             Ok(axum::Json(value)) => Ok(Self(value)),
-            Err(rejection) => {
-                let code = match rejection {
-                    JsonRejection::MissingJsonContentType(_) => {
-                        crate::messages::UNSUPPORTED_MEDIA_TYPE
-                    }
-                    _ => crate::messages::MALFORMED_BODY,
-                };
-                Err(Problem::new(
-                    rejection.status(),
-                    &Message::new(code).with("reason", MessageArg::text(rejection.body_text())),
-                    locale,
-                    &crate::CATALOG,
-                ))
-            }
+            Err(rejection) => Err(refused(&rejection, locale)),
         }
     }
+}
+
+/// **`Option<Json<T>>`, for a route that gained a body it did not have.**
+///
+/// **`None` is an empty body and nothing else** — with or without a
+/// `Content-Type`, because a client that always sets the header still sends no
+/// bytes when it has nothing to say, and that is what a caller written against
+/// the bodyless version of a route does. Both kept working when
+/// `POST /v1/sessions/second-factor` gained its optional `link`.
+///
+/// A body that is *there* goes through [`Json`]'s own rules: the wrong content
+/// type is still a 415 and unparseable JSON still a 400. Reading either as
+/// "nothing was sent" is how an ignored field becomes a security hole.
+impl<T, S> axum::extract::OptionalFromRequest<S> for Json<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = Problem;
+
+    async fn from_request(request: Request, state: &S) -> Result<Option<Self>, Problem> {
+        let locale = spoken_in(request.headers());
+        let (parts, body) = request.into_parts();
+        // Through `Bytes`, so the deployment's body limit still applies.
+        let bytes =
+            axum::body::Bytes::from_request(Request::from_parts(parts.clone(), body), state)
+                .await
+                .map_err(|rejection| {
+                    Problem::new(
+                        rejection.status(),
+                        &Message::new(crate::messages::MALFORMED_BODY)
+                            .with("reason", MessageArg::text(rejection.body_text())),
+                        locale,
+                        &crate::CATALOG,
+                    )
+                })?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        match <axum::Json<T> as FromRequest<S>>::from_request(
+            Request::from_parts(parts, axum::body::Body::from(bytes)),
+            state,
+        )
+        .await
+        {
+            Ok(axum::Json(value)) => Ok(Some(Self(value))),
+            Err(rejection) => Err(refused(&rejection, locale)),
+        }
+    }
+}
+
+fn refused(rejection: &JsonRejection, locale: Locale) -> Problem {
+    let code = match rejection {
+        JsonRejection::MissingJsonContentType(_) => crate::messages::UNSUPPORTED_MEDIA_TYPE,
+        _ => crate::messages::MALFORMED_BODY,
+    };
+    Problem::new(
+        rejection.status(),
+        &Message::new(code).with("reason", MessageArg::text(rejection.body_text())),
+        locale,
+        &crate::CATALOG,
+    )
 }
 
 impl<T: serde::Serialize> IntoResponse for Json<T> {
@@ -152,12 +201,13 @@ fn spoken_in(headers: &axum::http::HeaderMap) -> Locale {
         .map_or(Locale::DEFAULT, Locale::from_accept_language)
 }
 
-/// An amount, as a client sends it.
+/// An amount, as a client sends it — and as a setting made of one answers it
+/// back, so what a screen reads is what it sends.
 ///
 /// Minor units and an explicit currency — never a decimal string, and never a
 /// float. A client that sends `10.50` has already lost the argument about how
 /// many decimal places the currency has.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, serde::Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(example = json!({ "minor": 1050, "currency": "SAR" }))]
 pub struct Amount {
     /// The amount in the currency's smallest unit. 1050 is 10.50 SAR.

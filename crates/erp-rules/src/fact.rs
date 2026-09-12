@@ -39,9 +39,11 @@ impl Value {
 
     /// Orders two values of the same kind.
     ///
-    /// `None` when they are different kinds, or two amounts in different
-    /// currencies — which the registry refuses at authoring time, so reaching
-    /// this at evaluation means a fact was supplied with the wrong kind.
+    /// `None` when they are different kinds — which the registry refuses when a
+    /// rule is written, so reaching it means a fact was supplied with the wrong
+    /// kind — or two amounts in different currencies, which nothing can refuse
+    /// earlier: a rule's currency is known when it is written, an amount's only
+    /// when one is asked about. `DynCondition::decide` carries the `None` up.
     #[must_use]
     pub fn compare(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
@@ -128,6 +130,8 @@ impl Facts {
 #[derive(Debug, Clone, Default)]
 pub struct FactRegistry {
     known: BTreeMap<FactName, Kind>,
+    /// The only values some text facts ever take. See [`Self::one_of`].
+    values: BTreeMap<FactName, Vec<String>>,
     /// Whether conditions here may ask about a span.
     spans: bool,
 }
@@ -144,6 +148,25 @@ impl FactRegistry {
         self
     }
 
+    /// Declares a text fact that only ever takes one of `values`.
+    ///
+    /// **So a misspelt value is refused when it is written.** Without the list,
+    /// `capability == "post_entires"` has the right fact and the right kind,
+    /// validates, and is never once true. Nothing orders such a fact either:
+    /// `role < "clerk"` compares spellings, not anything the business means.
+    #[must_use]
+    pub fn one_of(
+        mut self,
+        name: impl Into<FactName>,
+        values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let name = name.into();
+        self.known.insert(name.clone(), Kind::Text);
+        self.values
+            .insert(name, values.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Declares that a decision here is about a window of time, so
     /// `DynCondition::Covers` is available.
     #[must_use]
@@ -155,6 +178,12 @@ impl FactRegistry {
     #[must_use]
     pub fn kind_of(&self, name: &str) -> Option<Kind> {
         self.known.get(name).copied()
+    }
+
+    /// The only values a fact declared with [`Self::one_of`] takes.
+    #[must_use]
+    pub fn values_of(&self, name: &str) -> Option<&[String]> {
+        self.values.get(name).map(Vec::as_slice)
     }
 
     #[must_use]

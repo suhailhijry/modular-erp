@@ -349,6 +349,7 @@ async fn two_branches_report_separately_and_sum_to_one_trial_balance() {
                 &code(&format!("{branch}-SALE-{n}")),
                 &service(net),
                 &at(branch),
+                sales::Authority::Member { owner: false },
             )
             .await
             .expect("the sale rings");
@@ -438,6 +439,7 @@ async fn a_posting_to_an_unknown_branch_is_refused_everywhere() {
         &code("SALE-1"),
         &service(10_000),
         &at("NOWHERE"),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect_err("there is no such branch");
@@ -491,6 +493,7 @@ async fn a_closed_branch_keeps_what_it_traded() {
         &code("SALE-1"),
         &service(10_000),
         &at("OLAYA"),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("the sale rings");
@@ -512,6 +515,7 @@ async fn a_closed_branch_keeps_what_it_traded() {
         &code("SALE-2"),
         &service(10_000),
         &at("OLAYA"),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect_err("the branch is closed");

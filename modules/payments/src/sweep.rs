@@ -487,6 +487,8 @@ pub async fn collect_awaited(
             },
             now,
             metadata,
+            // The worker, finding what was already asked for and judged.
+            sales::Authority::System,
         )
         .await?;
         tx.commit().await?;
@@ -564,6 +566,8 @@ pub async fn open_checkouts(
             },
             now,
             metadata,
+            // The worker, finding what was already asked for and judged.
+            sales::Authority::System,
         )
         .await?;
         tx.commit().await?;
@@ -690,6 +694,8 @@ pub async fn charge_requested(
             },
             now,
             metadata,
+            // The worker, finding what was already asked for and judged.
+            sales::Authority::System,
         )
         .await?;
         tx.commit().await?;

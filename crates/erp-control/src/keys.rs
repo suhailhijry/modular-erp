@@ -289,6 +289,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            Some(tenant),
             "api_key.issued",
             "api_key",
             &id.to_string(),
@@ -479,6 +480,7 @@ impl ControlPlane {
         if changed > 0 {
             self.record(
                 actor,
+                Some(tenant),
                 "api_key.revoked",
                 "api_key",
                 &key.to_string(),
@@ -538,6 +540,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            Some(tenant),
             "api_key.rotated",
             "api_key",
             &key.to_string(),

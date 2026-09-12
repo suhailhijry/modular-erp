@@ -53,8 +53,8 @@ mod employee;
 mod projections;
 
 pub use claims::{
-    Approval, Claim, ClaimError, Held, SEGREGATED, any_claim_placed, effective, holds,
-    is_segregated, may, may_for,
+    Approval, Claim, ClaimError, Held, RESET_SECOND_FACTOR, SEGREGATED, actor_holds,
+    any_claim_placed, effective, holds, is_segregated, may, may_for,
 };
 pub use commands::{
     APPROVE_TIMESHEET, Hire, HrError, amend_employee, eligible_for, exists, grant_claim, hire,
@@ -83,9 +83,10 @@ pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 /// This module's projection group name, for `?consistent_after=`.
 pub const GROUP_NAME: &str = <Hr as erp_projection::ProjectionGroup>::NAME;
 
-const GROUPS: &[(&str, &str)] = &[(
+const GROUPS: &[(&str, &str, i16)] = &[(
     <Hr as erp_projection::ProjectionGroup>::NAME,
     <Hr as erp_projection::ProjectionGroup>::SCHEMA,
+    <Hr as erp_projection::ProjectionGroup>::VERSION,
 )];
 
 /// Creates this module's read models in a tenant database.
@@ -119,6 +120,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         upcasters,
     )
     .requiring(&["branches"])
+    .reading(&["branches"])
 }
 
 /// This module's entitlement name.

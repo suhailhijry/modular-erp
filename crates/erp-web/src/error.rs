@@ -56,7 +56,25 @@ impl ApiError {
             // membership in this tenant, so there is nothing left to discover.
             // A 404 would tell a member to give up when the one thing they can
             // do is enrol.
-            Self::Access(AccessError::SecondFactorRequired) => StatusCode::FORBIDDEN,
+            //
+            // **403 on the platform surface, for anyone.** There is no tenant
+            // here to keep from being enumerated, and the routes are in the
+            // public document — hiding them behind a 404 would hide nothing.
+            // Turning off a factor that staff or a tenant requires is here too:
+            // logging in again would not change the answer, so not a 401.
+            //
+            // **And enrolling on an account somebody else's reset left
+            // link-only.** A 401 would say "your credentials were wrong" to
+            // somebody whose password is right; the missing thing is the link,
+            // and no amount of logging in produces one.
+            Self::Access(
+                AccessError::SecondFactorRequired
+                | AccessError::StaffOnly(_)
+                | AccessError::StaffSecondFactorRequired,
+            )
+            | Self::Auth(AuthError::SecondFactorKept(_) | AuthError::EnrolmentLinkRequired) => {
+                StatusCode::FORBIDDEN
+            }
 
             // 404, not 403 — and the same 404 a genuinely missing tenant gets.
             // Distinguishing "exists but you may not" from "does not exist"
@@ -74,13 +92,15 @@ impl ApiError {
                 StatusCode::SERVICE_UNAVAILABLE
             }
 
-            // Two different conflicts, one status: a name someone else took, and
-            // a record someone else changed first. Both mean "look at what is
-            // there now and decide again".
+            // Different conflicts, one status: a name someone else took, a
+            // record someone else changed first, a tenant not in the status a
+            // move starts from. All mean "look at what is there now and decide
+            // again".
             Self::Access(
                 AccessError::SlugTaken(_)
                 | AccessError::Auth(AuthError::HandleTaken(_))
-                | AccessError::DomainNotProved { .. },
+                | AccessError::DomainNotProved { .. }
+                | AccessError::WrongTenantStatus { .. },
             )
             | Self::Append(erp_eventlog::AppendError::Conflict { .. }) => StatusCode::CONFLICT,
 
@@ -90,10 +110,12 @@ impl ApiError {
             Self::Access(AccessError::Auth(_)) => StatusCode::UNAUTHORIZED,
 
             Self::Access(AccessError::DomainProofUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Access(AccessError::NotAnOrigin(_) | AccessError::OriginOutsideDomain { .. }) => {
-                StatusCode::BAD_REQUEST
-            }
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Access(
+                AccessError::NotAnOrigin(_)
+                | AccessError::OriginOutsideDomain { .. }
+                | AccessError::SuspensionReason,
+            )
+            | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
 
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }

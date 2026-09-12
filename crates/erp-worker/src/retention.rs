@@ -22,8 +22,8 @@ use erp_types::Timestamp;
 
 use crate::{Activity, BoxError, Job, PlatformJob};
 
-/// A delivered effect is kept this long. Long enough to answer "did we send
-/// the reminder" for last month's bookings.
+/// A delivered effect is kept this long, in either plane. Long enough to answer
+/// "did we send the reminder" for last month's bookings.
 pub const DELIVERED_EFFECTS: chrono::Duration = chrono::Duration::days(30);
 /// A provider's callback payload is kept this long — a quarter, which is how
 /// long an argument about a settlement takes.
@@ -33,7 +33,8 @@ pub const OCCUPANCY_CLAIMS: chrono::Duration = chrono::Duration::days(180);
 /// A dead short link is kept this long past its death.
 pub const SHORT_LINKS: chrono::Duration = chrono::Duration::days(30);
 
-/// The tenant-plane sweeps, as one kernel job every tenant gets.
+/// The tenant-plane sweeps, as one kernel job every tenant gets — and
+/// [`Retention::sweep_control`], the control plane's one, for the reaper.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Retention;
 
@@ -48,6 +49,20 @@ impl Retention {
         gone += erp_occupancy::sweep_ended_before(&mut conn, now - OCCUPANCY_CLAIMS).await?;
         gone += erp_links::sweep(&mut conn, now - SHORT_LINKS).await?;
         Ok(gone)
+    }
+
+    /// Forgets the control plane's delivered effects — signup, invitation and
+    /// reset emails, sign-in texts — after the same [`DELIVERED_EFFECTS`], as
+    /// of `now`. Pending and dead ones stay, as they do in a tenant's.
+    ///
+    /// **Called by the reaper, not run as a [`PlatformJob`].** Platform jobs
+    /// run every claim cycle, a quarter of a second apart on an idle fleet, and
+    /// `outbox` has no index on `delivered_at`, so this would scan the table
+    /// four times a second on every worker. It is a sweep that is cheap once
+    /// and pointless often, which is the reaper's shape.
+    pub async fn sweep_control(control: &ControlPlane, now: Timestamp) -> Result<u64, BoxError> {
+        let mut conn = control.pool().acquire().await?;
+        Ok(erp_eventlog::sweep_delivered(&mut conn, now - DELIVERED_EFFECTS).await?)
     }
 }
 

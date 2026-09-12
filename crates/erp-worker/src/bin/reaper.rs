@@ -1,4 +1,5 @@
-//! Destroys demo tenants whose time is up, and forgets signups nobody answered.
+//! Destroys demo tenants whose time is up, abandons signups whose build never
+//! finished, and forgets signups nobody answered and mail already delivered.
 //!
 //! ```text
 //! CONTROL_DATABASE_URL=… PRIMARY_CLUSTER_URL=… cargo run --bin reaper
@@ -11,19 +12,28 @@
 //! work with a different shape, and giving the worker a second shape to support
 //! one caller would be inventing structure.
 //!
-//! One-shot also means it can simply not be scheduled. A deployment with no
-//! demos never runs it, and one that wants to look before it deletes runs it by
-//! hand.
+//! It still has to be scheduled, demos or not: a signup whose build died holds
+//! its name until this runs, and stale links sit until it does. One-shot means
+//! a person who wants to look before it deletes can also run it by hand.
 //!
 //! # Why the signup sweep rides along
 //!
 //! Same shape and the same schedule: fleet-level tidying with no tenant behind
 //! it, cheap, and pointless to run often. An unanswered signup holds a password
 //! hash and an address somebody typed, and neither is worth keeping a day after
-//! the link stopped working.
+//! the link stopped working. The control plane's delivered mail and texts ride
+//! along for the same reason, after thirty days — see `Retention::sweep_control`.
 //!
 //! It runs **first**, and unconditionally: it touches only the control plane,
 //! so it cannot be held up by a cluster the demo sweep cannot reach.
+//!
+//! # Why the stuck-provisioning sweep rides along
+//!
+//! A signup's build compensates itself when it fails — but only if its process
+//! lives to run the compensation. One killed mid-build by a crash or a deploy
+//! leaves a tenant `provisioning`, holding its name, for ever. This runs that
+//! compensation for it, after `PROVISIONING_GRACE_SECONDS`, so a stuck name is
+//! held for up to that plus this binary's schedule.
 //!
 //! Exits non-zero if a sweep itself failed. An individual tenant that could not
 //! be destroyed is logged and retried on the next run — one unreachable cluster
@@ -73,17 +83,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let stale = control.sweep_password_resets().await?;
     tracing::info!(stale, "expired reset links swept");
 
+    // The same, for the links mailed after somebody's second factor was reset.
+    // **It reopens nothing**: the account stays link-only — that fact is on the
+    // identity, not on the row — so a swept link means asking for a fresh one,
+    // never a password-only enrolment.
+    let enrolments = control.sweep_enrolment_links().await?;
+    tracing::info!(enrolments, "expired enrolment links swept");
+
+    // The control plane's delivered mail and texts, after the tenant plane's
+    // thirty days. Here rather than in the worker for the reason
+    // `Retention::sweep_control` gives.
+    let receipts = erp_worker::Retention::sweep_control(
+        &control,
+        erp_types::Timestamp::from(chrono::Utc::now()),
+    )
+    .await?;
+    tracing::info!(receipts, "delivered control-plane effects swept");
+
     let reaped = control.reap_expired_demos(PER_RUN).await?;
     tracing::info!(reaped, "demo sweep finished");
+
+    // Before the orphans, though the order does not matter: it drops a
+    // database and the row naming it together, so it never makes one.
+    let abandoned = control
+        .reap_stuck_provisioning(erp_control::PROVISIONING_GRACE_SECONDS, PER_RUN)
+        .await?;
+    tracing::info!(abandoned, "stuck provisionings abandoned");
 
     // **Databases no tenant row claims.**
     //
     // Dropped only when the database itself says it holds nothing: no events,
     // and no setting anybody chose. The control plane cannot answer this —
-    // `provision` writes the row before it creates the database, so an
-    // unclaimed database is not a dead provisioning, it is usually a control
-    // plane that has lost rows. Asking the database is asking the one party
-    // that is not in doubt.
+    // `provision` writes the row before it creates the database, so a dead
+    // provisioning leaves a row (the sweep above), not an unclaimed database;
+    // one of those is usually a control plane that has lost rows. Asking the
+    // database is asking the one party that is not in doubt.
     //
     // One occupied or unreadable database refuses the whole cluster's sweep,
     // which is the case `restore.rs` calls dangerous and is right to.

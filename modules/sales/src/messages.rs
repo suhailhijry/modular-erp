@@ -29,8 +29,19 @@ pub const PREPAID_DOES_NOT_FIT: MessageCode = MessageCode::new("sales.prepaid_do
 
 pub const NO_SUCH_LINE: MessageCode = MessageCode::new("sales.no_such_line");
 
+/// An invoice, credit note or refund over the tenant's document limit.
+pub const OVER_DOCUMENT_LIMIT: MessageCode = MessageCode::new("sales.over_document_limit");
+/// One in another currency than the limit's, which cannot be compared with it.
+pub const DOCUMENT_LIMIT_CURRENCY: MessageCode = MessageCode::new("sales.document_limit_currency");
+/// A limit of nothing, or less.
+pub const DOCUMENT_LIMIT_NOT_POSITIVE: MessageCode =
+    MessageCode::new("sales.document_limit_not_positive");
+
 pub static CODES: &[MessageCode] = &[
     NOT_APPROVED,
+    OVER_DOCUMENT_LIMIT,
+    DOCUMENT_LIMIT_CURRENCY,
+    DOCUMENT_LIMIT_NOT_POSITIVE,
     NO_EXEMPTION_REASON,
     PREPAID_DOES_NOT_FIT,
     NO_SUCH_LINE,
@@ -319,5 +330,47 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_LINE,
         Locale::Arabic,
         Template::Simple("الفاتورة {invoice} لا تحتوي على البند {line}."),
+    ),
+    (
+        OVER_DOCUMENT_LIMIT,
+        Locale::English,
+        Template::Simple(
+            "This document comes to {amount}, and this business limits one document to {limit}. Ask the owner, or somebody who holds the {claim} claim here.",
+        ),
+    ),
+    (
+        OVER_DOCUMENT_LIMIT,
+        Locale::Arabic,
+        Template::Simple(
+            "قيمة هذا المستند {amount}، والحد الذي وضعته المنشأة للمستند الواحد {limit}. اطلب ذلك من المالك أو من شخص يملك صلاحية {claim} هنا.",
+        ),
+    ),
+    (
+        DOCUMENT_LIMIT_CURRENCY,
+        Locale::English,
+        Template::Simple(
+            "This document comes to {amount}, and this business's limit of {limit} per document is in another currency, so it cannot be judged against it. Ask the owner, or somebody who holds the {claim} claim here.",
+        ),
+    ),
+    (
+        DOCUMENT_LIMIT_CURRENCY,
+        Locale::Arabic,
+        Template::Simple(
+            "قيمة هذا المستند {amount}، وحد المنشأة للمستند الواحد {limit} بعملة أخرى فلا تمكن مقارنته به. اطلب ذلك من المالك أو من شخص يملك صلاحية {claim} هنا.",
+        ),
+    ),
+    (
+        DOCUMENT_LIMIT_NOT_POSITIVE,
+        Locale::English,
+        Template::Simple(
+            "A limit on one document must be more than nothing, and {limit} is not. Send null to have no limit.",
+        ),
+    ),
+    (
+        DOCUMENT_LIMIT_NOT_POSITIVE,
+        Locale::Arabic,
+        Template::Simple(
+            "يجب أن يكون حد المستند الواحد أكبر من الصفر، و{limit} ليس كذلك. أرسل null لإلغاء الحد.",
+        ),
     ),
 ];

@@ -2,7 +2,7 @@
 
 The HTTP surface, and the one place that composes it.
 
-**Depends on:** `erp-web` and every module.
+**Depends on:** `erp-web`, `erp-tenant` and `erp-rules` (for permission limits), and every module.
 **Used by:** `erp-demo`, and `bin/api.rs` inside it.
 
 ## What is here and what is not
@@ -29,6 +29,9 @@ a module has to be able to name it.
 | [`catalog.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/catalog.rs) | The complete message catalog |
 | [`signup.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/signup.rs) | `POST /v1/signups` and `POST /v1/signups/{token}` |
 | [`members.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/members.rs) | `/v1/members` |
+| [`platform.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/platform.rs) | `/v1/platform/staff`, `/v1/platform/tenants/{id}/…`, `/v1/platform/effects/dead` and `/v1/platform/audit` — the platform's own surface |
+| [`audit.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/audit.rs) | `GET /v1/audit` and `GET /v1/sessions/current/audit`, and the view all three trail readers answer in |
+| [`permission_limits.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/permission_limits.rs) | `GET`/`PUT /v1/tenant/permission-limits`, the owner's writer for `erp_tenant::Limits` |
 | [`invitations.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/invitations.rs) | `/v1/invitations` and `/v1/join/{token}` |
 | [`bin/api.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-api/src/bin/api.rs) | The API process |
 
@@ -106,7 +109,9 @@ in the meantime; refusing there would trap them.
 1. Create the crate under `modules/`, depending on `erp-tenant`, `erp-web`, and
    whichever modules sit below it. **Never `erp-control`.**
 2. Export `setup()`, `module_id()`, `upcasters()`, `CATALOG`, `projections()`
-   and `http::routes()`.
+   and `http::routes()`. `setup()` names its group as `(NAME, SCHEMA, VERSION)`
+   from the `ProjectionGroup`, and `.reading(&[…])` the modules its crate
+   depends on.
 3. Add one `Registered` entry here.
 4. Add its catalog to `catalog.rs`.
 5. Register its `ProjectionJob` (with `.for_module`) and any invariants or jobs
@@ -115,7 +120,10 @@ in the meantime; refusing there would trap them.
 7. `just prepare`, `just errors`, `just openapi`, and commit the diffs.
 
 Several tests will tell you if you missed a step. `a_modules_schema_is_named_after_its_crate`
-pins the naming. The shadow-replay coverage assertion fails if the group is not
+pins the naming. `a_modules_reads_are_its_crate_dependencies` compares `reads`
+with its `Cargo.toml`. `a_read_model_change_bumps_its_version` in `bin/migrator`
+prints the read-model pin to add, and `every_module_can_be_rebuilt` wants an arm
+in the migrator's `rebuild`. The shadow-replay coverage assertion fails if the group is not
 replayed. `every_role_against_every_endpoint` fails if a route has no
 authorization row. The completeness audit fails if a message has no Arabic.
 
@@ -125,6 +133,21 @@ authorization row. The completeness audit fails if a message has no Arabic.
 pub fn router(state: AppState) -> Router;
 pub fn openapi() -> utoipa::openapi::OpenApi;
 ```
+
+`router` fills `AppState::read_models` from the same list that mounts the module
+routes, so a server refuses a stale read model by the list it serves from, and
+the document's conventions add the resulting `503 request.read_model_rebuilding`
+to every route of a module with read models.
+
+A route this crate serves under a module's path is refused by that module, and
+the module's `reads` is its own crate's dependencies, which cannot see this
+crate. So `COMPOSED` in `modules.rs` names what those routes run beyond it: the
+reservation invoice under `/v1/booking` is issued through `sales`, and the
+public deposit goes through `payments`, `ledger`, `messaging` and `tax_sa`.
+`composed_routes_run_only_what_their_module_is_refused_on` scans each file here
+that declares a `/v1/{module}/` path, and fails on a module it names as `x::`
+that is not in that module's closure. A new route under a module's path that
+calls another module needs its line there.
 
 `OpenApiRouter` registers an axum route *from* its handler's `#[utoipa::path]`
 attribute, so the path and the method a client reads are the path and the method
@@ -192,7 +215,7 @@ against it, so a code missing from any part is a failing build.
 | `BIND` | no | Default `0.0.0.0:8080` |
 | `PUBLIC_DOMAIN` | no | Default `localhost`, so `acme.localhost` works with no DNS |
 | `REDIS_URL` | no | Shared sessions and cross-node invalidation |
-| `SEALING_KEY` | no | `<id>:<64 hex>`. Without it, storing a tenant secret refuses |
+| `SEALING_KEY` | no | `<id>:<64 hex>[,<id>:<64 hex>…]`; the first seals, the rest are read during a rotation. Without it, storing a tenant secret refuses |
 
 Three layers, and nothing else:
 
@@ -218,5 +241,6 @@ Generate a sealing key with:
 openssl rand -hex 32
 ```
 
-Its identifier is stored beside every row it seals, so a rotation can find what
-it has not re-sealed yet.
+Prefix it with an id, `2026-09:<hex>`. The id is stored beside every row it
+seals, a row is opened with the key it names or refused, and `migrator reseal`
+moves rows onto a new first key. RUNNING has the rotation procedure.

@@ -27,6 +27,9 @@ pub const PASSWORD_TOO_SHORT: MessageCode = MessageCode::new("request.password_t
 pub const UNKNOWN_MODULE: MessageCode = MessageCode::new("request.unknown_module");
 pub const UNKNOWN_CHART: MessageCode = MessageCode::new("request.unknown_chart");
 pub const UNKNOWN_ROLE: MessageCode = MessageCode::new("request.unknown_role");
+/// Not a platform staff role. Its own code, because the list it names is not
+/// the tenant's.
+pub const UNKNOWN_STAFF_ROLE: MessageCode = MessageCode::new("request.unknown_staff_role");
 pub const UNKNOWN_ID_SCHEME: MessageCode = MessageCode::new("request.unknown_id_scheme");
 pub const UNKNOWN_ONBOARDING_STAGE: MessageCode =
     MessageCode::new("request.unknown_onboarding_stage");
@@ -46,6 +49,11 @@ pub const NOT_AN_OTP: MessageCode = MessageCode::new("request.not_an_otp");
 pub const COMPLIANCE_REFUSED: MessageCode = MessageCode::new("request.compliance_refused");
 /// 503. The caller asked to see a write that has not been projected yet.
 pub const NOT_CAUGHT_UP: MessageCode = MessageCode::new("request.not_caught_up");
+/// A 503: a read model this module's routes are served from was built by an
+/// older build than this one, and has not been rebuilt yet. Refused rather than
+/// served: what those tables say was worked out by rules this build no longer
+/// uses (decision 7 of 2026-09-11).
+pub const READ_MODEL_REBUILDING: MessageCode = MessageCode::new("request.read_model_rebuilding");
 /// A module was asked for without one it cannot work without.
 pub const MODULE_REQUIRES: MessageCode = MessageCode::new("request.module_requires");
 /// A module that needs at least one of several, and has none of them.
@@ -61,6 +69,13 @@ pub const NO_SUCH_BILL: MessageCode = MessageCode::new("request.no_such_bill");
 pub const NO_SUCH_DEAD_LETTER: MessageCode = MessageCode::new("request.no_such_dead_letter");
 /// A calendar that is not a name in the IANA zone database.
 pub const NOT_A_ZONE: MessageCode = MessageCode::new("request.not_a_zone");
+/// A permission limit asking about a fact no request supplies. 400.
+pub const NO_SUCH_FACT: MessageCode = MessageCode::new("request.no_such_fact");
+/// A permission limit comparing a fact to a value it never takes. 400.
+pub const NO_SUCH_FACT_VALUE: MessageCode = MessageCode::new("request.no_such_fact_value");
+/// A permission limit comparing a fact to a value of another kind, or ordering
+/// something that has no order. 400.
+pub const RULE_CANNOT_COMPARE: MessageCode = MessageCode::new("request.rule_cannot_compare");
 /// An `If-Match` header that does not name a version.
 pub const NOT_A_VERSION: MessageCode = MessageCode::new("request.not_a_version");
 /// A path this API does not serve.
@@ -102,6 +117,7 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_MODULE,
     UNKNOWN_CHART,
     UNKNOWN_ROLE,
+    UNKNOWN_STAFF_ROLE,
     UNKNOWN_ID_SCHEME,
     UNKNOWN_ONBOARDING_STAGE,
     UNKNOWN_ZATCA_ENVIRONMENT,
@@ -117,6 +133,7 @@ pub static CODES: &[MessageCode] = &[
     NOT_AN_OTP,
     COMPLIANCE_REFUSED,
     NOT_CAUGHT_UP,
+    READ_MODEL_REBUILDING,
     MODULE_REQUIRES,
     MODULE_REQUIRES_ONE_OF,
     MODULE_NOT_ENABLED,
@@ -129,6 +146,9 @@ pub static CODES: &[MessageCode] = &[
     METHOD_NOT_ALLOWED,
     NOT_A_VERSION,
     NOT_A_ZONE,
+    NO_SUCH_FACT,
+    NO_SUCH_FACT_VALUE,
+    RULE_CANNOT_COMPARE,
     MODULE_IN_USE,
     MODULE_DEPRECATED,
     UNUSABLE_VAT_RATE,
@@ -347,6 +367,16 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Template::Simple("{role} ليس دورًا. استخدم owner أو accountant أو clerk أو viewer."),
     ),
     (
+        UNKNOWN_STAFF_ROLE,
+        Locale::English,
+        Template::Simple("{role} is not a staff role. Use support, billing or superadmin."),
+    ),
+    (
+        UNKNOWN_STAFF_ROLE,
+        Locale::Arabic,
+        Template::Simple("{role} ليس دورًا لموظفي المنصة. استخدم support أو billing أو superadmin."),
+    ),
+    (
         UNKNOWN_ID_SCHEME,
         Locale::English,
         Template::Simple(
@@ -561,6 +591,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Template::Simple("لا يزال التحديث جاريًا (متبقٍ {behind}). يُرجى المحاولة بعد لحظات."),
     ),
     (
+        READ_MODEL_REBUILDING,
+        Locale::English,
+        Template::Simple(
+            "{module} is being brought up to date after an upgrade, and is unavailable until that finishes. Please try again shortly.",
+        ),
+    ),
+    (
+        READ_MODEL_REBUILDING,
+        Locale::Arabic,
+        Template::Simple(
+            "يجري تحديث {module} بعد ترقية النظام، ولن يكون متاحًا حتى يكتمل ذلك. يُرجى المحاولة بعد قليل.",
+        ),
+    ),
+    (
         MODULE_REQUIRES,
         Locale::English,
         Template::Simple("The {module} module needs {required}. Add it to the list."),
@@ -632,14 +676,14 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_DEAD_LETTER,
         Locale::English,
         Template::Simple(
-            "There is no dead letter {id}; it was already requeued, or never given up on.",
+            "There is no dead letter {id}; it was already requeued or dismissed, or never given up on.",
         ),
     ),
     (
         NO_SUCH_DEAD_LETTER,
         Locale::Arabic,
         Template::Simple(
-            "لا توجد رسالة متوقفة {id}؛ أُعيدت إلى الطابور من قبل، أو لم يُتخلَّ عنها أصلًا.",
+            "لا توجد رسالة متوقفة {id}؛ أُعيدت إلى الطابور أو حُذفت من قبل، أو لم يُتخلَّ عنها أصلًا.",
         ),
     ),
     (
@@ -692,6 +736,48 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         Locale::Arabic,
         Template::Simple(
             "{zone} ليست منطقة زمنية. استخدم اسمًا من قاعدة بيانات IANA، مثل Asia/Riyadh أو Europe/Berlin.",
+        ),
+    ),
+    (
+        NO_SUCH_FACT,
+        Locale::English,
+        Template::Simple(
+            "Rule {rule} asks about {fact}, which no request here can answer, so it would never apply. A rule may ask about: {known}.",
+        ),
+    ),
+    (
+        NO_SUCH_FACT,
+        Locale::Arabic,
+        Template::Simple(
+            "القاعدة {rule} تسأل عن {fact}، ولا يجيب عنه أي طلب هنا، فلن تنطبق أبدًا. يمكن للقاعدة أن تسأل عن: {known}.",
+        ),
+    ),
+    (
+        NO_SUCH_FACT_VALUE,
+        Locale::English,
+        Template::Simple(
+            "Rule {rule} compares {fact} to {value}, which it never is, so it would never apply. {fact} is one of: {known}.",
+        ),
+    ),
+    (
+        NO_SUCH_FACT_VALUE,
+        Locale::Arabic,
+        Template::Simple(
+            "القاعدة {rule} تقارن {fact} بـ {value}، وهي قيمة لا يأخذها أبدًا، فلن تنطبق القاعدة. قيم {fact} الممكنة: {known}.",
+        ),
+    ),
+    (
+        RULE_CANNOT_COMPARE,
+        Locale::English,
+        Template::Simple(
+            "Rule {rule} can never be true: it compares {fact} to a value of another kind, or by an order {fact} does not have.",
+        ),
+    ),
+    (
+        RULE_CANNOT_COMPARE,
+        Locale::Arabic,
+        Template::Simple(
+            "القاعدة {rule} لا يمكن أن تتحقق أبدًا: فهي تقارن {fact} بقيمة من نوع آخر، أو بترتيب لا يملكه {fact}.",
         ),
     ),
     (

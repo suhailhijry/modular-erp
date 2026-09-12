@@ -130,6 +130,14 @@ impl TenantDb {
     /// that is about to do database work anyway. An empty limit set — every
     /// tenant's default — short-circuits after that read.
     ///
+    /// **`ManageTenant` is answered before the read**, by the role alone
+    /// (`limits::narrows`). That is what keeps the owner able to repair limits
+    /// that refuse everything, and limits this build can no longer read: both
+    /// would otherwise refuse the one route that fixes them.
+    ///
+    /// The role that applies here is added as the `role` fact, so a limit can
+    /// name the bookkeeper and leave the owner alone.
+    ///
     /// ponytail: reads per call. Cache it beside `Access` if a profile ever
     /// says the row lookup shows, and invalidate on write like every other
     /// cached authorization answer.
@@ -145,11 +153,12 @@ impl TenantDb {
         facts: &erp_rules::Facts,
     ) -> Result<bool, erp_eventlog::ConfigError> {
         let allowed = self.allows_in(capability, module);
-        if !allowed {
+        if !allowed || !crate::limits::narrows(capability) {
             // **The role already said no**, and a limit cannot widen. Skipping
             // the read here is not just an optimisation: it is why a refusal
-            // costs nothing to serve.
-            return Ok(false);
+            // costs nothing to serve. Or this is the capability no limit may
+            // touch, and it must not depend on limits being readable.
+            return Ok(allowed);
         }
         let mut conn = self
             .acquire()
@@ -163,7 +172,14 @@ impl TenantDb {
                 .await?
                 .map_or_else(crate::Limits::default, |configured| configured.value);
         drop(conn);
-        Ok(limits.narrow(allowed, facts))
+        let mut facts = facts.clone();
+        if let Some(access) = &self.access {
+            facts = facts.with(
+                crate::limits::ROLE,
+                erp_rules::Value::Text(access.role_in(module).as_str().to_owned()),
+            );
+        }
+        Ok(limits.narrow(allowed, &facts))
     }
 
     #[must_use]

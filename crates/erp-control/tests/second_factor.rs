@@ -150,14 +150,22 @@ impl Fixture {
     async fn enrolling(&self, now: Timestamp, previous: Option<&str>) -> (Vec<u8>, Vec<String>) {
         let enrolment = self
             .control
-            .begin_second_factor(self.identity, "Bassat", HANDLE, &self.sealing)
+            .begin_second_factor(self.identity, "Bassat", HANDLE, &self.sealing, None)
             .await
             .expect("enrolment begins");
         let secret = totp::unbase32(&enrolment.secret).expect("the secret is base32");
         let code = totp::code_at(&secret, seconds(now), totp::DIGITS).expect("a code");
         let confirmed = self
             .control
-            .confirm_second_factor(self.identity, &code, previous, now, &self.sealing)
+            .confirm_second_factor(
+                self.identity,
+                &code,
+                previous,
+                now,
+                &self.sealing,
+                None,
+                None,
+            )
             .await
             .expect("enrolment confirms");
         (secret, confirmed.recovery_codes)
@@ -209,7 +217,7 @@ async fn an_unconfirmed_enrolment_does_not_gate_a_login() {
 
     fixture
         .control
-        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &fixture.sealing)
+        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &fixture.sealing, None)
         .await
         .expect("enrolment begins");
 
@@ -236,13 +244,21 @@ async fn a_wrong_code_does_not_confirm_an_enrolment() {
 
     fixture
         .control
-        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &fixture.sealing)
+        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &fixture.sealing, None)
         .await
         .expect("enrolment begins");
 
     let refused = fixture
         .control
-        .confirm_second_factor(fixture.identity, "000000", None, now, &fixture.sealing)
+        .confirm_second_factor(
+            fixture.identity,
+            "000000",
+            None,
+            now,
+            &fixture.sealing,
+            None,
+            None,
+        )
         .await;
     assert!(matches!(refused, Err(AuthError::InvalidCredentials)));
     assert!(
@@ -524,13 +540,13 @@ async fn a_tenant_that_requires_a_second_factor_refuses_a_member_without_one() {
     fixture.cleanup().await;
 }
 
-/// Turning it **off** must not need the *tenant requirement* switched off
-/// first, or the requirement cannot be undone by the person it locked out.
+/// Switching the requirement **off** needs no second factor, or it could not be
+/// undone by an owner it locked out.
 ///
-/// It does now cost a code, since a stolen session used to be enough — and the
-/// phone being gone is what the recovery codes are for. That adds no stranding:
-/// somebody with neither could not have reached this route, because they could
-/// not have logged in.
+/// That owner is not one who dropped their own factor — a member of a tenant
+/// that requires one cannot (see
+/// `a_suspended_tenant_still_keeps_its_members_factor`) — but a second owner who
+/// never enrolled.
 #[tokio::test]
 async fn the_requirement_can_always_be_switched_off() {
     let fixture = Fixture::new().await;
@@ -538,37 +554,169 @@ async fn the_requirement_can_always_be_switched_off() {
     let tenant = fixture.tenant("acme").await;
     fixture.join(tenant).await;
 
-    let (_secret, recovery) = fixture.enrolled(now).await;
+    fixture.enrolled(now).await;
     fixture
         .control
         .set_second_factor_requirement(tenant, fixture.identity, true)
         .await
         .expect("switches on");
 
+    // Unprotected, and locked out — but still able to undo it.
+    let other_owner = fixture
+        .control
+        .create_identity(Actor::system())
+        .await
+        .expect("identity is created")
+        .id;
     fixture
         .control
-        .disable_second_factor(fixture.identity, Some(&recovery[0]), now, &fixture.sealing)
+        .grant_membership(other_owner, Scope::Tenant(tenant), "owner", Actor::system())
         .await
-        .expect("the phone is gone, and the paper is what that is for");
-
-    // Now unprotected, and locked out — but still able to undo it.
+        .expect("made an owner");
     assert!(matches!(
         fixture
             .control
-            .enter(fixture.identity, tenant, Lane::Interactive)
+            .enter(other_owner, tenant, Lane::Interactive)
             .await,
         Err(AccessError::SecondFactorRequired)
     ));
     fixture
         .control
-        .set_second_factor_requirement(tenant, fixture.identity, false)
+        .set_second_factor_requirement(tenant, other_owner, false)
         .await
         .expect("switching it off needs no second factor");
     fixture
         .control
-        .enter(fixture.identity, tenant, Lane::Interactive)
+        .enter(other_owner, tenant, Lane::Interactive)
         .await
         .expect("and they are back in");
+
+    fixture.cleanup().await;
+}
+
+/// **A tenant's requirement is kept while it is suspended**, and removal is
+/// refused before the code is checked, so the recovery code sent is not spent.
+/// A suspended tenant is reinstated with its requirement; a factor dropped in
+/// between would leave the account password-only when it comes back.
+#[tokio::test]
+async fn a_suspended_tenant_still_keeps_its_members_factor() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let tenant = fixture.tenant("acme").await;
+    fixture.join(tenant).await;
+    let (_secret, recovery) = fixture.enrolled(now).await;
+    fixture
+        .control
+        .set_second_factor_requirement(tenant, fixture.identity, true)
+        .await
+        .expect("switches on");
+    fixture
+        .control
+        .suspend_tenant(tenant, "unpaid", Actor::system())
+        .await
+        .expect("suspends");
+
+    let refused = fixture
+        .control
+        .disable_second_factor(fixture.identity, Some(&recovery[0]), now, &fixture.sealing)
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(AuthError::SecondFactorKept(
+                erp_control::FactorRequiredBy::Tenant
+            ))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fixture
+            .control
+            .recovery_codes_left(fixture.identity)
+            .await
+            .expect("counts"),
+        i64::try_from(recovery.len()).expect("small"),
+        "the refusal spent a recovery code"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Two confirmations of one replacement at once leave a factor.** Both pass
+/// every check before either writes: each proves the old factor with its own
+/// code, and the pending enrolment is still there for both. The pool is held
+/// down to one free connection, so the second's transaction starts only after
+/// the first has committed — the order in which it used to delete the first's
+/// new factor, rename nothing, and commit recovery codes beside no `totp`: a
+/// password-only account again, with nobody asked.
+#[tokio::test]
+async fn two_confirmations_at_once_never_leave_the_account_without_a_factor() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let (old, _recovery) = fixture.enrolled(now).await;
+
+    let enrolment = fixture
+        .control
+        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &fixture.sealing, None)
+        .await
+        .expect("a replacement begins");
+    let waiting = totp::unbase32(&enrolment.secret).expect("base32");
+    let fresh = totp::code_at(&waiting, seconds(now), totp::DIGITS).expect("a code");
+    // Two codes from the old app, both inside the drift window, so the second
+    // is not refused as the first one replayed.
+    let this = totp::code_at(&old, seconds(now), totp::DIGITS).expect("a code");
+    let last = totp::code_at(&old, seconds(now) - 30, totp::DIGITS).expect("a code");
+
+    let pool = fixture.control.pool();
+    let held = (
+        pool.acquire().await.expect("a connection"),
+        pool.acquire().await.expect("a connection"),
+        pool.acquire().await.expect("a connection"),
+    );
+    let (first, second) = tokio::join!(
+        fixture.control.confirm_second_factor(
+            fixture.identity,
+            &fresh,
+            Some(&this),
+            now,
+            &fixture.sealing,
+            None,
+            None,
+        ),
+        fixture.control.confirm_second_factor(
+            fixture.identity,
+            &fresh,
+            Some(&last),
+            now,
+            &fixture.sealing,
+            None,
+            None,
+        ),
+    );
+    drop(held);
+
+    assert!(
+        fixture
+            .control
+            .has_second_factor(fixture.identity)
+            .await
+            .expect("asks"),
+        "two confirmations left the account password-only: {first:?}, {second:?}"
+    );
+    let won = [&first, &second].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(won, 1, "{first:?}, {second:?}");
+    assert!(
+        [&first, &second]
+            .iter()
+            .any(|r| matches!(r, Err(AuthError::InvalidCredentials))),
+        "the one that lost should find nothing pending: {first:?}, {second:?}"
+    );
+    let code = totp::code_at(&waiting, seconds(now) + 30, totp::DIGITS).expect("a code");
+    fixture
+        .control
+        .verify_second_factor(fixture.identity, &code, now, &fixture.sealing)
+        .await
+        .expect("the new app is the factor");
 
     fixture.cleanup().await;
 }
@@ -1088,7 +1236,7 @@ async fn replacing_a_factor_needs_the_one_being_replaced() {
 
     let enrolment = fixture
         .control
-        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &fixture.sealing)
+        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &fixture.sealing, None)
         .await
         .expect("a second enrolment may be started");
     let waiting = totp::unbase32(&enrolment.secret).expect("base32");
@@ -1096,7 +1244,15 @@ async fn replacing_a_factor_needs_the_one_being_replaced() {
 
     let refused = fixture
         .control
-        .confirm_second_factor(fixture.identity, &fresh, None, now, &fixture.sealing)
+        .confirm_second_factor(
+            fixture.identity,
+            &fresh,
+            None,
+            now,
+            &fixture.sealing,
+            None,
+            None,
+        )
         .await
         .expect_err("a session alone must not repoint the factor");
     assert!(
@@ -1122,4 +1278,98 @@ async fn replacing_a_factor_needs_the_one_being_replaced() {
         .expect("the old factor still verifies");
 
     fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Sealing-key rotation
+// ---------------------------------------------------------------------------
+
+/// The fixture's key, `test`, with `new` in front of it: a rotation under way.
+fn rotating() -> erp_eventlog::SealingKey {
+    erp_eventlog::SealingKey::parse(&format!("new:{},test:{}", "cd".repeat(32), "ab".repeat(32)))
+        .expect("a ring")
+}
+
+/// `new` alone: the rotation finished and `test` retired.
+fn rotated() -> erp_eventlog::SealingKey {
+    erp_eventlog::SealingKey::parse(&format!("new:{}", "cd".repeat(32))).expect("a key")
+}
+
+/// **An enrolment started again after a rotation records the key it is
+/// under.** Enrolling again updates the pending row in place, and an update
+/// that replaced the secret and kept the old id would name a key the secret
+/// is not sealed under — and the person could never confirm it.
+#[tokio::test]
+async fn re_enrolling_after_a_rotation_records_the_new_key() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+
+    fixture
+        .control
+        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &fixture.sealing, None)
+        .await
+        .expect("an enrolment begins under the old key");
+    let enrolment = fixture
+        .control
+        .begin_second_factor(fixture.identity, "Bassat", HANDLE, &rotating(), None)
+        .await
+        .expect("and begins again after the rotation");
+
+    let secret = totp::unbase32(&enrolment.secret).expect("base32");
+    let code = totp::code_at(&secret, seconds(now), totp::DIGITS).expect("a code");
+    fixture
+        .control
+        .confirm_second_factor(fixture.identity, &code, None, now, &rotated(), None, None)
+        .await
+        .expect("the key that sealed the enrolment is the one it names");
+}
+
+/// **A factor enrolled before keys were recorded is read, and a reseal stamps
+/// it.** The row's `sealed_with` is nulled by hand: that is what every
+/// enrolment the build before `0020` made looks like, and this build cannot
+/// write one — the test simulates a control plane upgraded with them in it.
+#[tokio::test]
+async fn a_factor_enrolled_before_keys_were_recorded_is_read_and_stamped() {
+    let fixture = Fixture::new().await;
+    let now = at(1_700_000_000);
+    let (secret, _) = fixture.enrolled(now).await;
+    sqlx::query("UPDATE authenticator SET sealed_with = NULL WHERE kind = 'totp'")
+        .execute(fixture.control.pool())
+        .await
+        .expect("forgets the key id");
+
+    let code = |at: Timestamp| totp::code_at(&secret, seconds(at), totp::DIGITS).expect("a code");
+    fixture
+        .control
+        .verify_second_factor(fixture.identity, &code(now), now, &rotating())
+        .await
+        .expect("an unrecorded secret opens under a key the ring holds");
+
+    let census = fixture
+        .control
+        .reseal_second_factors(&rotating(), true)
+        .await
+        .expect("reseals");
+    assert_eq!(census.resealed, 1, "the unrecorded row was not moved");
+    assert_eq!(
+        census.under,
+        std::collections::BTreeMap::from([("new".to_owned(), 1)])
+    );
+
+    // The spent-code marker `verify` left behind survived the move: the code
+    // just used is still refused, under the new key alone.
+    assert!(
+        fixture
+            .control
+            .verify_second_factor(fixture.identity, &code(now), now, &rotated())
+            .await
+            .is_err(),
+        "resealing forgot which code was spent"
+    );
+    let later = at(1_700_000_120);
+    fixture
+        .control
+        .verify_second_factor(fixture.identity, &code(later), later, &rotated())
+        .await
+        .expect("the factor opens under the new key alone");
 }

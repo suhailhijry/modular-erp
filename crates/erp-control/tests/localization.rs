@@ -5,7 +5,7 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use erp_control::{AccessError, CATALOG, Lane, PoolError, TenantStatus, messages};
+use erp_control::{AccessError, CATALOG, Lane, PoolError, StaffError, TenantStatus, messages};
 use erp_i18n::{Catalog, Locale, Localize, Message, MessageArg};
 
 /// **The load-bearing test.** Every code, in every language, or the build fails.
@@ -43,14 +43,31 @@ fn every_error_variant_maps_to_a_known_code() {
             clusters_at_limit: 3,
         },
         AccessError::SlugTaken("acme".into()),
+        AccessError::StaffOnly(erp_control::PlatformPower::ManageStaff),
+        AccessError::StaffSecondFactorRequired,
+        AccessError::WrongTenantStatus {
+            status: TenantStatus::Suspended,
+            expected: TenantStatus::Active,
+        },
+        AccessError::SuspensionReason,
+    ];
+    let staff = [
+        StaffError::NoSuchAccount("a@b.test".into()),
+        StaffError::AlreadyStaff("a@b.test".into()),
+        StaffError::NoSecondFactor("a@b.test".into()),
+        StaffError::NotStaff,
+        StaffError::LastSuperadmin,
     ];
 
-    for error in errors {
-        let message = error.message();
+    for message in errors
+        .iter()
+        .map(Localize::message)
+        .chain(staff.iter().map(Localize::message))
+    {
         for locale in Locale::ALL {
             assert!(
                 CATALOG.template(locale, &message.code).is_some(),
-                "{error:?} produced {} which has no {} translation",
+                "{} has no {} translation",
                 message.code,
                 locale.code()
             );

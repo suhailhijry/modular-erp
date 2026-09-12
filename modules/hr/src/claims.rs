@@ -85,6 +85,16 @@ pub const SEGREGATED: &[&str] = &[
     "hr:approve_timesheet",
 ];
 
+/// The claim that lets somebody other than the owner reset a colleague's second
+/// factor. `module:verb`, like every claim, and `hr`'s because it is a fact
+/// about people rather than about any book.
+///
+/// **Not segregated**, so it travels up the chart like the document limit's: a
+/// manager covering for a supervisor who may get a cashier back into their
+/// account may do it too. It is checked with [`actor_holds`], which means a
+/// caller with no employee record holds it whatever else they are.
+pub const RESET_SECOND_FACTOR: &str = "hr:reset_second_factor";
+
 /// Whether a claim is one the union must not carry.
 #[must_use]
 pub fn is_segregated(claim: &str) -> bool {
@@ -360,15 +370,12 @@ pub async fn may_for(
     if access.is_some_and(|a| a.role == erp_tenant::Role::Owner) {
         return Ok(Approval::Permitted);
     }
-    let Some(actor) = metadata.actor.as_deref() else {
+    if metadata.actor.is_none() {
         // A worker, a reaper or provisioning. Nobody to check, and refusing
         // would stop background work the moment a tenant granted a claim.
         return Ok(Approval::Permitted);
-    };
-    let Some(employee) = crate::employee_by_login(&mut *conn, actor).await? else {
-        return Ok(Approval::NoClaim);
-    };
-    let Ok(id) = erp_types::AggregateId::new(employee.id) else {
+    }
+    let Some(id) = claimant(&mut *conn, metadata).await? else {
         return Ok(Approval::NoClaim);
     };
     if !holds(&mut *conn, &id, claim, metadata.branch()).await? {
@@ -425,6 +432,53 @@ pub async fn may(
     access: Option<&erp_tenant::Access>,
 ) -> Result<bool, sqlx::Error> {
     Ok(may_for(&mut *conn, claim, None, metadata, access).await? == Approval::Permitted)
+}
+
+/// **Whether the person behind this request holds a claim here**, and nothing
+/// else.
+///
+/// [`may`] without its two passes. It asks whether the tenant has granted any
+/// claim, but reads "none" as "not held" rather than as a pass, and a request
+/// with no actor holds nothing. That is the question for
+/// a control something *other* than a grant switches on — `sales`' document
+/// limit is set by the owner, and a claim is the way past it — where "nobody
+/// has granted anything yet" must not mean "nobody is limited". Whether the
+/// caller owns the tenant is the caller's question; this answers only for the
+/// org chart, which an owner may not even be on.
+///
+/// **A tenant that has granted nothing is answered from the grants alone**,
+/// which live in the tenant's own migration chain: finding the employee reads
+/// `hr`'s read model, and a tenant selling without `hr` enabled has none.
+///
+/// # Errors
+/// If the database does.
+pub async fn actor_holds(
+    conn: &mut PgConnection,
+    claim: &str,
+    metadata: &erp_eventlog::Metadata,
+) -> Result<bool, sqlx::Error> {
+    if !any_claim_placed(&mut *conn).await? {
+        return Ok(false);
+    }
+    match claimant(&mut *conn, metadata).await? {
+        Some(id) => holds(&mut *conn, &id, claim, metadata.branch()).await,
+        None => Ok(false),
+    }
+}
+
+/// The employee whose login made this request, if one did. **No employee
+/// record means no claim can reach them**, which every caller treats as not
+/// holding one.
+async fn claimant(
+    conn: &mut PgConnection,
+    metadata: &erp_eventlog::Metadata,
+) -> Result<Option<AggregateId>, sqlx::Error> {
+    let Some(actor) = metadata.actor.as_deref() else {
+        return Ok(None);
+    };
+    Ok(crate::employee_by_login(&mut *conn, actor)
+        .await?
+        .and_then(|employee| AggregateId::new(employee.id).ok()))
 }
 
 /// Everything one person effectively holds, and where each came from.

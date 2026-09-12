@@ -94,11 +94,13 @@ Minor units and an explicit currency, never a decimal string and never a float. 
         (name = "tenants", description = "The company you are working in."),
         (name = "members", description = "Who else has access, and as what."),
         (name = "invitations", description = "Inviting a colleague, and taking up an invitation."),
+        (name = "audit", description = "What was done, by whom, and when: a tenant's trail for its owner, and a person's own."),
         (name = "modules", description = "Which parts of the system this tenant has turned on."),
         (name = "ledger", description = "Accounts, journal entries, and the trial balance."),
         (name = "sales", description = "Invoices, payments, credit notes, and the VAT return."),
         (name = "purchases", description = "Supplier bills, what is owed, and the tax paid on them."),
         (name = "tax_sa", description = "Saudi Arabia: the VAT return, what has been filed, and ZATCA clearance and reporting."),
+        (name = "platform", description = "Running the platform rather than a company: platform staff, and what each of them may do. Every route needs a platform role that permits it and a second factor."),
         (name = "service", description = "Liveness and this document."),
     ),
 )]
@@ -147,29 +149,45 @@ fn canonical_meaning(status: &str) -> &'static str {
 /// a client reads as a doc comment, in eight places. The first version of this
 /// document offered `manager` in three of them, which has never been a role.
 ///
-/// Generated here, so there is one list and it is the enum's.
+/// Generated here, so there is one list and it is the enum's. `platform_role`
+/// is the staff vocabulary, named apart so neither list can be read as the
+/// other.
 fn name_the_roles(components: &mut utoipa::openapi::Components) {
-    let listed = erp_control::Role::ALL
-        .iter()
-        .map(|role| format!("`{}`", role.as_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let listed = |roles: &[&str]| {
+        roles
+            .iter()
+            .map(|role| format!("`{role}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let vocabularies = [
+        (
+            "role",
+            listed(&erp_control::Role::ALL.map(erp_control::Role::as_str)),
+        ),
+        (
+            "platform_role",
+            listed(&erp_control::PlatformRole::ALL.map(erp_control::PlatformRole::as_str)),
+        ),
+    ];
 
     for schema in components.schemas.values_mut() {
         let utoipa::openapi::RefOr::T(utoipa::openapi::Schema::Object(object)) = schema else {
             continue;
         };
-        let Some(utoipa::openapi::RefOr::T(utoipa::openapi::Schema::Object(property))) =
-            object.properties.get_mut("role")
-        else {
-            continue;
-        };
+        for (field, listed) in &vocabularies {
+            let Some(utoipa::openapi::RefOr::T(utoipa::openapi::Schema::Object(property))) =
+                object.properties.get_mut(*field)
+            else {
+                continue;
+            };
 
-        let one_of = format!("One of {listed}.");
-        property.description = Some(match property.description.take() {
-            Some(existing) if !existing.is_empty() => format!("{existing}\n\n{one_of}"),
-            _ => one_of,
-        });
+            let one_of = format!("One of {listed}.");
+            property.description = Some(match property.description.take() {
+                Some(existing) if !existing.is_empty() => format!("{existing}\n\n{one_of}"),
+                _ => one_of,
+            });
+        }
     }
 }
 
@@ -225,7 +243,10 @@ impl Modify for Conventions {
             ))
             .build();
 
-        for item in openapi.paths.paths.values_mut() {
+        let read_models = crate::modules::read_models();
+
+        for (path, item) in &mut openapi.paths.paths {
+            let rebuilt = served_from_read_models(path, &read_models);
             // Path-level, so it covers every method on the path and any added
             // later.
             item.parameters
@@ -296,6 +317,10 @@ impl Modify for Conventions {
                         .or_insert_with(|| problem_response(description));
                 }
 
+                if rebuilt {
+                    may_be_rebuilding(&mut operation.responses);
+                }
+
                 for (status, response) in &mut operation.responses.responses {
                     if let utoipa::openapi::RefOr::T(response) = response
                         && response.description.is_empty()
@@ -307,6 +332,49 @@ impl Modify for Conventions {
         }
     }
 }
+
+/// Whether `path` is `/v1/{module}` or under it, for a module with read
+/// models — the module `erp_web`'s `module_of` would find, and so the routes
+/// its `read_models_current` may refuse.
+fn served_from_read_models(
+    path: &str,
+    read_models: &std::collections::HashMap<erp_types::ModuleId, Vec<(&'static str, i16)>>,
+) -> bool {
+    path.split('/')
+        .nth(2)
+        .and_then(|segment| erp_types::ModuleId::new(segment).ok())
+        .is_some_and(|module| read_models.contains_key(&module))
+}
+
+/// **Every route of a module with read models may answer 503 while one is
+/// rebuilt**, because the refusal is in the extractor, before the handler. Said
+/// once here, beside whatever else that route's 503 already means.
+fn may_be_rebuilding(responses: &mut utoipa::openapi::Responses) {
+    match responses.responses.get_mut("503") {
+        Some(utoipa::openapi::RefOr::T(response)) => {
+            let said = if response.description.is_empty() {
+                canonical_meaning("503")
+            } else {
+                &response.description
+            };
+            response.description = format!("{said} Or {READ_MODEL_REBUILDING}");
+        }
+        Some(utoipa::openapi::RefOr::Ref(_)) => {}
+        None => {
+            responses.responses.insert(
+                "503".to_owned(),
+                problem_response(&format!(
+                    "Not serving right now: `code` is {READ_MODEL_REBUILDING}"
+                )),
+            );
+        }
+    }
+}
+
+/// What a module route's 503 adds, on every one of them.
+const READ_MODEL_REBUILDING: &str = "`request.read_model_rebuilding` while a read model this \
+module is served from was built by an older release and has not been rebuilt yet — nothing is \
+shown from tables worked out by rules this release has replaced. Retryable.";
 
 /// What every `Host` header parameter says.
 const HOST_DOC: &str = "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — \
@@ -328,6 +396,8 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(confirm_second_factor))
         .routes(routes!(tenant))
         .merge(crate::passwords::routes())
+        .merge(crate::audit::routes())
+        .merge(crate::platform::routes())
         .merge(crate::signup::routes())
         .merge(crate::members::routes())
         .merge(crate::invitations::routes())
@@ -341,6 +411,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .merge(crate::billing::routes())
         .merge(crate::effects::routes())
         .merge(crate::calendar::routes())
+        .merge(crate::permission_limits::routes())
         .merge(crate::realtime::routes())
         // Every module's own routes, from the one list that also says what to
         // install. See `crate::modules::REGISTERED`.
@@ -363,7 +434,11 @@ fn parts() -> (Router<AppState>, utoipa::openapi::OpenApi) {
 /// own layer beats this one exactly where it is applied.
 const MAX_JSON_BODY: usize = 1 << 20;
 
-pub fn router(state: AppState) -> Router {
+pub fn router(mut state: AppState) -> Router {
+    // **What this build projects, from the list that mounts the routes**, so
+    // no server built from here can refuse a stale read model by one list and
+    // serve modules from another. See `erp_web::AppState::read_models`.
+    state.read_models = std::sync::Arc::new(crate::modules::read_models());
     parts()
         .0
         // **Every answer is problem+json, including "there is no such
@@ -631,6 +706,25 @@ struct SecondFactorCode {
     /// Not needed for a first enrolment, which removes nothing.
     #[serde(default)]
     previous: Option<String>,
+    /// **Only after somebody else reset your two-step sign-in**: the token from
+    /// the email you were sent. A `403 auth.enrolment_link_required` means send
+    /// it. Confirming spends it.
+    #[serde(default)]
+    link: Option<String>,
+}
+
+/// What starting an enrolment costs an account whose factor somebody reset.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[schema(example = json!({ "link": "…" }))]
+struct BeginSecondFactor {
+    /// The token from the enrolment email, **sent in the body rather than the
+    /// path** for the reason a reset token is: a path lands in access logs,
+    /// browser history and the `Referer` of every asset the page loads.
+    ///
+    /// Needed only by an account somebody else's reset left link-only. Send
+    /// `{}` otherwise.
+    #[serde(default)]
+    link: Option<String>,
 }
 
 /// What turning a second factor off costs: proof that you hold it.
@@ -688,13 +782,20 @@ async fn second_factor(
 ///
 /// **Nothing changes about signing in until it is confirmed.** Somebody who
 /// scans the QR and walks away is not locked out.
+///
+/// **Send `link` if somebody else reset your two-step sign-in.** From then on a
+/// password alone cannot set up a new app — and that does not lapse when the
+/// link does, so an expired one means asking for a fresh link rather than
+/// waiting. Starting an enrolment does not spend it; confirming does.
 #[utoipa::path(
     post,
     path = "/v1/sessions/second-factor",
     tag = "sessions",
+    request_body = BeginSecondFactor,
     responses(
         (status = CREATED, body = EnrolmentStarted),
         (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, description = "Somebody else reset this account's second factor, so only the link it was emailed may enrol the next one — `auth.enrolment_link_required`. The same answer for a missing, wrong, spent and expired link.", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "This deployment has no sealing key, so there is nowhere safe to keep the secret", body = Problem),
     ),
 )]
@@ -702,7 +803,11 @@ async fn begin_second_factor(
     State(state): State<AppState>,
     Language(locale): Language,
     auth: Authenticated,
+    // **Optional, because this route had no body before the link existed.**
+    // A client that sends none is an ordinary first enrolment or replacement.
+    body: Option<Json<BeginSecondFactor>>,
 ) -> Result<impl IntoResponse, Problem> {
+    let link = body.and_then(|Json(body)| body.link);
     let sealing = sealing_key(&state, locale)?;
     let enrolment = state
         .control
@@ -711,6 +816,7 @@ async fn begin_second_factor(
             "ERP",
             &auth.session.identity.to_string(),
             sealing,
+            link.as_deref(),
         )
         .await
         .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
@@ -725,7 +831,13 @@ async fn begin_second_factor(
 
 /// Confirm an enrolment with the first code the app shows.
 ///
-/// Returns the recovery codes, **once**.
+/// Returns the recovery codes, **once**. **Every other session of this identity
+/// ends** — the one confirming stays — because a session from before the
+/// factor existed never went through it.
+///
+/// **Send `link` if somebody else reset your two-step sign-in.** Confirming
+/// spends it, and every other link the account was sent, and puts the account
+/// back to ordinary rules.
 #[utoipa::path(
     post,
     path = "/v1/sessions/second-factor/confirmation",
@@ -734,6 +846,7 @@ async fn begin_second_factor(
     responses(
         (status = CREATED, description = "Enrolled. Keep the recovery codes — they are not shown again.", body = RecoveryCodes),
         (status = UNAUTHORIZED, description = "The code is wrong, nothing is waiting to be confirmed, or a factor is already enrolled and `previous` did not prove it. `auth.second_factor_required` means send `previous`.", body = Problem),
+        (status = FORBIDDEN, description = "Somebody else reset this account's second factor and `link` was missing, wrong, spent or expired — `auth.enrolment_link_required`", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
 )]
@@ -752,6 +865,8 @@ async fn confirm_second_factor(
             body.previous.as_deref(),
             chrono::Utc::now(),
             sealing,
+            Some(&auth.token),
+            body.link.as_deref(),
         )
         .await
         .map_err(|e| ApiError::Auth(e).into_problem(locale, &crate::CATALOG))?;
@@ -773,6 +888,10 @@ async fn confirm_second_factor(
 /// Absence fails closed: no code with a factor enrolled is
 /// `401 auth.second_factor_required`, never a removal. Send `{}` when there is
 /// nothing enrolled — an enrolment started and never confirmed.
+///
+/// **Refused outright when a second factor is required of the account** —
+/// platform staff, or a live member of an organisation that requires one.
+/// Replacing it is still open.
 #[utoipa::path(
     delete,
     path = "/v1/sessions/second-factor",
@@ -781,6 +900,7 @@ async fn confirm_second_factor(
     responses(
         (status = NO_CONTENT, description = "Off. The password is the whole login again."),
         (status = UNAUTHORIZED, description = "No code came, or it was wrong. `auth.second_factor_required` means send one.", body = Problem),
+        (status = FORBIDDEN, description = "A second factor is required of this account, so it cannot be turned off, only replaced. `auth.staff_keeps_second_factor`: platform staff — dropping it means coming off the staff first. `auth.tenant_keeps_second_factor`: a live member of an organisation that requires one — dropping it takes its owner removing them (`DELETE /v1/members/{identity}`) or no longer requiring it; a member cannot leave on their own. Refused before the code is checked, so a recovery code sent here is not spent.", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "This deployment has no sealing key, so a code cannot be checked", body = Problem),
     ),
 )]

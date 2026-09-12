@@ -103,11 +103,16 @@ pub fn invoice_for(reservation: &AggregateId) -> Result<AggregateId, erp_types::
 /// worker may load no aggregate (L7) — and then, in one transaction, issues
 /// the invoice and tells the diary. Idempotent: a booking already billed
 /// answers the invoice it has.
+///
+/// `authority` is the desk's member, or the worker's pass: a member is held to
+/// the tenant's document limit, and the worker billing what the business asked
+/// to have billed on completion is not.
 pub async fn bill_reservation(
     db: &TenantDb,
     reservation: &AggregateId,
     at: Timestamp,
     metadata: &Metadata,
+    authority: sales::Authority,
 ) -> Result<Billed, BillingError> {
     let mut conn = db.read().await?;
     let detail = booking::reservation(&mut conn, reservation.as_str())
@@ -186,6 +191,7 @@ pub async fn bill_reservation(
         &draft,
         &format!("Booking {reservation} · {}", detail.summary.customer_name),
         metadata,
+        authority,
     )
     .await?;
     let raised = numbered.committed.at.is_some();
@@ -221,7 +227,9 @@ pub async fn bill_completions(
 
     let mut billed = 0;
     for reservation in waiting {
-        match bill_reservation(db, &reservation, at, metadata).await {
+        // **Nobody is at the desk.** The owner turned billing on completion
+        // on, and this pass is that setting doing what it says.
+        match bill_reservation(db, &reservation, at, metadata, sales::Authority::System).await {
             // Counted only when something was raised: a read model that has
             // not caught up with the last pass lists the same booking again,
             // and answering it is not work.
@@ -262,7 +270,7 @@ pub async fn bill_completions(
         (status = NOT_FOUND, description = "No such booking, or a module it needs is not enabled", body = Problem),
         (status = CONFLICT, description = "Nothing to bill: no priced line, or the booking was cancelled or a no-show", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, or the invoice is over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "The deposit's invoice is not visible yet, or the database is unwell. Retryable.", body = Problem),
     ),
 )]
@@ -281,6 +289,7 @@ async fn bill_reservation_route(
         &reservation,
         chrono::Utc::now(),
         &erp_web::metadata(&tenant),
+        sales::Authority::of(&tenant.db),
     )
     .await
     .map_err(|e| problem(&e, locale))?;
@@ -301,9 +310,16 @@ fn problem(error: &BillingError, locale: Locale) -> Problem {
         BillingError::Booking(erp_eventlog::ExecuteError::Rejected(refused)) => {
             Problem::from_error(StatusCode::CONFLICT, refused, locale, &CATALOG)
         }
-        BillingError::Sales(erp_eventlog::ExecuteError::Rejected(refused)) => {
-            Problem::from_error(StatusCode::CONFLICT, refused, locale, &CATALOG)
-        }
+        BillingError::Sales(erp_eventlog::ExecuteError::Rejected(refused)) => Problem::from_error(
+            if refused.refuses_the_caller() {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::CONFLICT
+            },
+            refused,
+            locale,
+            &CATALOG,
+        ),
         BillingError::Database(error) => {
             tracing::warn!(%error, "a booking could not be billed");
             erp_web::ApiError::Access(erp_control::AccessError::Database(sqlx::Error::Protocol(

@@ -24,6 +24,7 @@
 
 mod auth;
 mod cache;
+mod dead_letters;
 pub mod domains;
 mod fleet;
 mod invitations;
@@ -40,12 +41,17 @@ mod pools;
 mod provision;
 mod second_factor;
 pub mod shared;
-pub use second_factor::{Enrolled, Enrolment, RECOVERY_CODES};
+pub use second_factor::{
+    ENROLMENT_LIFETIME_SECONDS, Enrolled, Enrolment, FactorRequiredBy, RECOVERY_CODES, ResetError,
+};
 mod signup;
+mod staff;
+pub use staff::{PlatformPower, PlatformRole, StaffError, StaffMember};
 pub mod totp;
 
 pub use auth::{
-    AuthError, InvitationToken, SESSION_LIFETIME, Session, SessionToken, SignupToken, hash_password,
+    AuthError, EnrolmentToken, InvitationToken, SESSION_LIFETIME, Session, SessionToken,
+    SignupToken, hash_password,
 };
 /// Re-exported so the control plane's callers are unchanged by the split.
 ///
@@ -56,7 +62,10 @@ pub use erp_tenant::{
     Access, Budget, Capability, CommandError, Conn, EnabledModules, Lane, ModuleSetup, PoolError,
     Role, TenantDb, Tx, UnknownRole,
 };
-pub use fleet::{EventVersions, FleetPlan, MIGRATION_FLOOR, TenantSchema, UPGRADE_FROM_RELEASE};
+pub use fleet::{
+    EventVersions, FleetPlan, MIGRATION_FLOOR, ReadModelVersions, SealingPlan, TenantSchema,
+    UPGRADE_FROM_RELEASE,
+};
 pub use invitations::{
     Accepted, INVITATION_LIFETIME, Invitation, InvitationError, PendingInvitation,
 };
@@ -64,7 +73,8 @@ pub use keys::{ApiKey, BadScope, KeyContext, KeyScope, ROTATION_OVERLAP, Secret}
 pub use leases::{Claimed, WorkSchedule};
 pub use members::{Member, MemberError};
 pub use model::{
-    Actor, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant, TenantStatus,
+    Actor, AuditEntry, Entitlement, Identity, IdentityStatus, Membership, Scope, Tenant,
+    TenantStatus,
 };
 pub use otp::{
     CODE_LIFETIME_SECONDS, MAX_ATTEMPTS as MAX_CODE_ATTEMPTS, OtpError,
@@ -78,7 +88,9 @@ pub use passwords::{
 pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
 pub use pools::{ClusterRegistry, PoolConfig, TenantPools};
 pub use provision::SignedUp as ProvisionedTenant;
-pub use provision::{ORPHAN_GRACE_SECONDS, Unclaimed, orphan_age_seconds_for_tests};
+pub use provision::{
+    ORPHAN_GRACE_SECONDS, PROVISIONING_GRACE_SECONDS, Unclaimed, orphan_age_seconds_for_tests,
+};
 pub use signup::{
     Confirmed, PendingSignup, REQUEST_INTERVAL, SIGNUP_LIFETIME, SignupError, SignupRequest,
 };
@@ -102,7 +114,7 @@ use std::time::Duration;
 
 use cache::TtlCache;
 pub use domains::{DnsProver, DomainProver, NoResolver, ProofError, record_name, record_value};
-use erp_types::{IdentityId, MembershipId, ModuleId, TenantId};
+use erp_types::{Cursor, IdentityId, MembershipId, ModuleId, NotACursor, Page, TenantId};
 use sqlx::PgPool;
 
 /// How long entry-path lookups are cached.
@@ -135,6 +147,19 @@ pub enum AccessError {
     /// from a refusal.
     #[error("tenant is {status:?}, not active")]
     TenantNotActive { status: TenantStatus },
+    /// A status change asked of a tenant in a different status: suspending one
+    /// that is not active, reinstating one that is not suspended, activating
+    /// one that is not provisioning. Refused rather than accepted as a no-op,
+    /// so a repeat is never recorded as though it had done something.
+    #[error("tenant is {status:?}; this needs it {expected:?}")]
+    WrongTenantStatus {
+        status: TenantStatus,
+        expected: TenantStatus,
+    },
+    /// A suspension with no reason, or one over 500 characters. The rule is the
+    /// `tenant_suspension_is_complete` constraint; this is its refusal, named.
+    #[error("a suspension needs a reason of 1 to 500 characters")]
+    SuspensionReason,
     /// No live membership joins this identity to this tenant.
     ///
     /// API responses must render this and [`AccessError::NoSuchTenant`]
@@ -151,6 +176,16 @@ pub enum AccessError {
     /// holding a session and a live membership.
     #[error("this tenant requires a second factor and this account has none")]
     SecondFactorRequired,
+    /// **No platform role that may do this** — not staff at all, or staff whose
+    /// role does not include the power. One variant for both: the answer to
+    /// either is to ask a superadmin, and it names the power so they know what
+    /// to ask for.
+    #[error("only platform staff who may {} can do this", .0.as_str())]
+    StaffOnly(PlatformPower),
+    /// Staff whose role may, and who have no second factor. Every platform
+    /// door refuses them until they enrol one.
+    #[error("platform staff need a second factor and this account has none")]
+    StaffSecondFactorRequired,
     /// A domain this tenant has not claimed.
     #[error("{0} has not been claimed by this tenant")]
     DomainNotClaimed(String),
@@ -219,14 +254,17 @@ pub struct ControlPlane {
     /// A caller's role in a tenant. Cached as the parsed [`Role`], so
     /// authorization needs no second query.
     memberships: TtlCache<(IdentityId, TenantId), Option<Access>>,
-    /// Whether an identity is platform staff.
+    /// A caller's platform role, cached as the parsed [`PlatformRole`] so a
+    /// platform door needs no second query.
     ///
     /// A separate cache because it is a separate question with a separate
-    /// vocabulary: platform roles are `support`, `superadmin`, `billing`, and
-    /// forcing them through [`Role`] would let "support" answer questions about
-    /// what someone may do inside a tenant's books.
-    platform: TtlCache<IdentityId, bool>,
+    /// vocabulary: forcing platform roles through [`Role`] would let "support"
+    /// answer questions about what someone may do inside a tenant's books.
+    platform: TtlCache<IdentityId, Option<PlatformRole>>,
     entitlements: TtlCache<TenantId, EnabledModules>,
+    /// Projection groups known to be at or past a build's read model, per
+    /// tenant. **Only that answer is kept** — see [`Self::read_model_behind`].
+    read_models: TtlCache<(TenantId, &'static str), ()>,
     /// The origins a tenant's public API answers to, from `tenant_origin`.
     ///
     /// Cached on the same terms as everything else on the entry path: a
@@ -266,6 +304,7 @@ impl ControlPlane {
             memberships: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             platform: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             entitlements: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
+            read_models: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             origins: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             hosts: TtlCache::new(ENTRY_CACHE_TTL, ENTRY_CACHE_CAPACITY),
             prover: match DnsProver::from_system() {
@@ -385,6 +424,7 @@ impl ControlPlane {
         self.memberships.clear();
         self.platform.clear();
         self.entitlements.clear();
+        self.read_models.clear();
     }
 
     /// The core database. Control-plane queries only — this is not a route to
@@ -430,6 +470,37 @@ impl ControlPlane {
         tenant_id: TenantId,
         lane: Lane,
     ) -> Result<TenantDb, AccessError> {
+        let (tenant, access) = self.admitted(identity_id, tenant_id, true).await?;
+        let mut db = self.open(&tenant, lane).await?;
+        db.set_access(Some(access));
+        Ok(db)
+    }
+
+    /// **What this identity may do in this tenant, whatever its status** —
+    /// every check [`Self::enter`] makes but whether the tenant is serving, and
+    /// no connection.
+    ///
+    /// For what the control plane keeps *about* a tenant, which never needed
+    /// its database: its audit trail above all. `enter` answers a suspended
+    /// tenant 503, and its owner is the one person who must still read why
+    /// (decision 12 of 2026-09-11). What the role then permits is
+    /// [`Access::allows`]'s to say, as it is behind `enter`.
+    pub async fn admit(
+        &self,
+        identity_id: IdentityId,
+        tenant_id: TenantId,
+    ) -> Result<Access, AccessError> {
+        Ok(self.admitted(identity_id, tenant_id, false).await?.1)
+    }
+
+    /// `enter`'s checks, in `enter`'s order; `serving` is whether a tenant
+    /// that is not active is refused.
+    async fn admitted(
+        &self,
+        identity_id: IdentityId,
+        tenant_id: TenantId,
+        serving: bool,
+    ) -> Result<(Tenant, Access), AccessError> {
         let identity = self
             .cached_identity(identity_id)
             .await?
@@ -442,7 +513,7 @@ impl ControlPlane {
             .cached_tenant(tenant_id)
             .await?
             .ok_or(AccessError::NoSuchTenant)?;
-        if !tenant.is_enterable() {
+        if serving && !tenant.is_enterable() {
             return Err(AccessError::TenantNotActive {
                 status: tenant.status,
             });
@@ -461,9 +532,7 @@ impl ControlPlane {
             return Err(AccessError::SecondFactorRequired);
         }
 
-        let mut db = self.open(&tenant, lane).await?;
-        db.set_access(Some(access));
-        Ok(db)
+        Ok((tenant, access))
     }
 
     /// Opens a tenant on behalf of platform staff, recording who and why.
@@ -473,23 +542,17 @@ impl ControlPlane {
     /// and the audit trail has to say so — otherwise an engineer reading a
     /// tenant's ledger is indistinguishable from the tenant's owner doing it.
     ///
-    /// The caller must have a live platform membership.
+    /// The caller must pass [`Self::staff_may`] for
+    /// [`PlatformPower::EnterForSupport`]: support or superadmin, with a second
+    /// factor. Billing suspends tenants and never reads their books.
     pub async fn enter_for_support(
         &self,
         staff_id: IdentityId,
         tenant_id: TenantId,
         reason: &str,
     ) -> Result<TenantDb, AccessError> {
-        let staff = self
-            .cached_identity(staff_id)
-            .await?
-            .ok_or(AccessError::NoSuchIdentity)?;
-        if !staff.is_active() {
-            return Err(AccessError::IdentitySuspended);
-        }
-        if !self.cached_platform_membership(staff_id).await? {
-            return Err(AccessError::NotAMember);
-        }
+        self.staff_may(staff_id, PlatformPower::EnterForSupport)
+            .await?;
 
         let tenant = self
             .cached_tenant(tenant_id)
@@ -505,6 +568,7 @@ impl ControlPlane {
 
         self.record(
             Actor::identity(staff_id),
+            Some(tenant_id),
             "tenant.support_access",
             "tenant",
             &tenant_id.to_string(),
@@ -516,7 +580,7 @@ impl ControlPlane {
         self.open(&tenant, Lane::Interactive).await
     }
 
-    /// Opens a tenant for background work: projections, the outbox, migrations.
+    /// Opens a tenant for background work: projections, the outbox, the jobs.
     ///
     /// # Why this is not a bypass
     ///
@@ -543,9 +607,12 @@ impl ControlPlane {
             .ok_or(AccessError::NoSuchTenant)?;
 
         // A deleted tenant's database may be gone; a provisioning one has no
-        // schema yet. Suspended tenants still need their projections driven —
-        // suspension stops people using the system, not the system finishing
-        // what it already accepted.
+        // schema yet. A suspended one is not refused here, and nothing runs for
+        // it anyway: the worker, this door's caller, never claims one
+        // (`claim_tenants`) and stops a visit whose tenant is suspended under
+        // it (`renew_lease`). The fleet migrator and module refresh do bring a
+        // suspended tenant's schema current, and `reseal_fleet` its secrets,
+        // but through their own direct connections, not through here.
         if matches!(
             tenant.status,
             TenantStatus::Deleted | TenantStatus::Provisioning
@@ -578,10 +645,9 @@ impl ControlPlane {
     ///   from the interactive lane either, because a bot hammering a booking
     ///   form would then starve the counter staff serving people in the shop.
     ///   That is the whole reason the lane exists, and this is its first caller.
-    /// - **The tenant must be enterable.** Maintenance still drives projections
-    ///   for a suspended tenant, because suspension stops people using the
-    ///   system rather than stopping the system finishing what it accepted. A
-    ///   suspended tenant's public booking page must go dark.
+    /// - **The tenant must be enterable.** A suspended tenant's public booking
+    ///   page must go dark, and so must its payment gateway's callbacks — the
+    ///   settle sweep answers those after reinstatement.
     pub async fn enter_for_the_public(&self, tenant_id: TenantId) -> Result<TenantDb, AccessError> {
         let tenant = self
             .cached_tenant(tenant_id)
@@ -686,6 +752,7 @@ impl ControlPlane {
         let token = existing.unwrap_or(token);
         self.record(
             actor,
+            Some(tenant_id),
             "tenant.domain_claimed",
             "tenant",
             &tenant_id.to_string(),
@@ -747,6 +814,7 @@ impl ControlPlane {
             .await;
         self.record(
             actor,
+            Some(tenant_id),
             "tenant.domain_verified",
             "tenant",
             &tenant_id.to_string(),
@@ -805,6 +873,7 @@ impl ControlPlane {
             .await;
         self.record(
             actor,
+            Some(tenant_id),
             "tenant.origin_allowed",
             "tenant",
             &tenant_id.to_string(),
@@ -834,6 +903,7 @@ impl ControlPlane {
             .await;
         self.record(
             actor,
+            Some(tenant_id),
             "tenant.origin_revoked",
             "tenant",
             &tenant_id.to_string(),
@@ -939,6 +1009,11 @@ impl ControlPlane {
     /// and the right answer to that is to stop rather than to keep going beside
     /// them. A visit that outlives its lease without renewing is exactly the
     /// concurrent-visit race `claim_tenants` describes, from the other side.
+    ///
+    /// `false` also means the tenant stopped being active — suspended since the
+    /// visit began. `claim_tenants` would not have claimed it, and a visit
+    /// already under way must not run the rest of its jobs either, saved-card
+    /// charges among them, for a tenant nothing should run for.
     pub async fn renew_lease(
         &self,
         tenant_id: TenantId,
@@ -952,7 +1027,8 @@ impl ControlPlane {
                     next_visit_at      = now() + ($3::BIGINT * INTERVAL '1 millisecond')
               WHERE id = $1
                 AND worker_lease_owner = $2
-                AND worker_lease_until > now()",
+                AND worker_lease_until > now()
+                AND status = 'active'",
             tenant_id.as_uuid(),
             owner,
             lease_millis,
@@ -990,12 +1066,6 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Marks a tenant as having work waiting, so the next claim picks it up.
-    ///
-    /// The seam the push path attaches to: today the worker polls on an
-    /// interval, and when the API can tell it directly that a tenant just wrote
-    /// something, it does so by calling this. Polling becomes the floor rather
-    /// than the mechanism, and nothing downstream changes.
     /// **Requires — or stops requiring — a second factor of this tenant's
     /// members.**
     ///
@@ -1036,6 +1106,12 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// Marks a tenant as having work waiting, so the next claim picks it up.
+    ///
+    /// The seam the push path attaches to: today the worker polls on an
+    /// interval, and when the API can tell it directly that a tenant just wrote
+    /// something, it does so by calling this. Polling becomes the floor rather
+    /// than the mechanism, and nothing downstream changes.
     pub async fn request_visit(&self, tenant_id: TenantId) -> Result<(), AccessError> {
         sqlx::query!(
             "UPDATE tenant SET next_visit_at = now()
@@ -1116,12 +1192,12 @@ impl ControlPlane {
         Ok(fresh)
     }
 
-    /// What an identity may do in a tenant, through the entry cache.
+    /// What an identity's membership says it may do in a tenant, through the
+    /// entry cache. `None` is "no live membership".
     ///
-    /// The same answer [`Self::enter`] decides on, without needing the tenant's
-    /// database to exist — which is what makes it the thing to ask when the
-    /// question is about *authorization* rather than about data. `None` is "no
-    /// live membership".
+    /// The membership **alone**: not whether the identity is active, nor the
+    /// tenant's second-factor rule. [`Self::admit`] is [`Self::enter`]'s whole
+    /// answer bar the tenant's status, and is what a door asks.
     pub async fn access(
         &self,
         identity: IdentityId,
@@ -1153,24 +1229,84 @@ impl ControlPlane {
         Ok(fresh)
     }
 
-    /// Whether this identity is platform staff.
+    /// This identity's platform role, or `None` if they are not staff.
     ///
-    /// Existence only. What platform staff may do is decided by the path they
-    /// take — [`Self::enter_for_support`] is audited and time-boxed — not by a
-    /// role string, so parsing one would be inventing a vocabulary nothing
-    /// reads.
-    async fn cached_platform_membership(
+    /// What the role permits is [`PlatformRole::may`]'s to say, and
+    /// [`Self::staff_may`] is the only caller.
+    async fn cached_platform_role(
         &self,
         identity_id: IdentityId,
-    ) -> Result<bool, AccessError> {
+    ) -> Result<Option<PlatformRole>, AccessError> {
         if let Some(hit) = self.platform.get(&identity_id) {
             self.hit();
             return Ok(hit);
         }
         self.miss();
-        let fresh = self.platform_membership(identity_id).await?;
+        let fresh = self.platform_role(identity_id).await?;
         self.platform.put(identity_id, fresh);
         Ok(fresh)
+    }
+
+    /// **The first of `wanted`'s groups whose tables in this tenant are older
+    /// than the version beside it**, with the version they are, or `None`.
+    ///
+    /// For the request path, which refuses a module's routes while this says
+    /// anything (decision 7 of 2026-09-11): numbers served from a shape this
+    /// build no longer projects are numbers nobody can vouch for. A group with
+    /// no checkpoint row has no tables to be stale; the route that needs them
+    /// fails on its own, loudly.
+    ///
+    /// # Why only "current" is cached
+    ///
+    /// Behind is the state that has to end the moment it can: a rebuild swaps
+    /// the new tables in, in another process, and nothing here hears of it. So
+    /// a behind answer is never kept — every request for that module reads the
+    /// checkpoint again, and the first after the swap is served. That is the
+    /// same rule every entry cache follows (a refusal is not stored, so access
+    /// granted takes effect at once), and it is what makes the cache need no
+    /// invalidation on a swap. Current is kept for the entry TTL, which bounds
+    /// the one way a group goes backwards: a restore, or a migrator rolled back.
+    ///
+    /// Not counted as an entry hit or miss: a miss here costs the tenant's
+    /// database a query, not the control plane one.
+    pub async fn read_model_behind(
+        &self,
+        db: &TenantDb,
+        wanted: &[(&'static str, i16)],
+    ) -> Result<Option<(&'static str, i16)>, AccessError> {
+        let tenant = db.tenant();
+        let unknown: Vec<&str> = wanted
+            .iter()
+            .filter(|(group, _)| self.read_models.get(&(tenant, *group)).is_none())
+            .map(|(group, _)| *group)
+            .collect();
+        if unknown.is_empty() {
+            return Ok(None);
+        }
+
+        let mut conn = db.read().await?;
+        let rows = sqlx::query!(
+            "SELECT group_name, read_model_version FROM projection_checkpoint
+              WHERE group_name = ANY($1)",
+            &unknown as &[&str],
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        drop(conn);
+
+        let mut behind = None;
+        for (group, version) in wanted {
+            if !unknown.contains(group) {
+                continue;
+            }
+            match rows.iter().find(|row| row.group_name == *group) {
+                Some(row) if row.read_model_version < *version => {
+                    behind.get_or_insert((*group, row.read_model_version));
+                }
+                _ => self.read_models.put((tenant, *group), ()),
+            }
+        }
+        Ok(behind)
     }
 
     async fn cached_modules(&self, tenant_id: TenantId) -> Result<EnabledModules, AccessError> {
@@ -1200,6 +1336,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            None,
             "identity.created",
             "identity",
             &id.to_string(),
@@ -1257,6 +1394,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            None,
             "identity.suspended",
             "identity",
             &id.to_string(),
@@ -1271,9 +1409,19 @@ impl ControlPlane {
     ///
     /// The identity row goes, and with it every authenticator, session and
     /// membership — those cascade. What stays is the audit trail, with this
-    /// person's name removed from it: the entries they produced remain, saying
-    /// what was done and when, attributed to nobody. That is the same shape an
-    /// entry has always had for a system-initiated action.
+    /// person's **link** removed from it: the entries they produced remain,
+    /// saying what was done and when, attributed to nobody. That is the same
+    /// shape an entry has always had for a system-initiated action.
+    ///
+    /// **Their address is not removed from it.** Some entries name a person by
+    /// login rather than by link — `invitation.created` and
+    /// `invitation.accepted` and `signup.confirmed` carry the handle in
+    /// `detail`, and `signup.requested` has it as its subject — and those
+    /// stay, as does the identity's id as the subject of entries about them.
+    /// That is a decision (5 of 2026-09-11), not an oversight: the trail is
+    /// kept as the legal record of who was given access to what, and when, and
+    /// an invitation entry that no longer said who was invited would record
+    /// nothing. The trigger allows no other change anyway.
     ///
     /// Business records are untouched, and deliberately. An invoice naming a
     /// customer is a legal document a tax authority requires to be kept for
@@ -1300,6 +1448,7 @@ impl ControlPlane {
         // kind this must not be.
         self.record(
             actor,
+            None,
             "identity.erased",
             "identity",
             &id.to_string(),
@@ -1366,6 +1515,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            None,
             "cluster.registered",
             "cluster",
             name,
@@ -1397,6 +1547,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            None,
             "cluster.status_changed",
             "cluster",
             name,
@@ -1511,6 +1662,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            Some(id),
             "tenant.registered",
             "tenant",
             &id.to_string(),
@@ -1642,24 +1794,142 @@ impl ControlPlane {
     /// Marks a tenant active. Called by the provisioning workflow once the
     /// database exists, is migrated, and is seeded — never before, or entry
     /// would succeed against a database with no schema.
+    ///
+    /// Refuses a tenant that is not provisioning, with
+    /// [`AccessError::WrongTenantStatus`]: reinstating a suspended one is
+    /// [`Self::reinstate_tenant`], and this used to answer `Ok` to it, change
+    /// nothing, and record a `tenant.activated` anyway.
     pub async fn activate_tenant(&self, id: TenantId, actor: Actor) -> Result<(), AccessError> {
-        sqlx::query!(
+        let rows = sqlx::query!(
             "UPDATE tenant SET status = 'active', activated_at = now()
               WHERE id = $1 AND status = 'provisioning'",
             id.as_uuid(),
         )
         .execute(&self.pool)
-        .await?;
-        self.forget(crate::shared::Invalidate::Tenant(id)).await;
-
-        self.record(
-            actor,
+        .await?
+        .rows_affected();
+        self.moved(
+            id,
+            rows,
+            TenantStatus::Provisioning,
             "tenant.activated",
-            "tenant",
-            &id.to_string(),
             serde_json::json!({}),
+            actor,
         )
         .await
+    }
+
+    /// **Suspends a tenant: nothing runs for it until it is reinstated.**
+    ///
+    /// Every door refuses it — members, API keys and the public alike get the
+    /// same `access.tenant_unavailable` — the worker stops claiming it, and a
+    /// visit already under way stops before its next job, because
+    /// [`Self::renew_lease`] answers `false` for a tenant no longer active.
+    /// Support can still open it ([`Self::enter_for_support`]), and the fleet
+    /// migrator still brings its schema current, so it comes back to one this
+    /// build can read.
+    ///
+    /// Sessions are left alone: they belong to people, who may work for other
+    /// tenants too. This node refuses the tenant on the next request; the others
+    /// within [`ENTRY_CACHE_TTL`], or at once where the caches are shared.
+    ///
+    /// The reason goes on the tenant row and into the audit trail.
+    ///
+    /// # Errors
+    /// [`AccessError::WrongTenantStatus`] unless the tenant is active;
+    /// [`AccessError::SuspensionReason`] for a blank one or one over 500
+    /// characters; [`AccessError::NoSuchTenant`].
+    pub async fn suspend_tenant(
+        &self,
+        id: TenantId,
+        reason: &str,
+        actor: Actor,
+    ) -> Result<(), AccessError> {
+        let reason = reason.trim();
+        let rows = sqlx::query!(
+            "UPDATE tenant
+                SET status = 'suspended', suspended_reason = $2, suspended_at = now()
+              WHERE id = $1 AND status = 'active'",
+            id.as_uuid(),
+            reason,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db)
+                if db.constraint() == Some("tenant_suspension_is_complete") =>
+            {
+                AccessError::SuspensionReason
+            }
+            _ => AccessError::Database(e),
+        })?
+        .rows_affected();
+        self.moved(
+            id,
+            rows,
+            TenantStatus::Active,
+            "tenant.suspended",
+            serde_json::json!({ "reason": reason }),
+            actor,
+        )
+        .await
+    }
+
+    /// Lifts a suspension. The tenant is enterable on this node at once, and
+    /// the worker claims it when its `next_visit_at` comes round, which is when
+    /// the jobs it missed catch up.
+    ///
+    /// # Errors
+    /// [`AccessError::WrongTenantStatus`] unless the tenant is suspended;
+    /// [`AccessError::NoSuchTenant`].
+    pub async fn reinstate_tenant(&self, id: TenantId, actor: Actor) -> Result<(), AccessError> {
+        let rows = sqlx::query!(
+            "UPDATE tenant SET status = 'active', suspended_reason = NULL, suspended_at = NULL
+              WHERE id = $1 AND status = 'suspended'",
+            id.as_uuid(),
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        self.moved(
+            id,
+            rows,
+            TenantStatus::Suspended,
+            "tenant.reinstated",
+            serde_json::json!({}),
+            actor,
+        )
+        .await
+    }
+
+    /// **The one place a tenant status change is judged**, after its `UPDATE
+    /// ... WHERE status = expected` has run.
+    ///
+    /// No row changed means the tenant was not in `expected`, and the caller
+    /// is told what it is in instead — never `Ok`, so a repeat is not recorded
+    /// as though it did something. A change is forgotten from every entry cache
+    /// and put on the record.
+    async fn moved(
+        &self,
+        id: TenantId,
+        rows: u64,
+        expected: TenantStatus,
+        action: &str,
+        detail: serde_json::Value,
+        actor: Actor,
+    ) -> Result<(), AccessError> {
+        if rows == 0 {
+            return Err(match self.tenant(id).await? {
+                None => AccessError::NoSuchTenant,
+                Some(tenant) => AccessError::WrongTenantStatus {
+                    status: tenant.status,
+                    expected,
+                },
+            });
+        }
+        self.forget(crate::shared::Invalidate::Tenant(id)).await;
+        self.record(actor, Some(id), action, "tenant", &id.to_string(), detail)
+            .await
     }
 
     // -----------------------------------------------------------------------
@@ -1733,6 +2003,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            scope.tenant(),
             "membership.granted",
             "identity",
             &identity_id.to_string(),
@@ -1818,6 +2089,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            scope.tenant(),
             "membership.revoked",
             "identity",
             &identity_id.to_string(),
@@ -1874,15 +2146,21 @@ impl ControlPlane {
         Ok(Some(access))
     }
 
-    async fn platform_membership(&self, identity_id: IdentityId) -> Result<bool, AccessError> {
-        let found = sqlx::query_scalar!(
-            "SELECT 1 FROM membership
+    /// The live platform role, uncached. A stored role this build does not
+    /// know is an error, not a default — the reason `live_access` gives.
+    async fn platform_role(
+        &self,
+        identity_id: IdentityId,
+    ) -> Result<Option<PlatformRole>, AccessError> {
+        sqlx::query_scalar!(
+            "SELECT role FROM membership
               WHERE identity_id = $1 AND scope_kind = 'platform' AND revoked_at IS NULL",
             identity_id.as_uuid(),
         )
         .fetch_optional(&self.pool)
-        .await?;
-        Ok(found.is_some())
+        .await?
+        .map(|role| staff::parse_platform_role(&role))
+        .transpose()
     }
 
     /// Every tenant this identity may enter. The tenant switcher's query.
@@ -1949,6 +2227,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            Some(tenant_id),
             "module.enabled",
             "tenant",
             &tenant_id.to_string(),
@@ -1979,6 +2258,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            Some(tenant_id),
             "module.disabled",
             "tenant",
             &tenant_id.to_string(),
@@ -2018,11 +2298,23 @@ impl ControlPlane {
     // Audit
     // -----------------------------------------------------------------------
 
-    /// Appends an audit entry. The table refuses `UPDATE` and `DELETE` at the
-    /// database level, so this is the only way its contents change.
+    /// Appends an audit entry — the only way one is written. The table's
+    /// append-only trigger refuses `DELETE` and every `UPDATE` but one:
+    /// erasure nulling an actor (`0007_erasure.sql`, re-pinned in `0019`).
+    ///
+    /// `tenant` is the company the entry concerns, or `None` for one that
+    /// concerns none — a person, a cluster, the platform's own outbox. It is
+    /// what [`Self::tenant_audit`] selects on. A tenant given here is stored
+    /// as given. `None` is filled in by the table's insert trigger
+    /// (`audit_entry_tenant` in `0019`) when the subject is a tenant, `detail`
+    /// has a `tenant`, or the subject is an API key, which is how a pod still
+    /// on the build before `0019` files its entries during a deploy. So a
+    /// `None` entry with such a subject or detail is in that tenant's trail
+    /// anyway. Every writer that passes `None` today names none of the three.
     pub async fn record(
         &self,
         actor: Actor,
+        tenant: Option<TenantId>,
         action: &str,
         subject_type: &str,
         subject_id: &str,
@@ -2030,10 +2322,12 @@ impl ControlPlane {
     ) -> Result<(), AccessError> {
         sqlx::query!(
             "INSERT INTO audit_entry
-                (actor_identity_id, on_behalf_of_identity_id, action, subject_type, subject_id, detail)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+                (actor_identity_id, on_behalf_of_identity_id, tenant_id, action, subject_type,
+                 subject_id, detail)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
             actor.identity.map(IdentityId::into_uuid),
             actor.on_behalf_of.map(IdentityId::into_uuid),
+            tenant.map(TenantId::into_uuid),
             action,
             subject_type,
             subject_id,
@@ -2042,6 +2336,126 @@ impl ControlPlane {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// **A tenant's trail**, newest first: every entry [`Self::record`] was
+    /// told concerns it, or whose `None` the insert trigger filled in with it.
+    /// Not what concerns a person the tenant happens to
+    /// hold — a suspension of somebody may be about their conduct elsewhere.
+    ///
+    /// Asks nothing about the tenant's status, and the caller must not either:
+    /// a suspended tenant's owner reads the reason here. The door is
+    /// [`Self::admit`], never [`Self::enter`].
+    pub async fn tenant_audit(
+        &self,
+        tenant: TenantId,
+        limit: i64,
+        before: Option<i64>,
+    ) -> Result<Page<AuditEntry>, AccessError> {
+        self.audit(Some(tenant), None, false, limit, before).await
+    }
+
+    /// **A person's own trail**, newest first: entries about them, and
+    /// entries they made or were impersonated in — the right of access under
+    /// the PDPL (decision 6 of 2026-09-11).
+    pub async fn identity_audit(
+        &self,
+        identity: IdentityId,
+        limit: i64,
+        before: Option<i64>,
+    ) -> Result<Page<AuditEntry>, AccessError> {
+        self.audit(None, Some(identity), false, limit, before).await
+    }
+
+    /// **The whole trail, for staff**, narrowed to a tenant, a person, or
+    /// both (both is the entries that are in each). Neither is everything,
+    /// the entries about no tenant and no person included — the platform's
+    /// dead letters, clusters, signups nobody confirmed. Every actor is named.
+    pub async fn platform_audit(
+        &self,
+        tenant: Option<TenantId>,
+        identity: Option<IdentityId>,
+        limit: i64,
+        before: Option<i64>,
+    ) -> Result<Page<AuditEntry>, AccessError> {
+        self.audit(tenant, identity, true, limit, before).await
+    }
+
+    /// The three readers' one query. `staff` names every actor; otherwise an
+    /// actor is named only where they are, or were, a member of the tenant the
+    /// entry concerns — `membership` keeps revoked rows, so somebody who has
+    /// left is still named for what they did. Staff who are not, and never
+    /// were, members of the tenant appear by id alone; one who was is a
+    /// co-member like any other, and named.
+    // ponytail: one statement with optional filters, planned per call; split it
+    // per reader if a plan goes bad at volume.
+    async fn audit(
+        &self,
+        tenant: Option<TenantId>,
+        identity: Option<IdentityId>,
+        staff: bool,
+        limit: i64,
+        before: Option<i64>,
+    ) -> Result<Page<AuditEntry>, AccessError> {
+        let rows = sqlx::query!(
+            r#"SELECT e.id, e.at,
+                      e.actor_identity_id as "actor: IdentityId",
+                      e.on_behalf_of_identity_id as "on_behalf_of: IdentityId",
+                      e.tenant_id as "tenant: TenantId",
+                      e.action, e.subject_type, e.subject_id, e.detail,
+                      (SELECT a.handle FROM authenticator a
+                        WHERE a.identity_id = e.actor_identity_id AND a.kind = 'password'
+                          AND ($3 OR EXISTS (SELECT 1 FROM membership m
+                                              WHERE m.identity_id = e.actor_identity_id
+                                                AND m.tenant_id = e.tenant_id))
+                        LIMIT 1) as actor_handle
+                 FROM audit_entry e
+                WHERE ($1::uuid IS NULL OR e.tenant_id = $1)
+                  AND ($2::uuid IS NULL
+                       OR (e.subject_type = 'identity' AND e.subject_id = $2::text)
+                       OR e.actor_identity_id = $2
+                       OR e.on_behalf_of_identity_id = $2)
+                  AND ($4::bigint IS NULL OR e.id < $4)
+                ORDER BY e.id DESC
+                LIMIT $5"#,
+            tenant.map(TenantId::into_uuid),
+            identity.map(IdentityId::into_uuid),
+            staff,
+            before,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let entries = rows
+            .into_iter()
+            .map(|row| AuditEntry {
+                id: row.id,
+                at: row.at,
+                actor: row.actor,
+                actor_handle: row.actor_handle,
+                on_behalf_of: row.on_behalf_of,
+                tenant: row.tenant,
+                action: row.action,
+                subject_type: row.subject_type,
+                subject_id: row.subject_id,
+                detail: row.detail,
+            })
+            .collect();
+        Ok(Page::of(entries, limit, |entry| {
+            Cursor::over(&[&entry.id.to_string()])
+        }))
+    }
+}
+
+/// Where a page of the audit trail resumes, from the cursor
+/// [`ControlPlane::tenant_audit`] and its siblings handed out. Anything else —
+/// another list's cursor, a hand-made one — is refused, never read as "from
+/// the top" (L6).
+pub fn audit_position(cursor: &Cursor) -> Result<i64, NotACursor> {
+    match cursor.parts() {
+        [id] => id.parse().map_err(|_| NotACursor),
+        _ => Err(NotACursor),
     }
 }
 
@@ -2065,11 +2479,24 @@ impl Localize for AccessError {
             // the one thing they can do about this is enrol, and a message that
             // says "denied" tells them to give up instead.
             Self::SecondFactorRequired => Message::new(messages::TENANT_REQUIRES_SECOND_FACTOR),
+            // The same 403 a tenant role gets, naming the power the way that
+            // one names the capability.
+            Self::StaffOnly(power) => Message::new(messages::NOT_PERMITTED)
+                .with("capability", MessageArg::text(power.as_str())),
+            Self::StaffSecondFactorRequired => Message::new(messages::STAFF_SECOND_FACTOR_REQUIRED),
             Self::TenantNotActive { status } => match status {
                 // Provisioning is a retry, and saying so saves a support ticket.
                 TenantStatus::Provisioning => Message::new(messages::TENANT_PROVISIONING),
                 _ => Message::new(messages::TENANT_UNAVAILABLE),
             },
+            // Staff-facing: only a platform route reaches these, so naming the
+            // status leaks nothing the caller may not see.
+            Self::WrongTenantStatus { status, expected } => {
+                Message::new(messages::WRONG_TENANT_STATUS)
+                    .with("status", MessageArg::text(status.as_str()))
+                    .with("expected", MessageArg::text(expected.as_str()))
+            }
+            Self::SuspensionReason => Message::new(messages::SUSPENSION_REASON),
             Self::DomainNotClaimed(domain) => Message::new(messages::DOMAIN_NOT_CLAIMED)
                 .with("domain", MessageArg::text(domain.clone())),
             Self::DomainNotProved {

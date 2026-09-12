@@ -22,6 +22,24 @@ pub enum RunError {
     },
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+    /// The group's tables were built for another read model than this build
+    /// projects — older or newer. Refused rather than projected into (L6):
+    /// rows written by one build's rules into tables stamped as another's are
+    /// a table that agrees with neither, and nothing would find them later.
+    ///
+    /// Older: this build's migrator has not rebuilt it yet. Newer: this build
+    /// is the one draining out of a rolling deploy whose migrator already
+    /// swapped the group — the new build's workers project it — or a deploy
+    /// was rolled back and the old build's migrator has not rebuilt it down.
+    #[error(
+        "{group} was built for read-model version {installed} and this build projects \
+         {expected}; the bare migrator of the build meant to be running rebuilds it"
+    )]
+    OtherReadModel {
+        group: &'static str,
+        installed: i16,
+        expected: i16,
+    },
 }
 
 /// How many distinct streams one advance will name before it says "many".
@@ -66,7 +84,7 @@ impl Progress {
 pub async fn ensure_group_schema<G: ProjectionGroup>(
     conn: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {
-    ensure_group(conn, G::NAME, G::SCHEMA).await
+    ensure_group(conn, G::NAME, G::SCHEMA, G::VERSION).await
 }
 
 /// [`ensure_group_schema`] without the type parameter.
@@ -75,10 +93,15 @@ pub async fn ensure_group_schema<G: ProjectionGroup>(
 /// list — and a generic function awaited through that list produces a future
 /// rustc cannot prove `Send`, reported at the HTTP route rather than here.
 /// Names are `&'static str` from a `ProjectionGroup` either way.
+///
+/// `version` is stamped only on a row this creates. An existing row means
+/// existing tables, which the caller's `IF NOT EXISTS` DDL did not reshape, so
+/// the stamp already there is the truth about them.
 pub async fn ensure_group(
     conn: &mut PgConnection,
     name: &str,
     schema: &str,
+    version: i16,
 ) -> Result<(), sqlx::Error> {
     // A `&'static str` from a `ProjectionGroup` declaration, never input.
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -89,9 +112,10 @@ pub async fn ensure_group(
     .await?;
 
     sqlx::query!(
-        "INSERT INTO projection_checkpoint (group_name) VALUES ($1)
+        "INSERT INTO projection_checkpoint (group_name, read_model_version) VALUES ($1, $2)
          ON CONFLICT (group_name) DO NOTHING",
         name,
+        version,
     )
     // `&mut *conn`, not `conn`. Moving the `&mut` into `Executor` here leaves
     // the future's `Send`-ness dependent on a higher-ranked bound that rustc
@@ -172,8 +196,8 @@ pub async fn run_once_in<G: ProjectionGroup>(
 ) -> Result<Progress, RunError> {
     // 1. The lease. `NOWAIT` so a second worker returns immediately rather than
     //    blocking a connection until the first finishes.
-    let held = sqlx::query_scalar!(
-        "SELECT position FROM projection_checkpoint
+    let held = sqlx::query!(
+        "SELECT position, read_model_version FROM projection_checkpoint
           WHERE group_name = $1
           FOR UPDATE NOWAIT",
         G::NAME,
@@ -182,7 +206,20 @@ pub async fn run_once_in<G: ProjectionGroup>(
     .await;
 
     let position = match held {
-        Ok(Some(position)) => position,
+        // **Only tables stamped with this build's read model are projected
+        // into.** `!=`, not `<`: after the migrator swaps in a newer shape, the
+        // build still draining would otherwise write rows by its old rules into
+        // tables stamped new, and nothing — not the migrator, which sees the
+        // stamp current, nor the request path — would ever find them. The cost
+        // is lag on the changed groups until the new build's workers are up.
+        Ok(Some(row)) if row.read_model_version != G::VERSION => {
+            return Err(RunError::OtherReadModel {
+                group: G::NAME,
+                installed: row.read_model_version,
+                expected: G::VERSION,
+            });
+        }
+        Ok(Some(row)) => row.position,
         // No row: the group's schema has not been created. Nothing to do.
         Ok(None) => {
             return Ok(Progress::UpToDate {

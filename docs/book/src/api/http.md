@@ -160,6 +160,10 @@ a day.
 If the name was taken while the link sat in a mailbox, this is `409
 provisioning.slug_taken` and **the link still works**. Ask for another name.
 
+A `504`, or a connection that drops, is not a failure. The build carries on
+without the request. It ends in the company, which the password signs into, or
+in a failure that has been undone, after which the link works again.
+
 There is deliberately no `GET` beside this. `/v1/join/{token}` has one because
 whoever opens an invitation did not write it and has to be told what they are
 joining; whoever opens this one filled the form in themselves.
@@ -226,6 +230,7 @@ with `request.module_in_use` while another module stands on it.
 | `DELETE /v1/members/{identity}` | Take access away | ManageTenant |
 | `PUT /v1/members/{identity}/modules/{module}` | A different role in one module | ManageTenant |
 | `DELETE /v1/members/{identity}/modules/{module}` | Back to their tenant-wide role | ManageTenant |
+| `POST /v1/members/{identity}/second-factor-reset` | Reset a colleague's two-step sign-in | ManageTenant, **or** `hr:reset_second_factor` — never an API key |
 
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
@@ -238,6 +243,169 @@ demoted or removed.
 
 `DELETE …/modules/{module}` removes the override, which is different from setting
 them to `viewer` there.
+
+## Permission limits
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/tenant/permission-limits` | The rules, with the version as `ETag` | ManageTenant |
+| `PUT /v1/tenant/permission-limits` | Replace them; `If-Match` to write only over what you read | ManageTenant |
+
+What a role may do, narrowed further by facts. The first rule that matches
+decides; `refuse` turns the role's yes into a no, and `allow` only restores what
+the role already permits, so an exception goes above the refusal it excepts.
+
+```bash
+# A bookkeeper posts entries under ten thousand riyals.
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/tenant/permission-limits -d '{"rules":[{
+    "name":"A bookkeeper posts under ten thousand",
+    "when":{"when":"all","of":[
+      {"when":"is","fact":"role","op":"eq","value":{"type":"text","of":"accountant"}},
+      {"when":"is","fact":"capability","op":"eq","value":{"type":"text","of":"post_entries"}},
+      {"when":"is","fact":"amount","op":"gte","value":{"type":"money","of":{"minor":1000000,"currency":"SAR"}}}]},
+    "then":"refuse"}]}'
+```
+
+A rule may ask about `amount`, `branch` (from `X-Branch`), `capability` (`read`,
+`post_entries`, `manage_accounts`) and `role`. Only the ledger's own two
+routes supply an amount: `POST /v1/ledger/entries`, and a reversal, which is
+the size of the entry it undoes. An invoice, a sale at the till or anything
+else that posts under `post_entries` supplies none, so an amount rule does not
+reach it: a permission limit judges what a *role* may do, at the edge, before
+any document has a total. **How large one invoice, credit note or refund may
+be** is the sales document limit, `PUT /v1/sales/document-limit`, judged inside
+the command where the total exists — see *Sales*.
+
+An amount in another currency than the rule's has no answer, and **no answer
+refuses**: the rule above refuses the bookkeeper an entry of any size in `USD`,
+rather than wave it through because five million dollars is not "at least ten
+thousand riyals". An `allow` it cannot judge excepts nothing. A tenant that
+posts in two currencies puts an `allow` per currency above the refusal — say
+`amount < 2,700 USD` for the bookkeeper.
+
+A rule that could never be true is refused when written, naming it:
+`request.no_such_fact`, `request.no_such_fact_value` (a misspelt capability, or
+`manage_tenant`), or `request.rule_cannot_compare`. A refused request is `403
+access.not_permitted`, naming only the capability.
+
+**Both routes are the owner's, and no limit can take them away.** `ManageTenant`
+is never narrowed, so a rule refusing everything still leaves the owner able to
+read and remove it. If a later build can no longer read the stored rules, every
+check they would narrow answers 503, `GET` answers 500, and a `PUT` without
+`If-Match` replaces them. The row's `set_by` says who wrote it last; the
+control-plane audit trail does not record it.
+
+## Platform staff
+
+About no tenant: these answer to a **platform** role, and every one also needs a
+second factor on the caller's account.
+
+| | | Platform power |
+|---|---|---|
+| `GET /v1/platform/staff` | Everybody on staff, and whether each has a second factor | manage_staff |
+| `POST /v1/platform/staff` | Make an existing account staff | manage_staff |
+| `PATCH /v1/platform/staff/{identity}` | Change their platform role | manage_staff |
+| `DELETE /v1/platform/staff/{identity}` | Take them off staff | manage_staff |
+| `POST /v1/platform/tenants/{id}/suspend` | Suspend a tenant, saying why | suspend_tenants |
+| `POST /v1/platform/tenants/{id}/reinstate` | Lift the suspension | suspend_tenants |
+| `GET /v1/platform/effects/dead` | The control plane's dead letters, oldest first | handle_dead_letters |
+| `POST /v1/platform/effects/dead/{id}/requeue` | Send one again | handle_dead_letters |
+| `DELETE /v1/platform/effects/dead/{id}` | Delete one that should not be sent | handle_dead_letters |
+| `GET /v1/platform/audit` | The audit trail, all of it, or `?tenant=` and `?identity=` | read_audit_trail |
+| `POST /v1/platform/identities/{identity}/second-factor-reset` | Reset anybody's two-step sign-in, saying why | reset_second_factors (+ manage_staff for staff) |
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/platform/staff \
+  -d '{"email":"noura@erp.example","platform_role":"support"}'
+```
+
+Platform roles are `support`, `billing` and `superadmin`; only a superadmin
+manages staff. The account must already exist and have a second factor
+(`staff.no_second_factor` otherwise), and while they are staff they cannot turn
+it off (`403 auth.staff_keeps_second_factor`) — only replace it. The last live superadmin cannot be demoted
+or removed here (`staff.last_superadmin`) — `operator revoke-staff` is the
+break-glass path, and `operator grant-staff` is how the first superadmin is made.
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/platform/tenants/$TENANT/suspend \
+  -d '{"reason":"The August invoice is unpaid after three reminders."}'
+```
+
+Billing and superadmins suspend. From the next request the tenant's members, API
+keys and public pages all get `503 access.tenant_unavailable` everywhere but
+`GET /v1/audit`, and its
+background jobs stop — a visit under way stops before its next job. Nobody is
+signed out. **The reason is written for the tenant's owner**: it goes into the
+audit trail about their tenant under the staff member's name, and they read it
+there — `GET /v1/audit` answers them while every other route is `503` — and it
+is 1 to 500 characters
+(`400 tenants.suspension_reason`). Suspending a tenant that is not
+active, or reinstating one that is not suspended, is `409 tenants.wrong_status`
+naming the status it is in. There is no route that finds a tenant's id by name
+yet.
+
+```bash
+curl -s "${AUTH[@]}" http://localhost:8080/v1/platform/effects/dead
+curl -sX DELETE "${AUTH[@]}" http://localhost:8080/v1/platform/effects/dead/42
+```
+
+Support and superadmins handle the control plane's dead letters: the signup,
+invitation and reset emails and sign-in texts it gave up on, in the same shape
+as a tenant's `GET /v1/effects/dead`. The `idempotency_key` says what each was —
+`signup:`, `invitation:`, `reset:` or `code:`, then the id of the row it was
+about. **Dismiss a `code:` or `reset:` letter rather than requeue it**: a code
+expires in five minutes and a reset link in an hour, and the retries take about
+four hours to give up, so one that died of an outage had expired long before it
+died. Either act on a dead letter only — anything else is
+`404 request.no_such_dead_letter` — and each is recorded in the audit trail
+under the staff member's name, with the effect's kind and key.
+
+```bash
+curl -s "${AUTH[@]}" "http://localhost:8080/v1/platform/audit?tenant=$TENANT"
+```
+
+Support and superadmins read the audit trail: every tenant's and the platform's
+own, newest first and paged like any list. `?tenant=` is one company's — what its
+owner sees — and `?identity=` is what was done to a person and what they did,
+staff included; both is the entries in each, neither is everything, and every
+actor is named by login.
+
+## The audit trail
+
+| | | Capability |
+|---|---|---|
+| `GET /v1/audit` | This tenant's trail, newest first | ManageTenant, **whatever the tenant's status** |
+| `GET /v1/sessions/current/audit` | What was done to you, and what you did | Signed in; never an API key |
+
+```bash
+curl -s "${AUTH[@]}" "http://acme.localhost:8080/v1/audit?limit=50"
+```
+
+Both are paged: `?limit=` (50, at most 200) and `?after=` from the last page's
+`next`, which is absent when the trail ended. A cursor the trail did not hand out
+is `400 request.invalid_cursor`, never the first page again.
+
+**The tenant's trail answers while the tenant is suspended**, where every other
+route on its host answers `503`: it is where the owner reads
+`tenant.suspended` and its `reason`. It asks every question entry asks —
+signed in, a live membership, the tenant's second-factor rule — but not whether
+the tenant is serving, and it opens no tenant database, so a limit (kept there)
+is not consulted. An API key needs `*:manage_tenant`. It holds what was recorded
+*about this tenant*: members and their roles, keys, domains, origins, modules,
+invitations, support opening it, suspension. Not what concerns one of its
+people alone — an account's suspension may be about another company.
+
+The personal trail is the PDPL right of access: entries whose subject is you,
+and entries you made, in every company. On either, somebody else is named by
+login only when they are, or were, a member of the tenant the entry concerns, so
+platform staff who never were appear by id. An API key is refused the personal
+trail (403 `keys.not_a_person`): it is not a person, and its trail would name
+the owner who issued it. Handles written into an entry stay after the person
+is erased: the trail is kept as the legal record of who was given access to
+what.
 
 ## Invitations
 
@@ -826,6 +994,64 @@ for proof of what it is about to destroy. A first enrolment removes nothing and
 needs no `previous`. Lost the phone? A recovery code works anywhere a code
 does — that is what they are for.
 
+**A second factor that is required can be replaced, never turned off.** `DELETE`
+answers `403` for platform staff (`auth.staff_keeps_second_factor`) and for a
+live member of an organisation that requires one, suspended or not
+(`auth.tenant_keeps_second_factor`). It refuses before the code is checked, so a
+recovery code sent with it is not spent. The organisation's owner removing the
+member (`DELETE /v1/members/{identity}`), or switching the requirement off,
+makes turning it off possible again. A member cannot leave on their own.
+
+**Confirming ends every other session of the account**; the one that confirmed
+stays. A session from before the factor never went through it, and one signed
+in with a phished password would otherwise outlive the enrolment meant to shut
+it out.
+
+#### When the phone and the paper are both gone
+
+`POST /v1/members/{identity}/second-factor-reset` is the organisation's route:
+its owner, or a member holding `hr:reset_second_factor`. `POST
+/v1/platform/identities/{identity}/second-factor-reset` is support's, with a
+reason. **Neither is a machine's.** The organisation's route answers an API key
+`403 keys.not_a_person` whatever its scopes — a machine identity has no employee
+record, so it holds no claim — and every platform route already refuses a key at
+the door.
+
+```bash
+curl -sX POST "${AUTH[@]}" \
+  http://localhost:8080/v1/members/$IDENTITY/second-factor-reset
+```
+
+Either one destroys the app and all ten recovery codes, ends every session the
+person holds, records itself in the audit trail under the caller's name, and
+emails them a one-time enrolment link. **The account is then link-only**: a
+password alone cannot enrol, `403 auth.enrolment_link_required` at both halves,
+and that **outlives the link** — an expired one means asking for a fresh one,
+never a password-only enrolment. Enrolling sends the token as `link` to both
+calls and clears the state:
+
+```bash
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/sessions/second-factor -d '{"link":"…"}'
+curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/sessions/second-factor/confirmation \
+  -d '{"code":"654321","link":"…"}'
+```
+
+The tenant route refuses four targets, each with its own code:
+`second_factor.reset_yourself`, `second_factor.reset_the_owner`,
+`second_factor.reset_platform_staff`, and — the one that sends people
+elsewhere — `second_factor.reset_another_company`, for anybody with a live
+membership of a second organisation. A factor is the account's everywhere, so
+no one company may weaken it; support resets those. Support's route refuses a
+**staff** target without `manage_staff`, so it cannot reach a superadmin, and
+refuses your own account, so it is no way round
+`auth.staff_keeps_second_factor`.
+
+A `link` field is optional on both enrolment calls, and the body of `POST
+/v1/sessions/second-factor` is optional as a whole: a caller that sends none is
+an ordinary first enrolment or replacement, exactly as before this existed.
+
 ### Passwords
 
 | | | Capability |
@@ -1082,6 +1308,8 @@ invoices, because an invoice and its journal entry commit together.
 | `GET /v1/sales/receivables` | Who owes what, and for how long | Read |
 | `GET /v1/sales/posting-accounts` | What sales posts to | Read |
 | `PUT /v1/sales/posting-accounts` | Choose | ManageAccounts |
+| `GET /v1/sales/document-limit` | How large a document a member may issue, with the version as `ETag` | ManageTenant |
+| `PUT /v1/sales/document-limit` | Set it, or `{"limit": null}` for none; `If-Match` to write only over what you read | ManageTenant |
 
 ```bash
 curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
@@ -1208,6 +1436,32 @@ Grouped by customer **and currency**, aged from the due date and falling back to
 the issue date. `as_of` is a parameter, so an accountant closing March gets the
 ageing as it stood on 31 March.
 
+### The document limit
+
+```bash
+# Nobody but the owner issues an invoice, credit note or refund over 10,000 SAR after VAT.
+curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  http://localhost:8080/v1/sales/document-limit -d '{"limit":{
+    "amount":{"minor":1000000,"currency":"SAR"},"basis":"after_vat"}}'
+```
+
+`basis` is `before_vat` or `after_vat`. `{"limit": null}` (or no `limit`)
+removes it, which is also where every tenant starts. An amount that is not more
+than nothing is `400 sales.document_limit_not_positive`.
+
+Every invoice, every credit note (whole or part) and every refund a member other
+than the owner issues — here, at the till, from the booking desk, by asking a
+gateway for a refund, or by charging a deposit at `POST /v1/payments` or
+`POST /v1/payments/cards/{card}/charges`, whose prepayment invoice the gateway's
+settlement raises — is then `403 sales.over_document_limit` when it comes to
+more, naming the limit and the amount. A refund's before-VAT figure is its share
+of the invoice's net. A document in another currency than the limit's is `403
+sales.document_limit_currency`. The org chart lifts it: an employee who holds
+`sales:exceed_document_limit` in the branch the request names, or who manages
+somebody who does, is not limited; a member with no employee record is. What
+nobody issues by hand is not limited either: a customer's own deposit, the
+worker billing completed bookings, a refund the gateway confirms.
+
 ## The counter
 
 | | | Capability |
@@ -1280,6 +1534,13 @@ curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
 The money, the credit note and the drawer in one write. `reference` is your key
 for *this* return, so sending it again is a no-op; the sale in the path is the
 document being credited, which is why they are two fields and not one.
+
+**A return needs `sales:approve_credit_note`** once the company has granted any
+claim, because it issues a credit note: `403 sales.not_approved`, the same code
+`POST /v1/sales/invoices/{invoice}/credit-note` answers. This is a **deliberate
+behaviour change at the till**, decided by the product owner — the counter used
+to be the one door that did not ask. A company that has granted no claims is
+asked nothing, and the owner is never asked.
 
 A return credits the **whole** sale: a partial credit note is not something
 `sales` can write.
@@ -1866,7 +2127,7 @@ the bank rejects on the day wages are due.
 | 422 | Valid JSON, refused on the state of things |
 | 500 | A bug. The detail goes to the log and never to the caller |
 | 429 | A confirmation went to this address moments ago. Retryable; the message says when |
-| 503 | The connection budget is exhausted, or a read is not caught up. Retryable |
+| 503 | The connection budget is exhausted, a read is not caught up, the tenant is suspended, or — on a module's route — `request.read_model_rebuilding`: a read model it is served from was built by an older release and has not been rebuilt yet. Retryable |
 | 504 | The request took longer than 30 seconds |
 
 A 409, a 429 and a 503 are worth retrying. A 422 is not: re-asking gets the same

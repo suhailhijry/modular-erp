@@ -210,6 +210,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            Some(tenant_id),
             "membership.role_changed",
             "identity",
             &identity.to_string(),
@@ -301,6 +302,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            Some(tenant_id),
             "membership.module_role_changed",
             "identity",
             &identity.to_string(),

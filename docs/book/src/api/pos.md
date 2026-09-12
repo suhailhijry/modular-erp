@@ -114,8 +114,8 @@ audit.
 
 ```rust
 pub async fn open_shift(db, id, opening: &Opening, metadata)                 -> Outcome;
-pub async fn sell(db, shift, sale, basket: &Basket, metadata)                -> Result<Rung, _>;
-pub async fn take_back(db, shift, sale, returning: &Return, metadata)        -> Outcome;
+pub async fn sell(db, shift, sale, basket: &Basket, metadata, authority)     -> Result<Rung, _>;
+pub async fn take_back(db, shift, sale, returning: &Return, metadata, authority) -> Outcome;
 pub async fn pay_out(db, shift, payment: &PayOut, metadata)                  -> Outcome;
 pub async fn close_shift(db, shift, declared: Money, at, metadata)           -> Outcome;
 ```
@@ -135,6 +135,24 @@ forty-three, which is what the drawer actually gains.
 
 `Rung` answers with the **statutory number and the total**, because that is what
 a receipt prints. The document is read at `GET /v1/sales/invoices/{sale}`.
+
+**The tenant's document limit applies at the till** (`sales.md`, *The document
+limit*). `authority` is whoever is at the counter, `sales::Authority::of` the
+route's handle, and `sales` judges the sale, each tender's refund and a return's
+credit note with it — so splitting a return across tenders under the limit does
+not carry a credit note over it. The refusal is `403 sales.over_document_limit`.
+
+**A return needs `sales:approve_credit_note`** once the tenant has granted any
+claim, because a return issues a credit note and that is the claim a credit note
+takes. `take_back` calls `sales`' credit-note roots, and since §70 the claim is
+asked for *there* rather than in the two `sales` wrappers — so the counter and
+`POST /v1/sales/invoices/{invoice}/credit-note` ask the same question and answer
+the same `403 sales.not_approved`. **This is a deliberate behaviour change at
+the till**, decided by the product owner: the till used to be the one door that
+did not ask, so a clerk refused on the sales screen could hand the same money
+back at the counter. A tenant that has never granted a claim is asked nothing,
+which is where every tenant starts; the owner is never asked; and a credit note
+with `Authority::System` behind it is not claim-judged at all.
 
 ## Returns, and the change to `sales` they needed first
 

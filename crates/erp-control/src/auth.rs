@@ -29,6 +29,22 @@ pub enum AuthError {
     /// code.
     #[error("this account needs its second factor")]
     SecondFactorRequired,
+    /// **A second factor that is required cannot be turned off** — by platform
+    /// staff, or by a member of a tenant that requires one. An account with a
+    /// password and no factor gets its next factor from whoever enrols first,
+    /// which may be somebody holding only the password. Replacing the factor
+    /// is still open; to drop it, come off the staff or out of the tenant, or
+    /// have its owner stop requiring it. See
+    /// [`ControlPlane::second_factor_required_by`](crate::ControlPlane::second_factor_required_by).
+    #[error("a second factor is required of this account ({0:?})")]
+    SecondFactorKept(crate::FactorRequiredBy),
+    /// **Somebody else reset this account's factor, so only the link they were
+    /// mailed may enrol the next one.** A password alone is not enough, and it
+    /// stays that way after the link expires — waiting the hour out must not
+    /// reopen the door. See
+    /// [`ControlPlane::reset_second_factor_by`](crate::ControlPlane::reset_second_factor_by).
+    #[error("this account can only enrol a second factor through its enrolment link")]
+    EnrolmentLinkRequired,
     /// That login handle already belongs to somebody.
     ///
     /// Deliberately *not* folded into `InvalidCredentials`: this one reaches a
@@ -51,6 +67,15 @@ impl erp_i18n::Localize for AuthError {
                 .with("handle", erp_i18n::MessageArg::text(handle.clone())),
             Self::NoSession => erp_i18n::Message::new(messages::SESSION_EXPIRED),
             Self::SecondFactorRequired => erp_i18n::Message::new(messages::SECOND_FACTOR_REQUIRED),
+            Self::SecondFactorKept(crate::FactorRequiredBy::Staff) => {
+                erp_i18n::Message::new(messages::STAFF_KEEPS_SECOND_FACTOR)
+            }
+            Self::SecondFactorKept(crate::FactorRequiredBy::Tenant) => {
+                erp_i18n::Message::new(messages::TENANT_KEEPS_SECOND_FACTOR)
+            }
+            Self::EnrolmentLinkRequired => {
+                erp_i18n::Message::new(messages::ENROLMENT_LINK_REQUIRED)
+            }
             Self::Hash(_) | Self::Database(_) => erp_i18n::Message::new(messages::INTERNAL),
         }
     }
@@ -157,6 +182,19 @@ link_token! {
     /// account, a tenant and a database, so it is treated exactly as an
     /// invitation link is.
     SignupToken
+}
+
+link_token! {
+    /// The link that lets somebody enrol a second factor after theirs was
+    /// reset by their company's owner or by platform support.
+    ///
+    /// **Not a way in.** It issues no session and rewrites no password; the
+    /// only thing it does is let its holder past
+    /// [`ControlPlane::begin_second_factor`](crate::ControlPlane::begin_second_factor)
+    /// and [`ControlPlane::confirm_second_factor`](crate::ControlPlane::confirm_second_factor),
+    /// which still need the account's password to reach at all. See
+    /// `crate::second_factor`.
+    EnrolmentToken
 }
 
 /// 32 bytes from the OS. The one random source in this file.

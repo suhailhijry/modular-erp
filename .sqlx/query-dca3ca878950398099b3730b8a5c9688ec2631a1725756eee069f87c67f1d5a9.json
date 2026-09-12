@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM membership\n                               WHERE identity_id = $1 AND scope_kind = 'platform'\n                                 AND revoked_at IS NULL) as \"staff!\",\n                      EXISTS (SELECT 1 FROM membership m\n                                JOIN tenant t ON t.id = m.tenant_id\n                               WHERE m.identity_id = $1 AND m.revoked_at IS NULL\n                                 AND t.requires_second_factor\n                                 AND t.status <> 'deleted') as \"tenant!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "staff!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "dca3ca878950398099b3730b8a5c9688ec2631a1725756eee069f87c67f1d5a9"
+}

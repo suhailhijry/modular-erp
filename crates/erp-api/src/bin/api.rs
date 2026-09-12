@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state = state.trusting_forwarded_for(trust_forwarded);
     if let Ok(configured) = std::env::var("SEALING_KEY") {
         let key = erp_eventlog::SealingKey::parse(&configured)?;
-        tracing::info!(key = key.id(), "sealing key loaded");
+        tracing::info!(key = ?key, "sealing key loaded");
         state = state.sealing_with(key);
     } else {
         tracing::warn!("SEALING_KEY is not set; anything that stores a tenant secret will refuse");

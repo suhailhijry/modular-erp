@@ -34,6 +34,7 @@ and nothing else.
 | [`vat.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/vat.rs) | `Vat`, `TaxBand`, `Totals`, `total` |
 | [`posting.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/posting.rs) | `PostingAccounts`, `entry_for_issue`, `entry_for_payment` |
 | [`commands.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/commands.rs) | `issue_invoice`, `record_payment`, `refund_invoice`, `cancel_invoice`, `attach_customer` |
+| [`limit.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/limit.rs) | `Authority`, `DocumentLimit`, `Basis` — how large a document a member may issue |
 | [`projections.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/projections.rs) | The `Sales` group, invoices, the VAT return, receivables |
 | [`http.rs`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/http.rs) | The routes |
 
@@ -234,18 +235,24 @@ pub struct Receipt {
 }
 
 pub async fn issue_invoice(db: &TenantDb, id: &AggregateId, draft: &Draft,
-    metadata: &Metadata) -> Result<Numbered, CommandError<SalesError>>;
+    metadata: &Metadata, authority: Authority) -> Result<Numbered, CommandError<SalesError>>;
 
 pub async fn record_payment(db: &TenantDb, invoice: &AggregateId,
     receipt: &Receipt, metadata: &Metadata) -> Result<Committed<InvoiceEvent>, …>;
 
 pub async fn refund_invoice(db: &TenantDb, invoice: &AggregateId,
-    receipt: &Receipt, metadata: &Metadata) -> Result<Committed<InvoiceEvent>, …>;
+    receipt: &Receipt, reason: &str, metadata: &Metadata, authority: Authority)
+    -> Result<Committed<InvoiceEvent>, …>;
 
 pub async fn cancel_invoice(db: &TenantDb, invoice: &AggregateId,
-    credit_note: &str, reason: &str, on: Timestamp, metadata: &Metadata)
-    -> Result<Numbered, CommandError<SalesError>>;
+    credit_note: &str, reason: &str, on: Timestamp, metadata: &Metadata,
+    authority: Authority) -> Result<Numbered, CommandError<SalesError>>;
 ```
+
+Everything that issues a document takes an [`Authority`](#the-document-limit):
+these, `credit_invoice_part`, and the `_in` forms other modules compose
+(`issue_in`, `credit_in`, `credit_part_in`, `refund_in`, `credit_what_is_clear`).
+Recording a payment issues nothing and takes none.
 
 `Draft` is a struct and not eight parameters. Half of them are strings, and
 transposing two strings is a bug no type can catch.
@@ -300,6 +307,99 @@ a negative balance is how that decision never gets made.
 the entry is `Dr` the customer, `Cr` wherever the money left — the exact reverse
 of the payment, and the reason `invoice_payment` accepts a negative `amount`
 with the sign carrying the meaning.
+
+### Crediting is a claim
+
+Once a tenant has granted **any** claim, issuing a credit note — cancelling an
+invoice, crediting part of one, a refund that clears one, or asking a gateway
+for a refund that will leave one owing — needs `sales:approve_credit_note` on
+the org chart. The refusal is `SalesError::NotApproved`,
+`403 sales.not_approved`.
+
+It is asked for **in the roots**, `cancel_in` and `credit_part_in`, which every
+credit note in this system goes through, and in the same branch the document
+limit is judged in: `Authority::Member` who is not the owner. So `pos::take_back`
+is asked exactly what `/v1/sales` is — a deliberate change at the till, decided
+by the product owner (§70), because until then the check sat in the two wrappers
+the sales routes call and the counter went round it. `Authority::System` is not
+claim-judged, the same way it is not limited: the credit note a gateway's
+confirmed refund implies is a consequence of money that has already moved.
+
+**A member who asks a gateway for a refund is asked when they ask**, in
+`may_refund`, beside the document limit that already judges them there — because
+the credit note the gateway's answer leaves owing is written with
+`Authority::System`, when there is nobody left to ask. Whole or part: both are
+credit notes. A refund that leaves no credit note owing is not asked for one.
+
+The refusal is applied **inside** the decision, after the retry check, which is
+where §68 put the limit's comparison. So resending a return's `reference` still
+answers with the credit note it issued, even once the claim has been revoked: a
+retry is not a second document, and answering `403` to one would only invite a
+second credit note under a new reference.
+
+The claim is one of `hr::SEGREGATED`, so unlike `sales:exceed_document_limit` it
+**does not travel up the chart**: a manager does not hold what their report was
+granted. Raising a document and cancelling it must not land in one pair of
+hands.
+
+### The document limit
+
+```rust
+pub enum Authority { Member { owner: bool }, System }
+impl Authority { pub fn of(db: &TenantDb) -> Self; }     // never System
+
+pub struct DocumentLimit { … }                           // KEY = "sales.document_limit"
+impl DocumentLimit {
+    pub fn new(limit: Money, basis: Basis) -> Result<Self, NotALimit>;  // more than nothing
+    pub async fn resolve(conn) -> Result<Option<Self>, ConfigError>;  // None: no limit
+}
+pub enum Basis { BeforeVat, AfterVat }
+pub const EXCEED_DOCUMENT_LIMIT: &str = "sales:exceed_document_limit";
+pub async fn may_refund(conn, invoice, refunded: Money, authority, metadata) -> Result<(), …>;
+pub async fn may_issue(conn, net: Money, gross: Money, authority, metadata) -> Result<(), …>;
+```
+
+**How large a document a member may issue**, set by the owner at
+`PUT /v1/sales/document-limit`. Every invoice, every credit note (whole or part)
+and every refund issued by a `Member` who is not the owner is refused with
+`SalesError::OverDocumentLimit` — `403 sales.over_document_limit`, naming the
+limit and the amount — when its total on the chosen basis is more than the
+limit. Equal is within it. A document in another currency than the limit's
+cannot be compared, and is refused (`sales.document_limit_currency`).
+
+It is judged **inside the command**, after the totals exist and in the same
+transaction: in `issue_in` on what the invoice charges (after its discounts and
+any deposit deducted), in the two credit-note roots on what the note credits, and
+in `refund_in` on what goes back. A refund's before-VAT figure is its share of
+the invoice's net, `refunded × net ÷ gross`. A credit note a refund issues is
+judged too, so a refund that leaves an invoice holding nothing is refused when
+the whole-invoice credit note would be over the limit — `credit_what_is_clear`
+issues that note by the same `owed` decision `may_refund` judges by, so the
+two answers cannot differ. The comparison sits after the retry check, so a retry
+of a document issued before the limit was lowered answers with it.
+
+**Who is not limited.** The owner. Anybody the org chart gives
+`sales:exceed_document_limit` in the branch the request names — the claim
+travels up like any claim that is not segregated, so a manager holds it when
+somebody beneath them does. A member with no employee record can hold no claim,
+and is limited. And `Authority::System`, which the paths nobody performs pass in
+so many words: a customer's own deposit, the prepayment invoice raised when the
+gateway settles one, the credit note and refund the gateway already made
+(`payments::refund_in`), and the worker billing completed bookings.
+
+**What a member starts and a gateway finishes is judged when they start it**,
+because by the time the gateway answers the money has moved and refusing to
+record it would only make the books wrong. A gateway refund: `may_refund` in
+`payments::request_refund_in`, on the money and on the credit note it will
+imply. A deposit a member charges: `may_issue` in `payments::request_in` and
+`start_in`, on the totals its prepayment invoice will have — the deposit's net
+and what the customer is charged, which settling refuses to bill unless the
+invoice comes to exactly that.
+
+**Not a permission limit.** `erp_tenant::Limits` judges a capability at the
+edge, where an invoice's total does not exist yet. Use a permission limit for
+what a role may do (`post_entries` over an amount on the ledger's own routes, by
+branch, by role); use this for how large one sales document may be.
 
 ### attach_customer
 
@@ -493,6 +593,7 @@ is the same kind of canary as the trial balance, and is registered in
 | `POST` | `/v1/sales/invoices/{invoice}/credit-note` | PostEntries |
 | `GET` | `/v1/sales/receivables` | Read |
 | `GET` `PUT` | `/v1/sales/posting-accounts` | Read / ManageAccounts |
+| `GET` `PUT` | `/v1/sales/document-limit` | ManageTenant |
 
 ## What is deliberately absent
 

@@ -303,6 +303,7 @@ async fn a_cafe_opens_sells_and_closes_level() {
             &code(&format!("SALE-{n}")),
             &coffee(vec![Tender::new(Method::Cash, gross())]),
             &Metadata::default(),
+            sales::Authority::Member { owner: false },
         )
         .await
         .expect("the sale rings");
@@ -380,6 +381,7 @@ async fn a_variance_is_booked_and_not_just_recorded() {
             &code(&format!("SALE-{n}")),
             &coffee(vec![Tender::new(Method::Cash, gross())]),
             &Metadata::default(),
+            sales::Authority::Member { owner: false },
         )
         .await
         .expect("the sale rings");
@@ -458,6 +460,7 @@ async fn a_sale_that_is_not_paid_in_full_is_refused_and_rings_nothing() {
             &code("SALE-1"),
             &coffee(vec![Tender::new(Method::Cash, short)]),
             &Metadata::default(),
+            sales::Authority::Member { owner: false },
         )
         .await
         .expect_err("the tenders do not come to the sale");
@@ -498,6 +501,7 @@ async fn a_split_payment_lands_in_two_accounts() {
             Tender::new(Method::Card, money(1_000)),
         ]),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("the sale rings");
@@ -534,6 +538,7 @@ async fn a_retried_sale_is_harmless_and_gives_back_the_same_number() {
         &code("SALE-1"),
         &coffee(vec![Tender::new(Method::Cash, gross())]),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("the sale rings");
@@ -545,6 +550,7 @@ async fn a_retried_sale_is_harmless_and_gives_back_the_same_number() {
             &code("SALE-1"),
             &coffee(vec![Tender::new(Method::Cash, gross())]),
             &Metadata::default(),
+            sales::Authority::Member { owner: false },
         )
         .await
         .expect("a retry is not an error");
@@ -583,6 +589,7 @@ async fn a_closed_till_refuses_a_sale() {
         &code("SALE-1"),
         &coffee(vec![Tender::new(Method::Cash, gross())]),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect_err("the till is shut");
@@ -661,6 +668,7 @@ async fn a_rebuild_reproduces_the_till() {
             Tender::new(Method::Transfer, money(1_000)),
         ]),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("rings");
@@ -728,6 +736,7 @@ async fn a_return_hands_the_money_back_and_credits_the_sale() {
         &code("SALE-1"),
         &coffee(vec![Tender::new(Method::Cash, gross())]),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("the sale rings");
@@ -744,6 +753,7 @@ async fn a_return_hands_the_money_back_and_credits_the_sale() {
             at: on("2026-04-01"),
         },
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("the return is taken");
@@ -789,6 +799,7 @@ async fn a_retried_return_is_harmless() {
         &code("SALE-1"),
         &coffee(vec![Tender::new(Method::Cash, gross())]),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("rings");
@@ -806,6 +817,7 @@ async fn a_retried_return_is_harmless() {
                 at: on("2026-04-01"),
             },
             &Metadata::default(),
+            sales::Authority::Member { owner: false },
         )
         .await
         .expect("a retry is not an error");
@@ -850,6 +862,7 @@ async fn a_return_of_one_line_credits_that_line_and_leaves_the_rest() {
         &code("SALE-1"),
         &coffee_and_cake(vec![Tender::new(Method::Cash, money(4_025))]),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("the sale rings");
@@ -860,6 +873,7 @@ async fn a_return_of_one_line_credits_that_line_and_leaves_the_rest() {
         &code("SALE-1"),
         &cake_back(2_300),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("the cake comes back");
@@ -904,6 +918,7 @@ async fn a_partial_return_whose_tenders_do_not_match_its_lines_is_refused() {
         &code("SALE-1"),
         &coffee_and_cake(vec![Tender::new(Method::Cash, money(4_025))]),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("the sale rings");
@@ -914,6 +929,7 @@ async fn a_partial_return_whose_tenders_do_not_match_its_lines_is_refused() {
         &code("SALE-1"),
         &cake_back(2_000),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect_err("2 000 is the cake's net, not its gross");
@@ -955,6 +971,7 @@ async fn a_closed_till_refuses_a_return() {
         &code("SALE-1"),
         &coffee(vec![Tender::new(Method::Cash, gross())]),
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("the sale rings");
@@ -980,6 +997,7 @@ async fn a_closed_till_refuses_a_return() {
             at: on("2026-04-02"),
         },
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect_err("the till is shut");
@@ -992,6 +1010,301 @@ async fn a_closed_till_refuses_a_return() {
         fixture.balance("4000").await,
         money(-1_500),
         "the sale was not credited behind a closed till"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A till is a member at a counter, and held to the document limit.**
+///
+/// This tenant has no `hr`, so nobody can hold the claim that lifts it: a
+/// clerk's sale over it is refused and rings nothing, the owner's is not. A
+/// return is judged twice — each tender's refund, and the credit note — so
+/// splitting the money across two tenders under the limit does not carry a
+/// credit note over it.
+#[tokio::test]
+async fn a_till_holds_a_clerk_to_the_document_limit() {
+    let fixture = Fixture::new().await;
+    opened(&fixture, "SHIFT-1", 0).await;
+    {
+        let mut conn = fixture.db.acquire().await.expect("a connection");
+        erp_eventlog::configuration::set(
+            &mut conn,
+            sales::DocumentLimit::KEY,
+            &Some(
+                sales::DocumentLimit::new(money(1_000_000), sales::Basis::AfterVat)
+                    .expect("a limit"),
+            ),
+            Some("the-owner"),
+            None,
+        )
+        .await
+        .expect("the limit is set");
+    }
+    // 10,000 net is 11,500 after VAT.
+    let big = |tenders| Basket {
+        lines: vec![sales::DraftLine {
+            allowances: Vec::new(),
+            description: "آلة قهوة".to_owned(),
+            net: money(1_000_000),
+            category: ledger::VatCategory::Standard,
+        }],
+        ..coffee(tenders)
+    };
+    let clerk = Metadata {
+        actor: Some("clerk".to_owned()),
+        ..Metadata::default()
+    };
+
+    let refused = sell(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-BIG"),
+        &big(vec![Tender::new(Method::Cash, money(1_150_000))]),
+        &clerk,
+        sales::Authority::Member { owner: false },
+    )
+    .await;
+    assert!(
+        matches!(
+            refused.as_ref().err().and_then(rejection),
+            Some(PosError::Sale(sales::SalesError::OverDocumentLimit { .. }))
+        ),
+        "{refused:?}"
+    );
+
+    sell(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-OWNER"),
+        &big(vec![
+            Tender::new(Method::Cash, money(575_000)),
+            Tender::new(Method::Card, money(575_000)),
+        ]),
+        &Metadata::default(),
+        sales::Authority::Member { owner: true },
+    )
+    .await
+    .expect("the owner is never limited");
+
+    let refused = take_back(
+        &fixture.db,
+        &code("SHIFT-1"),
+        &code("SALE-OWNER"),
+        &pos::Return {
+            reference: "RET-BIG".to_owned(),
+            tenders: vec![
+                Tender::new(Method::Cash, money(575_000)),
+                Tender::new(Method::Card, money(575_000)),
+            ],
+            lines: Vec::new(),
+            why: "أعادها".to_owned(),
+            at: on("2026-04-01"),
+        },
+        &clerk,
+        sales::Authority::Member { owner: false },
+    )
+    .await;
+    assert!(
+        matches!(
+            refused.as_ref().err().and_then(rejection),
+            Some(PosError::Sale(sales::SalesError::OverDocumentLimit { amount, .. }))
+                if *amount == money(1_150_000)
+        ),
+        "the credit note is 11,500 though each tender is under 10,000: {refused:?}"
+    );
+
+    fixture.project().await;
+    let shift = fixture.shift("SHIFT-1").await.expect("there");
+    assert_eq!(
+        shift.expected,
+        money(575_000),
+        "the refused sale and the refused return moved no cash"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// An org chart in this café — boss ← supervisor ← clerk — and the `hr` it
+/// needs. **Installing `hr` is part of the point**: until this runs there is no
+/// `hr` here at all, which is the ordinary shape of a till.
+async fn a_chart_with_three(fixture: &Fixture) {
+    {
+        let mut conn = fixture.db.acquire().await.expect("a connection");
+        hr::install(&mut conn).await.expect("hr installs");
+        ensure_group_schema::<hr::Hr>(&mut conn)
+            .await
+            .expect("hr checkpoint");
+    }
+    for (id, login, reports_to) in [
+        ("EMP-BOSS", "boss", None),
+        ("EMP-SUPERVISOR", "supervisor", Some("EMP-BOSS")),
+        ("EMP-CLERK", "clerk", Some("EMP-SUPERVISOR")),
+    ] {
+        hr::hire(
+            &fixture.db,
+            &code(id),
+            &hr::Hire {
+                details: hr::Details {
+                    name: id.to_owned(),
+                    name_latin: None,
+                    national_id: None,
+                    email: Some(format!("{login}@cafe.test")),
+                    phone: None,
+                },
+                reports_to: reports_to.map(code),
+                branch: None,
+                at: on("2026-01-01"),
+            },
+            &Metadata::default(),
+        )
+        .await
+        .expect("hires");
+        hr::link_login(
+            &fixture.db,
+            &code(id),
+            login,
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("links a login");
+    }
+    let owned = hr::projections();
+    let refs: Vec<&dyn Projection<Group = hr::Hr>> = owned.iter().map(AsRef::as_ref).collect();
+    run_to_head::<hr::Hr>(&fixture.pool, &refs, hr::upcasters(), 200)
+        .await
+        .expect("hr projects");
+}
+
+/// Grants it company-wide, **asking for propagation** the way the granting
+/// screen does — which `hr` refuses to honour, because this claim is one of
+/// `SEGREGATED`.
+async fn grant_the_credit_claim(fixture: &Fixture, employee: &str) {
+    hr::grant_claim(
+        &fixture.db,
+        &code(employee),
+        &hr::Claim {
+            name: sales::APPROVE_CREDIT_NOTE.to_owned(),
+            branch: None,
+        },
+        true,
+    )
+    .await
+    .expect("grants the claim");
+}
+
+/// **A till return asks for `sales:approve_credit_note`.**
+///
+/// Until §70 the claim was asked for only in the two `sales` wrappers the sales
+/// screens call, and `take_back` calls the roots — so a clerk refused at
+/// `/v1/sales` could take the same return at the counter. That is one rule now,
+/// and the change at the till is deliberate. What must **not** change is the
+/// tenant that has granted nothing: this café has no `hr` at all until the
+/// chart below, and its returns go through exactly as they did.
+#[tokio::test]
+async fn a_till_return_needs_the_credit_note_claim() {
+    let fixture = Fixture::new().await;
+    opened(&fixture, "SHIFT-1", 0).await;
+    let member = sales::Authority::Member { owner: false };
+    let at_the_till = |actor: &str| Metadata {
+        actor: Some(actor.to_owned()),
+        ..Metadata::default()
+    };
+    let back = |reference: &str| pos::Return {
+        reference: reference.to_owned(),
+        tenders: vec![Tender::new(Method::Cash, gross())],
+        lines: Vec::new(),
+        why: "أعادها".to_owned(),
+        at: on("2026-04-01"),
+    };
+    let returned = async |sale: &str, reference: &str, actor: &str| {
+        take_back(
+            &fixture.db,
+            &code("SHIFT-1"),
+            &code(sale),
+            &back(reference),
+            &at_the_till(actor),
+            member,
+        )
+        .await
+    };
+    let not_approved = |outcome: &Result<_, CommandError<PosError>>| {
+        matches!(
+            outcome.as_ref().err().and_then(rejection),
+            Some(PosError::Sale(sales::SalesError::NotApproved(_)))
+        )
+    };
+
+    for sale in ["SALE-1", "SALE-2", "SALE-3"] {
+        sell(
+            &fixture.db,
+            &code("SHIFT-1"),
+            &code(sale),
+            &coffee(vec![Tender::new(Method::Cash, gross())]),
+            &at_the_till("clerk"),
+            member,
+        )
+        .await
+        .expect("rings");
+    }
+
+    // **A tenant that has granted nothing is asked nothing.** No `hr`, no
+    // grants, no change.
+    returned("SALE-1", "RET-1", "clerk")
+        .await
+        .expect("the door that opened yesterday opens today");
+
+    a_chart_with_three(&fixture).await;
+    grant_the_credit_claim(&fixture, "EMP-SUPERVISOR").await;
+
+    let refused = returned("SALE-2", "RET-2", "clerk").await;
+    assert!(not_approved(&refused), "{refused:?}");
+
+    // **The same clerk, the same refusal, at the sales screen.** One rule.
+    let screen = sales::cancel_invoice(
+        &fixture.db,
+        &code("SALE-2"),
+        "CN-1",
+        "أعادها",
+        on("2026-04-01"),
+        &at_the_till("clerk"),
+        member,
+    )
+    .await;
+    assert!(
+        matches!(
+            screen,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                sales::SalesError::NotApproved(_)
+            )))
+        ),
+        "the till and the sales screen must refuse alike: {screen:?}"
+    );
+
+    // **This claim travels nowhere.** It is one of `hr::SEGREGATED`, so the
+    // boss does not hold what the supervisor beneath them was granted — unlike
+    // §68's `sales:exceed_document_limit`, which does.
+    let refused = returned("SALE-3", "RET-3", "boss").await;
+    assert!(
+        not_approved(&refused),
+        "a segregated claim does not travel up: {refused:?}"
+    );
+    returned("SALE-3", "RET-4", "supervisor")
+        .await
+        .expect("the supervisor holds what they were granted");
+
+    grant_the_credit_claim(&fixture, "EMP-CLERK").await;
+    returned("SALE-2", "RET-5", "clerk")
+        .await
+        .expect("granted to the clerk now");
+
+    fixture.project().await;
+    let shift = fixture.shift("SHIFT-1").await.expect("there");
+    assert_eq!(
+        shift.expected,
+        money(0),
+        "three sales rung and three handed back; the refusals moved nothing"
     );
 
     fixture.cleanup().await;

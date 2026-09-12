@@ -23,7 +23,7 @@ moment it does, this is a module.
 
 | File | What is in it |
 |---|---|
-| [`extract.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-web/src/extract.rs) | `Language`, `Authenticated`, `Tenant`, `Capability`, `Allowed<C>` |
+| [`extract.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-web/src/extract.rs) | `Language`, `Authenticated`, `Tenant`, `Capability`, `Allowed<C>`, `ManagesTenant`, `Power`, `Staff<P>` |
 | [`problem.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-web/src/problem.rs) | `Problem`, the RFC 9457 body |
 | [`error.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-web/src/error.rs) | `ApiError` and the status mapping |
 | [`wire.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-web/src/wire.rs) | `Json`, `Query`, `Amount`, `Paged`, `After`, `require_module`, `metadata` |
@@ -81,6 +81,18 @@ active, the tenant is enterable, and a live membership joins them. A handler
 taking this has been handed proof of all three, and cannot obtain a `TenantDb`
 any other way.
 
+**On a module's route it also refuses a read model older than the build.**
+While any group in `AppState::read_models` for that module — its own, and those
+of the modules whose code it runs — is stamped below this build's version in the
+tenant, the answer is `503 request.read_model_rebuilding`, with the module in
+`args` (decision 7 of 2026-09-11). Numbers worked out by rules the build has
+replaced are not served; other modules' routes are untouched. It is asked after
+entry, so only a caller who may be there learns it, and `Public` asks it too.
+The module is the one `module_of` finds, the same answer the capability check
+uses. Per request it costs a cache read per group; `ControlPlane::read_model_behind`
+caches only "current", so the first request after a rebuild is served with no
+invalidation to wait for.
+
 Which tenant comes from the subdomain. `AppState::domain` is what it is a
 subdomain of.
 
@@ -99,7 +111,10 @@ pub struct Allowed<C: Capability> { … }   // Derefs to Tenant
 ```
 
 `Tenant` proves membership. `Allowed<C>` proves membership **and** that the role
-on it permits `C`.
+on it permits `C`, narrowed by the tenant's permission limits
+(`TenantDb::permits`) with the facts the edge knows: the capability and
+`X-Branch`. A handler that learns more from the body — the ledger, an entry's
+amount — asks again with `Allowed::still_permits`.
 
 **Why this is a type and not a call.** A handler taking `Allowed<PostEntries>`
 cannot be reached by a viewer, and cannot be written to skip the check, because
@@ -114,6 +129,45 @@ without unwrapping anything.
 Coverage is not left to inspection either. `every_role_against_every_endpoint` in
 `erp-api` walks the matrix of role by endpoint and pins the count, so a new route
 without an authorization row fails the build instead of shipping open.
+
+```rust
+pub struct ManagesTenant { pub session: Session, pub tenant: TenantId }
+```
+
+`Allowed<ManageTenant>` for what the control plane keeps *about* a tenant, whose
+tenant may not be serving. `Allowed` goes through `enter`, which answers a
+suspended tenant 503; this asks `ControlPlane::admit` — the same checks bar the
+status — and then `Allowed`'s gates in `Allowed`'s order, a key's scopes and the
+role, with the same 403s. It hands out no `TenantDb`, and consults no limits,
+which would change nothing: `ManageTenant` is the one capability a permission
+limit never narrows. Its one route is `GET /v1/audit`, where a suspended
+tenant's owner reads why.
+
+### Staff
+
+```rust
+pub trait Power { const POWER: erp_control::PlatformPower; }
+pub struct ManageStaff;
+pub struct SuspendTenants;
+pub struct HandleDeadLetters;
+pub struct ReadAuditTrail;
+pub struct ResetSecondFactors;
+
+pub struct Staff<P: Power> { pub session: Session, pub role: PlatformRole, … }
+```
+
+The platform's `Allowed`, for routes about no tenant. It asks
+`ControlPlane::staff_may(identity, P::POWER)` — the same door support access
+asks at — which refuses unless the identity is active, holds a platform role
+that may `P`, and has a second factor enrolled. The refusals are 403s:
+`access.not_permitted` naming the power, or
+`access.staff_second_factor_required`. An API key is refused outright; a key is
+one tenant's integration and never staff.
+
+`every_platform_role_against_every_platform_endpoint` is its matrix: every route
+under `/v1/platform/` must be tabled with its power, and every staff role, a
+tenant owner who is not staff, and a superadmin without a second factor are sent
+at every one.
 
 ## Json and Query
 
@@ -317,7 +371,8 @@ difference between this being a feature and a timeout.
 pub struct AppState {
     pub control: Arc<ControlPlane>,
     pub domain: Arc<str>,
-    // sealing key, optional
+    pub read_models: Arc<HashMap<ModuleId, Vec<(&'static str, i16)>>>,
+    // sealing key, storage, realtime hub: optional
 }
 
 impl AppState {
@@ -335,3 +390,8 @@ curl.
 The sealing key is `None` when the deployment has not configured one, and then
 anything that would store a secret **refuses**. Nothing is ever stored in the
 clear. That is L6.
+
+`read_models` is what this build projects, by module: every `(group, version)`
+a module's routes are served from. `erp_api::router` fills it from the module
+list that mounts the routes, so every server built from there refuses by the
+same list it serves; it is empty elsewhere, where there are no module routes.

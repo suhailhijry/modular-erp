@@ -48,7 +48,7 @@ fn toy_module() -> ModuleSetup {
         ModuleId::new("toy").expect("valid"),
         "CREATE SCHEMA IF NOT EXISTS proj_toy;
          CREATE TABLE IF NOT EXISTS proj_toy.thing (id INT PRIMARY KEY);",
-        &[("toy", "proj_toy")],
+        &[("toy", "proj_toy", 1)],
         no_events,
     )
 }

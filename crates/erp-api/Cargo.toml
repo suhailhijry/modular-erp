@@ -18,6 +18,9 @@ erp-payments = { workspace = true }
 payments = { workspace = true }
 erp-recurrence = { workspace = true }
 erp-control = { workspace = true }
+# `Limits` and the rules it is made of, for `PUT /v1/tenant/permission-limits`.
+erp-tenant = { workspace = true }
+erp-rules = { workspace = true }
 erp-eventlog = { workspace = true }
 erp-projection = { workspace = true }
 futures-util = { workspace = true }

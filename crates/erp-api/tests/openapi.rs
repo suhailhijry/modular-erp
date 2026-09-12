@@ -564,6 +564,44 @@ fn every_role_the_document_names_exists() {
         described >= 6 && exampled >= 2,
         "only {described} descriptions and {exampled} examples — did they register?"
     );
+
+    // **The staff vocabulary, the same way.** A separate field name, so a
+    // client cannot offer `owner` where `support` belongs or the reverse.
+    let real: BTreeSet<&str> = erp_control::PlatformRole::ALL
+        .iter()
+        .map(|r| r.as_str())
+        .collect();
+    let mut described = 0;
+    for (name, schema) in doc["components"]["schemas"]
+        .as_object()
+        .expect("there are schemas")
+    {
+        if let Some(example) = schema["example"]["platform_role"].as_str() {
+            assert!(
+                real.contains(example),
+                "{name}'s example offers the platform role `{example}`, which does not exist"
+            );
+        }
+        let Some(description) = schema["properties"]["platform_role"]["description"].as_str()
+        else {
+            continue;
+        };
+        described += 1;
+        let listed: BTreeSet<&str> = description
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            listed, real,
+            "{name}.platform_role is described as {listed:?}, and the roles are {real:?}"
+        );
+    }
+    assert!(
+        described >= 3,
+        "only {described} platform_role descriptions"
+    );
 }
 
 /// Every module this build offers has routes in the document.

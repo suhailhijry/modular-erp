@@ -297,7 +297,14 @@ async fn issue_numbered(
     id: &str,
     lines: Vec<DraftLine>,
 ) -> Result<sales::Numbered, CommandError<SalesError>> {
-    issue_invoice(&fixture.db, &code(id), &draft(lines), &Metadata::default()).await
+    issue_invoice(
+        &fixture.db,
+        &code(id),
+        &draft(lines),
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
 }
 
 async fn pay(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> Outcome {
@@ -333,6 +340,7 @@ async fn credit_numbered(
         "issued in error",
         when(),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
 }
@@ -1231,6 +1239,7 @@ async fn a_credit_note_cancels_an_invoice_and_reverses_its_posting() {
         "wrong customer",
         when(),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("credits");
@@ -1434,9 +1443,15 @@ async fn the_final_invoice_after_a_deposit_charges_and_declares_only_the_rest() 
         issued_on: on("2026-01-05"),
         ..draft(vec![line("Deposit", riyals(200), VatCategory::Standard)])
     };
-    let numbered = issue_invoice(&fixture.db, &code("dep-1"), &deposit, &Metadata::default())
-        .await
-        .expect("the deposit is billed");
+    let numbered = issue_invoice(
+        &fixture.db,
+        &code("dep-1"),
+        &deposit,
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+    .expect("the deposit is billed");
     fixture.project().await;
     let mut conn = fixture.db.acquire().await.expect("connection");
     let bands = sales::bands_of(&mut conn, "dep-1").await.expect("reads");
@@ -1467,6 +1482,7 @@ async fn the_final_invoice_after_a_deposit_charges_and_declares_only_the_rest() 
         &code("bk-1"),
         &final_invoice,
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("the final invoice is issued");
@@ -1530,7 +1546,14 @@ async fn the_final_invoice_after_a_deposit_charges_and_declares_only_the_rest() 
         }),
         ..draft(vec![line("Trim", riyals(100), VatCategory::Standard)])
     };
-    let refused = issue_invoice(&fixture.db, &code("bk-2"), &too_much, &Metadata::default()).await;
+    let refused = issue_invoice(
+        &fixture.db,
+        &code("bk-2"),
+        &too_much,
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await;
     assert!(
         matches!(
             refused,
@@ -1549,6 +1572,7 @@ async fn the_final_invoice_after_a_deposit_charges_and_declares_only_the_rest() 
         &code("bk-3"),
         &other_band,
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await;
     assert!(
@@ -1656,6 +1680,7 @@ async fn issue_on(fixture: &Fixture, id: &str, day: &str, lines: Vec<DraftLine>)
             note: String::new(),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await;
     issued.map(|numbered| numbered.committed)
@@ -1786,6 +1811,7 @@ async fn a_refund_takes_its_supply_out_of_the_vat_return() {
         },
         "the engagement was cancelled",
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("refunds");
@@ -1847,6 +1873,7 @@ async fn a_credit_note_in_the_same_period_nets_the_supply_out() {
         "issued in error",
         on("2026-02-20"),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("credits");
@@ -2323,6 +2350,7 @@ async fn a_credit_note_is_declared_in_its_own_period_not_the_invoices() {
         "supply never happened",
         on("2026-04-20"),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("credits");
@@ -2387,6 +2415,7 @@ async fn a_credit_note_adjusts_each_rate_the_invoice_carried() {
         "cancelled",
         on("2026-05-02"),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("credits");
@@ -2520,6 +2549,7 @@ async fn a_credit_note_cannot_be_dated_into_a_closed_period() {
         "cancelled",
         on("2026-03-01"),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await;
     assert!(
@@ -2547,6 +2577,7 @@ async fn a_credit_note_cannot_be_dated_into_a_closed_period() {
         "cancelled",
         on("2026-04-20"),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("credits into the open period");
@@ -2790,6 +2821,7 @@ async fn owe(
             note: String::new(),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .map(|numbered| numbered.committed)
@@ -3145,6 +3177,7 @@ async fn owe_customer(
             note: String::new(),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .map(|numbered| numbered.committed)
@@ -3376,6 +3409,7 @@ async fn refund(fixture: &Fixture, id: &str, reference: &str, amount: Money) -> 
         },
         "the customer changed their mind",
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
 }
@@ -3586,6 +3620,7 @@ async fn an_unmatched_buyer_can_be_matched_to_a_record_afterwards() {
                 note: String::new(),
             },
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .expect("issues");
@@ -3771,6 +3806,7 @@ async fn credit_part(
             on: when(),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
 }
@@ -4146,6 +4182,7 @@ async fn a_partial_credit_takes_only_its_own_share_out_of_the_vat_return() {
             on: on("2026-02-20"),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("credits");
@@ -4187,6 +4224,7 @@ async fn a_partial_credit_in_a_later_period_does_not_reach_back() {
             on: on("2026-05-05"),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("credits");
@@ -4330,6 +4368,7 @@ async fn a_line_allowance_and_a_document_discount_both_apply() {
             note: String::new(),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("issues");
@@ -4458,6 +4497,7 @@ async fn the_band_cap_still_bites_when_a_document_discount_shrank_the_invoice() 
             note: String::new(),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("issues");
@@ -4677,6 +4717,7 @@ async fn a_discounted_invoice_credited_to_its_band_refuses_the_line_room_left_ov
             note: String::new(),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("issues");
@@ -4769,7 +4810,9 @@ async fn staff_with_the_credit_claim(fixture: &Fixture) {
 }
 
 /// **Cancelling an invoice needs the claim, and so does crediting part of
-/// one** — the same authority, checked in one helper so the two cannot drift.
+/// one** — the same authority, asked for in the roots both paths go through
+/// (§70), and asked for **only of a member who is not the owner**, which is the
+/// branch the document limit is judged in.
 #[tokio::test]
 async fn crediting_an_invoice_needs_the_claim_once_the_tenant_uses_claims() {
     let fixture = Fixture::new().await;
@@ -4777,8 +4820,24 @@ async fn crediting_an_invoice_needs_the_claim_once_the_tenant_uses_claims() {
         actor: Some(actor.to_owned()),
         ..Metadata::default()
     };
+    let db = &fixture.db;
+    let cancel = |invoice: &'static str, note: &'static str, actor: &'static str, authority| {
+        let by = by(actor);
+        async move {
+            sales::cancel_invoice(
+                db,
+                &code(invoice),
+                note,
+                "a mistake",
+                on("2026-03-02"),
+                &by,
+                authority,
+            )
+            .await
+        }
+    };
 
-    for id in ["INV-A", "INV-B"] {
+    for id in ["INV-A", "INV-B", "INV-C", "INV-D", "INV-E"] {
         issue(
             &fixture,
             id,
@@ -4789,28 +4848,13 @@ async fn crediting_an_invoice_needs_the_claim_once_the_tenant_uses_claims() {
     }
 
     // Nothing granted: unchanged for everyone.
-    sales::cancel_invoice(
-        &fixture.db,
-        &code("INV-A"),
-        "CN-0",
-        "a mistake",
-        on("2026-03-02"),
-        &by("sara"),
-    )
-    .await
-    .expect("no claims in this tenant means no control");
+    cancel("INV-A", "CN-0", "sara", MEMBER)
+        .await
+        .expect("no claims in this tenant means no control");
 
     staff_with_the_credit_claim(&fixture).await;
 
-    let refused = sales::cancel_invoice(
-        &fixture.db,
-        &code("INV-B"),
-        "CN-1",
-        "a mistake",
-        on("2026-03-02"),
-        &by("sara"),
-    )
-    .await;
+    let refused = cancel("INV-B", "CN-1", "sara", MEMBER).await;
     assert!(
         matches!(
             refused,
@@ -4821,16 +4865,52 @@ async fn crediting_an_invoice_needs_the_claim_once_the_tenant_uses_claims() {
         "sara does not hold the claim, got {refused:?}"
     );
 
-    sales::cancel_invoice(
+    cancel("INV-B", "CN-2", "khalid", MEMBER)
+        .await
+        .expect("khalid holds it");
+
+    // **The owner is not asked**, the way they are not held to the document
+    // limit: switching a control on must not strand the person who did.
+    cancel("INV-C", "CN-3", "sara", OWNER)
+        .await
+        .expect("an owner is never refused their own credit note");
+
+    // **Nobody acting is not asked either.** A worker's sweep and a gateway's
+    // confirmed refund say `System` in so many words, and there is nobody to
+    // hold a claim.
+    cancel("INV-D", "CN-4", "sara", sales::Authority::System)
+        .await
+        .expect("a credit note nobody issued is not claim-judged");
+
+    // **A refund that clears an invoice issues a whole-invoice credit note**,
+    // and since §70 that one is asked for like any other: the member refused at
+    // the credit-note route cannot refund their way to the same document.
+    pay(&fixture, "INV-E", "wire-1", riyals(115))
+        .await
+        .expect("paid in full");
+    let refused = sales::refund_invoice(
         &fixture.db,
-        &code("INV-B"),
-        "CN-2",
-        "a mistake",
-        on("2026-03-02"),
-        &by("khalid"),
+        &code("INV-E"),
+        &Receipt {
+            reference: "back-1".to_owned(),
+            amount: riyals(115),
+            received_on: on("2026-03-02"),
+            into: code("1010"),
+        },
+        "returned",
+        &by("sara"),
+        MEMBER,
     )
-    .await
-    .expect("khalid holds it");
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::NotApproved(_)
+            )))
+        ),
+        "clearing an invoice issues a credit note, got {refused:?}"
+    );
 
     fixture.cleanup().await;
 }
@@ -4866,6 +4946,7 @@ async fn a_partial_credit_needs_the_claim_too() {
         &code("INV-P"),
         &note("sara", "CP-1"),
         &by("sara"),
+        MEMBER,
     )
     .await;
     assert!(
@@ -4883,9 +4964,601 @@ async fn a_partial_credit_needs_the_claim_too() {
         &code("INV-P"),
         &note("khalid", "CP-2"),
         &by("khalid"),
+        MEMBER,
     )
     .await
     .expect("khalid holds the claim");
 
     fixture.cleanup().await;
+}
+
+/// **A gateway refund is asked for the claim when a credit note will follow
+/// it**, because by the time one is issued there is nobody left to ask.
+///
+/// `payments::request_refund_in` judges the member here; `payments::refund_in`
+/// then issues the credit note with `System`, which no claim judges. Whole or
+/// part — a partial refund of a single-band invoice credits exactly what went
+/// back, and that document is a credit note like any other.
+#[tokio::test]
+async fn a_gateway_refund_is_asked_for_the_claim_when_it_will_credit() {
+    let fixture = Fixture::new().await;
+    for id in ["INV-GR-1", "INV-GR-2", "INV-GR-3", "INV-GR-4", "INV-GR-5"] {
+        issue(
+            &fixture,
+            id,
+            vec![line("Consulting", riyals(100), VatCategory::Standard)],
+        )
+        .await
+        .expect("issues");
+        pay(&fixture, id, "wire-1", riyals(115))
+            .await
+            .expect("paid in full");
+    }
+    let asked = async |invoice: &str, refunded: Money, actor: &str, authority| {
+        let mut conn = fixture.db.acquire().await.expect("a connection");
+        sales::may_refund(&mut conn, &code(invoice), refunded, authority, &by(actor)).await
+    };
+    let not_approved = |outcome: &Result<(), ExecuteError<SalesError>>| {
+        matches!(
+            outcome,
+            Err(ExecuteError::Rejected(SalesError::NotApproved(_)))
+        )
+    };
+
+    // Nothing granted: unchanged for everyone, and the invoice is not even read.
+    asked("INV-GR-1", riyals(115), "sara", MEMBER)
+        .await
+        .expect("no claims in this tenant means no control");
+
+    staff_with_the_credit_claim(&fixture).await;
+
+    let refused = asked("INV-GR-2", riyals(115), "sara", MEMBER).await;
+    assert!(
+        not_approved(&refused),
+        "clearing the invoice issues a whole credit note: {refused:?}"
+    );
+    // 23 back is 20 net at 15%, so it credits exactly what went back.
+    let refused = asked("INV-GR-3", riyals(23), "sara", MEMBER).await;
+    assert!(
+        not_approved(&refused),
+        "a partial refund credits exactly what went back, which is a credit note too: {refused:?}"
+    );
+    // **No net comes to 10 at 15%**, so that refund issues no credit note at
+    // all — and a control on issuing one must not refuse a refund that issues
+    // none.
+    asked("INV-GR-3", riyals(10), "sara", MEMBER)
+        .await
+        .expect("no credit note follows, so there is nothing to approve");
+
+    asked("INV-GR-2", riyals(115), "khalid", MEMBER)
+        .await
+        .expect("khalid holds the claim");
+    asked("INV-GR-4", riyals(115), "sara", OWNER)
+        .await
+        .expect("an owner is never refused");
+    asked("INV-GR-5", riyals(115), "sara", sales::Authority::System)
+        .await
+        .expect("a gateway's own answer has nobody to ask");
+
+    fixture.cleanup().await;
+}
+
+/// **A retry answers with the document it issued, even after the claim is
+/// revoked.**
+///
+/// `reference` is the client's idempotency key, and the book promises that
+/// sending it again is a no-op. So the claim is applied *inside* the decision,
+/// after the retry check, exactly where §68 put the document limit's
+/// comparison — otherwise a till whose response was lost answers 403 to its own
+/// retry and the clerk rings a second credit note by a different reference.
+#[tokio::test]
+async fn a_retry_answers_with_its_credit_note_after_the_claim_is_revoked() {
+    let fixture = Fixture::new().await;
+    for id in ["INV-RT-1", "INV-RT-2", "INV-RT-3"] {
+        issue(
+            &fixture,
+            id,
+            vec![line("Consulting", riyals(100), VatCategory::Standard)],
+        )
+        .await
+        .expect("issues");
+    }
+    staff_with_the_credit_claim(&fixture).await;
+
+    let cancel = async |invoice: &str, reference: &str| {
+        sales::cancel_invoice(
+            &fixture.db,
+            &code(invoice),
+            reference,
+            "a mistake",
+            on("2026-03-02"),
+            &by("khalid"),
+            MEMBER,
+        )
+        .await
+    };
+    let credit_part = async |invoice: &str, reference: &str| {
+        sales::credit_invoice_part(
+            &fixture.db,
+            &code(invoice),
+            &sales::CreditNote {
+                reference: reference.to_owned(),
+                lines: vec![credit_line(0, riyals(10))],
+                reason: "a mistake".to_owned(),
+                on: on("2026-03-02"),
+            },
+            &by("khalid"),
+            MEMBER,
+        )
+        .await
+    };
+    let claim = || hr::Claim {
+        name: sales::APPROVE_CREDIT_NOTE.to_owned(),
+        branch: None,
+    };
+
+    let cancelled = cancel("INV-RT-1", "CN-R1")
+        .await
+        .expect("khalid holds the claim");
+    let credited = credit_part("INV-RT-2", "CP-R1")
+        .await
+        .expect("khalid holds the claim");
+
+    // **The claim moves to somebody else.** Sara is granted it so the tenant
+    // still uses claims — without that the control would switch itself off and
+    // this would prove nothing.
+    hr::revoke_claim(&fixture.db, &code("EMP-KHALID"), &claim())
+        .await
+        .expect("revokes");
+    hr::grant_claim(&fixture.db, &code("EMP-SARA"), &claim(), false)
+        .await
+        .expect("grants");
+
+    let refused = cancel("INV-RT-3", "CN-R2").await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::NotApproved(_)
+            )))
+        ),
+        "the control is on and khalid no longer holds it: {refused:?}"
+    );
+
+    let again = cancel("INV-RT-1", "CN-R1")
+        .await
+        .expect("the retry of a credit note khalid was allowed to issue");
+    assert!(again.committed.did_nothing());
+    assert_eq!(again.number, cancelled.number);
+
+    let again = credit_part("INV-RT-2", "CP-R1")
+        .await
+        .expect("and the same for a partial credit note");
+    assert!(again.committed.did_nothing());
+    assert_eq!(again.number, credited.number);
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// The document limit
+// ---------------------------------------------------------------------------
+
+/// A member who is not the owner, as a route passes one.
+const MEMBER: sales::Authority = sales::Authority::Member { owner: false };
+const OWNER: sales::Authority = sales::Authority::Member { owner: true };
+
+/// What a route stamps: who is asking.
+fn by(actor: &str) -> Metadata {
+    Metadata {
+        actor: Some(actor.to_owned()),
+        ..Metadata::default()
+    }
+}
+
+/// Sets the limit the way `PUT /v1/sales/document-limit` does, through the
+/// same typed setter.
+async fn limit_documents_to(fixture: &Fixture, limit: Money, basis: sales::Basis) {
+    let mut conn = fixture.db.acquire().await.expect("a connection");
+    erp_eventlog::configuration::set(
+        &mut conn,
+        sales::DocumentLimit::KEY,
+        &Some(sales::DocumentLimit::new(limit, basis).expect("a limit")),
+        Some("the-owner"),
+        None,
+    )
+    .await
+    .expect("the limit is set");
+}
+
+/// Puts people on the org chart with logins, each reporting to the one named,
+/// and projects `hr` so a login resolves to its employee.
+async fn staff(fixture: &Fixture, people: &[(&str, &str, Option<&str>)]) {
+    for (id, login, reports_to) in people {
+        hr::hire(
+            &fixture.db,
+            &code(id),
+            &hr::Hire {
+                details: hr::Details {
+                    name: (*id).to_owned(),
+                    name_latin: None,
+                    national_id: None,
+                    email: Some(format!("{login}@acme.test")),
+                    phone: None,
+                },
+                reports_to: reports_to.map(code),
+                branch: None,
+                at: on("2026-01-01"),
+            },
+            &Metadata::default(),
+        )
+        .await
+        .expect("hires");
+        hr::link_login(
+            &fixture.db,
+            &code(id),
+            login,
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("links a login");
+    }
+    let pool = fixture.tenant_pool().await;
+    let owned = hr::projections();
+    let refs: Vec<&dyn Projection<Group = hr::Hr>> = owned.iter().map(AsRef::as_ref).collect();
+    run_to_head::<hr::Hr>(&pool, &refs, hr::upcasters(), 200)
+        .await
+        .expect("hr projects");
+    pool.close().await;
+}
+
+async fn grant_the_exemption(fixture: &Fixture, employee: &str) {
+    hr::grant_claim(
+        &fixture.db,
+        &code(employee),
+        &hr::Claim {
+            name: sales::EXCEED_DOCUMENT_LIMIT.to_owned(),
+            branch: None,
+        },
+        true,
+    )
+    .await
+    .expect("grants the claim");
+}
+
+/// One standard-rated line of `net`, issued by `actor`.
+async fn issue_as(
+    fixture: &Fixture,
+    id: &str,
+    net: Money,
+    actor: &str,
+    authority: sales::Authority,
+) -> Result<sales::Numbered, CommandError<SalesError>> {
+    issue_invoice(
+        &fixture.db,
+        &code(id),
+        &draft(vec![line("Consulting", net, VatCategory::Standard)]),
+        &by(actor),
+        authority,
+    )
+    .await
+}
+
+fn over_the_limit(outcome: &Result<sales::Numbered, CommandError<SalesError>>) -> Option<Money> {
+    match outcome {
+        Err(CommandError::Execute(ExecuteError::Rejected(SalesError::OverDocumentLimit {
+            amount,
+            ..
+        }))) => Some(*amount),
+        _ => None,
+    }
+}
+
+/// **A clerk is held to the owner's limit; the owner and the worker are not.**
+///
+/// Before a limit exists nothing changes for anybody. After, a clerk's invoice
+/// over it is refused naming what it came to, the owner's is not, a login
+/// with no employee record is refused like any clerk, a document in another
+/// currency is refused rather than counted as under, and a path nobody
+/// performs is not judged at all.
+#[tokio::test]
+async fn a_clerk_is_held_to_the_document_limit_and_the_owner_is_not() {
+    let fixture = Fixture::new().await;
+    staff(&fixture, &[("EMP-CLERK", "clerk", None)]).await;
+
+    issue_as(&fixture, "INV-NO-LIMIT", riyals(20_000), "clerk", MEMBER)
+        .await
+        .expect("with no limit set, nothing is refused");
+
+    limit_documents_to(&fixture, riyals(10_000), sales::Basis::AfterVat).await;
+
+    issue_as(&fixture, "INV-NO-LIMIT", riyals(20_000), "clerk", MEMBER)
+        .await
+        .expect("a retry of an invoice issued before the limit answers with it");
+    issue_as(&fixture, "INV-UNDER", riyals(8_000), "clerk", MEMBER)
+        .await
+        .expect("9,200 after VAT is within 10,000");
+    let refused = issue_as(&fixture, "INV-OVER", riyals(10_000), "clerk", MEMBER).await;
+    assert_eq!(
+        over_the_limit(&refused),
+        Some(riyals(11_500)),
+        "10,000 net is 11,500 after VAT, over the limit: {refused:?}"
+    );
+    assert!(
+        !fixture.is_issued("INV-OVER").await,
+        "a refused invoice left a document behind"
+    );
+
+    issue_as(&fixture, "INV-OWNER", riyals(50_000), "the-owner", OWNER)
+        .await
+        .expect("the owner is never limited");
+    issue_as(
+        &fixture,
+        "INV-WORKER",
+        riyals(50_000),
+        "",
+        sales::Authority::System,
+    )
+    .await
+    .expect("nobody acting is not limited");
+
+    let stranger = issue_as(&fixture, "INV-STRANGER", riyals(10_000), "stranger", MEMBER).await;
+    assert!(
+        over_the_limit(&stranger).is_some(),
+        "a login with no employee record can hold no claim: {stranger:?}"
+    );
+
+    let mut dollars = draft(vec![line(
+        "Consulting",
+        Money::from_minor(100, usd()),
+        VatCategory::Standard,
+    )]);
+    dollars.currency = usd();
+    let refused = issue_invoice(
+        &fixture.db,
+        &code("INV-USD"),
+        &dollars,
+        &by("clerk"),
+        MEMBER,
+    )
+    .await;
+    assert_eq!(
+        over_the_limit(&refused).map(Money::currency),
+        Some(usd()),
+        "a dollar invoice cannot be judged against a riyal limit, and is refused: {refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The basis is the question at the boundary.** Net 9,500 is 10,925 with
+/// VAT: over a 10,000 limit after VAT, within it before.
+#[tokio::test]
+async fn the_basis_decides_which_total_is_held_to_the_limit() {
+    let fixture = Fixture::new().await;
+    staff(&fixture, &[("EMP-CLERK", "clerk", None)]).await;
+
+    limit_documents_to(&fixture, riyals(10_000), sales::Basis::AfterVat).await;
+    let refused = issue_as(&fixture, "INV-GROSS", riyals(9_500), "clerk", MEMBER).await;
+    assert_eq!(
+        over_the_limit(&refused),
+        Some(riyals(10_925)),
+        "{refused:?}"
+    );
+
+    limit_documents_to(&fixture, riyals(10_000), sales::Basis::BeforeVat).await;
+    issue_as(&fixture, "INV-NET", riyals(9_500), "clerk", MEMBER)
+        .await
+        .expect("9,500 before VAT is within 10,000");
+    let refused = issue_as(&fixture, "INV-NET-OVER", money(1_000_001), "clerk", MEMBER).await;
+    assert_eq!(
+        over_the_limit(&refused),
+        Some(money(1_000_001)),
+        "{refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The claim is the allow list, and it travels the way every claim does:
+/// up.** Granted to a supervisor, it exempts them and the manager above them,
+/// and not the clerk beneath — a manager holds what their reports hold, never
+/// the reverse.
+#[tokio::test]
+async fn the_claim_lifts_the_limit_for_whoever_holds_it_and_everyone_above() {
+    let fixture = Fixture::new().await;
+    staff(
+        &fixture,
+        &[
+            ("EMP-BOSS", "boss", None),
+            ("EMP-SUPERVISOR", "supervisor", Some("EMP-BOSS")),
+            ("EMP-CLERK", "clerk", Some("EMP-SUPERVISOR")),
+        ],
+    )
+    .await;
+    limit_documents_to(&fixture, riyals(10_000), sales::Basis::AfterVat).await;
+    grant_the_exemption(&fixture, "EMP-SUPERVISOR").await;
+
+    issue_as(
+        &fixture,
+        "INV-SUPERVISOR",
+        riyals(20_000),
+        "supervisor",
+        MEMBER,
+    )
+    .await
+    .expect("granted to them");
+    issue_as(&fixture, "INV-BOSS", riyals(20_000), "boss", MEMBER)
+        .await
+        .expect("inherited from the supervisor beneath them");
+    let refused = issue_as(&fixture, "INV-CLERK", riyals(20_000), "clerk", MEMBER).await;
+    assert!(
+        over_the_limit(&refused).is_some(),
+        "a claim does not travel down the chart: {refused:?}"
+    );
+
+    grant_the_exemption(&fixture, "EMP-CLERK").await;
+    issue_as(&fixture, "INV-CLERK-2", riyals(20_000), "clerk", MEMBER)
+        .await
+        .expect("granted to the clerk now");
+
+    fixture.cleanup().await;
+}
+
+/// **A credit note is a document too**, whole or in part, and so is the one a
+/// refund issues. Judged on what it credits, after the state checks: a whole
+/// cancellation the invoice would refuse anyway is not what is reported.
+#[tokio::test]
+async fn a_credit_note_over_the_limit_is_refused_whole_or_in_part() {
+    let fixture = Fixture::new().await;
+    staff(&fixture, &[("EMP-CLERK", "clerk", None)]).await;
+    issue_as(&fixture, "INV-BIG", riyals(20_000), "the-owner", OWNER)
+        .await
+        .expect("issues");
+    limit_documents_to(&fixture, riyals(10_000), sales::Basis::AfterVat).await;
+
+    let whole = sales::cancel_invoice(
+        &fixture.db,
+        &code("INV-BIG"),
+        "CN-WHOLE",
+        "a mistake",
+        on("2026-03-02"),
+        &by("clerk"),
+        MEMBER,
+    )
+    .await;
+    assert_eq!(over_the_limit(&whole), Some(riyals(23_000)), "{whole:?}");
+
+    let part = |reference: &str, net: Money| sales::CreditNote {
+        reference: reference.to_owned(),
+        lines: vec![sales::CreditLine { against: 0, net }],
+        reason: "partly returned".to_owned(),
+        on: on("2026-03-02"),
+    };
+    let refused = sales::credit_invoice_part(
+        &fixture.db,
+        &code("INV-BIG"),
+        &part("CP-OVER", riyals(10_000)),
+        &by("clerk"),
+        MEMBER,
+    )
+    .await;
+    assert_eq!(
+        over_the_limit(&refused),
+        Some(riyals(11_500)),
+        "{refused:?}"
+    );
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code("INV-BIG"),
+        &part("CP-UNDER", riyals(5_000)),
+        &by("clerk"),
+        MEMBER,
+    )
+    .await
+    .expect("5,750 is within the limit");
+
+    fixture.cleanup().await;
+}
+
+/// **A refund is judged on what goes back** — after VAT the money itself,
+/// before it the invoice's own share of net — and the credit note a refund
+/// issues is judged as well.
+#[tokio::test]
+async fn a_refund_over_the_limit_is_refused() {
+    let fixture = Fixture::new().await;
+    staff(&fixture, &[("EMP-CLERK", "clerk", None)]).await;
+    for id in ["INV-PAID", "INV-PART"] {
+        issue_as(&fixture, id, riyals(20_000), "the-owner", OWNER)
+            .await
+            .expect("issues");
+    }
+    pay(&fixture, "INV-PAID", "wire-1", riyals(23_000))
+        .await
+        .expect("paid in full");
+    pay(&fixture, "INV-PART", "wire-1", riyals(5_000))
+        .await
+        .expect("paid in part");
+    // Two bands: a refund of part of it issues no credit note at all, so the
+    // refund is the only document there is to judge.
+    issue_invoice(
+        &fixture.db,
+        &code("INV-MIXED"),
+        &draft(vec![
+            line("Consulting", riyals(10_000), VatCategory::Standard),
+            line("Export", riyals(10_000), VatCategory::Zero),
+        ]),
+        &by("the-owner"),
+        OWNER,
+    )
+    .await
+    .expect("issues");
+    pay(&fixture, "INV-MIXED", "wire-1", riyals(21_500))
+        .await
+        .expect("paid in full");
+
+    let refund = |invoice: &'static str, reference: &'static str, amount: Money| {
+        refund_as_the_clerk(&fixture, invoice, reference, amount)
+    };
+    let refused_by_limit = |outcome: &Outcome| {
+        matches!(
+            outcome,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::OverDocumentLimit { .. }
+            )))
+        )
+    };
+
+    limit_documents_to(&fixture, riyals(10_000), sales::Basis::AfterVat).await;
+    let refused = refund("INV-PAID", "back-1", riyals(11_500)).await;
+    assert!(
+        refused_by_limit(&refused),
+        "11,500 back is over 10,000: {refused:?}"
+    );
+    let refused = refund("INV-MIXED", "back-1", riyals(11_000)).await;
+    assert!(
+        refused_by_limit(&refused),
+        "a refund with no credit note is still judged: {refused:?}"
+    );
+
+    // The same 11,500 is 10,000 of the invoice before VAT: within a limit on
+    // that basis, to the halala.
+    limit_documents_to(&fixture, riyals(10_000), sales::Basis::BeforeVat).await;
+    refund("INV-PAID", "back-2", riyals(11_500))
+        .await
+        .expect("10,000 before VAT is within 10,000");
+
+    // 5,000 back leaves the part-paid invoice holding nothing, so the refund
+    // cancels it — and that credit note is the whole invoice, 20,000 before
+    // VAT, which the clerk may not issue.
+    let refused = refund("INV-PART", "back-1", riyals(5_000)).await;
+    assert!(
+        refused_by_limit(&refused),
+        "the whole-invoice credit note a refund issues is judged too: {refused:?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+async fn refund_as_the_clerk(
+    fixture: &Fixture,
+    invoice: &str,
+    reference: &str,
+    amount: Money,
+) -> Outcome {
+    sales::refund_invoice(
+        &fixture.db,
+        &code(invoice),
+        &Receipt {
+            reference: reference.to_owned(),
+            amount,
+            received_on: on("2026-03-02"),
+            into: code("1010"),
+        },
+        "returned",
+        &by("clerk"),
+        MEMBER,
+    )
+    .await
 }

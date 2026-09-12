@@ -308,24 +308,7 @@ async fn post_entry(
     let balanced = BalancedLines::new(lines)
         .map_err(|e| ApiError::BadRequest(e.message()).into_problem(locale, &CATALOG))?;
     let line_count = balanced.len();
-
-    // **The amount the edge could not know.** `Allowed<PostEntries>` decided
-    // before this body was read, so a limit like "a bookkeeper may post entries
-    // under ten thousand riyals" — the example `erp_tenant::roles` names — is
-    // narrowed here, by the handler that has one. Debits, because debits equal
-    // credits and either would do; the debit side is what an accountant means
-    // by the size of an entry.
-    let size = balanced.total_debits().map_err(|_| {
-        ApiError::BadRequest(erp_i18n::Message::new(crate::messages::ENTRY_TOO_LARGE))
-            .into_problem(locale, &CATALOG)
-    })?;
-    tenant
-        .still_permits(
-            Some(&crate::module_id()),
-            [(erp_tenant::limits::AMOUNT, erp_rules::Value::Money(size))],
-            locale,
-        )
-        .await?;
+    within_limits(&tenant, &balanced, locale).await?;
 
     let committed = crate::post_entry(
         &tenant.db,
@@ -348,6 +331,31 @@ async fn post_entry(
         position: committed.at.map(erp_types::LogPosition::get),
         lines: line_count,
     }))
+}
+
+/// **The amount the edge could not know.** `Allowed<PostEntries>` decided
+/// before the body was read, so a limit like "a bookkeeper may post entries
+/// under ten thousand riyals" — the example `erp_tenant::roles` names — is
+/// narrowed here, by the handler that has the lines. Both routes that post an
+/// entry by hand call it: a reversal is an entry of the same size as the one it
+/// undoes. Debits, because debits equal credits and either would do; the debit
+/// side is what an accountant means by the size of an entry.
+async fn within_limits(
+    tenant: &Allowed<PostEntries>,
+    lines: &BalancedLines,
+    locale: Locale,
+) -> Result<(), Problem> {
+    let size = lines.total_debits().map_err(|_| {
+        ApiError::BadRequest(erp_i18n::Message::new(crate::messages::ENTRY_TOO_LARGE))
+            .into_problem(locale, &CATALOG)
+    })?;
+    tenant
+        .still_permits(
+            Some(&crate::module_id()),
+            [(erp_tenant::limits::AMOUNT, erp_rules::Value::Money(size))],
+            locale,
+        )
+        .await
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -400,6 +408,10 @@ async fn reverse_entry(
 
     let original = parse_id(params.get("entry").map_or("", String::as_str), locale)?;
     let reversal = key.id().clone();
+    let undone = crate::posted_lines(&tenant.db, &original)
+        .await
+        .map_err(|e| ledger_problem(&e, locale))?;
+    within_limits(&tenant, &undone, locale).await?;
 
     let committed = crate::reverse_entry(
         &tenant.db,

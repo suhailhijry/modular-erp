@@ -706,7 +706,7 @@ real fact types is a basis. Four, two of them fictional, is not.
 #### And half of one 5b box is already built
 
 `explain`-backed dry run and effective-permission inspection are one box.
-**Inspection ships twice**: `modules/hr/src/claims.rs:300` `effective` returns
+**Inspection ships twice**: `modules/hr/src/claims.rs:485` `effective` returns
 claim, branch *and source*; `GET /v1/members` returns each member's tenant role
 plus module exceptions. `explain` and `dry_run` return zero hits — and the dry
 run needs the *same* rolled-back-transaction primitive 4d's preview needs, so
@@ -779,7 +779,7 @@ front of an auditor — and no code path will ever ask.
 
 The demo does exactly this: `crates/erp-demo/src/lib.rs:1682,1696` grant
 `sales:apply_discount` and `purchases:approve_payment`, and nothing checks
-either. Combined with `modules/hr/src/http.rs:1767` — *"a claim name is checked
+either. Combined with `modules/hr/src/http.rs:1768` — *"a claim name is checked
 for shape and never for meaning"* — the system will accept and display any
 control a customer invents, including one it does not implement.
 
@@ -815,22 +815,37 @@ day, each a small diff because `hr::may` already existed:
 | Claim | Guards | Where |
 |---|---|---|
 | `purchases:approve_payment` | Paying a supplier | `purchases::pay_bill` |
-| `sales:approve_credit_note` | Cancelling *or* partly crediting an invoice | `sales::may_credit`, called by both paths |
+| `sales:approve_credit_note` | Cancelling *or* partly crediting an invoice, and asking a gateway for a refund that will leave one owing | `sales::may_credit`, in `cancel_in`, `credit_part_in` and `may_refund` — the roots every credit note goes through, since §70 |
 | `hr:approve_timesheet` | Recording a day worked | `hr::record_day` |
+
+*Since §68 a fourth claim is checked*, and not a segregated one:
+`sales:exceed_document_limit` lifts the owner's per-document limit in
+`sales::issue_in`, the credit-note roots and `refund_in`. It is asked with
+`hr::actor_holds`, not `hr::may`, because the limit, not the first grant,
+switches that control on.
 
 **One helper for both credit paths**, because a full cancellation and a partial
 credit are the same authority and two copies of the check would eventually
 differ. `sales` gained an `hr` dependency for it, the same sibling edge
 `purchases` took; `hr` needed none, since it owns claims.
 
-**The check sits before the retry loop** in both credit paths. The answer cannot
-change between optimistic-concurrency attempts, and asking inside would ask
-again on every retry.
+**The check sat before the retry loop** in both credit paths, so the answer
+could not change between optimistic-concurrency attempts. §70 moved it to the
+top of each root, which is inside that loop: a contended credit note asks once
+per attempt, and an uncontended one — every one in practice — asks exactly once,
+as before. The *question* is still asked there; §70's review moved the
+**refusal** into the decision, after the retry check, so that a retry answers
+with the document it issued rather than with a 403 once the claim is revoked.
 
-**Not guarded, deliberately:** `sales::credit_what_is_clear`, which `payments`
-calls when a gateway refund lands. That is a consequence of a refund that
-already happened, not a person approving a credit note — the same reasoning that
-lets a worker with no actor through.
+**Not claim-judged, deliberately:** a credit note with `Authority::System`
+behind it, which is what `payments` passes `sales::credit_what_is_clear` when a
+gateway refund lands. That is a consequence of a refund that already happened,
+not a person approving a credit note — the same reasoning that lets a worker
+with no actor through. Until §70 the *function* was the exemption; now the
+authority is, so the same function called by a member — a refund at
+`/v1/sales` that clears an invoice — does ask. A member asking a *gateway* for
+one is asked when they ask, in `may_refund`, because by the time the gateway
+answers there is nobody left to ask.
 
 #### Self-approval — *decided and built, 2026-09-10*
 
@@ -901,12 +916,2685 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
 - [ ] Decide what a claim on a module that has no check means: today it is
       accepted and displayed. Refusing an unknown claim name needs the registry
       `http.rs:1767` deliberately declined; **surfacing** unenforced claims on
-      the read model may be the cheaper honest answer
+      the read model may be the cheaper honest answer. *Still open after §68*,
+      which adds a fourth name with a check (`sales:exceed_document_limit`);
+      a misspelling of it is accepted and lifts nothing, which fails closed
 - [x] **§9b and §9c corrected 2026-09-10.** Both now say when they became true
       rather than describing enforcement in the present tense while none
       existed. Every factual claim in the corrected text was checked back
       against the three call sites — `purchases/commands.rs:369`,
-      `sales/commands.rs:46` (from both credit paths) and `hr/commands.rs:732`
+      `sales/commands.rs:46` (from both credit paths, as they stood then; §70
+      moved that check into the credit-note roots, and it is `:69` now) and
+      `hr/commands.rs:732`
+
+### 70 · One rule everywhere for the credit-note claim
+
+**Built 2026-09-12**, Round 3c decision. §68's own *Left open* said it: a till
+return did not ask for `sales:approve_credit_note`. The claim was checked in
+`may_credit`, and `may_credit` was called by `cancel_invoice` and
+`credit_invoice_part` — the two wrappers the `/v1/sales` routes use.
+`pos::take_back` calls the roots directly (`credit_in` → `cancel_in`, and
+`credit_part_in`), so a clerk refused a credit note on the sales screen could
+hand the same money back at the counter and get the same document out of it.
+The product owner's call is **one rule everywhere**, and the change at the till
+is deliberate.
+
+**The check moved into the roots.** `may_credit` (`sales/src/commands.rs:69`) is
+asked at the top of `cancel_in` (`:1366`) and `credit_part_in` (`:1736`) — the
+two functions every credit note in this system passes through — and both wrapper
+calls are gone, so there is one enforcement point and not two. Each root asks it
+beside §68's `limit::binding`, on the root's own connection and so inside the
+caller's transaction: a till return is judged in the same write that hands the
+money back. The *refusal* sits further in, beside the limit's own comparison —
+see **What review found** below.
+
+**The branch is §68's, exactly**: `Authority::Member { owner: false }`, the same
+`let … else` that opens `limit::binding` (`limit.rs:241`). Two consequences,
+both deliberate:
+
+- **`Authority::System` is not claim-judged**, the way it is not limit-judged. A
+  gateway's confirmed refund (`payments::refund_in` → `credit_what_is_clear`), a
+  worker's sweep and a customer's own deposit have nobody to ask, and by then
+  the money has moved.
+- **The owner is exempt**, as they are exempt from the document limit and from
+  `hr::may`'s own reading of the handle. The exemption comes off `Authority` now
+  rather than off `erp_tenant::Access`, because a root has no handle — and it is
+  the same bit: `Authority::of` (`limit.rs:78`) reads `db.role() ==
+  Some(Role::Owner)`, which is the field `hr::may` compared. `may_credit`
+  therefore passes `None` for `access`, and nothing else in `hr::may` consults
+  it.
+
+**A tenant that has granted nothing still works, and that is the load-bearing
+part.** `hr::may` answers *permitted* when `any_claim_placed` is false, and that
+first answer is what makes the control opt-in: every till that worked yesterday
+works today, in every tenant that has never granted a claim — which is nearly
+all of them. It is also why this asks `hr::may` and not §68's `hr::actor_holds`:
+`actor_holds` reads "nobody has granted anything" as "not held", which is right
+for a control the *owner* switches on by setting a limit and exactly wrong for
+one a *grant* switches on. Swapping them refuses every existing tenant's till
+(see *Falsified*). A tenant selling with no `hr` at all never reaches the read
+model either, because `any_claim_placed` reads `org_claim_granted` in the
+tenant's own migration chain and stops there.
+
+**What changed for whom.**
+
+| Path | Before | Now |
+|---|---|---|
+| `POST /v1/sales/invoices/{invoice}/credit-note`, `…/credit-notes` | claim asked | unchanged |
+| `POST /v1/pos/shifts/{shift}/sales/{sale}/returns` | **not asked** | asked |
+| `POST /v1/sales/invoices/{invoice}/refunds` that clears the invoice | **not asked** | asked |
+| `POST /v1/payments/{payment}/refunds` that will leave a credit note owing | **not asked** | asked, of the member, when they ask |
+| a gateway's confirmed refund, a worker's sweep, a customer's own deposit | not asked | unchanged |
+| the owner, anywhere | not asked | unchanged |
+| a tenant that has granted no claim | not asked | unchanged |
+
+The third row is a second door, and it was not in the decision's words.
+`refund_invoice` calls `credit_what_is_clear` with the member's authority, so a
+refund that leaves an invoice holding nothing issues a whole-invoice credit note
+— which now needs the claim that credit note needs. It is the till's hole one
+function over, and closing one without the other would have left the rule in two
+pieces again. §52's *not guarded, deliberately* was about the **function**
+`credit_what_is_clear`; it is about the **authority** now, which is what makes
+it one rule rather than a list of exempt functions.
+
+**The claim does not travel.** `sales:approve_credit_note` is on `hr::SEGREGATED`
+(`hr/src/claims.rs:78`), so `grant` refuses to propagate it whatever the screen
+asks: the boss above a supervisor who holds it does not hold it, and the clerk
+beneath never would. That is the opposite of §68's
+`sales:exceed_document_limit`, which is not segregated and does travel up. The
+two claims read alike and behave differently, so the till test pins both
+directions.
+
+**Status and message are unchanged.** `SalesError::NotApproved`,
+`sales.not_approved` in en and ar, and 403 through
+`SalesError::refuses_the_caller` (`commands.rs:261`), which the till's
+`problem_for` already consulted — so the counter answers exactly what the sales
+screen answers, with no new mapping. The till's and the refunds route's
+`FORBIDDEN` descriptions gained the code, so `just openapi` ran.
+
+**Tests**, through the product path.
+
+- `a_till_return_needs_the_credit_note_claim` (`modules/pos/tests/pos.rs:1206`).
+  Three sales rung at one till. With no `hr` and no grants, the clerk's return
+  goes through — the opt-in case, and the one that would break every existing
+  tenant. Then an org chart, boss ← supervisor ← clerk, and the claim granted to
+  the supervisor: the clerk's return is refused, and `sales::cancel_invoice`
+  refuses the same clerk the same way in the same test, which is the item in one
+  assertion. The boss above the holder is refused too, the supervisor is not,
+  and once the clerk is granted it their return goes through. The drawer is
+  level at the end: three sales, three returns, and the refusals moved nothing.
+- `crediting_an_invoice_needs_the_claim_once_the_tenant_uses_claims`
+  (`modules/sales/tests/sales.rs:4817`) gained the three cases this branch
+  needs: an owner is never refused, a `System` credit note is not judged at all,
+  and a member's refund that clears an invoice is refused for the claim. Its
+  first case — a tenant that has granted nothing — was already there and is now
+  the second opt-in guard.
+- `a_partial_credit_needs_the_claim_too` (`:4922`) is unchanged except that both
+  calls say `MEMBER` where they said `System`. They said `System` because the
+  check used to read the *handle* and ignore the authority; under one rule
+  `System` is not judged, so the old spelling would have made the test prove
+  nothing.
+- `the_credit_note_claim_refuses_the_caller_at_the_till_too`
+  (`modules/pos/src/http.rs:931`), beside the document limit's.
+- `a_gateway_refund_is_asked_for_the_claim_when_it_will_credit`
+  (`modules/sales/tests/sales.rs:4983`), from review. Five invoices paid in
+  full, then `may_refund` asked the way `payments::request_refund_in` asks it:
+  before any grant the member is permitted; after one they are refused both for
+  a refund that clears the invoice and for a 23-riyal part of it (20 net at
+  15%, so a partial credit note lands exactly); the claim's holder, the owner
+  and `System` are not refused. A 10-riyal refund of the same invoice is **not**
+  asked, because no net comes to 10 at 15% and so no credit note follows —
+  which is what keeps this a control on issuing a document rather than on
+  handing money back.
+- `a_retry_answers_with_its_credit_note_after_the_claim_is_revoked` (`:5055`),
+  from review. Khalid cancels one invoice and partly credits another while he
+  holds the claim; it is then revoked and granted to Sara, so the tenant still
+  uses claims and the control stays on. A *new* credit note is refused him, and
+  both retries — the same references — answer with the documents they issued,
+  `did_nothing()` and the same numbers.
+
+`pos` gained `hr` as a **dev**-dependency for the chart the test grants on. Not
+a dependency: `pos` composes `sales`, and `sales` owns the edge to `hr`.
+
+#### What review found — two doors, one root
+
+Review put two things to this section, and they are the same mistake twice: the
+claim was given half the shape of the limit it now sits beside. §68's limit is
+three things — an async *question* (`limit::binding`), a sync *comparison*
+applied inside the decision and after the retry check, and a *pre-judgement*
+where a member asks for something a gateway will later write as `System`
+(`may_refund`, `may_issue`). The claim had the question and nothing else.
+
+**A member could still refund their way to a credit note.**
+`payments::request_refund_in` (`payments/src/commands.rs:711`) judged the member
+with `sales::may_refund`, which asked the limit and not the claim; the document
+itself is then written by `payments::refund_in` → `credit_what_is_clear` with
+`Authority::System`, which no claim judges. So the member this section refuses
+at the credit-note route and at the till could ask a gateway for a refund and
+get the same credit note out of it. The asymmetry was the tell — the same
+pre-judgement already enforced the *limit* on that member.
+
+`may_refund` (`sales/src/commands.rs:783`) now asks `may_credit` beside the
+limit (`:791`) and refuses on the credit note the refund will leave owing
+(`:813`). **Whole *or* part.** Review proposed the whole-invoice arm alone,
+since that is the arm the limit judges separately; but a partial refund of a
+single-band invoice issues a *partial* credit note through `credit_part_in`,
+also with `System`. The limit can skip that arm — the money that went back is
+exactly what the note credits, and that was judged a line earlier — while a
+claim about whether you may issue a credit note at all cannot. A refund that
+leaves no credit note owing (`Owed::Nothing`, or a multi-band invoice's
+`Owed::Overstated`) is not asked for one, and that is pinned rather than
+assumed. The invoice is loaded only when there is something to judge, so a
+tenant with no limit whose member holds the claim reads nothing it did not
+read before.
+
+**And a retry answered 403 where the book promises a no-op.** The claim refused
+at the top of each root, before `try_execute`, while both retry arms live
+*inside* the decision — `state.cancelled_by == Some(reference)` and
+`state.has_credit(&reference)`. So a till return whose response was lost and
+which the client resent after the claim was revoked was refused, though
+`reference` is documented as the client's key for that return and sending it
+again as a no-op (`docs/book/src/api/http.md`), and §68 put the limit's
+comparison after the retry check for precisely this reason (`limit.rs`,
+`binding`). The 403 is not the worst of it: a clerk told *not approved* rings the
+return again under a new reference, and **that** one is a second credit note.
+
+So `may_credit` (`:69`) answers rather than refuses — `Result<bool, …>`, the
+shape `limit::binding` has, for the same reason: the question is async and a
+decision is not. Each root applies the answer inside its decision, after its
+retry arm (`:1396`, `:1766`). There is still one function that decides; what
+moved is where its answer is spent. Somebody who never held the claim is refused
+exactly as before, which two of the five falsifications below are the old guards
+re-run to prove.
+
+**Falsified.** Each break, the failure it produced, then the file restored byte
+for byte (checked with `md5sum`) and the tests watched to pass again.
+
+| broke | failed |
+|---|---|
+| `cancel_in`'s `may_credit` removed | `a_till_return…`: the clerk's return went through; `crediting_an_invoice…`: *sara does not hold the claim, got Ok(Numbered { … CN-00002 … })*. `a_partial_credit…` still passed, which is what says the two roots are guarded separately |
+| `credit_part_in`'s `may_credit` removed | `a_partial_credit…`: *a partial credit is still a credit note, got Ok(…)*, and the other two still passed |
+| `hr::may` swapped for §68's `hr::actor_holds` | `a_till_return…`: *the door that opened yesterday opens today: NotApproved*; `crediting_an_invoice…`: *no claims in this tenant means no control: NotApproved* — the opt-in gone, and with it every existing tenant's till |
+| the owner no longer exempt (`owner: _`) | `crediting_an_invoice…`: *an owner is never refused their own credit note: NotApproved* |
+| `System` claim-judged too | `crediting_an_invoice…`: *a credit note nobody issued is not claim-judged: NotApproved*. `a_members_refund_is_judged…` **passed** under this break and is not a witness: its tenant grants no claim, so `hr::may` permits everything in it |
+| review: `may_refund`'s refusal removed (`commands.rs:813`) | `a_gateway_refund…`: *clearing the invoice issues a whole credit note: Ok(())* — the member every other door refuses walks through this one |
+| review: `cancel_in` refuses before the retry check again (the placement this section shipped) | `a_retry_answers…`: the retry of a credit note Khalid *was* allowed to issue answered `NotApproved` instead of its own number |
+| review: `credit_part_in` refuses before the retry check again | `a_retry_answers…`: the same, one assertion further on, for the partial credit note |
+
+**Left open.**
+
+- ~~**A gateway refund that clears an invoice still issues its credit note
+  unasked.**~~ Found by review and closed below: `may_refund` asks the claim
+  beside the limit it already judged there, for the whole-invoice credit note
+  *and* the partial one.
+- **`purchases.not_approved` and `hr.not_approved` still answer 400.** §68's
+  item, still true: only sales moved to 403.
+- **A contended credit note asks twice.** The question sat before the retry loop
+  and now sits inside it, so every optimistic-concurrency attempt asks again.
+  One indexed lookup per attempt, and the answer cannot change between them.
+  A refused caller also reserves a credit-note number before being refused,
+  because the refusal now sits after the reservation; the transaction rolls it
+  back, so no number is spent and the series stays gapless.
+- **A member with no employee record may credit nothing** once the tenant uses
+  claims. That is `hr::may`'s rule rather than this item's, but the till is where
+  it will be felt: a shop may well run its counter on logins nobody has put on
+  the org chart, and the first grant anywhere turns the control on for all of
+  them.
+
+### 69 · Resetting somebody else's second factor, and the link that is the only way back
+
+**Built 2026-09-12**, Round 3b. §67 closed the hole where a member could drop a
+factor their company required, and its Left-open bullet named the cost: somebody
+who loses the authenticator *and* all ten recovery codes is locked out, and
+nobody — not their owner, not support — could undo it. This is the undoing, and
+almost all of its design is about the state it leaves behind, because taking a
+factor away hands the account to whoever enrols next.
+
+**Two routes, one root.** `POST /v1/members/{identity}/second-factor-reset`
+(`erp-api/src/members.rs:253`) is the company's; `POST
+/v1/platform/identities/{identity}/second-factor-reset` (`platform.rs:488`) is
+platform support's, with a required reason. Both reach
+`ControlPlane::reset_second_factor_by` (`second_factor.rs:745`), which is
+private and is the only thing that removes somebody else's factor. In one
+transaction it deletes `totp`, `totp_pending` and `recovery`, stamps
+`identity.second_factor_reset_at`, writes a hashed link row, deletes every
+session of the person, and enqueues the email (D9, as
+`request_password_reset` does); the other nodes' session caches are cleared
+after the commit, the way `log_out` and `confirm_second_factor` do it. The audit
+entry is `second_factor.reset` under the resetter, on the tenant for the
+company's route and on no tenant, carrying the reason, for support's.
+
+**This is not `disable_second_factor` and shares no line with it.** That one is
+a person dropping their *own* factor, costs a code, and is refused outright
+wherever a factor is required of them (§67). This one takes no code, because the
+person it exists for has nothing left to prove with — and it does not ask
+`second_factor_required_by`, because a member of a tenant that requires a factor
+is exactly who needs it. They are refused entry until they enrol again, which is
+the same answer a new member gets. **No new way to remove your own appears:**
+`by == target` is refused at *both* routes (`:639`, `:697`), so a staff member
+cannot reach through support's route for the removal `auth.staff_keeps_second_factor`
+denies them.
+
+**Link-only, and it is a fact about the account rather than a timer.** This is
+the part worth the migration. After a reset, enrolment refuses unless the caller
+presents a live link — and **that holds after the link expires**, because if it
+lapsed with the link, the move for somebody holding a stolen password would be
+to wait an hour. So `0021_second_factor_reset.sql` adds two things, not one:
+`second_factor_reset` is the *permission* (token digest, an hour, `used_at`,
+swept like a password reset), and `identity.second_factor_reset_at` is the
+*state*, cleared by a confirmed enrolment and by nothing else. Sweeping an
+expired link therefore takes nothing away — it means asking for another.
+`ControlPlane::enrolment_permitted` (`:556`) is the one check, and both
+`begin_second_factor` and `confirm_second_factor` ask it first.
+`confirm_second_factor` clears the column and spends **every** outstanding link
+of the identity in its own transaction (`:342`): two resets in a row leave two
+live links, and enrolling once must not leave the second one able to enrol
+again. An account that never had a factor has the column NULL and is untouched —
+first enrolment by whoever holds the password stays the accepted gap (decision B).
+
+**A fresh link is the same route run again**, not a second one. It removes a
+factor that is already gone, ends sessions that are already ended, mails another
+link and records another entry. There was nothing for a second route to do
+differently, and one more route is one more thing to authorise. Griefing is
+bounded by who may call it at all — the owner, a claim holder, or support — and
+every call is on the record under their name; the cross-tenant rule below stops
+one company aiming it at somebody who mostly works elsewhere.
+
+**Who may, at the company's route.** The owner always, or a member holding
+`hr:reset_second_factor` (`hr/src/claims.rs:96`) — and **never an API key**
+(`members.rs:267`), which is review's and is the sharp edge of the door being
+`Allowed<Read>`. The extractor has to be `Read`, because the claim lives in the
+tenant's own database and `erp-web` is below it; but the key-scope gate asks for
+*the door's* capability (`extract.rs:913`), so a credential issued `*:read` with
+the owner's role cleared a gate that answers `keys.out_of_scope` at every
+sibling member route, and the role its machine identity holds was all the
+handler then asked for. It is refused with `keys.not_a_person`, the answer the
+personal audit trail already gave a key, through one shared
+`erp_web::not_a_person` (`extract.rs:1007`). A wider scope is not the way in
+either: `claimant` finds no employee record for a machine, so no key can hold
+the claim.
+
+The real check, for a person, is the handler's next line: not the owner and not
+holding the claim is `403 access.not_permitted` naming `manage_tenant`, through
+a now-public `erp_web::not_permitted` (`extract.rs:987`) so there is one shape
+for "you may not" in the API. The `PERMISSIONS` row is therefore `OWNER`, and it
+is honest: in a tenant that has granted nothing, the owner is the only one who
+gets through. The claim is asked with `hr::actor_holds` (`members.rs:317`), not
+`hr::may`, for the reason §68 gives — "nobody has granted anything" must read as
+*not held*, or a tenant that uses no claims would let every clerk reset every
+colleague. It is not in `hr::SEGREGATED`, so it travels **up** the chart: a
+grant to a supervisor reaches the boss above them and not the clerk beneath,
+which the test pins in both directions.
+
+**Four targets the company's route refuses**, each with its own code in en and
+ar, checked in an order that says nothing about anybody the caller cannot
+already list: not a live member here is the same `404 members.not_a_member`
+`remove_member` gives, and only then yourself
+(`second_factor.reset_yourself`), the owner (`…reset_the_owner`), platform staff
+(`…reset_platform_staff`) and — the cross-tenant rule — anybody with a live
+membership of another tenant (`…reset_another_company`). That last one exists
+because a factor is the *account's* everywhere, not one company's: acme may not
+weaken somebody's sign-in at globex. Its message says to contact support, and
+the test asserts the word is in it. A fifth, `second_factor.reset_no_login`,
+refuses an account with no password login at all — there would be nowhere to
+send the link, and a reset with no link is a lockout with extra steps (L6).
+
+**The platform power.** `PlatformPower::ResetSecondFactors` (`staff.rs:63`),
+support and superadmin, with `erp_web::ResetSecondFactors` as its marker
+(`extract.rs:1139`). **Resetting a staff account needs `ManageStaff` on top**
+(`second_factor.rs:705`), so support cannot reset a superadmin's factor —
+otherwise the narrower role would be the route to the wider one. The reason is
+1–500 characters, refused blank (`second_factor.reset_reason`), and is the only
+record anybody will ever have of why a person's sign-in was weakened.
+
+**No `attempts` column, and the migration says why.** `password_reset` has one
+because the link gates six digits, and twenty bits is where guessing goes.
+Nothing is gated behind this link: presenting it *is* the permission, and the
+code that confirms the enrolment comes from the app its holder is enrolling. A
+column nothing increments would be a claim the code does not make. Single use,
+an hour, and the fact that only three kinds of caller can cause a row are what
+bound it instead.
+
+**`POST /v1/sessions/second-factor` gained an optional body, and nothing broke.**
+It had none, so a required one would have turned every existing caller's request
+into a 415. `erp_web::Json` now implements `OptionalFromRequest` (`wire.rs:67`):
+**an empty body is `None`**, with or without a `Content-Type`, because a client
+that always sets the header still sends no bytes when it has nothing to say. A
+body that is *there* goes through `Json`'s own rules, so the wrong content type
+is still 415 and bad JSON still 400 — reading either as "nothing was sent" is
+how an ignored field becomes a hole. `confirm_second_factor`'s body already
+existed, so its `link` is purely additive.
+
+**The matrix:** `reset_member_second_factor`, OWNER, which makes 247 tenant
+operations; `reset_any_second_factor` with `reset_second_factors`, which makes
+11 platform operations. `STAFF_POWERS` gained the power for superadmin and
+support, and `PlatformPower::ALL` is six.
+
+**Tests.** Through the product path, in `crates/erp-api/tests/http.rs`.
+
+- `an_owner_resets_a_members_factor_and_the_link_is_the_only_way_back`
+  (`:3154`). acme requires a factor. A clerk's session dies with the reset, the
+  password still signs in, `GET /v1/sessions/second-factor` shows nothing
+  enrolled and no codes left, and the tenant answers
+  `403 auth.tenant_requires_second_factor` until they enrol. Both enrolment
+  calls are `403 auth.enrolment_link_required` on the password alone — the
+  confirmation too, holding a valid code. The link enrols, hands back ten fresh
+  recovery codes, and a replacement afterwards needs no link, which is the state
+  having been cleared. A second reset mints a second link; the first is dead.
+  The tenant's trail names the owner and the clerk, twice.
+- `waiting_out_an_enrolment_link_does_not_reopen_password_only_enrolment`
+  (`:3374`). The link is wound back an hour — the way
+  `an_expired_session_is_swept` winds one — and `sweep_enrolment_links` deletes
+  it. Enrolment is still refused, with the stale token and without one. Running
+  the reset route again is what sends a working link.
+- `the_claim_lets_somebody_other_than_the_owner_reset_a_factor` (`:3449`). Boss
+  ← supervisor ← clerk on a real org chart. With nothing granted, all three are
+  refused. Granted to the supervisor, the supervisor and the boss may and the
+  clerk still may not; a member with no employee record never can. The owner's
+  factor and your own are both refused, and a stranger is a 404. An API key is
+  refused before any of that (review's): `*:read` reaches the handler and gets
+  `keys.not_a_person`, `*:manage_tenant` does not even clear the scope gate, and
+  the target's session is still alive afterwards.
+- `somebody_who_works_for_two_companies_is_platform_supports_to_reset`
+  (`:3657`). A clerk in acme and globex is `422 second_factor.reset_another_company`
+  at acme, and the message says support. Support's route refuses no reason and a
+  blank one, resets them, and the platform trail carries the reason under
+  support's name with no tenant. Support is refused a superadmin
+  (`403 access.not_permitted` naming `manage_staff`) and a superadmin is not;
+  nobody resets their own; an account with no login is refused; and acme cannot
+  reach a staff member of its own through its route.
+
+**What review found, and what changed.** Three findings, two of them real.
+
+1. **A read-only API key could reset anybody's factor.** The serious one, and
+   the price of lowering the door to make room for the claim: a key issued
+   `*:read` with the owner's role — what a tenant hands a reporting vendor —
+   deleted a colleague's `totp` and ended every session they held, while the
+   same key got `keys.out_of_scope` on `DELETE /v1/members/{identity}`. Refused
+   now rather than scoped differently, for the reason above; the audit entry
+   that would have named a machine goes with it.
+2. **A database fault stated a fact about somebody's account.**
+   `password_handle`'s error was discarded into `ResetError::NoLogin`, so a
+   dropped connection answered `422 second_factor.reset_no_login` — *"that
+   account has no email login, nothing was changed"* — about a colleague who
+   plainly signs in by email, and the caller who believed it would not retry.
+   `no_address` (`second_factor.rs:139`) matches the variant: only a missing
+   password row is `NoLogin`, and a fault is a 500 (L6).
+3. **Not a bug: the "`hr` disabled, so `actor_holds` 500s" reading.** It cannot
+   happen — the Left-open bullet below says why — so no code changed. The prose
+   that invited the reading did: `actor_holds` "asks the grants before the read
+   model" was doing the work of a guarantee it does not give, and both
+   `members.rs:313` and the paragraph above now say the thing that is actually
+   true, which is that a tenant with a grant has had `hr` on and a disabled
+   module keeps its read models.
+
+**Falsified.** For each row I broke the fix, watched the named tests fail,
+restored the file byte for byte and watched them pass. The breaks inside
+`query!` text were built against the type-check database (`SQLX_OFFLINE=false`).
+
+| broke | failed |
+|---|---|
+| `enrolment_permitted` always `Ok` | `an_owner_resets…`: `201` where `403 auth.enrolment_link_required` was due at `begin`; `waiting_out…`: *expiring the link reopened enrolment* |
+| the link not spent on a confirmed enrolment | `an_owner_resets…`: *a spent link enrolled again*, 201 |
+| `second_factor_reset_at` not cleared by a confirmation | `an_owner_resets…`: *the link-only state outlived the enrolment that was supposed to clear it*, 403 |
+| the reset's session `DELETE` neutered | `an_owner_resets…`: *the reset left a session alive*, 403 where 401 was due |
+| the reset's authenticator `DELETE` neutered | `an_owner_resets…`: the login still demanded a code, 401 |
+| the cross-tenant check removed | `somebody_who_works…`: `204` where `422 second_factor.reset_another_company` was due |
+| the owner check removed | `the_claim_lets…`: `204` where `…reset_the_owner` was due |
+| `by == target` removed, tenant route | `the_claim_lets…`: *the supervisor reset their own* |
+| `by == target` removed, platform route | `somebody_who_works…`: `204` where `…reset_yourself` was due |
+| the platform-staff check removed, tenant route | `somebody_who_works…`: `204` where `…reset_platform_staff` was due |
+| `staff_may(ManageStaff)` removed from the platform route | `somebody_who_works…`: support reset the superadmin, `204` |
+| the no-login check removed | `somebody_who_works…`: an account with no address was reset, `204` |
+| the reason check removed | `somebody_who_works…`: a blank reason accepted, `204` |
+| the claim check bypassed | `the_claim_lets…`: *boss reset a factor with no claim* |
+| the route asking for `hr:approve_timesheet` instead | `the_claim_lets…`: *supervisor was refused*, 403 |
+| `support` given `ManageStaff` | `somebody_who_works…`: support reset the superadmin |
+| `billing` given `ResetSecondFactors` | `every_role_may_exactly_what_it_should`: *billing / reset_second_factors*; `every_platform_role_against_every_platform_endpoint`: billing reached the route |
+| the key refusal deleted (review) | `the_claim_lets…`: *a key scoped `["*:read"]` reset a colleague's factor* — `204` and no body, where `403 keys.not_a_person` was due |
+| `no_address` collapsed back to `NoLogin` for every error (review) | `a_database_fault_is_not_an_account_with_nowhere_to_mail`: *a database fault was reported as an account with no email login* |
+
+**Docs.** RUNNING gained *When somebody loses the phone and the paper*, with
+both routes and the four refusals; its platform-trail paragraph said the trail
+does **not** record second factors enrolled or removed, which is now only true
+of the person's own, so it says so and names `second_factor.reset`. The book's
+`http.md` gained both routes in their tables and a section under *The second
+factor*; `erp-control.md` gained the two entry points, the root, the link-only
+column and the widened power matrix; `erp-web.md` gained the `ResetSecondFactors`
+marker; `erp-worker.md` and RUNNING's reaper paragraph name the new sweep.
+`just openapi` regenerated the document for two new routes, the new `link`
+fields and the `403` on both enrolment calls. §67's Left-open bullet about the
+lockout is struck through and points here.
+
+**Left open.**
+
+- **A person in several companies whose mailbox is also gone is still stuck.**
+  Support's route mails the link to the account's own address, which is the only
+  address this system has. If that address is what they lost, nothing here
+  reaches them; somebody has to change the login handle first, and no route
+  does that. This is the honest limit of a mailbox-based recovery.
+- **If the mail never arrives, nothing says so.** A dead letter shows in
+  `GET /v1/platform/effects/dead` under `enrolment:`, and support can requeue
+  it — but the *resetter* gets a `204` either way and learns nothing. The
+  person's factor is already gone by then, so a failed send leaves them worse
+  off than before they asked. Telling the caller the send is only promised, or
+  surfacing undelivered enrolment mail to the tenant, is not built.
+- **A reset is not undoable.** Nothing restores the old factor or the ten
+  recovery codes — they are deleted, not archived — so a mistaken or malicious
+  reset costs the person an enrolment they must redo, and the audit entry is
+  the whole of the remedy.
+- **Nothing rate-limits the route.** An owner or a claim holder can reset the
+  same colleague every minute, ending their sessions each time, and the only
+  cost is a row in the trail. A per-target cooldown like
+  `RESET_INTERVAL_SECONDS` would bound it. Nobody asked, and the caller is
+  already somebody the tenant trusts with its books.
+- **The reset and the enrolment are two acts, and the account is exposed
+  between them.** From the moment of the reset the account is password-only in
+  every sense that matters *except* enrolment, so a tenant that does not require
+  a factor lets whoever holds the password sign in. That was already true of
+  anybody without a factor; this makes it true of somebody who had one.
+- **The audit entry is written after the transaction commits**, as
+  `move_staff`'s is, so a crash in between leaves the reset done and unrecorded.
+  §61 named this seam and it is unchanged.
+- **`identity.second_factor_reset_at` survives a restore of an older dump.** A
+  control-plane restore to before a reset would bring back the old `totp` row
+  and clear the state with it, which is right; a restore to *after* one, with a
+  tenant database from before, changes nothing here. Neither is tested.
+- **A missing `proj_hr` would 500 this route, and nothing in the product makes
+  one.** This bullet used to say that disabling `hr` after granting the claim
+  would leave `actor_holds` reading a read model that is not there. Review
+  checked it and it is wrong: `disable_module` (`erp-control/src/lib.rs:2242`)
+  marks the entitlement and **never drops a module's tables**, so that a tenant
+  who downgrades and comes back finds their data; `proj_hr` is created by
+  `hr::install`; a grant is only ever written through a route that needs `hr`
+  on; and the one `DROP SCHEMA` of a live read model is inside `rebuild_swap`'s
+  transaction, which renames the replacement in before it commits. So the 500 is
+  unreachable and no code changed. It stops being unreachable the day something
+  learns to drop a read model — a storage reclaim, a rebuild that half-fails —
+  and then both callers of `actor_holds`, this route and §68's limit, answer
+  500. Neither is tested, because neither has a way in.
+
+### 68 · How large a document a member may issue, and the claim that lifts it
+
+**Built 2026-09-12**, Round 3 decision C. §63 left a bookkeeper limited to ten
+thousand riyals free to issue a fifty-thousand invoice, because a permission
+limit is judged at the edge and an invoice has no total there. The decision is a
+second, separate control: a per-document limit on every invoice, credit note
+and refund a member issues, anywhere a member issues one, with the owner always
+exempt and an `hr` claim as the allow list.
+
+**The setting** is `sales.document_limit`, one typed configuration key owned by
+`sales`: `DocumentLimit { limit: Money, basis: before_vat | after_vat }`
+(`modules/sales/src/limit.rs`). Absent, or stored as `null`, is no limit.
+`DocumentLimit::new` refuses an amount that is not positive, and
+`#[serde(try_from)]` makes reading a stored row check the same way, so a row a
+later build cannot use is a 500 on the `GET` and a refusal on every member's
+document (L6), never "no limit". The routes are `GET`/`PUT
+/v1/sales/document-limit` in `sales`' own `http.rs` (`:1518`, `:1573`), beside
+its posting accounts, copied from the calendar: the version as `ETag`,
+`If-Match` on the write, `set_by` on the row. Both take `Allowed<ManageTenant>`,
+as decision 9 did for permission limits. The wire shape is `{ "limit": { "amount":
+{minor, currency}, "basis" } | null }`, so a basis cannot be sent without an
+amount. `erp_web::Amount` gained `Serialize` so the `GET` answers in the shape
+the `PUT` takes. Every write stamps the whole configuration version into the
+document's metadata as before (L5), so which limit was in force when a document
+was judged stays answerable.
+
+**Who is asking is an argument with no default.** `sales::Authority` is
+`Member { owner: bool }` or `System` (`limit.rs:62`). Every root a document
+passes through takes one: `issue_in`, `cancel_in` (behind `cancel_invoice` and
+`credit_in`), `credit_part_in`, `refund_in` and `credit_what_is_clear`, and so
+does every public wrapper over them, `pos::sell`, `pos::take_back`,
+`erp_api::billing::bill_reservation` and `payments::request_refund_in`. A new
+path does not compile until it says. `Authority::of(db)` (`:78`) is how a route
+says it, and it can never answer `System`: a handle with nobody behind it is a
+member who is not the owner, so the worst a mistaken caller gets is a refusal.
+
+**Every path, and what it passes.** I traced every caller of the five roots.
+
+| Path | Caller | Authority |
+|---|---|---|
+| `POST /v1/sales/invoices`, `…/refunds`, `…/credit-note`, `…/credit-notes` | member | `Authority::of` |
+| `POST /v1/pos/shifts/{shift}/sales`, `…/returns` | member at the till | `Authority::of` |
+| `POST /v1/booking/reservations/{r}/invoice` | the desk | `Authority::of` |
+| `bill_completions`, the worker's pass (`billing.rs:232`) | nobody; the owner turned billing on completion on | `System` |
+| `settle_in` → `bill_the_deposit` (`payments/src/commands.rs:371`) | the gateway settling a customer's own deposit | `System` |
+| `payments::refund_in` → `sales::refund_in`, `credit_what_is_clear` (`:672`, `:903`) | the worker, recording what the gateway already refunded | `System` |
+| `POST /v1/payments/{payment}/refunds` → `request_refund_in` | member | `Authority::of`, judged by `sales::may_refund` (`:769`) |
+| `POST /v1/payments`, `…/cards/{card}/charges` with a deposit → `start_in`, `request_in` | member | `Authority::of`, judged by `sales::may_issue` (after review) |
+| the customer's own deposit (`erp-api/src/deposits.rs:379`), the three gateway sweeps | nobody; what they start was judged when it was asked for | `System` |
+
+A gateway refund needed the fourth row. The member asks, the worker tells the
+gateway, and `payments::refund_in` records what the gateway confirms, by which
+time the money has gone and refusing to record it would only make the books
+wrong. So the member is judged when they ask. `sales::may_refund` (`commands.rs:780`)
+applies the rule `refund_in` does, and the one `credit_what_is_clear` does, and `request_refund_in` calls it only when
+the request is new, after it is recorded, so a retry answers the way the first
+one did. A refusal returns an error and the route's transaction takes the
+request back out. `PaymentsError::Refused(SalesError)` carries it as `sales`
+said it, instead of the `Sales(String)` that flattens every other sales failure
+into a 400 with English inside.
+
+**Where it is judged.** `limit::binding` (`:236`) answers the limit this caller
+is held to: `None` for `System`, for the owner, when nothing is set, or when
+`hr::actor_holds` says the caller holds `sales:exceed_document_limit`. It runs
+in the command's transaction before the decision, because a claim lookup is a
+query and a decision closure is not async. The comparison, `DocumentLimit::judge`
+(`:182`), runs inside the decision after the totals and after the retry check:
+
+- `issue_in` (`commands.rs:496`) on the invoice's own totals, after its
+  discounts and after any deposit is deducted, which is what the document
+  charges.
+- `cancel_in` (`:1400`) on the whole invoice, which is what a cancellation
+  credits. It sits after the `HasPayments` check on purpose: an invoice still
+  holding money is refused for that, not for its size.
+- `credit_part_in` (`:1773`) on the credit note's own totals.
+- `refund_in` (`:1060`) on what goes back. After VAT that is the money itself.
+  Before VAT it is the invoice's own proportion, `refunded × net ÷ gross`, with
+  `Money::apportioned`, the way `payments::retain_in` splits a kept deposit.
+  Refunding a whole invoice is therefore judged on exactly the totals issuing it
+  was.
+
+Because the comparison follows the retry check, a retry of a document issued
+before the limit was lowered answers with its number rather than a refusal.
+Equal to the limit is within it.
+
+A refund is judged twice when it issues a credit note: once as money, once as
+the document. That is what stops a till return being split across two tenders
+under the limit to carry an 11,500 credit note, and what refuses a 5,000 refund
+that clears a part-paid 23,000 invoice, since clearing it issues a
+whole-invoice credit note — at `/v1/sales` because `credit_what_is_clear` runs
+with the member, and through a gateway because `may_refund` judges the same
+document when the member asks. `refund_in`'s own check is not redundant: a
+partial refund of a multi-band invoice issues no credit note at all (§44), and
+the first version of the refund test passed with that check removed, because
+each case it had also issued one. It now refunds part of a two-band invoice.
+
+**Another currency is refused.** `judge` counts an amount it cannot compare as
+over, the three-valued reading §63 settled on: counting it as under would let
+anybody past a riyal limit by invoicing in dollars. The message is its own,
+`sales.document_limit_currency`, because "over 100 SAR" is not what 5 USD is.
+
+**The claim.** `sales:exceed_document_limit`, `module:verb` like the others. It
+is not in `SEGREGATED`, so it travels up the chart: a manager holds it when
+somebody beneath them does. The decision's wording, "a position above them",
+reads the other way. The org chart has no positions, only employees, and a claim
+has never travelled down, so a clerk is not exempted by a grant to their
+supervisor. The test pins both directions. It is asked with a new
+`hr::actor_holds` (`hr/src/claims.rs:455`), `hr::may` without its two passes. `may`
+answers yes when the tenant has granted no claim at all and when there is no
+actor, which is right for a control that a grant switches on. Here the owner
+switches the control on and the claim is the way past it, so "nobody has granted
+anything" must not mean "nobody is limited". The employee lookup is shared with
+`may_for` through a private `claimant`, so the two cannot drift. Like `may`, it
+takes the branch from the request's `X-Branch`.
+
+**My first draft had a 500 in it.** `actor_holds` found the employee through
+`hr`'s read model, and a tenant selling without `hr` enabled has none, so the
+first limited clerk at its till would have got `relation "proj_hr.employee" does
+not exist`. I saw it writing the till test, whose fixture has no `hr`. `may`
+never hits this, because it stops when no claim is granted. `actor_holds` now
+does the same: it asks the grants, which live in the tenant's own migration
+chain, before it asks the read model. Taking that check out again produces
+exactly that error in the till and payments tests (see *Falsified*).
+
+**The refusal** is `SalesError::OverDocumentLimit { limit, amount }` with the
+amount on the limit's basis, `sales.over_document_limit` (or
+`sales.document_limit_currency`) in en and ar, naming the limit, the amount and
+the claim. A 403 everywhere it surfaces. The status is decided by one method,
+`SalesError::refuses_the_caller` (`commands.rs:261`), which the sales routes,
+the till, the booking desk and the payments route all ask. It also covers
+`NotApproved`, which used to fall into the sales routes' catch-all and answer
+400. Now both "who you are" refusals are 403, and the four routes' `FORBIDDEN`
+descriptions say which codes.
+
+**The matrix:** `document_limit` and `set_document_limit`, both OWNER. That
+makes 246.
+
+**Tests.** Through the product path. The limit is written with the same typed
+`configuration::set` the `PUT` calls in the module tests, the way
+`configure_exemption_reasons` seeds rates, and through the `PUT` itself over
+HTTP.
+
+- `a_clerk_is_held_to_the_document_limit_and_the_owner_is_not`
+  (`modules/sales/tests/sales.rs:5266`). With no limit a clerk's 20,000 goes
+  through. With 10,000 after VAT, the retry of that invoice still answers, 9,200
+  goes through, and 11,500 is refused and leaves no document. The owner's 57,500
+  and a `System` 57,500 go through. A login with no employee record is refused.
+  A dollar invoice is refused, and the refusal names dollars.
+- `the_basis_decides_which_total_is_held_to_the_limit` (`:5170`). Net 9,500 is
+  10,925 gross: refused after VAT, allowed before. 10,000.01 net is refused
+  before VAT.
+- `the_claim_lifts_the_limit_for_whoever_holds_it_and_everyone_above` (`:5201`).
+  Boss ← supervisor ← clerk. A grant to the supervisor exempts the supervisor and
+  the boss, not the clerk. A grant to the clerk then exempts the clerk.
+- `a_credit_note_over_the_limit_is_refused_whole_or_in_part` (`:5245`). A whole
+  cancellation of 23,000 is refused, a partial of 11,500 is refused, and one of
+  5,750 goes through.
+- `a_refund_over_the_limit_is_refused` (`:5301`). 11,500 back is refused after
+  VAT. 11,000 back from a two-band invoice, which issues no credit note, is
+  refused. The same 11,500 is 10,000 of net and goes through before VAT. A 5,000
+  refund that clears a part-paid invoice is refused on its whole-invoice credit
+  note.
+- `a_till_holds_a_clerk_to_the_document_limit` (`modules/pos/tests/pos.rs:1026`).
+  This tenant has no `hr`. A clerk's 11,500 sale is refused and rings nothing,
+  and the owner's goes through. The clerk's return of it in two 5,750 tenders is
+  refused on its 11,500 credit note. The drawer moved for neither refusal.
+- `a_members_refund_is_judged_when_asked_and_the_gateways_answers_are_not`
+  (`modules/payments/tests/payments.rs:3277`). Under a 50 limit two customer
+  deposits of 115 settle and are billed. A clerk asking for 115 back is refused
+  and nothing is recorded. 40 is accepted. The gateway's confirmed 115 refund is
+  recorded and credited.
+- After review, `a_members_deposit_charge_is_judged_on_the_invoice_it_will_raise`
+  (`:3487`). Under a 50 limit a clerk's saved-card deposit of 115 is refused and
+  leaves no payment, so is the same deposit recorded at `POST /v1/payments`, a
+  46 charge stands, and the customer's own 115 deposit is not judged.
+- After review, `a_refund_that_clears_an_invoice_is_judged_on_its_whole_credit_note`
+  (`:3530`). A 115 invoice part-paid by 40 at a gateway: a clerk asking for the
+  40 back is refused under a 50 limit, because clearing it issues the 115 credit
+  note; asking for 30 back, which leaves it holding 10, stands.
+- `the_document_limit_is_the_owners_versioned_setting`
+  (`crates/erp-api/tests/http.rs:14804`). `limit: null` and `ETag "0"` at first.
+  0 SAR is `400 sales.document_limit_not_positive`, a bad currency is `400
+  request.unknown_currency`, and neither is stored. A stale `If-Match` is 412.
+  The limit reads back as written, and `null` removes it.
+- `a_clerk_over_the_document_limit_is_refused_and_the_worker_is_not` (`:14878`).
+  The owner sets 100 SAR over HTTP. The clerk's 115 invoice is `403
+  sales.over_document_limit` naming `115.00 SAR`, and the owner's is 201. At the
+  booking desk the clerk's 230 final invoice is 403. The worker's pass bills the
+  same booking.
+- Unit tests in `limit.rs` (`:299`, `:317`, `:327`), and one each in the till's
+  and the payments route's status mapping (`pos/src/http.rs:931`,
+  `payments/src/http.rs:1553`). Neither route has an HTTP test that reaches the
+  refusal.
+
+**Falsified.** For each row I broke the fix in Rust, watched the named tests
+fail, restored the file, and watched them pass.
+
+| broke | failed |
+|---|---|
+| `issue_in`'s `judge` removed | `a_clerk_is_held…`: `None` where 11,500 was due; `the_basis_decides…held`: `None` where 10,925 was due; `the_claim_lifts…`: the clerk not refused; `a_till_holds…`: the sale rang; the HTTP test: 201, not 403 |
+| `Basis::BeforeVat` compared the gross | `the_basis_decides_which_total_is_compared`; `…held_to_the_limit`: 9,500 net refused; `a_refund_over…`: the 10,000-net refund refused |
+| the owner not exempt in `binding` | `a_clerk_is_held…`, `a_till_holds…`: the owner refused; the HTTP test: *the owner is never limited*, 403 |
+| `binding` asking for another claim | `the_claim_lifts…`: the supervisor, granted it, refused |
+| `actor_holds` answering yes for any employee | `the_claim_lifts…`: *a claim does not travel down the chart* |
+| `actor_holds` without its grants check | `a_till_holds…` and `a_members_refund…`: `relation "proj_hr.employee" does not exist` in place of the refusal |
+| an incomparable currency counted as under | `another_currency…`; `a_clerk_is_held…`: the dollar invoice went on to the ledger |
+| `cancel_in`'s `judge_whole` removed | `a_credit_note_over…`: the 23,000 cancellation went through; `a_refund_over…`: the refund that clears a part-paid invoice; `a_till_holds…`: the split return |
+| `credit_part_in`'s `judge` removed | `a_credit_note_over…`: the 11,500 partial went through |
+| `refund_in`'s `judge_refund` removed | `a_refund_over…`: the two-band refund went through. **It passed before that case was added** |
+| `refund_invoice` passing `System` to `credit_what_is_clear` | `a_refund_over…`: the clearing refund went through |
+| `take_back` passing `System` to its credit note | `a_till_holds…`: the split return went through |
+| `request_refund_in` judging as `System` | `a_members_refund…`: the 115 request accepted |
+| `bill_the_deposit` as a member | `a_members_refund…`: *a customer's own deposit is billed* failed to settle |
+| `payments::refund_in` as a member | `a_members_refund…`: the gateway's confirmed refund refused |
+| `bill_completions` as `Authority::of(db)` | the HTTP test: *nobody at the desk*, billed 0 |
+| the booking desk's 403 mapping | the HTTP test: 409, not 403 |
+| the sales routes' 403 mapping | the HTTP test: 400, not 403 |
+| the till's and the payments route's 403 mapping | their unit tests: 422 and 400 |
+| `DocumentLimit::new` accepting zero | `a_limit_of_nothing…`; the settings test: 204, not 400 |
+| `#[serde(try_from)]` removed | `a_limit_of_nothing…`: a stored −5 read back |
+| the `GET` on `Allowed<Read>` | `every_role_against_every_endpoint`: *accountant → GET /v1/sales/document-limit answered 200* |
+
+**Review found two more places a member reaches a document, and one doc line
+that was not true.** Both holes had the same root: a document a member *asks
+for* and a gateway *causes* is issued later with `System`, and only one of the
+two such paths was judged when the member asked.
+
+- **A deposit a member charges was not judged at all.** A clerk holds
+  `PostEntries`, so they can call `POST /v1/payments/cards/{card}/charges` or
+  `POST /v1/payments` with a `deposit`. The worker charges the card, `settle_in`
+  calls `bill_the_deposit`, and that raises the prepayment invoice with
+  `System` — a 57,500 riyal document from a clerk who is refused at
+  `/v1/sales/invoices` for the same number. The Left-open item excusing this
+  said judging the request would need the deposit's gross at `request_in`, and
+  that was simply wrong: `Collection.amount` **is** the gross, because
+  `bill_the_deposit` refuses any settlement whose invoice does not come to
+  exactly what was charged (`payments/src/commands.rs:425`), and `Advance.net`
+  is the net. So the member is judged when they ask, as they already were for a
+  refund: `sales::may_issue` (`limit.rs:273`) is `binding` plus `judge` on those
+  two numbers, and `payments::may_bill` (`commands.rs:797`) calls it from
+  `request_in` (`:1429`) and `start_in` (`:203`), each only when something was
+  written, so a retry answers as the first call did. Both now take an
+  `authority` with no default, like every other root: the two routes pass
+  `Authority::of` (`payments/src/http.rs:318`, `:1194`), the customer's own
+  deposit route passes `System` (`erp-api/src/deposits.rs:379`), and the three
+  sweeps pass `System`, since what they start was asked for and judged already.
+  Settlement still issues the invoice with `System`, which is what stops a
+  charge the customer has paid from going undeclared.
+- **A gateway refund that clears an invoice issues a whole-invoice credit note,
+  and `may_refund` judged only the money.** A clerk asking for 5,000 back
+  against a part-paid 23,000 invoice was accepted, and `payments::refund_in`
+  then issued a 23,000 credit note with `System`. The same refund at
+  `/v1/sales` is refused, because there `credit_what_is_clear` runs with the
+  member. The root is that "which credit note does this refund leave owing" was
+  answered in two places. It is one now: `commands::owed`
+  (`sales/src/commands.rs:951`) decides `Nothing`, `Whole`, `Part(net)` or
+  `Overstated(why)` from the invoice and what it holds once the refund is
+  recorded. `credit_what_is_clear` (`:854`) carries that decision out instead of
+  calling `credit_in` and reading `HasPayments` and `AlreadyCancelled` back out
+  of it, and `may_refund` (`:783`) judges what it says: the whole
+  invoice when the refund clears it. A partial credit note credits exactly what
+  went back, which `judge_refund` has already judged, so that arm judges
+  nothing twice.
+- **`actor_holds`' doc said it "does not ask whether the tenant uses claims"**,
+  and its first statement asks exactly that — it reads "nobody has granted
+  anything" as "not held" rather than as a pass, which is the whole point of
+  the function. A reader trusting the sentence would have deleted the call as
+  dead and brought back the 500 this section describes. Reworded
+  (`hr/src/claims.rs:437`).
+
+`sales.md`, `http.md` and the `GET /v1/sales/document-limit` rustdoc now name
+the deposit routes among the places a member is judged, and say the two refund
+answers come from one decision. The two payments routes' `FORBIDDEN` lines say
+which code, so `just openapi` ran again.
+
+| broke | failed |
+|---|---|
+| `request_in`'s `may_bill` removed | `a_members_deposit_charge…`: `Ok(())` where the saved-card deposit was due a refusal |
+| `start_in`'s `may_bill` removed | `a_members_deposit_charge…`: `Ok(())` where the recorded charge was due one |
+| `may_refund`'s `Owed::Whole` arm answering `Ok(())` | `a_refund_that_clears…`: `Ok(())` where the clearing refund was due one |
+
+**The round's gate found `may_refund` breaking L7, and it moved.** The L7 scan,
+`an_aggregate_is_loaded_only_while_handling_a_command`
+(`crates/erp-eventlog/tests/write_side.rs`), allows `erp_eventlog::load` only in
+a module's `commands.rs`, because that is where the convention puts command
+handling. `may_refund` loads the invoice and was written in `limit.rs`, so the
+whole-workspace run failed on it. It *is* command handling — it runs inside
+`payments::request_refund_in`'s transaction and decides from history what that
+write may do, the same argument the allowlist already makes for
+`payments/src/commands.rs` — so the fix is where it lives, not an allowlist
+entry that would stop the rule meaning what it says. `may_refund` moved whole
+to `sales/src/commands.rs` (`:780`), next to the `owed` it judges by and the
+`credit_what_is_clear` it mirrors; `lib.rs` re-exports it from `commands`
+instead of `limit`, so `sales::may_refund` is unchanged for every caller.
+`limit.rs` keeps everything that loads nothing, and its module doc says why the
+one function left. Falsified by moving the function back into `limit.rs`,
+watching the scan name `modules/sales/src/limit.rs:293`, restoring both files
+byte for byte (checked with `md5sum`) and watching it pass.
+
+**Doc corrections.** `roles.rs` said an invoice or a till sale "posts with no
+amount for it to judge". It now says why an amount rule cannot reach one and
+names this control. `limits.rs`, the book's `erp-tenant.md` and `http.md`
+(permission limits) say which control is for what. So does ARCHITECTURE §5.6: a
+permission limit for what a role may do, the document limit for how large one
+sales document may be. `sales.md` gained the section, the signatures and the
+route. `pos.md` gained the signatures and a paragraph. `http.md` gained the
+routes and a *Document limit* section. §63's Left-open item and §52's table point
+here.
+
+**Left open.**
+
+- ~~**A till return does not ask for `sales:approve_credit_note`.**~~ Put to the
+  product owner and closed by §70: `may_credit` moved into the roots behind
+  `Authority::Member`, which is the one-place fix this bullet named.
+- **`purchases.not_approved` and `hr.not_approved` still answer 400.** Only
+  sales moved to 403.
+- ~~**A member who starts a card charge for a deposit is not limited.**~~ Found
+  by review, fixed above: judged at `request_in` and `start_in`, where the net
+  and the gross both already are.
+- **A deposit refused at `POST /v1/payments` may already exist at the gateway.**
+  That route records a charge the caller's browser created, so a refusal leaves
+  a charge this system has not written down. It is the right way round — the
+  alternative is a prepayment invoice of any size — but the client has to void
+  it. The saved-card route has no such window: nothing is charged until the
+  worker's pass, and the refusal happens before it.
+- **A gateway's answer is judged on the invoice as it stood when the member
+  asked.** A payment, refund or credit note that lands in between can change
+  which credit note the gateway's answer issues, and that one is not judged
+  again — it cannot be, because by then the money has moved.
+- **An owner-role API key is exempt.** `Authority::of` reads the handle's role,
+  and a key can be issued with any role. That is the same rule `hr::may`
+  applies.
+- **A tenant that disables `hr` after granting claims** would hit the missing
+  read model in `actor_holds`, as `may_for` already would. Disabling a module
+  with live grants is not guarded anywhere.
+- **The limit is one amount for every document kind and every branch.** Nobody
+  asked for per-kind or per-branch limits. The claim is branch-scoped already.
+- **A stored limit this build cannot read refuses every member's document** until
+  the owner writes a new one, which the `PUT` can always do. There is no
+  read-back of the raw row, as for permission limits.
+
+### 67 · A second factor a tenant requires can be replaced, never removed
+
+**Built 2026-09-11**, Round 3 decision B. §58 stopped platform staff turning
+their second factor off, because an account with a password and no factor gets
+its next factor from whoever enrols first, and that may be somebody holding
+only the password. It left the same window open for a tenant that requires a
+factor: a member could turn theirs off and whoever enrolled next was let in.
+The decision is that a member of such a tenant can replace their factor but
+never remove it, by the same rule as staff.
+
+**One function decides it.** `ControlPlane::second_factor_required_by`
+(`crates/erp-control/src/second_factor.rs:513`) returns
+`Option<FactorRequiredBy>`. It is `Staff` for any live platform row, whatever
+its role, which is the query `disable_second_factor` used to run inline. It is
+`Tenant` for a live (`revoked_at IS NULL`) membership of a tenant with
+`requires_second_factor` whose status is not `deleted`. Staff is the answer
+when both hold. `disable_second_factor` asks it first (`:469`), before it
+looks at the code, so a recovery code sent with a refused request is not
+spent.
+
+**Which tenant statuses count.**
+
+- **Suspended counts.** A suspended tenant is reinstated with its requirement
+  still set. A member who dropped their factor during the suspension would come
+  back password-only, which is the gap this closes.
+- **Provisioning counts.** It becomes active with its flag. Nothing sets the
+  flag on a tenant that is still provisioning today, so this is the same rule
+  rather than a case anybody hits.
+- **Deleted does not count.** Nobody enters it again, and `tenants_for_identity`
+  leaves it out for the same reason. No product path sets `deleted` today, so
+  this part has no test. Reaching it would take raw SQL.
+
+The function reads the database, not the tenant cache that `enter` uses.
+Switching the requirement on binds the next removal attempt on every node.
+Switching it off frees removal at once.
+
+**The error is generalised.** `AuthError::StaffKeepsSecondFactor` became
+`AuthError::SecondFactorKept(FactorRequiredBy)` (`auth.rs:40`). Staff keep
+their code, `auth.staff_keeps_second_factor`, so no client that already matches
+on it breaks. Tenant members get `auth.tenant_keeps_second_factor`, in en and
+ar (`messages.rs:84`). Its text tells them the way out: ask the organisation's
+owner to remove them, or to stop requiring it. Both are 403
+(`erp-web/src/error.rs:75`), because signing in again would not change the
+answer. The `DELETE /v1/sessions/second-factor` 403 now describes both codes
+and says the code is not spent (`routes.rs:903`).
+
+**It refuses even when only a pending enrolment exists.** A required member who
+began an enrolment and never confirmed it cannot drop the pending row through
+this route either. That costs them nothing, because starting another enrolment
+replaces the pending one. It keeps the rule to one line.
+
+**Replacement never passes through a state without a factor, and it could.**
+I checked every write that removes `totp` or `recovery` rows:
+
+- `verify_second_factor` spends one recovery code. The `totp` row stays.
+- Erasure deletes the identity, and the rows go with it by cascade.
+- `reseal_second_factors` only updates the sealed part, and only when that
+  part still matches what it read.
+- `passwords.rs` touches only the `password` row.
+- `begin_second_factor` touches only `totp_pending`.
+- `confirm_second_factor` deletes the old factor and renames the pending row in
+  one transaction. That looks safe, but it was not under concurrency.
+
+Two confirmations of the same replacement can both pass every check before
+either writes. Each proves the old factor with a different code inside the
+drift window, and both find the pending row. If the second one's transaction
+starts after the first commits, its `DELETE` sees the first's new `totp` and
+new recovery codes and deletes them. Its `UPDATE` renames nothing, because the
+pending row is already gone. Its ten `INSERT`s no longer collide, and it
+commits. Both callers get `201` with recovery codes, and the account has
+recovery rows and no `totp`. `has_second_factor` then says no, `start_session`
+lets the password alone in, and the next person to enrol holds the factor.
+Nothing asks `second_factor_required_by` on that path. A double-submitted
+confirmation form is enough to cause it. In the other order, where the second
+transaction starts first, it failed with a unique violation, which showed as a
+500.
+
+The fix is at the rename (`second_factor.rs:293`). The `UPDATE` must move
+exactly one pending row, or the function returns `InvalidCredentials` and the
+transaction rolls back, taking the `DELETE` with it. The renamed row stays
+locked until commit, so whatever commits has a factor. The second confirmation
+now gets the same answer as confirming with nothing pending, whichever order
+the two run in.
+
+**Tests.**
+
+- `a_second_factor_a_company_requires_is_replaced_never_removed`
+  (`crates/erp-api/tests/http.rs:2995`). The owner switches the requirement on
+  through `PUT /v1/members/second-factor-policy`. A clerk in acme, which
+  requires a factor, and globex, which does not, sends a valid recovery code to
+  `DELETE` and gets `403 auth.tenant_keeps_second_factor`. `GET` still shows
+  the clerk enrolled with 10 codes left. The clerk then replaces the factor,
+  using that same unspent code as `previous`. The owner is refused the same
+  way. The owner removes the clerk from acme over HTTP, which leaves the clerk
+  only in globex, and the clerk's `DELETE` answers 204. The owner switches the
+  requirement off, and their own `DELETE` answers 204.
+- `a_suspended_tenant_still_keeps_its_members_factor`
+  (`crates/erp-control/tests/second_factor.rs:602`). The requirement is on and
+  the tenant is suspended. The member is refused with
+  `SecondFactorKept(Tenant)` and the recovery code is not spent.
+- `two_confirmations_at_once_never_leave_the_account_without_a_factor`
+  (`:653`). The test holds three of the pool's four connections, so the two
+  confirmations share one. The second one's transaction can then only begin
+  after the first commits, which is exactly the losing order. It asserts that
+  a factor is left, that exactly one confirmation succeeded, that the other got
+  `InvalidCredentials`, and that the new app verifies.
+- `the_requirement_can_always_be_switched_off` (`:551`) used to reach "owner
+  locked out" by having the owner turn off their own factor while the
+  requirement held. That is now refused, so the test uses a second owner who
+  never enrolled. They are refused entry, switch the requirement off without a
+  factor, and get in.
+- Staff are still refused. `every_platform_role_against_every_platform_endpoint`
+  is unchanged and still expects `auth.staff_keeps_second_factor`.
+
+**Review found the refusal pointing at a door that does not exist.** The new
+message, the `DELETE` 403 text in `openapi.json`, RUNNING, the book's `http.md`
+and this section told a member the way out was to leave the organisation. No
+route lets a member leave. The only removal is the owner's
+`DELETE /v1/members/{identity}` (`remove_member`, `Allowed<ManageTenant>`,
+`members.rs:433`). The en and ar text now says to ask the owner to remove you or
+to stop requiring two-step sign-in (`messages.rs:614`). The 403 description
+(`routes.rs:903`) names the owner's route and says a member cannot leave on
+their own, and `just openapi` regenerated the document. RUNNING, `http.md`, the
+code's rustdoc and the HTTP test's doc say the same. No behaviour changed, so
+there is no new test. The code the member gets is still pinned by
+`a_second_factor_a_company…`.
+
+**Falsified.** For each row I broke the fix, watched the test fail, restored
+it, and watched it pass. The breaks inside `query!` text were built against
+the type-check database (`SQLX_OFFLINE=false`). After them, `just prepare`
+rewrote `.sqlx/`.
+
+| broke | failed |
+|---|---|
+| the `Tenant` arm only when also staff (`row.tenant && row.staff`) | `a_second_factor_a_company…`: `(204, None)` where `(403, auth.tenant_keeps_second_factor)` was due; `a_suspended_tenant…`: `Ok(())` |
+| the refusal moved after the code check | `a_second_factor_a_company…`: *the refusal took the factor or spent the code*, 9 ≠ 10; `a_suspended_tenant…`: *the refusal spent a recovery code*, 9 ≠ 10 |
+| `m.revoked_at IS NULL` dropped (SQL) | `a_second_factor_a_company…`: 403 where 204 was due for the clerk removed from acme |
+| `AND t.requires_second_factor` dropped (SQL) | the same line: globex, which requires nothing, still refused |
+| `t.status <> 'deleted'` narrowed to `= 'active'` (SQL) | `a_suspended_tenant…`: `Ok(())` |
+| the `Tenant` case rendered with the staff code | `a_second_factor_a_company…`: `auth.staff_keeps_second_factor` where the tenant code was due |
+| the `Staff` arm only when also a tenant member | `every_platform_role…`: `(204, None)` where `(403, auth.staff_keeps_second_factor)` was due |
+| the rename check loosened to `renamed > 1` | `two_confirmations…`, 3 runs of 3: *two confirmations left the account password-only*, both `Ok` with recovery codes; passes 3 of 3 restored |
+
+**Docs.** I updated these:
+
+- RUNNING's second-factor section and the book's `http.md` now describe both
+  refusals.
+- `erp-control.md` now names the new error and the function.
+- `Tenant::requires_second_factor` and the `SecondFactorPolicy.required`
+  schema text said the requirement refuses entry "and nothing else", which is
+  no longer true. They now say it also keeps members' factors, and `just
+  openapi` regenerated the document.
+- §58's paragraph about the tenant gap now points here.
+- `set_second_factor_requirement`'s rustdoc began with the first paragraph of
+  `request_visit`'s doc, which had been pasted above it. I moved that paragraph
+  back to `request_visit`.
+
+**Left open.**
+
+- **First enrolment is an accepted gap** (decision B). An account that has
+  never had a factor can have one enrolled by whoever holds the password. A
+  member who joins a requiring tenant without a factor is refused entry until
+  they enrol, and whoever enrols first holds it. Nothing here changes that.
+- ~~**Losing the authenticator and all the recovery codes is a lockout, and
+  nobody can undo it.**~~ Closed by §69, Round 3b: the tenant's owner, a member
+  holding `hr:reset_second_factor`, or platform support resets it, and the
+  person enrols again through a link that is mailed to them. A required member
+  still cannot turn their *own* factor off, and nobody can reset their own
+  either, so the rule this section is about is untouched.
+- **The check and the delete are not serialised against a concurrent
+  switch-on.** If the owner switches the requirement on while a member's
+  `DELETE` is between its check and its delete, the member ends up without a
+  factor in a tenant that requires one. The result is the same as if the member
+  had removed the factor a moment before the switch, which is allowed, so no
+  lock was added. They are refused entry until they enrol again.
+- **Deleted tenants are excluded without a test.** No product path produces
+  one.
+- **A suspended tenant's member waits for reinstatement.** Both of the owner's
+  ways out, removing the member and switching the requirement off, go through
+  `enter`, which answers a suspended tenant 503. Until it is reinstated nobody
+  can free the member's factor, and the message does not say so, because the
+  refusal does not look at which tenant holds it.
+- **A replacement racing a new `begin_second_factor`** still commits whichever
+  pending secret is in the row at rename time. That may not be the one whose
+  code was checked. It needs a live session, and the begin has to land in the
+  milliseconds between the check and the rename. Keying the rename on the
+  secret that was verified would close it. It is outside this item.
+
+### 66 · An old pod's audit entries find their tenant, and a scan makes it a rule
+
+**Built 2026-09-11.** §62 gave `audit_entry` a `tenant_id` and left one hole
+open. During a deploy, a pod still on the build before `0019` inserts in the
+shape it knows, with no `tenant_id`, and the append-only trigger forbids
+filling it in afterwards. Those entries would have been missing from their
+tenant's trail for good. Round 3 decision A sets zero-downtime deploys as a
+goal: catch up at write time, through one SQL function the backfill and a
+trigger share, and make the rule general.
+
+**`0019` is amended, not followed by a new migration.** It is untracked in git
+and has been applied only to databases that are thrown away. I checked. The
+`.env` database `erp_control` is at control migration 10. `erp_typecheck` is
+rebuilt by `just prepare`. `scan_bench` and `spa_backend` have no
+`_sqlx_migrations`. Every other control-chain database on the one cluster is
+an `erp_test_*` clone or an `erp_tmpl_control_*` template, and the testkit names
+templates by a fingerprint of the migrations, so a changed file builds a new
+one. Amending in place means the trigger exists from the moment the column
+does. The migration is one transaction, and the `ALTER TABLE` holds its lock
+until commit, so an old pod's insert waits and then meets the trigger. There
+is no window.
+
+**One function, two users** (`0019_audit_tenant.sql:31`).
+`audit_entry_tenant(subject_type, subject_id, detail)` returns the tenant from
+the three places the backfill looked, in the backfill's order:
+
+1. a subject that is a tenant;
+2. `detail`'s `tenant`;
+3. the key's tenant when the subject is an API key.
+
+Otherwise it returns NULL. It is plpgsql with one `IF` per rule, not a `CASE`
+in SQL, so no rule's cast runs on a row it does not apply to. That matters
+because a `handle` subject is an email address, and `'x@y'::uuid` raises. The
+backfill is now one `UPDATE` through the function (`:50`), where it was three.
+`audit_entry_fills_tenant()` (`:66`) sets `NEW.tenant_id` from it only when
+the insert left it NULL, and `audit_entry_tenant_on_insert` (`:75`) runs it
+`BEFORE INSERT`.
+
+**Ordering with the append-only trigger:** there is none to get wrong.
+`audit_entry_no_update` is `BEFORE UPDATE OR DELETE` and the new one is
+`BEFORE INSERT`, so no statement fires both. The re-pinned
+`audit_entry_is_append_only` still compares `tenant_id`, so filling it in
+after the insert is still refused, and
+`the_audit_trail_is_still_append_only_for_everything_else` passes unchanged.
+
+**This build's `None` stays NULL.** A trigger cannot tell an old pod's missing
+column from this build's `None`. What matters is that the rules find nothing
+in what the `None` writers write, and I read every one of them:
+
+- staff changes and platform memberships: subject `identity`, `"tenant": null`;
+- dead letters: `effect`;
+- `identity.*`;
+- `cluster.*`;
+- `signup.requested`: `handle`;
+- the test action: `thing`.
+
+None of them matches a rule. `record()`'s doc (`lib.rs:2301`) said an entry
+that names no tenant "is not in that tenant's trail whatever its subject or
+detail says". That is no longer true of a `None` with a tenant subject. The
+doc now says what the trigger does, and that no current `None` writer trips
+it. The `ponytail:` note under it is gone. The book's paragraph on `record`
+said the same thing and is rewritten, and `tenant_audit`'s doc names the
+trigger.
+
+**Tests** (`crates/erp-api/tests/http.rs`):
+
+- `a_pod_on_the_build_before_0019_files_its_entries_under_their_tenant`
+  (`:4402`) makes four inserts shaped exactly like the pre-`0019` `record()`
+  (from `git show HEAD`), with no `tenant_id` column. They are the test's only
+  SQL writes, and its doc says they simulate an old build. Three of them show
+  up in the owner's `GET /v1/audit` under acme, with the owner named:
+  - `tenant.origin_revoked`, found by its subject;
+  - `membership.role_changed`, found by `detail`;
+  - `api_key.revoked`, for a key issued over HTTP, found by the key.
+
+  The fourth, `identity.suspended`, does not show up.
+- `the_database_keeps_the_tenant_its_writer_gave_and_the_none` (`:4488`). A
+  superadmin makes an acme clerk support staff over HTTP, then billing. Both
+  entries are about a tenant member, and both stay NULL. `record(Some(acme),
+  "test.filed", "tenant", globex, {"tenant": globex})` stays acme.
+- The dead-letter test (`support_requeues_and_dismisses…`, `:4012`) now also
+  asserts that no `effect.*` entry has a tenant.
+
+**The general guard** is
+`a_column_added_to_an_append_only_table_is_filled_on_insert`
+(`crates/erp-control/tests/migrations.rs:427`). It finds the append-only
+tables in the migrations themselves: the ones with a trigger that runs a
+function named `*_is_append_only`. Today those are `event` (tenant `0001`) and
+`audit_entry` (control `0001`), keyed by chain. The test fails if either one
+stops being found, so the convention cannot quietly stop checking anything.
+
+Then it fails any `ALTER TABLE` on one of those tables that has an `ADD`
+clause with no `DEFAULT`, or only `DEFAULT NULL` (`gives_a_default`, `:306`).
+`COLUMN` is optional in that clause, and constraints don't count. There are
+two ways out:
+
+- the same migration creates a `BEFORE INSERT … FOR EACH ROW` trigger on the
+  same table. The scan sees that the trigger exists, not that it fills the
+  column; that part is review's;
+- `migrations/EXEMPTIONS` gives the migration the new rule
+  `append-only-column`, with a reason.
+
+`no_migration_carries_an_exemption_it_does_not_need` knows the new rule and
+refuses it where nothing needs it. `the_append_only_check_refuses_what_it_claims_to`
+pins the parser on thirteen synthetic statements, among them:
+
+- `ADD` without `COLUMN`;
+- `DEFAULT NULL`, and `ON DELETE SET DEFAULT` with no default;
+- a constraint;
+- the other chain's `event`;
+- an `AFTER INSERT` trigger, which runs too late to set `NEW`;
+- a statement-level `BEFORE INSERT` trigger, written out or left to
+  Postgres's default, which has no `NEW` at all;
+- a row-level `BEFORE INSERT` trigger on a different table.
+
+**Review found four holes in the scan, all fixed.** It counted any clause with
+the word `default` in it as filled, so `DEFAULT NULL`, which is exactly no
+default, passed. So did a clause whose only `default` is in `ON DELETE SET
+DEFAULT`. `gives_a_default` now wants a `default` that is not after `set` and
+is followed by something other than `null`. `a_new_column_is_never_mandatory_without_a_default`
+had the same word match (`NOT NULL DEFAULT NULL` passed), so its predicate is
+now `mandatory_without_a_default` (`:297`) on the same helper, and its self-check
+calls that predicate instead of asserting on `statements()`. `trigger()`
+counted a statement-level `BEFORE INSERT` trigger as filling, though it has no
+`NEW`; it now also wants `for each row` (`:326`). Nothing tested that the
+trigger had to be on the same table as the column: loosening the match to "any
+`BEFORE INSERT` trigger in the migration" passed all six tests. Last, the
+ARCHITECTURE row said the trigger "fills it" and left out the `EXEMPTIONS`
+way out. It now lists all three ways and says the scan checks only that the
+trigger exists.
+
+No existing migration needed an exemption. The expand-only rule was not
+described in ARCHITECTURE at all, so §7's table now has a "Deploy overlap" row
+covering both rules. The `EXEMPTIONS` header names the new rule.
+
+**Falsified.** The guards in `0019` are SQL, so I broke each one in the
+unshipped file and touched `lib.rs` so `sqlx::migrate!` embedded it again. I
+ran the tests and watched them fail. Then I restored the file byte for byte
+(checked with `cmp`) and watched them pass.
+
+| broke (SQL, in `0019`) | failed |
+|---|---|
+| deleted the `CREATE TRIGGER` | `a_pod_on…`: *no tenant.origin_revoked in* the owner's trail; and `a_column_added…`: *control/0019_audit_tenant.sql adds a column to `audit_entry`, which is append-only, with no default* |
+| deleted rule 1 (subject) | `a_pod_on…`: *no tenant.origin_revoked* |
+| deleted rule 2 (`detail`) | `a_pod_on…`: *no membership.role_changed* |
+| deleted rule 3 (API key) | `a_pod_on…`: *no api_key.revoked* |
+| the trigger sets the tenant unconditionally | `the_database_keeps…`: `test.filed` under globex, not acme |
+| a fourth rule: an `identity` subject's tenant membership | `the_database_keeps…`: both staff entries under acme; `a_pod_on…`: *an entry about a person was filed under a tenant* |
+| unmatched rows get a fixed UUID instead of NULL | the dead-letter test: *a dead letter was filed under a tenant*, 2 ≠ 0; and `the_database_keeps…` |
+
+| broke (Rust, in the scan) | failed |
+|---|---|
+| an `AFTER` trigger counts as filling | `the_append_only_check…`: *too late to set NEW* |
+| `constraint` dropped from the not-a-column list | `the_append_only_check…`: the `ADD CONSTRAINT` case, 1 ≠ 0 |
+| only `ADD COLUMN` recognized | `the_append_only_check…`: *COLUMN is optional* |
+| the detector looks for a misspelled function name | `a_column_added…`: *("tenant", "event") is no longer found append-only* |
+| an `append-only-column` exemption added for `0019` | `no_migration_carries…`: *exempts `append-only-column` and does nothing that needs it* |
+| after review: `gives_a_default` accepts `DEFAULT NULL` | `the_append_only_check…`: *DEFAULT NULL is no default*, 0 ≠ 1; `the_check_refuses…`: `mandatory(… NOT NULL DEFAULT NULL)` |
+| after review: `gives_a_default` accepts `SET DEFAULT` | `the_append_only_check…`: *SET DEFAULT is no default*, 0 ≠ 1 |
+| after review: `mandatory_without_a_default` back on the word match | `the_check_refuses…`: `mandatory(… NOT NULL DEFAULT NULL)` |
+| after review: `trigger()` without the `for each row` test | `the_append_only_check…`: *a statement-level trigger has no NEW*, 0 ≠ 1 |
+| after review: any `BEFORE INSERT` trigger in the migration counts (`!filled.is_empty()`) | `the_append_only_check…`: *a trigger on another table fills nothing here*, 0 ≠ 1 |
+
+The broken template databases are left on the test cluster for `just
+clean-databases`. No `query!` text changed, so `just prepare` wrote nothing
+new to `.sqlx/`. RUNNING had no prose about the deploy gap, so it is
+unchanged. §62's Left-open bullet is struck through, and its note on the
+untested backfill now says the rules are tested through the trigger.
+
+**Left open.**
+
+- **The backfill statement itself is untested.** The rules are tested through
+  the trigger. The one `UPDATE` that applies them is not, because the testkit
+  migrates empty databases.
+- **The append-only convention is a name.** If a future append-only table's
+  guard function is not called `*_is_append_only`, the scan doesn't see it. The
+  two known tables are pinned, so renaming either one's function fails loudly.
+  A third table has to follow the name.
+- **The scan reads statements split on `;`**, as the expand-only scan always
+  has. It does not see an `ALTER TABLE` inside a `DO` block, or a trigger made
+  by dynamic SQL.
+- **The trigger escape is structural, not semantic.** The scan wants a
+  row-level `BEFORE INSERT` trigger on the table. It does not read the
+  function, so a trigger that never touches the new column passes, and so does
+  one whose `WHEN` skips the rows that need it. `gives_a_default` reads words:
+  `DEFAULT (NULL)` or an expression that yields NULL passes as a default.
+- **A future `None` writer with a tenant-shaped subject** would be filed under
+  that tenant by the trigger. `record()`'s doc says so. Nothing enforces it
+  beyond review and the examples in the two tests.
+- **An old pod's `api_key.revoked` for a key whose tenant is gone** stays NULL,
+  because the key row was deleted along with the tenant (cascade). The
+  backfill has the same limit.
+
+### 65 · Read models say which build made them, and a stale one answers 503
+
+**Built 2026-09-11.** Nothing recorded which read model built a tenant's
+tables. `install.sql` is `IF NOT EXISTS` throughout, provisioning's checkpoint
+insert was `DO NOTHING`, and a changed read model reached existing tenants only
+if an operator remembered `migrator refresh <module>` for that module. `check`
+said "uniform" while projections were on an old shape. A module disabled and
+enabled again kept its old tables and nobody could tell. ARCHITECTURE §7 listed
+"schema version = target, per module" as a continuously asserted invariant, and
+nothing asserted it. `provision.rs` cited a test,
+`a_module_has_exactly_one_projection_group`, that did not exist. Decision 7 sets
+what a user sees while a tenant is behind: 503 for that module's routes, with a
+new code in both languages, and never numbers from a shape the build has
+replaced.
+
+**The declaration and the record.** `ProjectionGroup::VERSION` (`group.rs`,
+default 1) is the shape and meaning of a group's tables. `ModuleSetup.groups`
+is now `(name, schema, version)`, and every module copies the third field from
+its group type the way it copies the other two. Tenant migration
+`0016_read_model_version.sql` adds `projection_checkpoint.read_model_version`,
+`SMALLINT NOT NULL DEFAULT 0` with a `>= 0` check. It is expand-only, so the
+migration test passes with no exemption. 0 means "built before this was
+recorded", below every real version. It is deliberately not 1: nothing knows
+whether an old tenant's tables match today's script, and stamping them current
+is the silent fallback L6 forbids. The cost is that the first deploy rebuilds
+every group on every tenant once, through the swap, with no outage.
+
+**Four writers stamp it, and nothing else writes it.**
+
+- `ensure_group` (`runner.rs`) stamps a new row. It takes the version now, and
+  `ensure_group_schema::<G>` passes `G::VERSION`.
+- Provisioning's `install_schema` (`provision.rs:1265`) stamps a new row too,
+  and keeps `DO NOTHING`. An existing row means existing tables the DDL did not
+  reshape, so the old stamp is the truth about them. That closes the
+  disable-then-enable hole.
+- `rebuild_schema` (`:1357`) sets the version with the rewind, because it
+  really does rebuild.
+- `rebuild_swap`'s swap (`shadow.rs:405`) sets it in the transaction that
+  renames staging over live, so the stamp always names the live tables.
+
+**The runner projects only into its own build's tables.** `run_once_in`
+(`runner.rs:215`) reads the version with the lease, which costs no extra query,
+and returns the new `RunError::OtherReadModel { group, installed, expected }`
+when the row is not `G::VERSION`. That rides the worker's existing "job failed;
+it is stalled" path, once per visit, per group. This is the continuous check §7
+promised. It was `<` as first built, and review changed it to `!=` (below): a
+build still draining must not write its old rules into tables the migrator has
+stamped new. The price is that every changed group waits for the new build's
+workers during a rollout, and the old ones log it as stalled until they are
+gone.
+
+**The deploy step rebuilds; `check` gates.** `ControlPlane::survey_read_models`
+(`fleet.rs`) mirrors `survey_event_versions`: every tenant with a database,
+suspended ones too, reading the tenant's checkpoints and not its entitlements.
+A disabled module's groups are surveyed because its tables have to be current
+the moment it is enabled again. The migrator judges it with a pure `stale`
+(`bin/migrator.rs:291`). A group not at the build's version is `Rebuild`.
+`!=` is right here: a group ahead is a rolled-back deploy's leftover, and read
+models are derived, so rebuilding down costs only a replay. A group that no
+module in the build declares is `Undeclared`, the read-model twin of "an event
+nothing can read". The bare command runs `read_models` (`:205`) after
+`migrate_fleet`, since the column is one of the migrations, and calls the
+existing `rebuild` for each finding. `check` lists the same findings without
+touching anything, as `acme: sales at 1, this build projects 2`. Either one
+exits 1 if anything is left, and an unreachable tenant counts as left. The
+calls go into the `Mode` match that §64 built. `refresh <module>` stays as the
+manual rebuild.
+
+**Forgetting to bump the version fails CI.** `a_read_model_change_bumps_its_version`
+(`bin/migrator.rs:860`) pins `(group, version, sha256)` for every module's
+`install.sql`, with comments and whitespace squeezed out. It uses the same
+normalization as `tests/migrations.rs`, so a comment-only edit never trips it,
+and `a_comment_is_not_a_change_of_shape` checks that. If the script changes and
+the version doesn't, it fails with the bump and the new pin written out. It
+also fails if the version moves without the pin, and on a pin that no module
+declares. `sha2` and `hex` are new dev-dependencies of `erp-worker`, both
+already in the workspace. The citation in `provision.rs` now names a test that
+exists: `a_module_has_at_most_one_projection_group` (`erp-api/src/modules.rs`).
+The name says "at most" because `messaging` and `hr_sa` have none.
+
+**The request path: 503 while a read model a route serves from is behind.**
+The check sits in the `Tenant` extractor, which every `Allowed<C>` goes
+through, and in `Public`: `read_models_current` (`extract.rs:384`), after
+entry. So only a caller who may be there learns that the module is being
+rebuilt. It works on the module `module_of` finds, which is the answer the
+capability check already uses, and answers
+`503 request.read_model_rebuilding` with `args.module` (en and ar,
+`erp-web/src/messages.rs`). Two things it needed:
+
+- **Which groups a route serves from.** One module's own group was not enough.
+  Every read across groups goes through the other module's crate, because L3
+  leaves no other way: a scan found no qualified `proj_x.` reference to another
+  module outside comments. `tax_sa`'s VAT return reads `sales` and `purchases`
+  tables through `sales::vat_return` and `purchases::input_tax`, so a stale
+  `sales` must stop the return too. `ModuleSetup::reads` (`.reading(&[..])`)
+  names the modules a crate depends on, and
+  `a_modules_reads_are_its_crate_dependencies` holds it equal to the crate's
+  `[dependencies]`. `erp_api::modules::read_models` takes the closure, which is
+  how `notifications` sees `booking` through `messaging`, a module with no
+  tables. Review found that `erp-api`'s own routes under `/v1/booking` run
+  more than `booking`'s crate does, and `COMPOSED` adds them (below). `erp_api::router` puts the result in `AppState::read_models`
+  (`routes.rs:441`), from the list that mounts the routes. That way no server
+  built there can refuse by one list and serve by another. `requires` would
+  not do: it is what a tenant must *have*, and `sales` reads `crm` without
+  requiring it.
+- **Low cost per request.** `ControlPlane::read_model_behind`
+  (`lib.rs:1269`) does one cache read per group, and one query on the
+  tenant's read connection for the groups not known current.
+  **It caches only "current"**, for the entry TTL. A behind answer is never
+  kept. Every request for that module reads the checkpoint again, and the
+  first request after the swap is served. That is the entry caches' own rule,
+  where a refusal is not stored so a grant works at once. It is also why the
+  cache needs no invalidation when a rebuild swaps tables in another process.
+  The one way a group goes backwards is a restore or a rolled-back migrator,
+  and the TTL bounds it. Misses are not counted in `entry_cache_stats`,
+  because they cost the tenant's database and not the control plane.
+
+The document's conventions (`routes.rs:352`) add the 503 to every route of a
+module with read models, appended to whatever that route's 503 already said.
+214 operations changed, and `just openapi` regenerated the document. A new
+status is compatible, and the compatibility test agrees. I considered a router
+layer instead of the extractor. It would run before authentication and put a
+tenant query on unauthenticated requests.
+
+**Falsified.** Each was broken in Rust, then the named test was watched fail,
+restored and watched pass.
+
+| broke | failed |
+|---|---|
+| the runner's guard disabled | `a_group_built_for_an_older_read_model_is_not_projected_into`: a newer build projected into the old shape |
+| the swap leaves `read_model_version` as it was | `a_rebuild_brings_a_group_up_to_this_builds_read_model`: `Behind { installed: 1, expected: 2 }` (the variant's name then) after its own rebuild; and the HTTP test: files still 503 after the rebuild |
+| `install_schema` stamps 0 | `a_new_tenant_is_stamped_with_the_read_model_it_was_built_from`: `Some(0)`, not 3; `re_enabling_over_an_old_shape…`: `Some(0)` |
+| `install_schema` `DO UPDATE SET read_model_version = EXCLUDED…` | `re_enabling_over_an_old_shape_does_not_claim_the_new_one`: `Some(2)` over the old tables |
+| `rebuild_schema` keeps the old version | `refreshing_a_module_rebuilds_its_schema_and_rewinds_its_checkpoint`: `Some(1)`, not 2 |
+| `stale` skips a group ahead (`to <= from`) | `a_group_behind_or_ahead_of_this_build_is_rebuilt_and_a_current_one_is_not`: `[]` for toy at 3 |
+| `stale` drops an undeclared group | `a_group_no_module_declares_is_reported`: `[]` |
+| `crm`'s pinned hash changed (what editing its `install.sql` does) | `a_read_model_change_bumps_its_version`: *crm's install.sql changed shape but crm's read-model version is still 1*, with the pin to write |
+| `normalized` keeps comments | `a_comment_is_not_a_change_of_shape`, and the pin: every module "changed shape" |
+| `files` given a second group | `a_module_has_at_most_one_projection_group`: *files declares 2* |
+| `crm` dropped from `sales`' `reading` | `a_modules_reads_are_its_crate_dependencies`: `["hr", "ledger"]`, with the `.reading(..)` to write |
+| `read_models` without the closure | `a_modules_read_models_are_its_closure_over_reads`: `notifications` lacks `booking` |
+| `Tenant` without `read_models_current` | the HTTP test: files 200 while behind |
+| `Public` without it | the HTTP test: the public services list 200 while booking is behind |
+| a behind group cached like a current one | the HTTP test: the second request while behind was 200 |
+| `router` does not fill `read_models` | the HTTP test: files 200 while behind |
+| the document convention off | `the_document_matches_the_router` |
+
+**Falsification found a hole in the guard test, fixed.** The HTTP test first
+asked once while behind. With a behind group cached as current, it still
+passed, because nothing asked a second time before the rebuild. It asks twice
+now. Caching the *behind* answer is not something I could break into: the
+cache's value is `()`, "current", so it cannot hold one. One run of the pin
+falsification passed at first, because the edit landed in the same mtime tick
+as the previous build and cargo did not rebuild. The rerun, with the file
+newer than the build, failed as shown, and every row above was run the same
+way.
+
+**One test seeds state around the product, and says so.**
+`a_module_whose_read_model_is_older_than_the_build_answers_503_until_it_is_rebuilt`
+sets a checkpoint to 0 with raw SQL (`built_before_versions`). This build writes
+only its own version. What it simulates is what `0016` leaves on every older
+tenant, or what a restore brings back. The same test calls `clear_caches`
+after that out-of-band change, which is that function's documented purpose.
+It does not call it after the rebuild, and that absence is the point.
+Everything else is reached through the product. The re-enable test signs up
+on v1, disables the module and enables it on v2.
+
+**Doc corrections.** `ARCHITECTURE` §1.17 says how the rebuilds are chosen,
+and §7 names the mechanism behind "schema version = target". RUNNING's
+"Before a deploy" says the bare command rebuilds and `check` gates. It says
+what a stalled group and the 503 look like, and that the bare command runs
+once more after a rollout that changed a read model. The restore steps and the
+checkpoint query mention the version. The justfile comment is updated. The
+migrator's header describes the new bare mode. In `provision.rs`,
+`install_module`, `refresh_module` and the one-group citation are updated. The
+book is updated for `erp-projection` (`VERSION`, `OtherReadModel`, `ensure_group`'s
+new argument, the swap stamp), `erp-tenant` (`groups`, `reads`), `erp-control`
+(`survey_read_models`, `read_model_behind`, `install_module`/`refresh_module`),
+`erp-web` (the refusal, `AppState::read_models`), `erp-worker` (the bare mode,
+the pin), `erp-api` (the router, and the adding-a-module steps) and `http.md`'s
+status table.
+
+**Review found three things, and all three were real.**
+
+- **`erp-api`'s own routes under `/v1/booking` were judged by `booking`'s
+  closure alone.** That closure is `booking`, `branches`, `crm` and `hr`, built
+  from module crates' `reads`. But `bill_reservation_route`
+  (`POST /v1/booking/reservations/{r}/invoice`, `billing.rs`) works out the
+  prepayment deduction through `sales::invoice` and `sales::bands_of`, then
+  issues a final tax invoice. With `sales` stale on one tenant, `/v1/sales/*`
+  answered 503 and this route still issued a legal document from the old
+  tables. The deposit routes (`deposits.rs`) call `payments`, `ledger`,
+  `messaging` and `tax_sa::registered` the same way. §65 had named the deposit
+  routes as left open, but not the invoice, and ARCHITECTURE, RUNNING and
+  `VERSION`'s doc claimed every route was covered. The fix is at the one place
+  the closure is made. `COMPOSED` (`erp-api/src/modules.rs:272`) names, per
+  module path, what this crate's routes under it run, and `closure` (`:237`)
+  seeds the walk with it, at the root only, since another module reading
+  `booking` runs `booking`'s crate and not these routes. `read_models` is
+  built from `closure`, and so is the guard,
+  `composed_routes_run_only_what_their_module_is_refused_on`. It scans every
+  file in `erp-api/src` that declares a `path = "/v1/{m}/…"`, and fails on a
+  registered module named there as `x::` (comment lines aside) that is not in
+  `m`'s closure. Now every `/v1/booking` route answers 503 while `sales`,
+  `payments`, `tax_sa` or what they read is stale. The OpenAPI document did
+  not change, because `booking` already had read models and its routes
+  already said 503.
+- **The runner's `<` let the draining build write its old rules into tables
+  stamped new.** After the migrator swaps `sales` to 2, a v1 worker still
+  leased the group and projected. With a new column that has a default, or a
+  bump for a change of meaning only, its rows land in v2 tables and the
+  checkpoint passes them. The v2 workers continue from there, the migrator
+  sees 2 == 2, the request path sees current, and those rows keep v1's rules
+  for good. The expand/contract rule I had cited covers a draining pod
+  *selecting* columns, not a draining worker *writing* rows. The runner is
+  `!=` now. The API's check stays `<`, because reading a newer shape is what
+  expand/contract does make safe. The variant is renamed `OtherReadModel`,
+  because `Behind { installed: 2, expected: 1 }` said the opposite of what
+  happened. Its message no longer says `just migrate-fleet` fixes it: on a
+  draining pod the fix is the rollout finishing, and after a rollback it is
+  the *old* build's migrator. RUNNING now says the old pods log the changed
+  groups as stalled during a rollout, and that `consistent_after` reads
+  answer `not_caught_up` meanwhile.
+- **"That module answers 503" was false for the first rollout of this
+  change.** A tenant provisioned by a pre-`0016` pod has no
+  `read_model_version` column. `read_model_behind`'s query fails,
+  `AccessError::Database` is a 500, and since every module is in
+  `AppState::read_models`, every module route of that tenant answers 500.
+  `check` lists it behind on migrations, and `unreachable` in the read-model
+  survey, not as a stale group. The bare command after the rollout repairs
+  it: it migrates, then rebuilds from 0. Only the prose was wrong, and the
+  Left-open bullet and RUNNING say this now. I did not map the missing column
+  to the 503. That would special-case one migration's first rollout in the
+  request path, for a state the documented deploy order already ends.
+
+| broke (review) | failed |
+|---|---|
+| `tax_sa` dropped from `COMPOSED` | `composed_routes_run_only_what_their_module_is_refused_on`: *deposits.rs serves routes under /v1/booking/ that run ["tax_sa"]* |
+| `closure` ignores `COMPOSED` | the same test: deposits.rs runs `["payments", "ledger", "tax_sa", "messaging"]`; and `a_modules_read_models_are_its_closure_over_reads`: `booking` lacks `sales` |
+| `COMPOSED` applied to every root, not only its own | `a_modules_read_models_are_its_closure_over_reads`: `files` is no longer just `["files"]` |
+| the runner's `!=` made `<` again | `an_older_build_does_not_project_into_a_newer_shape`: `Ok(Advanced { events: 3, .. })` for the draining build |
+
+Dropping `sales` alone from `COMPOSED`, as review suggested, does not fail
+the scan. `payments`, `messaging` and `tax_sa` each read `sales`, so it stays
+in the closure, which is correct. `tax_sa` is the entry nothing else brings
+in.
+
+**Left open.**
+
+- **A tenant that signs up on an old pod during a rollout that changed a read
+  model** is built with the old read model. On new pods, that module answers
+  503 until the bare command runs again. RUNNING says to run it after the
+  rollout. The worker does not rebuild for itself. On the rollout that brings
+  in `0016` itself it is worse: such a tenant lacks the column, so every
+  module route answers 500, and `check` lists it behind on migrations (above).
+  Every later tenant migration has the same hazard for the same reason.
+- **The composed-route scan is per file.** A route in one `erp-api` file that
+  reaches another module through a helper in a different file is not followed.
+  `realtime.rs` calls `deposits::public_settings`, which reads only `booking`.
+- **Refused per module path, not per route.** Every `/v1/booking` route now
+  answers 503 while `sales`, `payments`, `tax_sa` or `purchases` (through
+  `tax_sa`) is stale, including the ones that read only `booking`.
+- **Wider than strictly needed.** A crate dependency used only for event types
+  counts as a read. `reports` depends on `sales`, `booking`, `pos` and
+  `payroll` for their events, and so answers 503 while any of them is stale.
+  That is the safe direction, and it only costs availability during a failed
+  rebuild.
+- **A disabled module's stale group still refuses the modules that read it.**
+  The migrator rebuilds disabled groups with the rest, so this happens only
+  after a rebuild failed.
+- **The pin's loophole:** re-pinning the hash without bumping passes, in plain
+  sight in a diff. A projection change with no DDL change is caught only by
+  judgement, and `VERSION`'s doc says so.
+- **Rebuilds run one at a time** across the fleet (`ponytail:` note), and the
+  first deploy after this rebuilds every group on every tenant once.
+- `ControlPlane::refresh_module` and `rebuild_schema` still have only test
+  callers. They are stamped here, not deleted.
+
+### 64 · Sealing keys that can actually be rotated
+
+**Built 2026-09-11.** A column, an index, two doc comments and RUNNING all said
+`SEALING_KEY` could be rotated: `module_secret.sealed_with` was there "so a
+rotation can find what it has not re-sealed yet", and `SealingKey::parse` said
+"a rotation means two keys existing at once". The code made rotation
+impossible. `parse` took one key, `unseal` tried that one key, and `get` never
+read `sealed_with`. The control plane's TOTP secrets recorded no key at all.
+Changing the variable would have made every ZATCA key, gateway key, card
+token, webhook secret and authenticator app unreadable at once. Decision 11
+sets the scope: rotation, plus an incident playbook in RUNNING, and no reminder.
+
+**The ring** (`crates/erp-eventlog/src/secrets.rs`). `SealingKey` (`:114`) is
+now a current key and a list of previous ones. It keeps its name, so its ~40
+callers did not change. `parse` (`:201`) takes `<id>:<hex>[,<id>:<hex>…]`, and
+the first entry seals. It refuses an empty entry or id, a repeated id, and the
+same bytes under two ids, a "rotation" that only renamed the compromised key.
+Its errors name the entry or the id and never contain hex. The old one-key
+error echoed the first eight characters of a malformed value, which could be
+four bytes of the key. A single key parses as before, so no deployment has to
+change anything. `Debug` shows the ids, and the loaders in `api.rs` and
+`worker.rs` log it, so an operator can see a rollout take effect.
+
+**A row is opened with the key it names** (`unseal`, `:299`). The id comes
+from the column: `get` now passes `sealed_with`. An id the ring does not hold is
+the new `SecretError::UnknownKey`. The row is refused, not tried under whatever
+keys happen to be there, because a key that opens it is not the key the row
+says sealed it (L6). `UnknownKey` is kept separate from `Unsealable` because
+the fix differs: put the key back. `None` means a value sealed before its id
+was recorded. Only authenticator rows enrolled before `0020` are like that,
+and they are tried under every held key, which GCM makes a refusal rather than
+a guess. A `ponytail:` note there says when that arm can go.
+
+**The id lives in the column, not the envelope.** A new format byte carrying
+the id would have made everything written after the deploy unreadable to a
+rolled-back build. It could also collide with first-format values whose random
+first nonce byte happens to match it. The envelope stays `0x02`.
+
+**The control plane got the column.** `migrations/control/0020_authenticator_sealed_with.sql`
+adds `authenticator.sealed_with`, nullable and with no constraint, which keeps
+it expand-only. `begin_second_factor` writes it on both arms of its upsert
+(`second_factor.rs:85`). The second arm matters: a re-enrolment after a
+rotation that replaced the secret and kept the old id would name a key the
+blob is not under, and the person could never confirm it. `stored_secret`
+passes the column to `unseal`. Platform staff's factors are the same rows, so
+everything here covers them.
+
+**The sweep.** `secrets::reseal` (`:440`) moves one tenant database's rows off
+every key but the current one. `reseal_second_factors` (`second_factor.rs:397`)
+does the same for the control plane. The spent-code marker `remember_spent`
+appends after a pipe is kept: the compare-and-swap is on the sealed part only.
+`ControlPlane::reseal_fleet` (`fleet.rs:607`) runs the control plane, then
+every tenant from `tenants_with_databases`: active and suspended, on every
+cluster, through `maintenance_options`, at `fleet_concurrency`. Failures are
+collected the way `migrate_fleet` collects them. Every row is its own
+compare-and-swap on the value it read, so a `put` racing the sweep wins, the
+row is left for the next run, and a rerun resumes. `updated_at` is not touched,
+because resealing does not replace the secret. A row nothing opens goes in
+`Census::unsealable`, by name only, and is left exactly as it was. Both modes
+unseal every row, those already under the current id included, and write only
+the stale ones, so the look-only mode reports what a real run would fail on.
+`SealingPlan::is_settled` (`fleet.rs:591`) is the gate for retiring a key:
+everything under the current key, nothing unopenable, and every tenant reached.
+
+**The operator's command** is `migrator reseal` and `migrator reseal check`
+(`bin/migrator.rs:359`). It needs `SEALING_KEY`, it does not migrate or
+register a cluster, and it exits 1 until the plan is settled. It is not in the
+reaper, which holds no sealing key and runs scheduled tidying. This is a
+one-off step somebody decides to take.
+
+**The migrator ran any word it did not know as the bare, applying command.**
+`check_only = mode == "check"` sent everything else to `control.migrate()`
+and `migrate_fleet()`. So `reseal check` run on an image from before this
+change would have migrated the fleet, and so would a typo. RUNNING's restore
+section told operators to run `migrator -- survey`. No such mode exists, so
+that instruction migrated the fleet too. The fix is at the root: `mode`
+(`:335`) matches the exact argument lists it knows into a closed `Mode` enum,
+and `main` refuses anything else with the usage and exit 2 before it connects
+to anything. RUNNING's restore section now says `check`, then the bare command,
+then `reseal check`.
+
+**Falsified.** Each was broken in Rust and the named test watched fail, then
+restored and watched pass. Three rows break SQL text inside `query!` rather than
+a migration. Those were compiled against the `just prepare` type-check database
+(`SQLX_OFFLINE=false`) so `.sqlx/` was never touched, and are marked *(query
+text)*.
+
+| broke | failed |
+|---|---|
+| `seal` uses the last key in the ring | `a_value_sealed_under_the_previous_key_unseals_after_rotation`: the new-only ring could not open what the ring sealed |
+| `unseal(Some(id))` ignores the id and tries every key | `a_value_under_a_key_the_ring_does_not_hold_is_refused_by_name`: the renamed key opened it |
+| `unseal(None)` tries only the current key | `an_unrecorded_value_opens_under_any_held_key` |
+| `parse` without the same-bytes check / without the empty-id check | `a_configured_ring_is_the_current_key_first`: *the same bytes under two ids was accepted* / *an empty id was accepted* |
+| `Debug` prints the previous key's bytes | `the_key_is_not_in_its_own_debug_output` |
+| `Census::is_settled` ignores unsealable rows | `a_census_is_settled_only_when_nothing_is_left_behind` |
+| `mode` falls back to `Apply` | `only_the_modes_the_migrator_knows_are_accepted`: *["chek"] was accepted* |
+| `reseal_fleet` without the control plane | `a_rotation_reseals_every_tenant_on_every_cluster_and_the_control_plane`: `{"old": 3}`, not 4 |
+| `reseal_fleet` walks only `primary` | the same test: `{"old": 3}` |
+| `reseal_fleet` skips suspended tenants | the same test: `{"old": 3}` |
+| look-only writes (`if apply \|\| true`) | the same test: `{"new": 3, "old": 1}` after looking |
+| the tenant swap keeps the old `sealed_with` | the same test: `{"new": 1, "old": 3}` after applying |
+| `get` passes no id | the same test: *looking moved a secret* (`Unsealable`, not `UnknownKey`) |
+| *(query text)* the control swap compares the whole secret, marker included | the same test: `{"new": 3, "old": 1}` because the used factor never moved |
+| per-tenant failures dropped | `an_unreachable_tenant_keeps_the_rotation_unsettled`: `failed` 0, not 1 |
+| an unopenable row not recorded / `forget` on it | the same test: `unsealable` empty / `{"new": 1}` with no `stranger` row left |
+| control sweep skips unrecorded rows | `a_factor_enrolled_before_keys_were_recorded_is_read_and_stamped`: resealed 0 |
+| `stored_secret` reads a NULL id as the current key | the same test: the unrecorded secret did not open |
+| *(query text)* the control swap drops the spent-code marker | the same test: *resealing forgot which code was spent* |
+| *(query text)* the enrolment upsert keeps the old `sealed_with` | `re_enrolling_after_a_rotation_records_the_new_key`: the confirm failed under the new key |
+| `SealingPlan::is_settled` without `failed.is_empty()` | `an_unreachable_tenant_keeps_the_rotation_unsettled`: *a tenant nobody reached let the old key go* |
+| the tenant sweep skips rows under the current id before unsealing | `a_current_id_over_the_wrong_bytes_keeps_the_rotation_unsettled`: `unsealable` held only the control row |
+| the control sweep skips rows under the current id before unsealing | the same test: `unsealable` held only `acme: tax_sa.csid` |
+| either sweep rewrites rows already under the current id | `a_rotation_reseals_every_tenant_on_every_cluster_and_the_control_plane`: the second run resealed 3 (tenants) / 1 (control), not 0 |
+
+**Review found two holes in the gate, both fixed.** First, no test covered the
+unreachable-tenant half of `SealingPlan::is_settled`. The only test with an
+unreachable tenant also held an unopenable row, and that row alone kept the
+plan unsettled. With `failed.is_empty()` deleted, the suite stayed green. That
+test is now two: `what_a_rotation_cannot_finish_is_reported_and_left_alone`
+keeps the unopenable row and no ghost, and
+`an_unreachable_tenant_keeps_the_rotation_unsettled` has a ghost beside a fleet
+whose census is settled. Second, neither sweep opened a row that was already
+under the current id: the tenant query was `WHERE sealed_with <> $1`, and the
+control loop `continue`d before unsealing. So `reseal check` said more than it
+checked. Reuse an id for new bytes — rotate inside the month RUNNING's
+`$(date +%Y-%m)` names, and rename the old entry `2026-09-leaked` because
+`parse` refuses a repeated id — and every row names `2026-09` but is sealed by
+bytes that id no longer means. Every sign-in, ZATCA signature and settlement
+fails, and yet the sweep found nothing stale, `reseal check` exited 0, and the
+leak playbook said to drop the only key that opened everything. Both sweeps now
+open every row and skip only the write for current ones (`secrets.rs:452`,
+`second_factor.rs:412`), so those rows land in `unsealable` and the gate stays
+shut. RUNNING now says an id names its bytes for good, and that a leak in the
+same month as the last rotation still needs a new id.
+
+**One test seeds state around the product, and says so.**
+`a_factor_enrolled_before_keys_were_recorded_is_read_and_stamped` nulls
+`sealed_with` with raw SQL. That is what every enrolment made before `0020`
+looks like, and this build cannot write one. The test's doc says it simulates
+a control plane upgraded with such rows in it. Everything else is written
+through the product: secrets through `enter_for_maintenance` and
+`secrets::put`, and factors through `begin`/`confirm_second_factor`. The fleet
+fixture now registers a second cluster at the same server, so a walk that
+missed one cluster would show.
+
+**Checked by hand as well.** `migrator chek`, `migrator reseal chek` and
+`migrator check now` each print the usage and exit 2. Against a scratch control
+database, `migrator` then `SEALING_KEY=new,old migrator reseal check` exits 0.
+Without `SEALING_KEY` it exits 1 and names the variable. A list with one key
+twice is refused at parse.
+
+**Doc corrections.** RUNNING's environment line and SEALING_KEY paragraph now
+describe the list. It has a "Rotating the sealing key" procedure, with the
+retirement gate, the run once after this deploy, keeping retired keys for as
+long as backups, and no rollback mid-rotation. It has "If the sealing key
+leaks", decision 11's playbook: ZATCA through the manual route, since
+`activate` answers 409 to a live tenant; gateway keys and card tokens at each
+provider; webhook secrets; everyone's authenticator app, staff first. The
+restore section's `survey` is fixed. The book is updated: `erp-eventlog`
+(`seal` had lost its `key` argument in the listing, plus `unseal`, the ring,
+`Census`, `reseal`), `erp-control` (`reseal_fleet`), `erp-worker` (the modes
+and the refusal), `erp-api` (the variable). `secrets::forget` said a rotation
+used it. No rotation does, so it now says what does. `enter_for_maintenance`'s
+note on what reaches a suspended tenant names `reseal_fleet`. Tenant `0006`'s
+comments ("so a rotation can find…", "What a rotation sweeps") could not be
+edited, and they are now true.
+
+**Left open.**
+
+- **Other clusters.** `ClusterRegistry::from_env` knows only `PRIMARY_*`, so
+  a tenant on any other cluster lands in `failed`, and the gate stays shut
+  until the binaries learn more cluster URLs. `migrate_fleet` has the same
+  limit. The result is a refusal, not a silent skip.
+- **Two rollouts per rotation.** Skipping the read-only step costs visible
+  500s on processes not yet updated, as RUNNING says. Nothing is lost.
+- **Out of reach of the sweep:** databases no tenant row claims, and backups.
+  A restored backup from before a rotation is refused until the old key is back
+  in the list and `reseal` has run.
+- **No test races a `put` against the swap.** Forcing the interleaving needs a
+  hook the product does not have. The swap's `WHERE sealed = $old` is the
+  guard, and the loser is a no-op that the next run finishes.
+- **`fetch_all` per database.** There is a `ponytail:` note: page it if one
+  tenant ever holds ~10^5 secrets.
+- **The unrecorded arm** stays until every deployment's `reseal check` shows
+  no `(unrecorded)` row.
+- **Nothing stops an id being given to new bytes.** `parse` sees one list,
+  not the ids of the past. The gate now catches it, since every row under the
+  reused id is listed as unopenable, but the outage lasts until somebody puts
+  the id back on its old bytes.
+- Nothing reminds anyone to rotate (decision 11). There is no KMS and there
+  are no per-tenant data keys. Both would change only `SealingKey`.
+
+### 63 · Permission limits get a writer, and cannot lock out the one who writes them
+
+**Built 2026-09-11.** Since Phase 5b every capability check has read
+`tenant.permission_limits` (`TenantDb::permits`, `crates/erp-tenant/src/db.rs`),
+and nothing wrote it: no route, no seeder, no test. `erp-rules`' crate doc said
+so ("nothing writes it"); `roles.rs`, `limits.rs` and the 5b box said the
+bookkeeper example worked. It could not have, twice over: nothing stored it, and
+no fact said who was asking, so "entries over ten thousand are refused" refused
+the owner too. Decision 9 of the day shapes the routes: both are owner-only,
+and a 403 names only the capability.
+
+**The routes** are `GET`/`PUT /v1/tenant/permission-limits`
+(`crates/erp-api/src/permission_limits.rs`), a copy of the calendar's: the
+version as `ETag`, `If-Match` on the write, `set_by` on the row, one wire type
+`LimitsView { rules }` both ways. Both take `Allowed<ManageTenant>`. The tenant's
+settings live in its own `configuration` table, so **nothing is recorded in the
+control-plane audit trail**, as §62 already lists; `set_by` is the record of who
+wrote it last, and there is no history.
+
+**A writer copied from the calendar would have locked the owner out.** The
+`PUT` runs `permits(ManageTenant, ..)`, so a stored `{ when: always, then:
+refuse }` refuses the write that removes it. So would a stored row this build
+can no longer decode: `permits` returns an error, `Allowed` turns it into 503,
+and the repair route is behind it. The fix is one line in the one door every
+check goes through: `if !allowed || !limits::narrows(capability)` returns the
+role's answer before the read (`db.rs:156`). `narrows` (`limits.rs:85`) is false
+for `ManageTenant` alone. It sits **before the read on purpose**, which is what
+closes the second path. It is safe because only an owner holds `ManageTenant`,
+`LastOwner` keeps one, and `/v1/tenant/*` belongs to no module, so no module
+override reaches it. The price is that an owner cannot limit their own
+administration of the tenant by branch or amount; nobody asked. I rejected a
+write-time check ("refuse rules that would refuse the writer") because it only
+holds while the edge supplies no fact the owner might lack. It also closes §62's
+open item: `ManagesTenant` and `Allowed<ManageTenant>` now agree.
+
+**Limits cannot exist unchecked.** `Limits::new` (`limits.rs:138`) returns
+`Result<_, Unusable>`, where `Unusable { rule, why }` names the rule the tenant
+wrote rather than its index. `#[serde(try_from, into)]` (`:115`) replaces
+`transparent`, so reading a row validates too. The stored JSON is the same bare
+array, so no migration. The old `validate()` had no production caller and is
+gone. So a row a later build cannot use is refused where it is read (503, L6),
+and the owner can still replace it. That makes `registry()` expand-only, and its
+doc says so.
+
+**A misspelt value is refused, not stored.** `capability == "post_entires"` had
+the right fact and the right kind, validated, and never fired: exactly what
+`facts.rs` exists to prevent. `FactRegistry::one_of` (`erp-rules/src/fact.rs:158`)
+declares a text fact with its only values. `DynCondition::validate` refuses any
+other value with the new `Invalid::NoSuchValue`, and refuses ordering one
+(`condition.rs:134`), because `role < "clerk"` compares spellings. `capability`
+lists `Capability::ALL` (new, `roles.rs:95`) filtered by `narrows`, so naming
+`manage_tenant` is refused when written instead of stored to never fire.
+
+**The `role` fact** is added in `permits` from `access.role_in(module)`
+(`db.rs:178`): the role `allows_in` just checked, a module's own where the
+tenant set one. It is supplied there because nothing else knows it, and
+`facts.rs` finds it there. "Deliberately three" became four.
+
+**Refusals** are three new request codes with en and ar text:
+`request.no_such_fact` (with the facts a rule may name), `request.no_such_fact_value`
+(with the values) and `request.rule_cannot_compare`. A `covers` condition
+deserialises in the API build, because feature unification turns `spans` on
+there. It gets the unknown-fact code, which is true: no permission check
+supplies a window of time.
+
+**The matrix:** `permission_limits` and `set_permission_limits`, both OWNER.
+That makes 244.
+
+**Falsified**, each by breaking Rust and watching the named test fail, then
+restoring it and watching it pass:
+
+| broke | failed |
+|---|---|
+| `permits` without the `narrows` short-circuit | `no_limit_locks_the_owner_out_of_its_limits`: the owner's `GET` got *403 manage_tenant*; `limits_this_build_cannot_read_lock_nobody_out_of_repairing_them`: 503 |
+| the short-circuit moved after the read | `limits_this_build_cannot_read…` alone: 503, not 500 (the always-refuse test still passed, which is why both exist) |
+| `permits` without the `role` fact | `a_bookkeeper_is_refused_an_entry_over_the_limit_the_owner_wrote`: the 20,000 entry got 200; `every_declared_fact_is_assembled_somewhere`: *declares `role` and nothing anywhere supplies it* |
+| the ledger's `still_permits` call removed | `a_bookkeeper_is_refused…`: 200. The first end-to-end test of the narrowing engine |
+| `Limits::new` skips validation | `permission_limits_are_a_versioned_setting_that_refuses_impossible_rules`: 204, not 400; three `limits.rs` unit tests |
+| `registry()` without the `narrows` filter | `a_rule_naming_a_capability_that_does_not_exist_or_cannot_be_limited_is_refused_when_written`: *never narrowed: Ok*; the HTTP test's `manage_tenant` row: 204 |
+| `capability` declared as plain text | the same two: *a typo: Ok*, and 204 |
+| `#[serde(transparent)]` back | `stored_limits_that_no_longer_validate_are_refused_when_read`; `limits_this_build_cannot_read…`: **200**, the unlimited answer |
+| the value-list branch in `validate` | `a_text_fact_with_known_values_refuses_one_it_does_not_know`: `Ok(())` |
+| listed facts left orderable | the same test: *Lt should not order a listed fact* |
+| `GET` on `Allowed<Read>` | `every_role_against_every_endpoint`: *accountant → GET /v1/tenant/permission-limits answered 200* |
+
+**One test seeds state around the product, and says so.**
+`limits_this_build_cannot_read…` writes an undecodable row with
+`configuration::set` through maintenance entry, which is how
+`configure_vat_reasons` already seeds settings. No SQL is involved. It stands in
+for rules a build with a larger registry saved, which this build cannot
+produce. The e2e tests write limits only through the `PUT`.
+
+**Doc corrections.** `erp-rules/src/lib.rs` ("nothing writes it"), `roles.rs`
+(now names the route, the `accountant` role, and why "their own branch" still
+waits), `limits.rs` ("Deliberately three"; a new section on the one capability
+a limit cannot touch, and one on expand-only), the 5b boxes (the bookkeeper
+claim is marked *false until §63*), `Allowed::still_permits` ("the three"),
+`ManagesTenant`'s "limits are not consulted", `facts.rs`, the book (`erp-tenant`,
+`erp-web`, `erp-api`, `http.md`) and ARCHITECTURE §5.6. `erp-api` now depends on
+`erp-tenant` and `erp-rules` directly, as `erp-web` already did.
+
+**What review found: the bookkeeper could walk around the limit it names.**
+Twice, both failing open (L6).
+
+- **By currency.** `Value::compare` has no answer for two currencies, and
+  `holds` turned no answer into *false*, so `amount >= 10,000 SAR` did not
+  match 5,000,000 USD. An accountant holds `manage_accounts`, opens two dollar
+  accounts, and posts. The first draft listed this as "a rule in `USD` never
+  fires on an entry in `SAR`", a mistake of the author's; it was a hole for the
+  person limited. The root is that a condition had two answers where it needs
+  three. `DynCondition::decide` (`erp-rules/src/condition.rs`) answers
+  `Option<bool>`: a missing fact is still `false` (the edge supplies no amount,
+  and must not be refused for that), an incomparable one is `None`, and `All`,
+  `Any` and `Not` carry `None` up the three-valued way, so `Not` of no answer
+  is not a yes. `holds` is `decide == Some(true)`, unchanged except for `Not`
+  over an incomparable amount, which only limits ever compare. Who acts on a
+  rule decides what no answer means: `Rules::explain_undecided`
+  (`rule.rs`) is the one walk, and `explain` is it with *does not apply*.
+  `Limits::explain` (`limits.rs`) passes `then == Refuse`, and `narrow` reads
+  its answer from there, so the two cannot disagree. A refusal that cannot be
+  judged refuses; an exception that cannot be judged excepts nothing. A tenant
+  with dollar and riyal books writes an `allow` for dollars above the riyal
+  refusal, and `an_exception_in_another_currency_leaves_the_refusal_below_it_to_decide`
+  pins that it works. I rejected refusing, at write time, any amount not in
+  the tenant's currency: `Limits::new` does not know that currency, and the
+  entry would still arrive in dollars.
+- **By reversal.** `reverse_entry` took `Allowed<PostEntries>` and never asked
+  again with an amount, so the owner's 20,000 went through backwards. The
+  check both routes share is now `within_limits` (`modules/ledger/src/http.rs`),
+  and the reversal route reads the original first with `posted_lines`
+  (`commands.rs`), outside the reversal's transaction, which is safe because a
+  posted entry's lines never change. An entry that does not exist is 422 there,
+  as it was.
+
+The fix corrected `Value::compare`'s doc, which said the registry refuses two
+currencies at authoring time; it cannot, because an amount's currency is known
+only when one is asked about. `http.md`, the route's schema doc, `roles.rs`,
+`limits.rs`, the 5b box and the book's `erp-tenant` and `ledger` pages now say
+which checks supply an amount and what an unjudgeable one does. The HTTP guard
+is `a_bookkeeper_cannot_walk_around_the_limit_by_reversal_or_currency`, which
+shares its setup with the first test (`a_bookkeeper_limited_to_ten_thousand`)
+because the two together outgrew clippy's function length.
+
+| broke | failed |
+|---|---|
+| `Limits::explain` back on `Rules::explain` (no answer does not apply) | `an_amount_in_a_currency_the_limit_does_not_name…`: *no answer is not under it*; `an_exception_in_another_currency…` on 5,000,000 USD; `a_bookkeeper_cannot_walk_around_the_limit_by_reversal_or_currency`: **200** *in another currency* |
+| an undecided `allow` counted in too (`\|_\| true`) | `an_exception_in_another_currency…`: the riyal 20,000 was let through by the dollar exception |
+| `All` answering `false` on an unknown part | the same two unit tests, `an_amount_in_another_currency_is_no_answer_and_stays_one` (`Some(false)`, not `None`), and `a_bookkeeper_cannot_walk_around…`: 200 |
+| `Not` back on `!holds` | `an_amount_in_another_currency_is_no_answer…`: *not of no answer* `Some(true)` |
+| the reversal's `within_limits` call removed | `a_bookkeeper_cannot_walk_around…`: *20,000 backwards* 200. The bookkeeper reversing their own 4,000 is the contrast |
+
+**Left open.**
+
+- **No per-member branch.** "Only their own branch" needs a record of which
+  branch is somebody's; the `branch` fact is the request's `X-Branch`, which the
+  caller chooses.
+- **A 403 does not say which rule refused** (decision 9). `Limits::explain`
+  exists; returning its name changes `permits`' signature and both callers.
+- **An unusable stored row cannot be read back.** `GET` answers 500 and the
+  owner replaces the rules blind. Showing the raw JSON would need a second,
+  unvalidated read path.
+- **Keys scoped `*:manage_tenant` can write limits**, as they can the calendar.
+- **Only the ledger's two routes supply an amount.** Every other module that
+  posts — sales, purchases, prepaid, pos, payroll, payments and more — does it
+  through `post_entry_in` or `reverse_in`, from routes that never call
+  `still_permits`, so a bookkeeper limited to ten thousand riyals can still
+  issue a fifty-thousand invoice. That is a
+  question per module — what an invoice's amount is, and whether issuing one
+  is "posting an entry" — and `post_entry_in` cannot answer it, because it has
+  a connection and no `Access`. `http.md` says so. *Answered for sales documents
+  by §68, with a different control*: the owner's per-document limit, judged
+  inside the `sales` roots where an invoice's total exists, stops the
+  fifty-thousand invoice, credit note or refund. Permission limits still judge
+  only the ledger's two routes, and supplier bills, payroll and pay-outs are
+  still unlimited by amount.
+- **A tenant with a refusal in riyals is refused every dollar entry that rule
+  would judge** until it writes the dollar `allow` above it. Refused, visibly,
+  and fixed by the owner, which is the direction L6 asks for.
+- **No dry run**, still the 5b box it was.
+
+### 62 · The audit trail gets readers, and a column that says whose it is
+
+**Built 2026-09-11.** The control plane has recorded every change to members,
+keys, domains, modules, staff and a tenant's status since Phase 1, and nothing
+read it. The only readers were raw SQL in tests. So ARCHITECTURE §1.9's "visible
+to the tenant" was not true, §59's suspension reason went to an owner who had no
+way to see it, and "who suspended this person" was a question for psql.
+Decisions 5, 6 and 12 of that day shape this: handles stay in the trail, a
+person reads their own, and a suspended tenant's owner reads why.
+
+**The root: a row did not say which tenant it concerned.** "The entries about
+tenant T" meant an OR across the subject, a `tenant` key some writers put in
+`detail`, and a join to `api_key`. `api_key.revoked` and `api_key.rotated` had
+no tenant anywhere in the row, so no query could find them. Any new writer that
+left the tenant out of `detail` would have dropped out of the tenant's view.
+`migrations/control/0019_audit_tenant.sql` adds `tenant_id`, with no foreign
+key, because the entries outlive the tenant: `tenant.abandoned` and
+`tenant.demo_reaped` are the only record a deleted tenant existed. It backfills
+the old rows from the three places the tenant used to be, and adds an index
+for the tenant view and one on `on_behalf_of` (see below). `record()`
+(`lib.rs:2311`) takes `tenant: Option<TenantId>` after the actor, so every one
+of the 31 writers now states it. The compiler found them all, batch 1's
+included: `moved()` passes the tenant, `tenant.abandoned` passes it, staff
+changes and `dealt_with` in `dead_letters.rs` pass `None`. The detail shapes are
+unchanged, so old and new rows read alike.
+
+**The column would have opened a hole in the trigger.** `0007`'s function
+allows exactly one UPDATE, an actor nulled, and it lists the columns that must
+not change. It did not know `tenant_id`. So an UPDATE that moved an entry into
+another tenant's trail, or out of every tenant's trail, would have passed. `0019`
+re-pins the function with `tenant_id` in the list, after the backfill (which
+relies on the old function to pass).
+
+**One query, three readers** (`lib.rs:2346`–`2445`), newest first and
+keyset-paged on the entry's id. The id is an identity column allocated in
+order; `at` is a transaction timestamp and skews at least as much.
+
+- `tenant_audit`: `tenant_id = T`. Entries about a person alone are not in it,
+  even when the person is a member, because an account's suspension may be
+  about another company. The members list already shows `suspended`.
+- `identity_audit`: entries whose subject is the person, or whose actor or
+  on-behalf-of is them. That OR needed the third column indexed, or it scans
+  the whole trail.
+- `platform_audit`: either filter, both (the entries in each), or neither
+  (everything, including what concerns no tenant: staff changes, dead letters,
+  clusters, signups nobody confirmed).
+
+**Who is named.** On the first two readers, an actor's login is filled in only
+where they are, or were, a member of the tenant the entry concerns.
+`membership` keeps revoked rows, so somebody who has left is still named for
+what they did. Staff who are not, and never were, members of the tenant show
+up on `tenant.support_access` and `tenant.suspended` by id alone. A staff
+member who also is, or was, a member of it is a co-member like any other and is
+named. Decision 6 asks exactly that for the personal view, and it
+is the same rule for the tenant's. Staff see every actor's login. An erased
+actor comes back as a null actor, which is what a system action looks like.
+
+**The owner's route cannot go through `enter`,** and §59 said why:
+`Allowed<ManageTenant>` goes through `Tenant` and `enter`, which answers any
+tenant that is not active with 503. `enter`'s checks now live in a private
+`admitted(identity, tenant, serving)` (`lib.rs:495`). `enter` calls it with
+`serving` true and then opens a connection, as before, in the same order. The
+new `admit` (`lib.rs:485`) calls it with `serving` false and opens nothing. So
+the answer to "may this person act here" is still written once, with the
+identity, the membership and the tenant's second-factor rule. Only "is it
+serving" and the connection are left out.
+
+`erp_web::ManagesTenant` (`extract.rs:1034`) is the door: `admit`, then
+`Allowed`'s two gates in `Allowed`'s order, a key's scopes and then the role,
+with the same two 403s. Those 403s are now the functions `not_permitted` and
+`out_of_scope` (`:981`, `:995`), which `Allowed` uses too, so the wording
+cannot drift. It hands out no `TenantDb`. It does not consult limits, because
+they are kept in the tenant's database, which it does not open. Its one route is
+`GET /v1/audit`, beside `GET /v1/sessions/current/audit`, which takes
+`Authenticated` and refuses a key, in `crates/erp-api/src/audit.rs`. `GET /v1/platform/audit`
+(`platform.rs:422`) takes `Staff<ReadAuditTrail>`, the fourth `Power` marker,
+so support and superadmins read it. All three answer in one `AuditView`, paged, and share
+`resume`, which reads a cursor through `erp_control::audit_position`. A cursor
+that is not one part holding an integer is `400 request.invalid_cursor`, never
+the first page again. The matrices got their rows: `audit_trail` OWNER and
+`my_audit_trail` ALL_ROLES (242), and `platform_audit_trail` `read_audit_trail`
+(ten).
+
+**A key needs `*:manage_tenant`** to read a tenant's trail: the wildcard
+`Allowed` asks of every route outside a module. A key of a suspended tenant that has that
+scope can still read it, as the owner can. Keys never checked the tenant's
+status; `enter` did that for them.
+
+**Handles stay (decision 5).** `invitation.created`, `invitation.accepted` and
+`signup.confirmed` carry the handle in `detail`, `signup.requested` uses it as
+the subject, and erasure nulls actors only. `erase_identity`'s rustdoc said the
+trail stays "with this person's name removed from it". It now says the link is
+removed and the address is not, and that this is the product owner's call to
+keep a legal record of who was given access. The book says the same. Nothing is
+redacted.
+
+**What the trail does not record,** so nobody reads its silence as an answer:
+signing in and out, passwords changed or reset (`passwords.rs`), second
+factors enrolled or removed (`second_factor.rs`), and a tenant's second-factor
+rule (`set_second_factor_requirement`, which changes the tenant row and records
+nothing). A tenant's settings, permission limits among them, live in its own
+`configuration` table with its own `set_by`. Its business lives in its event
+log. RUNNING's platform section says this too.
+
+**Doc corrections.** `record()` said the table refuses `UPDATE` "so this is the
+only way its contents change". That has been false since `0007`, and it now
+names the one exception. `access()` said it was "the same answer `enter`
+decides on", but it is the cached membership alone, without identity status or
+the second-factor rule. It now says so and points at `admit`. §59 and the texts
+it left said "nothing shows it yet": the suspend route's doc, `http.md` and
+RUNNING now name `GET /v1/audit`. Both also said a suspended tenant's members and
+keys get 503 "from the next request", and they now say everywhere but the trail.
+The book's "every power but `ReadAuditTrail` has a door" is gone, and ARCHITECTURE
+§1.9 says the tenant sees support access. `0018`'s column comment ("Also
+recorded in the audit trail as tenant.suspended") was already true and stays.
+
+**Falsified**, each by breaking Rust and watching the named test fail:
+
+| broke | failed |
+|---|---|
+| `admit` refuses a tenant that is not serving (`admitted(.., true)`) | `the_owner_of_a_suspended_tenant_reads_why`: *get /v1/audit answered 503* |
+| `moved()` records `None` for the tenant | the same test: the newest entry was `membership.granted`, not `tenant.suspended` |
+| `revoke_key` records `None` | `an_owner_reads_their_tenants_trail_and_nobody_elses`: *no api_key.revoked* |
+| `tenant_audit` drops its tenant | the same test: *not acme's*, a platform `membership.granted` |
+| `tenant_audit` names every actor | the same test: *a customer was shown a staff member's address*, `support@erp.test` |
+| `ManagesTenant` skips the key's scopes | the same test: `*:read` answered 200 |
+| `ManagesTenant` skips the role | `every_role_against_every_endpoint`: *accountant → GET /v1/audit answered 200*; `…reads_why`: the clerk got 200 |
+| `identity_audit` drops its person | `a_person_reads_what_was_done_to_them_and_by_them`: *not about sara, nor by her* |
+| `identity_audit` names every actor | the same test: *a staff member's address was shown to a customer* |
+| `platform_audit` names only co-members | `support_reads_the_whole_trail_narrowed_by_tenant_or_person`: billing's handle null; `a_person_reads…`: admin's null |
+| `platform_audit` drops the tenant filter | `support_reads…`: an entry with no tenant in globex's view |
+| `ReadAuditTrail` asks for `SuspendTenants` | `every_platform_role_against_every_platform_endpoint`: *billing → GET /v1/platform/audit answered 200* |
+| `audit_position` reads a bad cursor as the top | `the_audit_trail_pages_without_losing_or_repeating_entries`: *not a number*, 200 |
+| the keyset resumes at `before + 1` | the same test: *paging lost, repeated or reordered an entry* |
+
+**One SQL falsification, for review.** The trigger's new line is SQL, and SQL
+cannot be broken in Rust. I deleted the line from `0019`, touched `lib.rs`, and
+watched `the_audit_trail_is_still_append_only_for_everything_else` fail with
+*an entry was taken out of its tenant's trail*. Then I restored the file byte
+for byte, and the test passed. No `query!` text changed, so `.sqlx/` was not
+involved. The broken template database is left on the test cluster for `just
+clean-databases`.
+
+**Not tested: the backfill.** The testkit migrates empty databases, and seeding
+pre-`0019` rows would take SQL the product can no longer produce. A cast that
+fails aborts the migration rather than leaving a row out. Every writer stating
+a tenant is enforced by the compiler, not a test. (§66 made the backfill one
+`UPDATE` through `audit_entry_tenant`, the function the insert trigger uses,
+and the trigger is tested, so the rules are tested even though this statement
+is not.)
+
+**What review found.** Two things, both fixed.
+
+- *An API key could read the personal trail.* The route took plain
+  `Authenticated`, which admits keys. A key's identity is the subject of the
+  `membership.granted` that issuing it writes, with the issuing owner as actor
+  and the tenant set, so the co-member rule named the owner. A key scoped only
+  `booking:read`, refused `/v1/members`, got the owner's address from
+  `/v1/sessions/current/audit`. The route now answers a key `403
+  keys.not_a_person` (`audit.rs:151`), a new code with en and ar text that
+  names no scope because none reaches it. The check sits in the one handler
+  that needs it, as `Staff<P>` refuses keys in its extractor; the other
+  `/v1/sessions/*` routes still take keys, and are noted below.
+- *The docs said a customer never sees a staff member's address.* The query
+  names any actor who is, or was, a member of the entry's tenant, and staff can
+  be members: `a_person_reads…` grants support to an acme clerk. The docs
+  (`lib.rs:2383`, `model.rs:186`, `audit.rs`, this section, ARCHITECTURE §1.9,
+  the book) now say staff who never were members appear by id alone, and one
+  who was is named like any co-member. That is decision 6's rule, so the code
+  stays.
+
+Falsified: with the key check in `my_audit_trail` made unreachable,
+`a_key_reads_no_personal_trail` failed with *a key read a person's trail*:
+status 200, and the owner's address in the body.
+
+**No state is seeded by SQL.** Every entry the new tests read was written by
+the product: role changes, keys, staff grants and a suspension over HTTP,
+`enter_for_support` through the control plane. The extended append-only test
+uses raw `UPDATE`s only to show that the database refuses them.
+
+**Left open.**
+
+- ~~**Rolling deploys.** A pod on the build before `0019` inserts without a tenant
+  during the overlap, and the trigger forbids filling it in later. There is a
+  `ponytail:` note at `record()` naming the fix (a BEFORE INSERT default from
+  `subject_type`).~~ Closed by §66: `0019` itself fills the tenant on insert,
+  by the backfill's own rules, so there is no window.
+- **Not atomic.** `record()` still runs on the pool after the act commits, as
+  §61 noted, so a crash between the two leaves an unrecorded act.
+- **Infrastructure names reach customers.** `tenant.registered` carries its
+  cluster in `detail`, and `detail` is returned raw. The owner's view shows it.
+  It is low-sensitivity; filter it per action if it matters.
+- **No retention.** The trigger refuses every DELETE, so a limit on how long
+  entries are kept would need a new permitted shape and a sweep.
+- **Filters, and a way to find a tenant.** The tenant and personal views take no
+  action or subject filter. Staff still find a tenant's id in psql.
+- ~~**Limits and decision 9.** `ManagesTenant` consults no limits, while
+  `Allowed<ManageTenant>` does. Until the limits item makes `ManageTenant`
+  unnarrowable, a limit written against it narrows `/v1/members` and not
+  `/v1/audit`.~~ Closed by §63: no limit narrows `ManageTenant`, so the two
+  agree.
+- `signup.requested` names a handle, not an identity, so it is in no personal
+  view.
+- **Keys on the other personal routes.** `/v1/sessions/second-factor*`,
+  `/v1/sessions/current/password` and `DELETE /v1/sessions/current` take
+  `Authenticated` too, and so admit a key acting on its own identity. None
+  reveals anybody else, which is why only the trail refuses one. A `Person`
+  extractor for all of them is the root fix if that changes.
+
+### 61 · The control plane's outbox gets the watchers a tenant's has
+
+**Built 2026-09-11.** The control plane has had an outbox since invitations
+started sending email, and it now carries every signup confirmation,
+invitation, reset link and sign-in code. It got the dispatcher and none of the
+three things that watch a tenant's outbox:
+
+- **Nothing checked it.** `outbox_health` had one caller, `kernel_findings`,
+  which takes a `TenantDb`. A deployment with no `SMTP_URL` held every
+  top-of-funnel email unsent, and said so once, in a warning at start-up.
+  `dispatch.rs:258` promised that "the backlog-age health check fires", which
+  was true for tenants only, and RUNNING's SMTP paragraph leaned on it.
+- **Nothing handled its dead letters.** `GET /v1/effects/dead` and its requeue
+  sit behind `Allowed<ManageTenant>` and read `tenant.db`. For the control
+  plane the way back was hand-written SQL, the defect `effects.rs` was written
+  to remove.
+- **Nothing forgot its receipts.** `sweep_delivered` ran only inside
+  `Retention::sweep(&TenantDb)`, so every delivered email and text, each an
+  address and an expired credential, was kept for ever.
+
+**All three are the existing functions, pointed at the control pool.** They
+already take a bare connection, and the two tables are the same
+(`the_two_outboxes_are_the_same_table`), so nothing is copied.
+
+- **Health.** The outbox's two findings moved into `outbox_findings(conn)`
+  (`health.rs:197`). The tenant check calls it as before, and
+  `HealthJob::control_findings` (`:146`) calls it on `control.pool()`.
+  `HealthJob` is also a `PlatformJob` now, `control.health` (`:257`),
+  registered beside its tenant registration (`bin/worker.rs:146`). Platform jobs
+  run every claim cycle, a quarter of a second apart on an idle fleet, so it
+  goes through the same `claim_turn`, now keyed by `Option<TenantId>` with
+  `None` for the control plane. A tenant being checked cannot use up the
+  control plane's turn. A finding logs the tenant check's `invariant violated`
+  with `plane = "control"`, so an alert on that message catches it. Every
+  worker process runs the check, so N workers log a finding N times per
+  interval; a `ponytail:` comment says when to give it a lease.
+- **Retention.** `Retention::sweep_control(control, now)` (`retention.rs:63`)
+  is `sweep_delivered` with the tenant plane's thirty days, and the reaper
+  calls it after the reset links (`reaper.rs:89`). It is not a platform job:
+  `outbox` has no index on `delivered_at`, and a sequential scan four times a
+  second on every worker is not a sweep. It also bounds the table the new
+  health check counts.
+- **Dead letters**, over HTTP (decisions 1, 2 and 10). Three routes on
+  `Staff<HandleDeadLetters>`, a new `Power` marker, so support and superadmins:
+  `GET /v1/platform/effects/dead`, `POST …/{id}/requeue` and `DELETE …/{id}`
+  (`platform.rs:309`, `:343`, `:379`). They answer in the tenant route's
+  `DeadLetterView`, the same schema, and share its id parsing and its
+  `404 request.no_such_dead_letter` (`effects.rs`), so no new message codes.
+  There is no nudge: platform jobs run every cycle anyway. Behind them,
+  `crates/erp-control/src/dead_letters.rs` calls the `erp_eventlog` functions
+  on the control pool and records `effect.requeued` or `effect.dismissed`
+  naming the staff member, with `{kind, idempotency_key}` as the detail and
+  nothing else. The payload is never recorded: it holds the address and, for a
+  reset or a code, the credential. The key says which row the effect was about
+  (`reset:<id>`), and that id is the row's, not the token.
+
+**`erp_eventlog::dismiss` is new** (`effect.rs:307`), beside `requeue`. It
+deletes a row only when `dead_at IS NOT NULL` and returns its kind and key. It
+exists because a sign-in code expires in five minutes and a reset link in an
+hour, while the platform dispatcher's retries (16 attempts, backoff capped at
+an hour) take about four hours to give up. A code or reset letter that died of
+an outage had expired long before it died. Until now the only way to clear one
+was to requeue it, which mails a dead credential, and one left uncleared keeps
+`no_dead_letters` firing every five minutes for good, which teaches people to
+ignore it. The requeue route's doc, the book and RUNNING all say to dismiss
+those. `requeue` now returns `Option<Handled>` (kind and key) instead of
+`bool`, so its caller can record what it touched; the tenant route reads
+`.is_some()` and behaves as before. The tenant surface does not get a dismiss
+route here, but the function is there for it.
+
+**Recorded after the act, not in its transaction**, like every other audited
+write in the control plane (`suspend_tenant`, `grant_staff`), because `record()`
+takes the pool. A failure between the two leaves an unrecorded requeue or
+dismissal behind a 500. For review; the audit item changes `record()` anyway.
+
+**Doc corrections.** `effect.rs` had a stray first line on `DeadLetter`'s doc,
+"Counts an operator, and the per-tenant health check, cares about"; it belongs
+to `OutboxHealth` and now says either plane. `dispatch.rs:258` is true now and
+says so. ARCHITECTURE §7 says the two outbox invariants are asserted for the
+control plane too. RUNNING's SMTP paragraph says what gets logged, the reaper
+paragraph names the new sweep, and the platform section says how to handle the
+control plane's dead letters. The book said `HandleDeadLetters` had no door. The
+comment in `migrations/control/0008_outbox.sql` calling dead letters "a
+per-tenant health assertion" stays, because sqlx checksums migration files.
+
+**Falsified**, each by breaking Rust and watching the named test fail:
+
+| broke | failed |
+|---|---|
+| `dismiss` falls back to deleting the row whatever its state | `only_a_dead_letter_can_be_dismissed`: *the delivered effect is not a dead letter, and was dismissed anyway*; `support_requeues_and_dismisses_…`: dismissing the pending one answered 204 |
+| a dismissal not recorded | `support_requeues_and_dismisses_…`: the audit trail held only `effect.requeued` |
+| the dismiss route records `Actor::system()` | the same test: `effect.dismissed` with no actor |
+| the dismiss route on `Staff<SuspendTenants>` | `every_platform_role_against_every_platform_endpoint`: *billing → DELETE … answered 400, and the table says refused* |
+| `control_findings` answers `Ok(vec![])` | `a_dead_letter_in_the_control_plane_is_a_finding`: `[]`, not `["no_dead_letters"]` |
+| the tenant tick takes the control plane's turn (`claim_turn(None)`) | `the_control_plane_has_its_own_turn_on_an_interval`: the first platform tick answered `Idle` |
+| the platform tick without `claim_turn` | the same test: the second tick checked again and failed |
+| `sweep_control` without `- DELIVERED_EFFECTS` | `the_control_plane_forgets_what_it_delivered_and_nothing_else`: *a receipt younger than the window is kept*, 1 not 0 |
+| `sweep_control` answers `Ok(0)` | the same test: *the delivered one goes*, 0 not 1 |
+| the English 404 back to "already requeued, or never given up on" | `support_requeues_and_dismisses_…`: the requeue after a dismissal read *already requeued*, with no *dismissed* in it |
+| the Arabic 404 without أو حُذفت | the same test, on the Arabic detail |
+
+**No state is seeded by SQL.** Dead letters are made the product's way: a
+relay that refuses (`MailError::Refused`, which is permanent) in `erp-worker`,
+and a handler that answers `Permanent` in `erp-api` and `erp-eventlog`. The
+SQL in these tests only reads. The own-turn test closes the control pool, so
+that a check which runs is an error; that is how it sees whether the check ran.
+
+**Review found three places that still said a dead letter is only ever
+requeued**, one root: `dismiss` added a way out and the text written before it
+was not reread.
+
+- The `404 request.no_such_dead_letter` both new routes reuse said "it was
+  already requeued, or never given up on", in English and Arabic
+  (`erp-web/src/messages.rs:679`, `:686`). After a dismissal that reason is
+  false. It now says "requeued or dismissed" (أو حُذفت), which is still true of
+  the tenant route. The test asserted only the code, so it passed on the wrong
+  text; it now reads the detail after a dismissal in both languages.
+  `requeue`'s own rustdoc said the same and is fixed.
+- Both outbox migrations (`control/0008:96`, `tenant/0003:84`) say of
+  `dead_at`: "Never deleted — a dead letter is evidence". `dismiss` deletes
+  them. The files stay, for the checksums; `dismiss`'s rustdoc and the book's
+  dead-letters section now say it is the one way a dead letter is deleted, that
+  the migrations predate it, and that the kind and key survive in the caller's
+  record (`effect.dismissed` on the control plane).
+- The book said the tenant's and the control plane's dead-letter routes "are
+  the same three functions". The tenant surface has no dismiss route. It now
+  says the platform uses all three and the tenant the first two.
+
+The two prose fixes have no test; the one behaviour under them, that `dismiss`
+touches only a dead row, is `only_a_dead_letter_can_be_dismissed`.
+
+**Left open.** A dismiss route on the tenant surface. The N identical log
+lines from N workers. Nothing shows `effect.*` entries until the audit reader
+lands *(since §62: `GET /v1/platform/audit` does)*. The platform matrix sends the two id routes a tenant UUID, so an allowed
+caller gets a 400 rather than a 404; the matrix only asks whether it was a 403.
+
+### 60 · Signups cut off mid-build
+
+**Built 2026-09-11.** The plan box asked for a sweeper for tenants stuck in
+`provisioning`, on the premise that a crash strands them. A crash does, but the
+common cause was our own API: `bin/api` wraps every route in a 30-second
+`TimeoutLayer`, and a client can close the tab sooner. Either one drops the
+handler's future, and `provision` ran inside it. So the compensation in
+`provision` and the unclaim in `confirm_signup` were dropped with it. The tenant
+stayed `provisioning` for ever, often with a migrated database behind it. Its
+slug stayed taken, because `request_signup` checks the slug whatever its status,
+and the customer's link stayed spent. Decision 8 says to finish the build
+anyway, and to keep the sweeper for real crashes.
+
+**The build runs on a task the request only waits for.** `confirm_signup`
+(`signup.rs:409`) now takes `self: &Arc<Self>`, spawns the claim, the build, the
+compensation and the audit entry onto a task of their own, and awaits the
+handle. A dropped request drops only the wait. The task still ends in one of the
+two outcomes it would have reached anyway: an active company that the person
+logs into with their password, or a failure undone and the link unclaimed. The
+spawn is in the control plane, not the handler, because that is where the
+compensation lives. The only production path to `provision` is that handler,
+and the demo seeder reaches it over HTTP too. Invitations build nothing. The
+handler's doc, and so `openapi.json`, says that a timeout is not a failure.
+
+**The unclaimed link did not work, and the new test found it.** For a new
+account, the first attempt creates the identity and its login. After a failure
+the link was put back, but the next click tried to create the login again and
+got `HandleTaken` for its own handle. So "the link still works" was true only
+for an address that already had an account. `build_signup` now writes the new
+identity onto the request as soon as the identity exists (`signup.rs:507`),
+setting `identity_id` and clearing `password_hash`, which the one-owner CHECK
+allows. A retry then takes the existing-account path. A side effect: a
+confirmation that got as far as the account no longer leaves a password hash on
+the request.
+
+**`abandon` is safe to call with a stale value, so it is now public**
+(`provision.rs:500`). It had trusted the `Tenant` it was given: if the status
+said provisioning, it dropped the database first and then deleted the row with a
+status filter. A sweep that read a tenant just before it activated would have
+dropped a live company's database and kept a row pointing at nothing. Now:
+
+- **The row is the lock.** `abandon` re-reads the row `FOR UPDATE` while it is
+  still `provisioning`, and holds it until the `DELETE` commits.
+  `activate_tenant`'s `UPDATE` waits on it, and so do the foreign-key checks
+  behind `enable_module` and `grant_membership`: `FOR UPDATE` conflicts with the
+  `KEY SHARE` they take. If the row is not there, `abandon` returns `Ok(false)`
+  and touches nothing. A provisioner that loses the race is refused at
+  activation. That was already true through §59's `moved()`, which answers
+  `NoSuchTenant` for a row that is gone, so this item's own change to
+  `activate_tenant` was not needed.
+- **The database is asked what is in it**, through the same `occupancy_of` the
+  orphan sweep uses. If it has events or a setting a person chose, `abandon`
+  refuses with `Corrupt`. A provisioning row over a database like that is a
+  control plane restored to a point behind its database, not a dead signup. A
+  database it cannot open is refused too (L6).
+- **A database that does not exist is empty.** `occupancy_of` answers `Ok(None)`
+  for SQLSTATE 3D000 on connect (`provision.rs:973`), which is the crash before
+  `CREATE DATABASE`. For the orphan sweep this changes nothing: a database
+  listed a moment ago and gone now was going to be dropped with `IF EXISTS`
+  anyway.
+- `abandon` records `tenant.abandoned`. It used to leave no entry.
+
+**The sweep** is `reap_stuck_provisioning(grace, limit)` (`provision.rs:781`).
+It has the same shape as `reap_expired_demos`: it lists, abandons each one, and
+logs a failure and moves on. The reaper runs it after the demo sweep and before
+the orphans (`reaper.rs:102`). The order does not matter for correctness, because
+it drops a database and the row that names it together.
+`PROVISIONING_GRACE_SECONDS` is 15 minutes (`provision.rs:840`). The doc says
+what the grace is for: **not safety** (the lock and the look inside provide
+that), but not failing a signup that is still building. That means a spawned
+build, or a statement still running on the server after the process that sent
+it died. A stuck name is held for up to the grace plus the reaper's schedule,
+and RUNNING says to schedule it at least hourly. A link spent by a build that
+died stays spent after the sweep (decision 13); the person asks again.
+
+**Several docs said something false.** §56 and the orphan doc in `provision.rs`
+both said *"a provisioning that dies leaves a row with no database — which
+`abandon` handles"*. That was wrong twice: a cut-off after `CREATE DATABASE`
+leaves the database too, and `abandon` only ran in-process. RUNNING said the
+same. `provision.rs`'s module doc said every step is idempotent, *"so 'recover'
+and 'retry' are the same operation"*. Nothing retries: each `provision`
+registers a new `TenantId`. That bullet is replaced by one about the sweep. The
+book said *"Signup returns immediately and the provisioner works in the
+background"* and *"`sign_up` is what `confirm_signup` calls"*. Neither was true;
+both are corrected.
+
+**Two tests drop the request, at the control plane**, because only there can a
+test pass a module that sleeps. Over HTTP, modules are resolved from the
+build's own list. `confirm_and_cut_off` drops `confirm_signup` inside a
+`select!` at the moment the tenant row exists. That is mid-build by
+construction, because the module sleeps after the row is written. It is the
+same drop the `TimeoutLayer` does.
+
+**Falsified**, each by breaking Rust and watching the named test fail:
+
+| broke | failed |
+|---|---|
+| `confirm_signup` builds inline rather than on a task | `a_confirmation_cut_off_mid_build_still_ends_in_a_working_company`: *the tenant activating never happened*; `…that_fails_is_still_compensated`: *the link working again never happened* |
+| the new identity not written onto the request | `…that_fails_is_still_compensated`: *the same link builds the company: `Auth(HandleTaken("owner@acme.test"))`* (also the failure before the fix) |
+| the sweep's loop skips `abandon` | `a_build_that_died_mid_provision_is_swept_and_its_name_freed`: reaped 0, not 1 |
+| `WITH (FORCE)` removed from `drop_database` | the same test: reaped 0; the killed build's `pg_sleep` backend was still in the database |
+| the 3D000 arm removed | `a_provisioning_that_never_got_a_database_is_swept`: *a database that does not exist holds nothing*, 0 not 1 |
+| `tenant.abandoned` recorded under another name | the same test: *an abandonment is recorded*, 0 not 1 |
+| the grace bound as 0 | `a_provisioning_younger_than_the_grace_is_left_alone`: reaped 1 |
+| the locked re-read ignored | `a_tenant_that_activated_after_the_sweep_read_it_survives`: *an active tenant is not abandoned* |
+| `activate_tenant` tells `moved()` a row changed | `activating_a_tenant_the_sweep_abandoned_is_refused`: activation answered `Ok` |
+| the occupancy refusal made a pass-through | `a_provisioning_tenant_with_events_is_never_dropped`: `abandon` answered `Ok` |
+| *(review)* the locked re-read run on the pool, outside the transaction | `an_activation_waits_while_abandon_looks_and_then_finds_nothing`: *activated while abandon was looking: `Ok(Ok(()))`* |
+| *(review)* the cannot-look-inside refusal made a pass-through | `a_provisioning_tenant_whose_database_cannot_be_opened_is_never_dropped`: `abandon` answered `Ok(true)` and dropped it |
+
+**Review found two guards nothing tested, and three kinds of stale prose.**
+
+- **The row lock.** The only test of it passed `abandon` a value that was stale
+  before the call, so moving the `FOR UPDATE` onto the pool — where it
+  autocommits and lets go at once — still passed all nine related tests. And the
+  lock is all that stands between `abandon` and a live company, because its
+  `DELETE` has no status filter. `an_activation_waits_while_abandon_looks_and_then_finds_nothing`
+  now holds the race open: it locks the tenant's `event` table so `abandon`
+  stops inside its look, starts `activate_tenant`, and waits until
+  `pg_stat_activity` shows the activation waiting on a lock. Then it lets go and
+  expects `abandon` to answer `true` and the activation `NoSuchTenant`.
+- **The L6 refusal for a database `abandon` cannot open** had no test either;
+  the one `ALLOW_CONNECTIONS false` test covers the orphan sweep.
+  `a_provisioning_tenant_whose_database_cannot_be_opened_is_never_dropped` is
+  its sibling for `abandon`. Both new tests reach a stuck tenant the way the
+  existing sweep test does, by dropping `sign_up` mid-build, now a
+  `died_mid_build` helper the three share.
+- **Comments that needed a retry.** With the "recover and retry" bullet gone,
+  four places still leaned on it: the entitlement-before-schema comment in
+  `provision` and its mirror on `install_module` (and in the book) justified the
+  order by "retry visibility"; the `42P04` arm called itself "the idempotent
+  case"; the module doc said idempotency solved partial failure; and
+  `provisioning_the_same_tenant_twice_is_safe`'s doc said recovery and retry
+  were the same operation. Nothing reads a provisioning tenant's entitlements
+  back and nothing re-runs `provision`. Each now gives the real reason: the
+  order is harmless because nobody can see the tenant yet, and a module's
+  install is re-run by `install_module` on a live tenant.
+- **The reaper was still optional.** Its header and the book said a deployment
+  with no demos can leave it unscheduled, while RUNNING said at least hourly.
+  With no reaper, a signup whose build died holds its name for ever. Both now
+  say it must be scheduled.
+- **`ORPHAN_GRACE_SECONDS` said nothing deletes**, which stopped being true
+  when the reaper started passing it to `drop_empty_orphans`. It now says the look inside, not
+  the age, is what makes that drop safe.
+
+**Raw SQL, for review:** `a_provisioning_tenant_with_events_is_never_dropped`
+sets an active tenant back to `provisioning` by hand. The product cannot reach
+that state, since nobody can write an event before activation. It simulates a
+restore, as `a_tenant_whose_control_row_was_lost_is_never_dropped` does with a
+`DELETE`, and its doc says so. `a_provisioning_tenant_whose_database_cannot_be_opened_is_never_dropped`
+closes the database with `ALTER DATABASE … ALLOW_CONNECTIONS false`, an
+operator's lock during a restore, as the orphan test does.
+
+**Left open.** Nothing resumes a half-built tenant; the sweep only finishes the
+compensation, and the customer asks again.
+
+### 59 · Suspending a tenant, and the doc that said the worker kept going
+
+**Built 2026-09-11.** Nothing in the product could suspend a tenant. The only
+status write was `activate_tenant`, and the one test with a suspended tenant
+(`tests/fleet.rs`) set it by hand with a raw `UPDATE`. Decisions 1, 4 and 12 of
+that day shape it: staff do it over HTTP, nothing runs while a tenant is
+suspended, and the members get the same generic message everybody gets.
+
+**Two routes**, in `crates/erp-api/src/platform.rs:249` and `:279`: `POST
+/v1/platform/tenants/{id}/suspend` with a required `reason`, and `POST
+…/reinstate`, both `Staff<SuspendTenants>` — the new `Power` marker next to
+`ManageStaff`, so billing and superadmins. Each records the staff member as the
+actor. The suspend route's docs say the reason is written for the tenant's
+owner and goes into the audit trail about their tenant, so nobody types an
+internal note into it. **Nothing shows it to the owner yet**: the reader is the
+audit-trail item, which is still to land. *(Since §62 the owner reads it at
+`GET /v1/audit`, which answers while the tenant is suspended.)* Reinstating takes no reason; the
+entry names who and when. There is no `bin/operator` command for either.
+
+**One place judges a status change.** The three moves (provisioning → active,
+active → suspended, suspended → active) each run `UPDATE … WHERE status =
+<where the move starts>` and hand the row count to `moved()` (`lib.rs:1909`).
+Zero rows is refused: `WrongTenantStatus { status, expected }` naming the status
+the tenant is actually in, or `NoSuchTenant`, and never an `Ok` that did nothing.
+A change forgets the tenant from every entry cache and is recorded. Suspending
+twice is a 409, and so is reinstating an active tenant or suspending one still
+provisioning. The message is staff-facing, `tenants.wrong_status`, en and ar.
+
+**`activate_tenant` was that bug already.** It ignored the row count, so called
+on a tenant that was not provisioning it changed nothing, answered `Ok`, and
+wrote a `tenant.activated` entry anyway. Once reinstating exists, somebody
+reaching for "activate" to bring a tenant back would have got a silent no-op and
+an audit trail that lied. It goes through `moved()` now (`lib.rs:1808`). Its one
+product caller, `sign_up`, only reaches it while the row is provisioning.
+
+**A suspension has a reason, and the schema says so.**
+`migrations/control/0018_tenant_suspension.sql` adds `suspended_reason` and
+`suspended_at` with `tenant_suspension_is_complete`, the rule `identity` has had
+since 0001 plus a length bound `identity`'s lacks: suspended means a reason of 1
+to 500 characters after trimming plus a time, and any other status means neither. The explicit
+`suspended_reason IS NOT NULL` is load-bearing. `length(btrim(NULL))` is NULL,
+and a CHECK that comes out NULL passes. `suspend_tenant` does not check the
+reason itself. It maps that constraint's refusal to `SuspensionReason`, a 400
+`tenants.suspension_reason` (the `tenant_slug_key` → `SlugTaken` pattern), so
+the rule is written down once. The audit entry is the history; the columns are
+the current state and what the rule hangs on. The migration fills in any row
+suspended by hand before it adds the constraint. It carries an `EXEMPTIONS`
+entry because the previous build never writes `suspended`.
+
+**Nothing runs while suspended, including a visit already under way.** Every
+door already refused a suspended tenant: `enter` and `enter_for_the_public` both
+answer `503 access.tenant_unavailable`, gateway callbacks come in through
+`Public`, and `claim_tenants` selects only active tenants. The gap was a visit
+that started before the suspension. `renew_lease` did not look at the status,
+so that visit ran every remaining job, saved-card charges included. It now has
+`AND status = 'active'` (`lib.rs:1028`), and the worker's renewal before every job
+stops the visit. The warning text in `worker.rs:367` says why it can stop now.
+REVIEW B5 gets a line for it. Sessions are not ended, because they belong to
+people who may work for other tenants. This node refuses the tenant on the next
+request, and other nodes within five seconds, or at once where they share
+Redis.
+
+**The doc that said the worker kept going.** `enter_for_maintenance` said
+*"Suspended tenants still need their projections driven"*, and
+`enter_for_the_public` repeated it. Neither was true: the worker, the only
+production caller of `enter_for_maintenance`, never claims a suspended tenant.
+The fleet migrator and module refresh do reach suspended tenants, but through
+their own connections (`maintenance_options`), not this door. The comment now
+says what is true (`lib.rs:606`): a suspended tenant is not refused there, and
+nothing runs for it anyway. The book's lease
+section and ARCHITECTURE §1.14 both said *"claiming and renewing are the same
+call"*, which stopped being true when `renew_lease` was split out. Both are
+corrected.
+
+**`tests/fleet.rs` suspends through `suspend_tenant`**, not raw SQL. The one raw
+`UPDATE` this section adds is in
+`a_suspension_says_why_and_is_audited_and_the_schema_refuses_one_that_does_not`,
+and it is there to prove the database refuses a hand edit.
+
+**Falsified**, each by breaking Rust and watching the named test fail:
+
+| broke | failed |
+|---|---|
+| `forget` removed from `moved()` | `a_suspended_tenant_is_refused_at_every_door_and_reinstated_at_once`: *a member got into a suspended tenant: Ok(())* |
+| `moved()`'s zero-rows refusal disabled | `a_tenant_moves_only_from_the_status_it_is_in`: suspending a provisioning tenant answered `Ok(())` |
+| `activate_tenant` alone told a row changed | the same test: activating a suspended tenant answered `Ok(())` |
+| the constraint → `SuspensionReason` mapping keyed on another name | `a_suspension_says_why…`: *a 3-character reason was not refused* |
+| `record` removed from `moved()` | the same test: *an audit entry was written: RowNotFound* |
+| `renew_lease` back to its old text, with its old `.sqlx` file restored for the build | `a_suspended_tenant_is_not_visited_and_its_visit_stops`: *a visit went on running jobs for a suspended tenant* |
+| `WrongTenantStatus` out of the 409 arm | `billing_suspends_and_reinstates_a_tenant_under_their_own_name`: 500 where 409 was due |
+| the suspend route asks for `ManageStaff` | the HTTP matrix: billing's `POST …/suspend` answered 403 |
+| `WrongTenantStatus` rendered with an uncatalogued code | `every_error_variant_maps_to_a_known_code` |
+| the `EXEMPTIONS` entry removed | `every_migration_is_expand_only` names 0018 |
+
+**Not falsified:** the CHECK itself. Breaking it means editing a migration,
+which is SQL. The hand-edit assertion is what holds it.
+
+**Review found the docs promising a reader that does not exist.** The suspend
+route's doc called the audit trail *"a trail that is theirs to read"*, and it is
+published in `openapi.json`. The migration's column comment said *"where the
+tenant's owner reads it"*. Nothing reads the audit trail, so both claims were
+false. They now say the reason is recorded for the owner and is to be shown to
+them, and that nothing shows it yet (`platform.rs:230`, the `0018` comment, the
+book's `http.md` and RUNNING). The instruction to write it for the owner stays.
+No behaviour changed, so no new test. The property the future reader will depend
+on is the entry itself: `tenant.suspended`, subject the tenant, actor the staff
+member, `detail.reason` trimmed. `a_suspension_says_why…` already pins that
+entry. Re-falsified by recording `{}` as the detail: it failed on the detail
+assertion.
+
+**Left open.** No route finds a tenant's id by its name, so staff take it from
+the control plane for now (RUNNING says how). While a tenant is suspended its
+ZATCA reporting stops too, so a suspension longer than a day can push invoices
+issued just before it past their 24 hours. That is decision 4's cost, and
+RUNNING says so.
+
+**A constraint for the audit-trail reader.** Decision 12 wants the owner to
+read the reason through the audit trail, and the reader as designed cannot meet
+that. The owner's reader, `GET /v1/audit`, is a tenant-host route. Its
+`Allowed<ManageTenant>` goes through `Tenant` and `enter`
+(`erp-web/src/extract.rs:258`), and `enter` answers 503 for any tenant that is
+not active. So the owner of a suspended tenant would get the same 503 there,
+and could read the reason only while the tenant is active, when nobody needs
+it. The self-access route (`GET /v1/sessions/current/audit`, decision 6) would
+miss it too as designed: it selects entries whose subject, actor or
+on-behalf-of is the person, and `tenant.suspended` has the tenant as its
+subject and staff as its actor. Either route needs a path that does not go
+through `enter`. One option: the session route includes tenant-subject entries
+for tenants where the caller holds a live owner membership, whatever the
+tenant's status. The trail is control-plane data, so reading it never needed
+the tenant's database. Its guard test should suspend a tenant and read the
+reason as its owner. *(Met in §62 by the other option: `GET /v1/audit` stays on
+the tenant's host behind `ManagesTenant`, which asks `admit` — `enter`'s checks
+bar the status — and `the_owner_of_a_suspended_tenant_reads_why` is that test.)*
+
+### 58 · Platform staff: roles, one door, and a way to make the first one
+
+**Built 2026-09-11**, as the foundation the suspend, dead-letter and audit-reader
+items stand on. Decisions 1–3 of that day are the product owner's: staff act over
+HTTP, roles split by job, and a CLI makes the first superadmin.
+
+**What was there.** A `membership` row with `scope_kind = 'platform'` and a
+free-text role (`migrations/control/0001_initial.sql:88`), a cache of *whether*
+somebody was staff, and `enter_for_support`, which let in anybody with a live
+platform membership. Nothing in the product could grant one. Its doc said what
+staff may do was decided by the path — *"audited and time-boxed"* — and nothing
+was time-boxed; that sentence is gone.
+
+**The vocabulary is closed and has one table.** `PlatformRole { Support,
+Billing, Superadmin }` and `PlatformPower { SuspendTenants, HandleDeadLetters,
+ReadAuditTrail, EnterForSupport, ManageStaff }` live in
+`crates/erp-control/src/staff.rs`, shaped like the tenant's `Role` and
+`Capability`, and `PlatformRole::may` (`staff.rs:93`) is the matrix: superadmin
+everything, billing suspends, support reads the trail, handles dead letters and
+enters for support. A stored role this build does not know is
+`AccessError::Corrupt` — `UnknownRole` reused rather than a second copy — so a
+`root` row locks nobody in and nobody out silently. The cache now holds the
+parsed `Option<PlatformRole>`.
+
+**One door.** `ControlPlane::staff_may(identity, power)` (`staff.rs:212`) is what
+every platform door asks: active identity, a role that `may`, and a second
+factor. `enter_for_support` asks it for `EnterForSupport` (`lib.rs:551`), so
+**billing can no longer open a tenant's books** — before this, any platform row
+could. `erp_web::Staff<P>` asks it for `P::POWER`; it is to `Power` what
+`Allowed<C>` is to `Capability`, and taking one is the check. Refusals are 403
+either way: `access.not_permitted` naming the power, the same shape a tenant
+role gets, or `access.staff_second_factor_required`. An API key is refused
+before the door (`extract.rs:1147`) — belt and braces, since a key's machine
+identity has no handle to be granted by. That line has no test.
+
+**The door asks whether a factor is enrolled, and that has to mean the session
+went through it.** Two things make it mean that — both added after review, see
+below: confirming an enrolment ends every other session, and staff cannot turn
+their factor off. **`grant_staff` refuses an account with no factor**: a staff
+account with only a password is one somebody holding that password could enrol
+their own factor on, and then they would hold the only one. Whose phone the
+factor is on is the granting superadmin's to know; nothing here can.
+
+**Staff over HTTP**, in `crates/erp-api/src/platform.rs`: `GET`/`POST
+/v1/platform/staff`, `PATCH`/`DELETE /v1/platform/staff/{identity}`, all
+`Staff<ManageStaff>`. The field is `platform_role`, not `role`: `name_the_roles`
+appends the tenant's list to every `role` in the document, and a staff route
+offering `owner` is the drift `every_role_the_document_names_exists` was written
+against. It now names each vocabulary on its own field and that test checks
+both. Every change is a `membership.*` audit entry with the superadmin as actor,
+and forgets the platform cache at once.
+
+**The last live superadmin cannot leave over HTTP**, by demotion or removal,
+their own or anybody's — `LastOwner`'s rule, with "live" meaning an active
+identity, so a suspended superadmin is not somebody who can grant another.
+Unlike `is_last_owner`, the check is **in one transaction that locks every live
+superadmin row first** (`staff.rs:360`), in id order: two superadmins removing
+each other at once otherwise both see the other standing and both succeed. The
+tenant's `is_last_owner` has the same race and I did not touch it.
+
+**A grant race too, found by writing the test for it.** `grant_membership`
+answers success for a membership that is already live, deliberately and without
+changing the role. Two superadmins granting one person `support` and `billing`
+at once were both told 201. `grant_staff` now reads the role back
+(`staff.rs:314`) and tells the one who did not get theirs `staff.already_staff`.
+
+**`bin/operator`** (`crates/erp-worker/src/bin/operator.rs`): `grant-staff
+<email> <role>` through `grant_staff`, and `revoke-staff <email>` through
+`revoke_membership(Scope::Platform)`, which has no last-superadmin guard — the
+break-glass path decision 3 asks for, and which also ends the account's
+sessions. Both record as the system. It opens no cluster
+(`ClusterRegistry::new()`), so it needs `CONTROL_DATABASE_URL`, plus `REDIS_URL`
+where the API has one.
+Anything but those two exact shapes is the usage and exit 2, before it connects.
+Wired into the Dockerfile's build, `cp` and `COPY` lines, a `just operator`
+recipe, and RUNNING's binary count.
+
+**The matrix test.** `role_scoped_operations` now leaves out everything under
+`/v1/platform/`, and `platform_operations` collects exactly that for
+`every_platform_role_against_every_platform_endpoint`: `PLATFORM` tables each
+route's power, `STAFF_POWERS` types decision 2 out rather than reading `may`,
+and every staff role, a tenant owner with a second factor who is not staff, and
+a superadmin with no factor (made by `grant_membership` directly, the one way
+left to be one) are sent at every route. The tenant matrix stays at 240.
+
+**Falsified**, each by breaking Rust and watching the named test fail:
+
+| broke | failed |
+|---|---|
+| `Support` may `ManageStaff` | `every_role_may_exactly_what_it_should`; the HTTP matrix (support → `GET /v1/platform/staff` answered 200) |
+| `Staff<P>` asks for `ReadAuditTrail` whatever `P` is | the HTTP matrix (billing's 403 named the wrong power) |
+| second-factor check removed from `staff_may` | the HTTP matrix (factorless superadmin got 200); `support_access_needs_the_power_and_a_second_factor_and_is_audited` |
+| `enter_for_support` back to "any platform role" | the support-access test: *billing entered a tenant's books* |
+| unknown stored role read as `Support` | `an_unknown_stored_role_is_corrupt_data_not_a_guess`; the support-access test |
+| `forget` removed from `move_staff` | `staff_are_managed_over_http…`: *a promotion waited for the cache* |
+| `platform.rs` records `Actor::system()` | the same test: three audit rows with no actor |
+| grant's second-factor check removed | the same test: 201 where 422 `staff.no_second_factor` was due |
+| last-superadmin guard disabled | `the_last_superadmin_cannot_leave…`; `two_superadmins_removing_each_other…` |
+| superadmin rows read off the transaction (lock released) | `two_superadmins_removing_each_other…`, 5 runs of 5; passes 5 of 5 restored |
+| grant read-back disabled | `two_grants_of_one_person_at_once_tell_the_loser`, 5 of 5 |
+| `revoke-staff` arm accepts any first word | `only_the_two_commands_are_read…` |
+| `platform_role` described with the tenant's roles | `every_role_the_document_names_exists` |
+| platform routes left in `role_scoped_operations` | `every_role_against_every_endpoint`: four untabled operations |
+
+Two of those need saying. **The race tests first passed with the lock
+removed**: one side spent its turn opening a fourth pool connection while the
+other ran to the end. Both now open every connection the pool will give before
+racing, and then fail every time without the fix. And **"live" is a SQL clause**
+(`i.status = 'active'`), which the Rust-only rule cannot break; I broke it with
+the build pointed at the type-check database, watched
+`the_last_superadmin_cannot_leave…` fail on the suspended-superadmin step, and
+restored the text, leaving `.sqlx/` as `just prepare` wrote it.
+
+#### What review found
+
+**A session from before the factor walked through the door.** `staff_may` asks
+whether a factor is enrolled *now*. A reviewer signed in with a password, then
+enrolled, then was granted superadmin — and the first, password-only session
+answered `200` at `GET /v1/platform/staff`. In life: a password phished at nine,
+the owner enrolling at ten and made superadmin at five past, and the attacker's
+session managing staff until it expired twelve hours later without ever holding
+the factor. The paragraph this section used to have said *"a stolen session is a
+stolen session either way"*; this one was not stolen, it was minted from a
+stolen password, which is exactly what the factor is there to stop.
+
+The fix is at the enrolment, not the grant, because the grant is only one of the
+places this shows: **`confirm_second_factor` now ends every other session of the
+identity in its own transaction** (`second_factor.rs:214`), keeping only `keep`,
+the session that confirmed and so just proved the factor. With `start_session`
+refusing password-only sessions once a factor exists, a session alive while a
+factor exists either went through it or confirmed it — for tenants that require
+a factor as much as for staff. The route passes its own token; the Rust callers
+in tests pass `None`.
+
+**And a staff member could turn the factor off**, which reopened the window the
+grant check closes: the account is password-only again, and whoever enrols next
+holds the factor — a password-holder signing in (allowed, no factor exists)
+could enrol first. **`disable_second_factor` now refuses any identity with a live
+platform row** (`second_factor.rs:342`), before it checks the code so a recovery
+code is not spent on a refusal: `403 auth.staff_keeps_second_factor`, en and ar.
+Replacing a factor still works; dropping one means coming off the staff first.
+**A tenant that requires a factor has the same window and I did not close it**:
+its members can still turn theirs off, and whoever enrols next is let in. That
+is a product call about tenants, not part of this item. *Closed by §67: the
+product owner made that call, and the staff refusal became the general one.*
+
+**`operator revoke-staff` told no API node.** It built its control plane without
+`.sharing(...)`, so the revocation forgot the platform cache in its own
+short-lived process and every API node kept the revoked superadmin for up to
+five seconds — the window `move_staff`'s own comment calls *"exactly what was
+just taken away"*. It now shares when `REDIS_URL` is set, as `api` and `worker`
+do (`operator.rs:91`), and since this is the command for a compromised account,
+it also ends that account's sessions (`operator.rs:120`), which the HTTP
+revocation deliberately does not. The book's *"invalidates the platform cache at
+once"* now says where.
+
+| broke | failed |
+|---|---|
+| `confirm_second_factor`'s session delete skipped | `a_session_from_before_the_factor_does_not_reach_a_platform_door`: the phished session answered 200 where 401 was due |
+| staff refusal in `disable_second_factor` skipped | `every_platform_role_against_every_platform_endpoint`: `(204, None)` where `(403, auth.staff_keeps_second_factor)` was due |
+| operator's `control_plane` drops the `Shared` | `revoke_staff_closes_the_door_on_every_node_and_ends_the_sessions`: *the API node still let a revoked superadmin manage staff* |
+| operator's `log_out_everywhere` removed | the same test: *the revoked superadmin's session still works on the API node* |
+
+The operator test runs an API-shaped control plane and the operator's over one
+database and one Redis, warms the API node's cache first, and needs `REDIS_URL`
+the way `erp-control`'s `tests/shared.rs` does — failing without it, not
+skipping.
+
+**Not here, deliberately:** a support-entry route (`enter_for_support` stays a
+function), a staff screen, and doors for the other three powers — suspend, dead
+letters and the audit reader are the next items and each adds one `Power`
+marker. ARCHITECTURE §1.9's "time-boxed, visible to the tenant, attributed to
+both parties" is still design, and now says so.
 
 ### 57 · The leftovers, reclaimed where they are made
 
@@ -963,10 +3651,10 @@ falsified, a day of grace, no `WITH (FORCE)`.
 
 **A review found the premise backwards.** The sweep was justified by "a run that
 dies between `CREATE DATABASE` and the row that names it". `provision` writes the
-row **first** (`provision.rs:159`) and creates the database **second** (`:187`),
+row **first** (`provision.rs:167`) and creates the database **second** (`:195`),
 and `abandon` drops the database before deleting the row. A provisioning that
-dies leaves a row with no database — which `abandon` handles — and never a
-database with no row. **The window the whole design was calibrated against does
+dies leaves a row with no database — which `abandon` handles **— false
+twice**, see §60 — and never a database with no row. **The window the whole design was calibrated against does
 not exist**, and the grace protected the wrong thing: it measures age since
 *signup*, so the older and larger a tenant, the less protection it had.
 
@@ -2727,11 +5415,16 @@ exist, because everything after inherits them.
 
 ### 1d · Control plane
 - [x] Schema: identities, memberships, tenants, entitlements
-- [x] Append-only audit trail, enforced by trigger (D2)
+- [x] Append-only audit trail, enforced by trigger (D2).
+      *Read since §62: a tenant's owner at `GET /v1/audit`, whatever the
+      tenant's status; a person their own at `GET /v1/sessions/current/audit`;
+      support and superadmins all of it at `GET /v1/platform/audit`*
 - [x] Connection manager: LRU pools, `min = 0`, global budget as a semaphore
 - [x] `TenantDb` with no public constructor; `ControlPlane::enter`
 - [x] Tenant registry carries `(cluster, database)` from day one
-- [x] Support access as a separate audited path — no `is_system` bypass
+- [x] Support access as a separate audited path — no `is_system` bypass.
+      *Since §58 it needs the `EnterForSupport` power (support or superadmin)
+      and a second factor; billing is refused*
 - [x] Authenticators and sessions *(landed in 3a, with the rest of auth)*
 
 ### 1e · Build hygiene
@@ -2897,7 +5590,12 @@ modules can say what shape they need.
       `POST /v1/signups/{token}`, which is where the caller gets a working
       system they are already logged into with the ledger installed and usable.
       Two calls since item 5; nothing is built by the first
-- [ ] A sweeper for tenants stuck in `provisioning`. *(**Audited 2026-09-09:
+- [x] A sweeper for tenants stuck in `provisioning`. **Built 2026-09-11, §60**:
+      `reap_stuck_provisioning` in the reaper, through an `abandon` made safe
+      against a stale read and a database with data in it. The commonest cause
+      was not a crash but the API's 30-second timeout or a closed tab dropping
+      the build; a confirmation now builds on a task the request only waits
+      for. *(**Audited 2026-09-09:
       the premise is true and the reason is wrong.** Signup is synchronous end
       to end — `crates/erp-api/src/signup.rs` → `confirm_signup` → `provision`,
       nothing spawned or enqueued. But compensation is **best-effort**:
@@ -3265,7 +5963,9 @@ Not in the original plan at all — it was one line in 4a. It is a phase.
 - [x] The XAdES signature, and the transport (`reqwest` over the OpenSSL stack
       sqlx already links)
 - [x] Sealed module secrets — `SEALING_KEY`, and anything that would store a
-      private key **refuses** without one rather than storing it in the clear
+      private key **refuses** without one rather than storing it in the clear.
+      *Rotatable only since §64: until then one key, and changing it lost
+      every secret; now a list, and `migrator reseal`*
 - [x] Worker sweeps: `tax_sa.sign` and `tax_sa.submit`, registered only when the
       deployment has a sealing key
 - [x] `CertificateExpiry` invariant — sixty days' warning, because renewal needs
@@ -3376,6 +6076,9 @@ and let two working cases describe the engine.
       `Rules<Verdict>` over three facts — `amount`, `branch`, `capability` —
       stored as tenant configuration under `tenant.permission_limits`, empty by
       default so roles decide alone until somebody says otherwise.
+      **Nothing wrote it until §63 (2026-09-11)**, which added the owner's
+      `GET`/`PUT /v1/tenant/permission-limits`, a fourth fact, `role`, and made
+      `ManageTenant` impossible to narrow.
 
       **A limit narrows and never widens**, and it is a shape rather than a
       convention: `Limits::narrow(allowed, facts)` takes the role's own answer
@@ -3388,9 +6091,15 @@ and let two working cases describe the engine.
       match winning — "Olaya is exempt" above "everything else over ten
       thousand". It only ever restores what the role already permitted.
 
-      **The example `roles.rs` named now works**: *"a bookkeeper may post
-      entries under ten thousand riyals"* is one rule, and it leaves reading
-      alone because the capability is a fact.
+      **The example `roles.rs` named now works** — *false until §63*: *"a
+      bookkeeper may post entries under ten thousand riyals"* could not name the
+      bookkeeper, because no fact said who was asking, so the rule refused the
+      owner too; and no route could store it. With §63's `role` fact it is one
+      rule, and it leaves reading alone because the capability is a fact.
+      *Until §63's review it could also be walked around*: an entry in dollars
+      was never "at least ten thousand riyals", and a reversal supplied no
+      amount. Both are closed; it still reaches only the ledger's own entries,
+      not an invoice or a till sale — see §63's Left open.
 
       **`erp-rules` grew a `spans` feature for this.** A permission is not about
       a window of time, so the authorization kernel does not compile the booking

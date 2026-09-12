@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tenant\n                SET status = 'suspended', suspended_reason = $2, suspended_at = now()\n              WHERE id = $1 AND status = 'active'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fa58dc3eead9537b3a5e941c44c236c0428d7ccc6aaed99f0038f4c50b5ffef5"
+}

@@ -496,6 +496,169 @@ impl ControlPlane {
             .map(|row| (row.event_name, row.version))
             .collect())
     }
+
+    /// **Which read model built each projection group, tenant by tenant.**
+    ///
+    /// The raw record, like [`Self::survey_event_versions`], and judged by the
+    /// migrator, which knows what this build projects (D11). Read from the
+    /// tenant's own checkpoints rather than from its entitlements: a disabled
+    /// module keeps its tables (`disable_module`), and they have to be this
+    /// build's shape the moment it is enabled again, because `install_module`
+    /// does not reshape. A module never enabled has no row and costs nothing.
+    ///
+    /// Active and suspended tenants, on every cluster, failures collected.
+    pub async fn survey_read_models(
+        &self,
+    ) -> Result<(Vec<ReadModelVersions>, Vec<(TenantId, String)>), AccessError> {
+        let tenants = self.tenants_with_databases().await?;
+        let mut found = Vec::with_capacity(tenants.len());
+        let mut failed = Vec::new();
+
+        for tenant in tenants {
+            match self.read_models_of(&tenant).await {
+                Ok(installed) => found.push(ReadModelVersions {
+                    tenant: tenant.id,
+                    slug: tenant.slug,
+                    installed,
+                }),
+                Err(e) => {
+                    tracing::error!(
+                        tenant = %tenant.id,
+                        slug = %tenant.slug,
+                        error = %e,
+                        "could not read a tenant's read-model versions"
+                    );
+                    failed.push((tenant.id, e.to_string()));
+                }
+            }
+        }
+
+        Ok((found, failed))
+    }
+
+    async fn read_models_of(
+        &self,
+        tenant: &crate::model::Tenant,
+    ) -> Result<Vec<(String, i16)>, AccessError> {
+        let options = self
+            .tenants
+            .maintenance_options(&tenant.cluster)?
+            .database(&tenant.database_name);
+
+        let mut conn = Box::pin(PgConnection::connect_with(&options)).await?;
+        let rows = sqlx::query!(
+            "SELECT group_name, read_model_version FROM projection_checkpoint ORDER BY group_name"
+        )
+        .fetch_all(&mut conn)
+        .await;
+        conn.close().await.ok();
+
+        Ok(rows?
+            .into_iter()
+            .map(|row| (row.group_name, row.read_model_version))
+            .collect())
+    }
+}
+
+/// One tenant's projection groups and the read-model version each was built
+/// for, from [`ControlPlane::survey_read_models`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadModelVersions {
+    pub tenant: TenantId,
+    pub slug: String,
+    /// `(group, version)`, by group name. 0 is "built before versions were
+    /// recorded".
+    pub installed: Vec<(String, i16)>,
+}
+
+// ---------------------------------------------------------------------------
+// Sealing-key rotation
+// ---------------------------------------------------------------------------
+
+/// What a rotation found across the control plane and the fleet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SealingPlan {
+    /// Summed over the control plane (`control`) and every tenant (by slug).
+    pub census: erp_eventlog::Census,
+    /// Tenants that could not be reached or swept, with why.
+    pub failed: Vec<(TenantId, String)>,
+}
+
+impl SealingPlan {
+    /// **Whether a key other than `current` can leave `SEALING_KEY`.** An
+    /// unreachable tenant counts as "no": nobody knows what it still holds.
+    #[must_use]
+    pub fn is_settled(&self, current: &str) -> bool {
+        self.failed.is_empty() && self.census.is_settled(current)
+    }
+}
+
+impl ControlPlane {
+    /// **Moves every sealed value onto the current key**: second factors in
+    /// the control plane, then module secrets in every tenant database on
+    /// every cluster, suspended tenants included — a suspended tenant that
+    /// comes back to secrets under a retired key has lost them. With `apply`
+    /// false it only looks, and reports what a real run would fail on.
+    ///
+    /// Same walk, connections and concurrency as [`Self::migrate_fleet`], and
+    /// the same ceiling: a tenant on a cluster this process was not configured
+    /// with lands in `failed`, which keeps the plan unsettled. Resumable, since
+    /// every row is its own compare-and-swap.
+    pub async fn reseal_fleet(
+        &self,
+        sealing: &erp_eventlog::SealingKey,
+        apply: bool,
+    ) -> Result<SealingPlan, AccessError> {
+        use futures_util::StreamExt as _;
+
+        let mut plan = SealingPlan::default();
+        plan.census
+            .absorb(self.reseal_second_factors(sealing, apply).await?, "control");
+
+        let tenants = self.tenants_with_databases().await?;
+        let mut visits = futures_util::stream::iter(tenants.iter())
+            .map(|tenant| async move { (tenant, self.reseal_tenant(tenant, sealing, apply).await) })
+            .buffer_unordered(fleet_concurrency());
+
+        while let Some((tenant, outcome)) = visits.next().await {
+            match outcome {
+                Ok(census) => plan.census.absorb(census, &tenant.slug),
+                Err(e) => {
+                    tracing::error!(
+                        tenant = %tenant.id,
+                        slug = %tenant.slug,
+                        error = %e,
+                        "could not reseal a tenant; the next run will retry it"
+                    );
+                    plan.failed.push((tenant.id, e));
+                }
+            }
+        }
+        drop(visits);
+
+        plan.census.unsealable.sort();
+        plan.failed.sort_by_key(|failure| failure.0);
+        Ok(plan)
+    }
+
+    async fn reseal_tenant(
+        &self,
+        tenant: &crate::model::Tenant,
+        sealing: &erp_eventlog::SealingKey,
+        apply: bool,
+    ) -> Result<erp_eventlog::Census, String> {
+        let options = self
+            .tenants
+            .maintenance_options(&tenant.cluster)
+            .map_err(|e| e.to_string())?
+            .database(&tenant.database_name);
+        let mut conn = PgConnection::connect_with(&options)
+            .await
+            .map_err(|e| e.to_string())?;
+        let census = erp_eventlog::secrets::reseal(&mut conn, sealing, apply).await;
+        conn.close().await.ok();
+        census.map_err(|e| e.to_string())
+    }
 }
 
 /// How many tenants the fleet walk visits at once.

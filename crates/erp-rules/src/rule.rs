@@ -111,11 +111,31 @@ impl<E> Rules<E> {
     }
 
     /// **Which rule applies, and what was considered getting there.**
+    ///
+    /// A rule whose condition [cannot be told](DynCondition::decide) does not
+    /// apply.
     #[must_use]
     pub fn explain(&self, facts: &Facts) -> Explained<'_, E> {
+        self.explain_undecided(facts, |_| false)
+    }
+
+    /// [`Self::explain`], with the caller saying whether a rule whose condition
+    /// cannot be told applies.
+    ///
+    /// **For a consumer with a safe answer.** A permission limit that cannot
+    /// say whether 5,000,000 USD is over 10,000 SAR must refuse the entry, not
+    /// wave it through, and must not grant an exception it cannot judge
+    /// either. Only the consumer knows which of its outcomes is the safe one,
+    /// so it says, per rule. A rule counted in is reported as matched.
+    #[must_use]
+    pub fn explain_undecided(
+        &self,
+        facts: &Facts,
+        undecided: impl Fn(&Rule<E>) -> bool,
+    ) -> Explained<'_, E> {
         let mut considered = Vec::new();
         for rule in &self.rules {
-            let matched = rule.when.holds(facts);
+            let matched = rule.when.decide(facts).unwrap_or_else(|| undecided(rule));
             considered.push(Considered {
                 name: &rule.name,
                 matched,

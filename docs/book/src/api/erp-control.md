@@ -31,7 +31,8 @@ must support cross-tenant reporting, none of which an event log helps with.
 | [`auth.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/auth.rs) | Passwords, sessions, `SessionToken`, `InvitationToken` |
 | [`members.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/members.rs) | Adding, removing and re-roling people |
 | [`invitations.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/invitations.rs) | Invite links and acceptance |
-| [`provision.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/provision.rs) | Provisioning, module install, refresh, demo reaping |
+| [`staff.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/staff.rs) | Platform staff: `PlatformRole`, `PlatformPower`, the door every platform power asks at |
+| [`provision.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/provision.rs) | Provisioning, module install, refresh, demo and stuck-provisioning reaping |
 | [`signup.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/signup.rs) | The two halves of signing up, and the mailbox between them |
 | [`pools.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/pools.rs) | `ClusterRegistry`, `PoolConfig`, `TenantPools` |
 | [`placement.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-control/src/placement.rs) | Which cluster a new tenant lands on |
@@ -57,8 +58,18 @@ impl ControlPlane {
     pub fn entry_cache_stats(&self) -> (u64, u64);
     pub fn clear_caches(&self);
     pub fn apply_invalidation(&self, what: &Invalidate);
+    pub async fn read_model_behind(&self, db: &TenantDb, wanted: &[(&'static str, i16)])
+        -> Result<Option<(&'static str, i16)>, AccessError>;
 }
 ```
+
+`read_model_behind` is the request path's question: the first of `wanted`'s
+groups whose tables in this tenant were built for an older read model than the
+version beside it. Only "current" is cached, for the entry TTL. A stale answer
+is never kept, because the rebuild that ends it happens in another process — so
+the first request after the swap is served, and the cache needs no
+invalidation. A miss costs the tenant's database a query, not the control
+plane, and is not counted in `entry_cache_stats`.
 
 `pool()` is the core database, control-plane queries only. It is not a route to
 tenant data.
@@ -92,7 +103,10 @@ every function taking one has been handed proof that all four passed.
 Platform staff do not get in this way, even superadmins. **There is no
 `is_system` bypass.** Support access is `enter_for_support`, which records who
 and why, because an engineer reading a tenant's ledger must not be
-indistinguishable from the tenant's owner doing it.
+indistinguishable from the tenant's owner doing it. It asks `staff_may` for
+`EnterForSupport` — support or superadmin, with a second factor; billing is
+refused — the same door the platform's HTTP routes ask at (see Platform staff
+below).
 
 `enter_for_maintenance` takes **no identity**, and that is the whole safety
 argument. A request handler always has one, so it has no way to reach this path
@@ -102,13 +116,19 @@ bulkhead. It is unaudited on purpose: a projection tick per tenant per interval
 would bury the entries that mean something.
 
 ```rust
+pub async fn admit(&self, identity: IdentityId, tenant: TenantId)
+    -> Result<Access, AccessError>;
 pub async fn access(&self, identity: IdentityId, tenant: TenantId)
     -> Result<Option<Access>, AccessError>;
 ```
 
-The same answer `enter` decides on, without needing the tenant's database to
-exist. Ask this when the question is about authorization and not about data.
-`None` means no live membership.
+`admit` is every check `enter` makes except whether the tenant is serving, with
+no connection: `enter` is `admit`'s checks plus that one, then `open`. It is for
+what the control plane keeps *about* a tenant — the audit trail, which a
+suspended tenant's owner must still read, and `enter` answers them 503.
+`erp_web::ManagesTenant` is its door. `access` is the cached membership alone:
+not whether the identity is active, nor the tenant's second-factor rule. `None`
+means no live membership.
 
 ### AccessError
 
@@ -118,6 +138,8 @@ pub enum AccessError {
     IdentitySuspended,
     NoSuchTenant,
     TenantNotActive { status: TenantStatus },
+    WrongTenantStatus { status: TenantStatus, expected: TenantStatus },
+    SuspensionReason,
     NotAMember,
     Pool(PoolError),
     Database(sqlx::Error),
@@ -257,14 +279,23 @@ impl Actor {
     pub const fn identity(id: IdentityId) -> Self;
     pub const fn impersonating(staff: IdentityId, subject: IdentityId) -> Self;
 }
+
+pub struct AuditEntry {
+    pub id: i64, pub at: Timestamp,
+    pub actor: Option<IdentityId>, pub actor_handle: Option<String>,
+    pub on_behalf_of: Option<IdentityId>, pub tenant: Option<TenantId>,
+    pub action: String, pub subject_type: String, pub subject_id: String,
+    pub detail: serde_json::Value,
+}
 ```
 
 `Scope` is one enum. A nullable tenant field would make "platform membership with
 a tenant id" a state somebody has to check for.
 
-`Provisioning` is a real state and not a transient one. Signup returns
-immediately and the provisioner works in the background, so a tenant is
-visible-but-not-yet-enterable for a few seconds.
+`Provisioning` is a real state and not a transient one. The row is written before
+the database is built and activated only once it is, so for the seconds a build
+takes a tenant is visible but not enterable. One whose build died stays that way
+until the reaper abandons it.
 
 `Actor::system()` is explicit. A bare `None` would let an unattributed audit row
 happen by omission; this way it is a choice somebody made.
@@ -279,6 +310,9 @@ pub async fn register_tenant_on(&self, slug: &str, display_name: &str,
 pub async fn tenant(&self, id: TenantId) -> Result<Option<Tenant>, AccessError>;
 pub async fn tenant_by_slug(&self, slug: &str) -> Result<Option<Tenant>, AccessError>;
 pub async fn activate_tenant(&self, id: TenantId, actor: Actor) -> Result<(), AccessError>;
+pub async fn suspend_tenant(&self, id: TenantId, reason: &str, actor: Actor)
+    -> Result<(), AccessError>;
+pub async fn reinstate_tenant(&self, id: TenantId, actor: Actor) -> Result<(), AccessError>;
 
 pub async fn create_identity(&self, actor: Actor) -> Result<Identity, AccessError>;
 pub async fn identity(&self, id: IdentityId) -> Result<Option<Identity>, AccessError>;
@@ -300,8 +334,18 @@ pub async fn disable_module(&self, tenant_id: TenantId, module: &ModuleId, actor
 pub async fn enabled_modules(&self, tenant_id: TenantId)
     -> Result<EnabledModules, AccessError>;
 
-pub async fn record(&self, actor: Actor, action: &str, subject_type: &str,
-    subject_id: &str, detail: serde_json::Value) -> Result<(), AccessError>;
+pub async fn record(&self, actor: Actor, tenant: Option<TenantId>, action: &str,
+    subject_type: &str, subject_id: &str, detail: serde_json::Value)
+    -> Result<(), AccessError>;
+
+pub async fn tenant_audit(&self, tenant: TenantId, limit: i64, before: Option<i64>)
+    -> Result<Page<AuditEntry>, AccessError>;
+pub async fn identity_audit(&self, identity: IdentityId, limit: i64,
+    before: Option<i64>) -> Result<Page<AuditEntry>, AccessError>;
+pub async fn platform_audit(&self, tenant: Option<TenantId>,
+    identity: Option<IdentityId>, limit: i64, before: Option<i64>)
+    -> Result<Page<AuditEntry>, AccessError>;
+pub fn audit_position(cursor: &Cursor) -> Result<i64, NotACursor>;
 ```
 
 `register_tenant` is the normal path. Signup does not know or care which machine
@@ -312,20 +356,58 @@ tenant with dedicated hardware.
 exists, is migrated and is seeded, never before, or entry would succeed against a
 database with no schema.
 
+The three status moves — provisioning → active, active → suspended, suspended →
+active — each run `UPDATE … WHERE status = <where it starts>` and are judged in one
+private place, `moved`: no row changed is `WrongTenantStatus` naming the status
+the tenant is in (or `NoSuchTenant`), never an `Ok` that did nothing; a change is
+forgotten from the entry cache and recorded. **While a tenant is suspended nothing
+runs for it**: every door refuses it, `claim_tenants` skips it, and
+`renew_lease` answers `false` so a visit under way stops before its next job.
+Support can still open it, and the fleet migrator still brings its schema
+current. Sessions are not ended — they belong to people, who may work elsewhere.
+The reason is the `tenant_suspension_is_complete` constraint's business (1 to 500
+characters, and only on a suspended row); `SuspensionReason` is its refusal,
+named.
+
 `enable_module` is idempotent, because the caller is usually a workflow that may
 be retried. `disable_module` **never drops the module's tables**. A tenant who
 downgrades and returns expects their data, and storage is reclaimed only on
 explicit deletion after an export.
 
-`record` is the only way the audit trail changes. The table refuses `UPDATE` and
-`DELETE` at the database level.
+`record` is the only way an audit entry is written. The table's trigger refuses
+`DELETE` and every `UPDATE` but erasure's, which nulls an actor and changes
+nothing else. Every writer says which tenant the entry concerns, or `None`: a
+person, a cluster, the platform's own outbox. That column is what
+`tenant_audit` selects on. A tenant the writer gives is kept as given. Where
+the writer gave `None`, an insert trigger fills the column from the subject
+when it is a tenant, from `detail`'s `tenant`, or from the key's tenant when
+the subject is an API key. Those are the rules `0019` used to backfill the rows
+written before the column existed, and the same function applies both. The
+trigger is there for a pod still on the build before `0019`, which inserts
+without the column during a deploy. No `None` writer in this build names a
+tenant in any of those three places.
+
+The three readers are one query, newest first, keyset-paged on the entry's id
+(allocated in order); `audit_position` reads a page's cursor back and refuses
+one it did not hand out. `tenant_audit` is a tenant's entries, whatever the
+tenant's status. `identity_audit` is a person's own: entries about them and
+entries they made or were impersonated in. `platform_audit` is everything,
+narrowed by either or both. On the first two an actor's login is filled in only
+where they are, or were, a member of the tenant the entry concerns, so staff who
+never were appear to a customer by id alone; staff see every actor's.
 
 ### erase_identity
 
 The identity row goes, and with it every authenticator, session and membership,
-which cascade. What stays is the audit trail with this person's name removed from
+which cascade. What stays is the audit trail with this person's link removed from
 it: the entries they produced remain, saying what was done and when, attributed
 to nobody. That is the same shape an entry has always had for a system action.
+
+**Their address stays in it.** `invitation.created`, `invitation.accepted` and
+`signup.confirmed` carry the handle in `detail`, `signup.requested` has it as its
+subject, and entries about the identity keep its id as theirs. That is the
+product owner's decision: the trail is kept as the legal record of who was given
+access to what, and when.
 
 Business records are untouched, deliberately. An invoice naming a customer is a
 legal document a tax authority requires to be kept for six years, and erasing a
@@ -405,6 +487,119 @@ is something this crate can know: the public domain is a deployment fact.
 Accepting is granting somebody access to something, and a link that does not say
 what is a link people click without reading.
 
+## Platform staff
+
+```rust
+pub enum PlatformRole { Support, Billing, Superadmin }
+pub enum PlatformPower { SuspendTenants, HandleDeadLetters, ReadAuditTrail, EnterForSupport,
+                        ManageStaff, ResetSecondFactors }
+
+impl PlatformRole { pub const fn may(self, power: PlatformPower) -> bool; }
+
+pub async fn staff_may(&self, identity: IdentityId, power: PlatformPower)
+    -> Result<PlatformRole, AccessError>;
+pub async fn staff(&self) -> Result<Vec<StaffMember>, AccessError>;
+pub async fn grant_staff(&self, handle: &str, role: PlatformRole, actor: Actor)
+    -> Result<IdentityId, StaffError>;
+pub async fn change_staff_role(&self, identity: IdentityId, role: PlatformRole,
+    actor: Actor) -> Result<(), StaffError>;
+pub async fn revoke_staff(&self, identity: IdentityId, actor: Actor)
+    -> Result<(), StaffError>;
+```
+
+A platform membership's role is its own closed vocabulary, not a tenant `Role`:
+forcing it through the tenant enum would let `support` answer questions about a
+ledger. A stored role this build does not know is `AccessError::Corrupt`, never a
+default.
+
+| | suspend tenants | dead letters | audit trail | enter for support | manage staff | reset second factors |
+|---|---|---|---|---|---|---|
+| `superadmin` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `billing` | ✓ | | | | | |
+| `support` | | ✓ | ✓ | ✓ | | ✓ |
+
+`PlatformRole::may` is that table, and the only place the product decides it.
+`staff_may` is the door that asks it: the identity is active, holds a role that
+may, **and has a second factor enrolled**. `enter_for_support` and
+`erp_web::Staff<P>` both go through it; `ReadAuditTrail`'s door is
+`GET /v1/platform/audit`.
+
+"Enrolled" stands in for "this session went through it", and that holds because
+`confirm_second_factor` ends every other session of the identity — a session
+from before the factor never went through it — and `start_session` refuses a
+password-only one afterwards. The door still checks per request, for staff made
+by calling `grant_membership` directly.
+
+`grant_staff` takes an existing password login by handle and refuses one with no
+second factor: a staff account with only a password is one somebody holding that
+password could enrol their own factor on. For the same reason
+`disable_second_factor` refuses staff
+(`AuthError::SecondFactorKept(FactorRequiredBy::Staff)`); they can replace a
+factor, or come off the staff and then drop it. The same refusal, with
+`FactorRequiredBy::Tenant`, covers a live member of any tenant that is not
+deleted and requires a second factor. `second_factor_required_by` is the one
+function that decides both, and it reads the database, not the tenant cache.
+
+```rust
+pub async fn reset_member_second_factor(&self, tenant: TenantId, by: IdentityId,
+    target: IdentityId, locale: Locale, link_base: &str)
+    -> Result<EnrolmentToken, ResetError>;
+pub async fn reset_any_second_factor(&self, by: IdentityId, target: IdentityId,
+    reason: &str, locale: Locale, link_base: &str)
+    -> Result<EnrolmentToken, ResetError>;
+pub async fn enrolment_permitted(&self, identity: IdentityId, link: Option<&str>)
+    -> Result<(), AuthError>;
+pub async fn sweep_enrolment_links(&self) -> Result<u64, AccessError>;
+```
+
+**Somebody who has lost both the app and the paper** is reset by somebody else,
+which is the opposite act from `disable_second_factor` and deliberately shares
+no code with it: it takes no second-factor code, because the person it is for
+has none to give. Both routes reach one private root, which in one transaction
+removes `totp`, `totp_pending` and `recovery`, stamps
+`identity.second_factor_reset_at`, writes a hashed `second_factor_reset` token,
+ends every session, and enqueues the enrolment email (D9). The other nodes'
+session caches are cleared after the commit.
+
+`reset_member_second_factor` decides everything about the *target* — a live
+member here, not the caller, not the owner, not staff, and **not a member of any
+other tenant**, since a factor is the account's everywhere. Whether the *caller*
+may is the route's question, because the claim that lifts it lives in the
+tenant's own database. `reset_any_second_factor` is support's, with a required
+reason, and asks `staff_may(by, ManageStaff)` when the target is staff.
+
+`identity.second_factor_reset_at` is the link-only state, and it is on the
+account rather than on the token row on purpose: if it lapsed with the link,
+waiting an hour would hand a password-only account back to whoever holds the
+password. `enrolment_permitted` is what `begin_second_factor` and
+`confirm_second_factor` both ask; a confirmed enrolment clears the column and
+spends every outstanding link in the same transaction.
+`change_staff_role` and `revoke_staff`
+refuse to demote or remove the **last live superadmin** (a suspended identity
+does not count), in one transaction that locks every live superadmin row first,
+so two superadmins removing each other at once leave one. `revoke_membership`
+with `Scope::Platform` has no such guard; it is what `bin/operator revoke-staff`
+calls, and nothing over HTTP does. Every change invalidates the platform cache at
+once — on every node when the process making it shares a Redis, and otherwise
+only in that process, with the rest converging within the five-second TTL — and
+is recorded as a `membership.*` audit entry naming the actor.
+
+### The control plane's dead letters
+
+```rust
+pub async fn dead_letters(&self, limit: i64) -> Result<Vec<DeadLetter>, AccessError>;
+pub async fn requeue_dead_letter(&self, id: i64, actor: Actor) -> Result<bool, AccessError>;
+pub async fn dismiss_dead_letter(&self, id: i64, actor: Actor) -> Result<bool, AccessError>;
+```
+
+What `HandleDeadLetters` is for: the signup, invitation and reset emails and the
+sign-in texts this plane gave up on. The outbox is the tenant's table, so these
+are `erp_eventlog`'s `dead_letters`, `requeue` and `dismiss` on the control
+pool, not copies of them. `false` means the id is not a dead letter, and nothing
+was touched. A requeue or a dismissal is recorded as `effect.requeued` or
+`effect.dismissed`, naming the actor, with the effect's kind and idempotency key
+and never its payload, which holds the address and usually the credential.
+
 ## Signing up
 
 Two calls with a mailbox in between. An unauthenticated endpoint that built a
@@ -441,7 +636,7 @@ pub async fn request_signup(&self, request: SignupRequest, confirm_base: &str,
 pub async fn pending_signup_modules(&self, token: &str)
     -> Result<Vec<String>, SignupError>;
 
-pub async fn confirm_signup(&self, token: &str, modules: Vec<ModuleSetup>)
+pub async fn confirm_signup(self: &Arc<Self>, token: &str, modules: Vec<ModuleSetup>)
     -> Result<Confirmed, SignupError>;
 
 pub async fn sweep_signups(&self) -> Result<u64, AccessError>;
@@ -463,6 +658,17 @@ they would have to prove a password they never set.
 before anything is built, so two clicks cannot both provision. A failure
 **unclaims** it, because provisioning can fail on a slug somebody took meanwhile
 and burning the link over that turns a recoverable error into a support ticket.
+A new account is written onto the request the moment it exists, so the retry
+signs in as that account and does not try to create it again.
+
+**It finishes when the caller stops waiting.** The claim, the build, the
+compensation and the audit entry run on a task of their own, and
+`confirm_signup` awaits its handle; that is why it wants an `Arc`. A request cut
+off by the API's 30-second timeout or a closed connection drops only the wait,
+so it still ends in a working company or in a failure undone and the link
+unclaimed. Only a process that dies mid-build leaves a tenant `provisioning`, and
+that is `reap_stuck_provisioning`'s, below. The link stays spent then, and the
+person asks again.
 
 `pending_signup_modules` exists because the stored names have to become
 `ModuleSetup`s and only the composition root knows how. That resolution is not a
@@ -508,14 +714,36 @@ pub async fn tenants_with_module(&self, module: &ModuleId) -> Result<Vec<Tenant>
 So partial failure is real: a tenant row can exist with no database behind it, or
 a database with no schema in it.
 
-Two things make that survivable, and neither is a workflow engine. **Every step
-is idempotent**, so recover and retry are the same operation. And **a failure
+Two things make that survivable, and neither is a workflow engine. **A failure
 compensates**: `provision` drops the database and the row on its way out, which
 frees the name, and the person who just failed to sign up is exactly the person
-about to try that name again.
+about to try that name again. And **a build that never finished is abandoned
+later**: a process that dies mid-build runs no compensation, so the reaper runs
+it, through the same `abandon`. Nothing resumes a half-built tenant.
 
-`sign_up` is what `confirm_signup` calls once the address is proved. It is no
-longer reachable from the API on its own.
+`confirm_signup` reaches `provision` through its own `build_signup`. `sign_up`
+is the one-call form, account included, and only tests call it.
+
+```rust
+pub async fn abandon(&self, tenant: Tenant) -> Result<bool, AccessError>;
+pub async fn reap_stuck_provisioning(&self, grace_seconds: i64, limit: i64)
+    -> Result<usize, AccessError>;
+pub const PROVISIONING_GRACE_SECONDS: i64 = 15 * 60;
+```
+
+`abandon` does not trust the `Tenant` it is given, which is what lets a sweep
+call it with a value read a moment ago. It re-reads the row `FOR UPDATE` while
+still `provisioning` and holds it until the row is deleted, so activation and the
+provisioner's own writes wait. If the row is not there it answers `false` and
+touches nothing. It asks the database what is in it, and refuses one with events
+or a setting a person chose, or one it cannot open: a provisioning row over data
+is a restored control plane, not a dead signup. A database that does not exist
+is empty. It records `tenant.abandoned`.
+
+`reap_stuck_provisioning` abandons tenants older than the grace, and like
+`reap_expired_demos` it logs a failure and carries on. The grace is not what
+makes it safe. It is there so the sweep does not fail a signup that is still
+building.
 
 ### Why sign_up is one method
 
@@ -534,9 +762,14 @@ signature looks the way it does.
 ### install_module: schema first, entitlement second
 
 The opposite order from `provision`, and on purpose. During provisioning the
-tenant is invisible, so entitling early is free and buys retry visibility. Here
+tenant is invisible, so the order does not matter there. Here
 the tenant is live, and entitling before the tables exist opens a window in which
 the module's routes are found and every one of them fails on a missing relation.
+
+It stamps each new checkpoint with the group's read-model version, and leaves an
+existing one alone. A module enabled again over the tables it had keeps them, and
+keeps the version they were built under, so an older shape is still seen as one:
+the migrator rebuilds it and, until then, its routes answer 503.
 
 ### refresh_module
 
@@ -551,7 +784,8 @@ lock a projection run takes, so it waits for a run in flight instead of racing i
 
 The version that does this **without an outage** is
 `erp_projection::rebuild_swap`. `refresh_module` leaves the tenant reading empty
-tables until the worker catches up.
+tables until the worker catches up. Both set the checkpoint's read-model version
+to the one the setup declares, in the transaction that replaces the tables.
 
 ### maintenance_pool
 
@@ -736,6 +970,8 @@ impl WorkSchedule {
 
 pub async fn claim_tenants(&self, owner: &str, limit: i64, schedule: WorkSchedule)
     -> Result<Vec<Claimed>, AccessError>;
+pub async fn renew_lease(&self, tenant_id: TenantId, owner: &str, lease: Duration)
+    -> Result<bool, AccessError>;
 pub async fn schedule_next_visit(&self, tenant_id: TenantId, after: Duration, worked: bool)
     -> Result<(), AccessError>;
 pub async fn request_visit(&self, tenant_id: TenantId) -> Result<(), AccessError>;
@@ -754,8 +990,10 @@ do.
 `claim_tenants` does the claiming and the scheduling in one statement. `SKIP
 LOCKED` means two workers claiming at the same instant get disjoint sets. A
 worker that dies mid-visit is recovered from by the lease expiring: there is
-nothing to detect and nothing to rebalance. A tenant this worker already holds is
-re-claimable, so renewing and claiming are the same call.
+nothing to detect and nothing to rebalance. A claimed tenant is not due again
+until its lease lapses, so a worker is never handed its own in-flight tenants;
+renewing is `renew_lease`, called before every job of a visit. It answers `false`
+when the lease lapsed or the tenant stopped being active, and the visit stops.
 
 `release_leases` on the way out is not needed for correctness. Releasing them
 means a rolling deploy hands work over in milliseconds instead of one lease
@@ -799,6 +1037,8 @@ pub const MIGRATION_FLOOR: i64 = 0;
 pub const UPGRADE_FROM_RELEASE: &str = "the previous major release";
 
 pub struct EventVersions { … }
+pub struct ReadModelVersions { pub tenant: TenantId, pub slug: String,
+                               pub installed: Vec<(String, i16)> }
 
 impl ControlPlane {
     pub fn latest_tenant_migration() -> i64;
@@ -806,7 +1046,16 @@ impl ControlPlane {
     pub async fn migrate_fleet(&self) -> Result<FleetPlan, AccessError>;
     pub async fn survey_event_versions(&self)
         -> Result<(Vec<EventVersions>, Vec<(TenantId, String)>), AccessError>;
+    pub async fn survey_read_models(&self)
+        -> Result<(Vec<ReadModelVersions>, Vec<(TenantId, String)>), AccessError>;
+    pub async fn reseal_fleet(&self, sealing: &SealingKey, apply: bool)
+        -> Result<SealingPlan, AccessError>;
+    pub async fn reseal_second_factors(&self, sealing: &SealingKey, apply: bool)
+        -> Result<Census, AuthError>;
 }
+
+pub struct SealingPlan { pub census: Census, pub failed: Vec<(TenantId, String)> }
+impl SealingPlan { pub fn is_settled(&self, current: &str) -> bool; }
 ```
 
 ### Why this has to exist before the next migration does
@@ -832,7 +1081,7 @@ unreachable tenant is not a migrated one.
 ### The two pre-deploy gates
 
 ```bash
-just migrate-fleet check      # is the fleet's schema where this build expects?
+just migrate-fleet check      # are the fleet's schema and read models where this build expects?
 just migrate-fleet versions   # can this build read what is already in the logs?
 ```
 
@@ -849,6 +1098,30 @@ to roll forward.
 `EventVersions` is raw counts with no opinion about what they mean. The
 comparison needs the modules' upcasters and the control plane holds no domain, so
 the migrator binary has both and does the judging.
+
+`ReadModelVersions` is the same shape for read models: each projection group in
+a tenant and the read-model version its checkpoint records. Read from the
+tenant's checkpoints, not its entitlements, because a disabled module keeps its
+tables and has to be current the moment it is enabled again — `install_module`
+does not reshape. The migrator rebuilds every group not at the build's version,
+and `check` lists them, so `check` gates read models as well as migrations.
+
+### Rotating the sealing key
+
+`reseal_fleet` moves every sealed value onto the first key of a
+`SealingKey` ring: second factors in the control plane
+(`reseal_second_factors`, platform staff's included), then
+`erp_eventlog::secrets::reseal` in every tenant database. It walks the same
+tenants as `migrate_fleet`, suspended ones included, on the same direct
+connections and at the same concurrency, and collects failures the same way.
+Either way it opens every value, those already under the current key included,
+and with `apply` false it writes nothing, so it reports what a real run would
+fail on.
+
+`is_settled` is the retirement gate: nothing under another key, nothing that
+would not open, and no tenant unreached. An authenticator row enrolled before
+`authenticator.sealed_with` existed is counted as `(unrecorded)` until a reseal
+stamps it.
 
 ### MIGRATION_FLOOR
 

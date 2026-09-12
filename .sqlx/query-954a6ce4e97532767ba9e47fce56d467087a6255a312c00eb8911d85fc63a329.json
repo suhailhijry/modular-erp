@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.identity_id as \"identity: IdentityId\",\n                      m.role,\n                      m.created_at,\n                      i.status,\n                      (SELECT a.handle FROM authenticator a\n                        WHERE a.identity_id = m.identity_id AND a.kind = 'password'\n                        LIMIT 1) as handle,\n                      EXISTS (SELECT 1 FROM authenticator a\n                               WHERE a.identity_id = m.identity_id AND a.kind = 'totp')\n                          as \"second_factor!\"\n                 FROM membership m\n                 JOIN identity i ON i.id = m.identity_id\n                WHERE m.scope_kind = 'platform' AND m.revoked_at IS NULL\n                ORDER BY m.created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "identity: IdentityId",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "membership",
+            "name": "identity_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "membership",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "membership",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "identity",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "handle",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "second_factor!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "954a6ce4e97532767ba9e47fce56d467087a6255a312c00eb8911d85fc63a329"
+}

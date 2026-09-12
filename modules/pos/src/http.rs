@@ -453,7 +453,7 @@ async fn shift_takings(
         (status = NOT_FOUND, description = "No such shift", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the tenders do not come to the sale, or the ledger refused it", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
     ),
 )]
@@ -488,9 +488,16 @@ async fn ring_sale(
         at: body.at.unwrap_or_else(chrono::Utc::now),
     };
 
-    let rung = crate::sell(&tenant.db, &shift, &sale, &basket, &creating(&tenant, &key))
-        .await
-        .map_err(|e| problem_for(&e, locale))?;
+    let rung = crate::sell(
+        &tenant.db,
+        &shift,
+        &sale,
+        &basket,
+        &creating(&tenant, &key),
+        sales::Authority::of(&tenant.db),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
 
     nudge(&state, tenant.db.tenant()).await;
     Ok((
@@ -524,7 +531,7 @@ async fn ring_sale(
         (status = NOT_FOUND, description = "No such shift", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the sale is not one that can be credited, the tenders do not come to what the lines credit, or the ledger refused it", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, without the `sales:approve_credit_note` claim once the tenant uses claims (`sales.not_approved`), or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
     ),
 )]
@@ -556,9 +563,16 @@ async fn take_back(
         at: body.at.unwrap_or_else(chrono::Utc::now),
     };
 
-    let committed = crate::take_back(&tenant.db, &id, &sale, &returning, &metadata(&tenant))
-        .await
-        .map_err(|e| problem_for(&e, locale))?;
+    let committed = crate::take_back(
+        &tenant.db,
+        &id,
+        &sale,
+        &returning,
+        &metadata(&tenant),
+        sales::Authority::of(&tenant.db),
+    )
+    .await
+    .map_err(|e| problem_for(&e, locale))?;
 
     nudge(&state, tenant.db.tenant()).await;
     Ok(Json(PosAccepted {
@@ -843,6 +857,8 @@ fn problem_for(error: &CommandError<PosError>, locale: Locale) -> Problem {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
                 PosError::NoSuchShift(_) => StatusCode::NOT_FOUND,
+                // The till's operator, over the document limit.
+                PosError::Sale(refused) if refused.refuses_the_caller() => StatusCode::FORBIDDEN,
 
                 // Well-formed, and refused on the state of the world.
                 PosError::Closed(_)
@@ -902,4 +918,39 @@ fn database(error: &sqlx::Error, locale: Locale) -> Problem {
         locale,
         &CATALOG,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A clerk without `sales:approve_credit_note` is refused a return with
+    /// the sales screen's own code and status**, since §70 moved that claim
+    /// into the credit-note roots the till goes through.
+    #[test]
+    fn the_credit_note_claim_refuses_the_caller_at_the_till_too() {
+        let refused = CommandError::Execute(ExecuteError::Rejected(PosError::Sale(
+            sales::SalesError::NotApproved(sales::APPROVE_CREDIT_NOTE.to_owned()),
+        )));
+        let problem = problem_for(&refused, Locale::English);
+        assert_eq!(problem.status, 403);
+        assert_eq!(problem.code, "sales.not_approved");
+    }
+
+    /// **The till's operator over the document limit is a 403**, the status
+    /// the sales routes and the booking desk answer the same refusal with —
+    /// not the 422 every other sales refusal at the till gets.
+    #[test]
+    fn the_document_limit_refuses_the_caller_at_the_till_too() {
+        let sar = CurrencyCode::new("SAR").expect("a currency");
+        let refused = CommandError::Execute(ExecuteError::Rejected(PosError::Sale(
+            sales::SalesError::OverDocumentLimit {
+                limit: Money::from_minor(100, sar),
+                amount: Money::from_minor(115, sar),
+            },
+        )));
+        let problem = problem_for(&refused, Locale::English);
+        assert_eq!(problem.status, 403);
+        assert_eq!(problem.code, "sales.over_document_limit");
+    }
 }

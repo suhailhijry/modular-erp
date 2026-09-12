@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE outbox\n            SET dead_at = NULL, attempts = 0, next_attempt_at = now(),\n                leased_until = NULL, last_error = NULL\n          WHERE id = $1 AND dead_at IS NOT NULL\n          RETURNING kind, idempotency_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "idempotency_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "outbox",
+            "name": "idempotency_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "41150e3077bc8f8689d27f67011ea3143786e5655fa6762ec5566e4507067e6b"
+}

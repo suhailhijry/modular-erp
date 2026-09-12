@@ -79,8 +79,16 @@ pub enum Invalid {
         declared: Kind,
         given: Kind,
     },
+    /// A bool, or a fact that takes one of a list of values, compared by order.
     #[error("{name} is {kind:?} and {op:?} orders nothing of that kind")]
     NotOrderable { name: String, kind: Kind, op: Op },
+    /// A value the fact never takes — see [`FactRegistry::one_of`].
+    #[error("{name} is never {value:?}; it is one of {}", known.join(", "))]
+    NoSuchValue {
+        name: String,
+        value: String,
+        known: Vec<String>,
+    },
     #[error("this rule kind is not about a window of time")]
     NoSpans,
 }
@@ -121,12 +129,23 @@ impl DynCondition {
                 // **`Bool` orders nothing.** "Is refundable greater than true"
                 // is a question with no answer, and refusing it here is the
                 // difference between a typo caught now and a rule that is
-                // quietly never true.
-                if declared == Kind::Bool && !matches!(op, Op::Eq | Op::Ne) {
+                // quietly never true. A fact with a list of values orders
+                // nothing either, for the reason `FactRegistry::one_of` gives.
+                let listed = registry.values_of(fact);
+                if (declared == Kind::Bool || listed.is_some()) && !matches!(op, Op::Eq | Op::Ne) {
                     return Err(Invalid::NotOrderable {
                         name: fact.clone(),
                         kind: declared,
                         op: *op,
+                    });
+                }
+                if let (Some(known), Value::Text(given)) = (listed, value)
+                    && !known.contains(given)
+                {
+                    return Err(Invalid::NoSuchValue {
+                        name: fact.clone(),
+                        value: given.clone(),
+                        known: known.to_vec(),
                     });
                 }
                 Ok(())
@@ -139,32 +158,68 @@ impl DynCondition {
     /// **A fact that is missing is not true.** An unsupplied fact means the
     /// caller could not answer, and a rule that fires on a question nobody
     /// answered is worse than one that does not fire.
+    ///
+    /// A condition that [cannot be told](Self::decide) does not hold either.
     #[must_use]
     pub fn holds(&self, facts: &Facts) -> bool {
+        self.decide(facts) == Some(true)
+    }
+
+    /// Whether this holds, or `None` when it **cannot be told**: a fact was
+    /// supplied that the condition's value does not compare with — an amount
+    /// in another currency.
+    ///
+    /// Not a false: *"is 5,000,000 USD at least 10,000 SAR"* has no answer,
+    /// and `Not` of a false would fire. So the unknown travels up — `All` is
+    /// false if any part is false, `Any` true if any part is true, and
+    /// otherwise an unknown part makes the whole unknown — and whoever acts on
+    /// the rule decides what an unknown means. See `Rules::explain_undecided`.
+    #[must_use]
+    pub fn decide(&self, facts: &Facts) -> Option<bool> {
         match self {
-            Self::Always => true,
-            Self::All { of } => of.iter().all(|c| c.holds(facts)),
-            Self::Any { of } => of.iter().any(|c| c.holds(facts)),
-            Self::Not { of } => !of.holds(facts),
+            Self::Always => Some(true),
+            Self::All { of } => {
+                let mut answer = Some(true);
+                for part in of {
+                    match part.decide(facts) {
+                        Some(false) => return Some(false),
+                        None => answer = None,
+                        Some(true) => {}
+                    }
+                }
+                answer
+            }
+            Self::Any { of } => {
+                let mut answer = Some(false);
+                for part in of {
+                    match part.decide(facts) {
+                        Some(true) => return Some(true),
+                        None => answer = None,
+                        Some(false) => {}
+                    }
+                }
+                answer
+            }
+            Self::Not { of } => of.decide(facts).map(|holds| !holds),
             #[cfg(feature = "spans")]
-            Self::Covers { window } => facts
-                .span()
-                .is_some_and(|(span, calendar)| window.covers(*span, *calendar)),
+            Self::Covers { window } => Some(
+                facts
+                    .span()
+                    .is_some_and(|(span, calendar)| window.covers(*span, *calendar)),
+            ),
             Self::Is { fact, op, value } => {
                 let Some(known) = facts.get(fact) else {
-                    return false;
+                    return Some(false);
                 };
-                let Some(order) = known.compare(value) else {
-                    return false;
-                };
-                match op {
+                let order = known.compare(value)?;
+                Some(match op {
                     Op::Eq => order.is_eq(),
                     Op::Ne => order.is_ne(),
                     Op::Lt => order.is_lt(),
                     Op::Lte => order.is_le(),
                     Op::Gt => order.is_gt(),
                     Op::Gte => order.is_ge(),
-                }
+                })
             }
         }
     }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "DELETE FROM tenant WHERE id = $1 AND status = 'provisioning'",
+  "query": "DELETE FROM tenant WHERE id = $1",
   "describe": {
     "columns": [],
     "parameters": {
@@ -10,5 +10,5 @@
     },
     "nullable": []
   },
-  "hash": "c240f9569485cc3876a786fb3076e9b3b4eec3dc6209a2ebb95117db40b11368"
+  "hash": "1d5b7120f0b287e14b4c19209619eb9f17b9e58307b7cf648b25d6aa8668e3ab"
 }

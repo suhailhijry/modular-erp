@@ -5,6 +5,11 @@
 //! the worst possible discovery latency — so they run here, on the same visit
 //! loop as everything else.
 //!
+//! **The control plane is checked too**, for the outbox invariants only: it has
+//! an outbox, carrying every signup, invitation, reset and sign-in code, and no
+//! event log or read models. Before, nothing watched it at all, so a deployment
+//! with no relay held all of that mail unsent and said so once, at start-up.
+//!
 //! # What a finding is
 //!
 //! Not a user error. Every check here is of a property that *cannot* be false if
@@ -17,11 +22,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use erp_control::TenantDb;
+use erp_control::{ControlPlane, TenantDb};
 use erp_types::TenantId;
 use tokio::sync::Mutex;
 
-use crate::job::{Activity, BoxError, Job};
+use crate::job::{Activity, BoxError, Job, PlatformJob};
 
 /// Something that should not be true.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +47,7 @@ impl Finding {
 
 /// A property a module says must hold.
 ///
-/// The kernel's own invariants are checked directly in [`HealthJob::tick`] —
+/// The kernel's own invariants are checked directly by [`HealthJob`] —
 /// they apply to every tenant and there is nothing to register. This trait is
 /// how a *module* adds one, which is what makes the trial balance the ledger's
 /// property rather than the platform's.
@@ -76,10 +81,16 @@ const MAX_BACKLOG_SECONDS: i64 = 300;
 /// The interval is kept in memory rather than in the tenant's database. Losing
 /// it on a deploy costs one extra check per tenant, which is cheaper than the
 /// table it would take to avoid.
+///
+/// **It is also the control plane's check**, as a [`PlatformJob`], on the same
+/// interval and its own turn: platform jobs run every claim cycle, a quarter
+/// of a second apart when the fleet is idle, and a tenant being checked must not
+/// use up the control plane's turn or the other way round.
 pub struct HealthJob {
     interval: Duration,
     module_invariants: Vec<Arc<dyn Invariant>>,
-    last_checked: Mutex<HashMap<TenantId, Instant>>,
+    /// Keyed by tenant; `None` is the control plane.
+    last_checked: Mutex<HashMap<Option<TenantId>, Instant>>,
 }
 
 impl std::fmt::Debug for HealthJob {
@@ -115,16 +126,26 @@ impl HealthJob {
         self
     }
 
-    /// Whether this tenant is due, marking it checked if so.
-    async fn claim_turn(&self, tenant: TenantId) -> bool {
+    /// Whether this tenant — or, for `None`, the control plane — is due,
+    /// marking it checked if so.
+    async fn claim_turn(&self, whose: Option<TenantId>) -> bool {
         let mut seen = self.last_checked.lock().await;
-        match seen.get(&tenant) {
+        match seen.get(&whose) {
             Some(last) if last.elapsed() < self.interval => false,
             _ => {
-                seen.insert(tenant, Instant::now());
+                seen.insert(whose, Instant::now());
                 true
             }
         }
+    }
+
+    /// What is wrong with the control plane: its outbox's two invariants.
+    ///
+    /// The job logs these rather than returning them; this is the check
+    /// itself, for a caller that wants the answer.
+    pub async fn control_findings(control: &ControlPlane) -> Result<Vec<Finding>, BoxError> {
+        let mut conn = control.pool().acquire().await?;
+        Ok(outbox_findings(&mut conn).await?)
     }
 
     /// The invariants every tenant has, whatever modules it runs.
@@ -145,21 +166,7 @@ impl HealthJob {
             ));
         }
 
-        let outbox = erp_eventlog::outbox_health(&mut conn).await?;
-        if outbox.dead > 0 {
-            findings.push(Finding::new(
-                "no_dead_letters",
-                format!("{} effects were given up on", outbox.dead),
-            ));
-        }
-        if let Some(age) = outbox.backlog_age_seconds
-            && age > MAX_BACKLOG_SECONDS
-        {
-            findings.push(Finding::new(
-                "outbox_keeping_up",
-                format!("the oldest undelivered effect is {age}s old"),
-            ));
-        }
+        findings.extend(outbox_findings(&mut conn).await?);
 
         // Projection lag, per group. Read from the checkpoints rather than from
         // a list of groups this build knows, so a group belonging to a module
@@ -185,6 +192,28 @@ impl HealthJob {
     }
 }
 
+/// The outbox's two kernel invariants, for either plane — it is the same table
+/// in both (`the_two_outboxes_are_the_same_table`).
+async fn outbox_findings(conn: &mut sqlx::PgConnection) -> Result<Vec<Finding>, sqlx::Error> {
+    let mut findings = Vec::new();
+    let outbox = erp_eventlog::outbox_health(conn).await?;
+    if outbox.dead > 0 {
+        findings.push(Finding::new(
+            "no_dead_letters",
+            format!("{} effects were given up on", outbox.dead),
+        ));
+    }
+    if let Some(age) = outbox.backlog_age_seconds
+        && age > MAX_BACKLOG_SECONDS
+    {
+        findings.push(Finding::new(
+            "outbox_keeping_up",
+            format!("the oldest undelivered effect is {age}s old"),
+        ));
+    }
+    Ok(findings)
+}
+
 #[async_trait::async_trait]
 impl Job for HealthJob {
     fn name(&self) -> &'static str {
@@ -192,7 +221,7 @@ impl Job for HealthJob {
     }
 
     async fn tick(&self, db: &TenantDb) -> Result<Activity, BoxError> {
-        if !self.claim_turn(db.tenant()).await {
+        if !self.claim_turn(Some(db.tenant())).await {
             return Ok(Activity::Idle);
         }
 
@@ -220,6 +249,31 @@ impl Job for HealthJob {
 
         // Checking is never `Worked`: a healthy tenant would otherwise be
         // revisited immediately, forever.
+        Ok(Activity::Idle)
+    }
+}
+
+#[async_trait::async_trait]
+impl PlatformJob for HealthJob {
+    fn name(&self) -> &'static str {
+        "control.health"
+    }
+
+    // ponytail: every worker process checks, so N workers log N identical lines
+    // per interval. Give it a control-plane lease if alerting cannot dedupe.
+    async fn tick(&self, control: &ControlPlane) -> Result<Activity, BoxError> {
+        if !self.claim_turn(None).await {
+            return Ok(Activity::Idle);
+        }
+        for finding in Self::control_findings(control).await? {
+            // The tenant check's message, so an alert on it catches this too.
+            tracing::error!(
+                plane = "control",
+                check = finding.check,
+                detail = %finding.detail,
+                "invariant violated"
+            );
+        }
         Ok(Activity::Idle)
     }
 }

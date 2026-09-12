@@ -262,7 +262,7 @@ const PAGE: i64 = 100;
         (status = BAD_REQUEST, description = "Not an id, not a currency, or not a positive amount", body = Problem),
         (status = CONFLICT, description = "That id is taken by a different payment", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, or a deposit whose prepayment invoice would be over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
 )]
@@ -315,6 +315,7 @@ async fn start_payment(
         },
         body.started_at.unwrap_or_else(chrono::Utc::now),
         &creating(&tenant, &key),
+        sales::Authority::of(&tenant.db),
     )
     .await
     .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
@@ -402,7 +403,7 @@ async fn get_payment(
         (status = BAD_REQUEST, description = "More than is left to refund, or a payment that never settled", body = Problem),
         (status = NOT_FOUND, description = "No such payment", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, over the tenant's document limit (`sales.over_document_limit`), or — when the refund will leave a credit note owing — without the `sales:approve_credit_note` claim once the tenant uses claims (`sales.not_approved`)", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "The gateway already refused this refund", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
@@ -455,6 +456,7 @@ async fn refund_gateway_payment(
         &reason,
         chrono::Utc::now(),
         &creating(&tenant, &key),
+        sales::Authority::of(&tenant.db),
     )
     .await
     .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
@@ -1086,7 +1088,7 @@ async fn forget_gateway_card(
         (status = NOT_FOUND, description = "No such card", body = Problem),
         (status = CONFLICT, description = "That card was removed", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, or a deposit whose prepayment invoice would be over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = SERVICE_UNAVAILABLE, body = Problem),
     ),
 )]
@@ -1189,6 +1191,7 @@ async fn charge_saved_card(
         },
         chrono::Utc::now(),
         &creating(&tenant, &key),
+        sales::Authority::of(&tenant.db),
     )
     .await
     .map_err(|e| problem_for(&CommandError::Execute(e), locale))?;
@@ -1464,6 +1467,7 @@ impl Localize for PaymentsError {
             // could say about somebody else's rule.
             Self::Sales(why) => Message::new(erp_web::messages::MALFORMED_BODY)
                 .with("reason", MessageArg::text(why)),
+            Self::Refused(refused) => refused.message(),
         }
     }
 }
@@ -1485,6 +1489,10 @@ fn problem_for(error: &CommandError<PaymentsError>, locale: Locale) -> Problem {
                 // A deployment fault or an attack, never something a caller
                 // can fix by sending different fields.
                 PaymentsError::Secret(_) => StatusCode::SERVICE_UNAVAILABLE,
+                // The member asking, over the tenant's document limit.
+                PaymentsError::Refused(refused) if refused.refuses_the_caller() => {
+                    StatusCode::FORBIDDEN
+                }
                 // **Well-formed, and refused on what the gateway said.** A 422
                 // rather than a 400: nothing about the request was wrong.
                 PaymentsError::WrongAmount { .. }
@@ -1532,4 +1540,26 @@ fn database(error: &sqlx::Error, locale: Locale) -> Problem {
         locale,
         &CATALOG,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A member asking for a refund over the document limit is a 403** that
+    /// names it, as `sales` says it, not the flattened 400 other sales
+    /// failures surface as here.
+    #[test]
+    fn the_document_limit_refuses_the_member_asking_for_a_refund() {
+        let sar = erp_types::CurrencyCode::new("SAR").expect("a currency");
+        let refused = CommandError::Execute(ExecuteError::Rejected(PaymentsError::Refused(
+            sales::SalesError::OverDocumentLimit {
+                limit: Money::from_minor(100, sar),
+                amount: Money::from_minor(115, sar),
+            },
+        )));
+        let problem = problem_for(&refused, Locale::English);
+        assert_eq!(problem.status, 403);
+        assert_eq!(problem.code, "sales.over_document_limit");
+    }
 }

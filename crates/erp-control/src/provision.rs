@@ -8,17 +8,21 @@
 //!
 //! Two things make that survivable, and neither is a workflow engine:
 //!
-//! - **Every step is idempotent.** Re-running from the start is always safe, so
-//!   "recover" and "retry" are the same operation.
 //! - **A failure compensates.** [`ControlPlane::provision`] drops the database
 //!   and the row on its way out, which frees the name — and the person who just
 //!   failed to sign up is exactly the person about to try that name again.
+//! - **A provisioning that never finished is abandoned later.** A process that
+//!   dies mid-build runs no compensation, so the reaper's
+//!   [`ControlPlane::reap_stuck_provisioning`] runs it instead, through the
+//!   same [`ControlPlane::abandon`]. Nothing resumes a half-built tenant; the
+//!   customer asks again. A request that is merely cut off is not this case:
+//!   `confirm_signup` builds on a task the request only waits for.
 //!
 //! The architecture calls for signup as a durable event-sourced workflow. That
 //! is the right shape when a step can block for hours — a payment, a DNS record,
 //! a human. Every step here is a second of local SQL, and a durable log of five
-//! synchronous statements is machinery around a problem idempotency already
-//! solved. ponytail: revisit when a step goes async.
+//! synchronous statements is machinery around a problem the compensation and
+//! the sweep already solve. ponytail: revisit when a step goes async.
 //!
 //! # Why modules arrive as data
 //!
@@ -140,6 +144,10 @@ impl ControlPlane {
     ///
     /// Compensates on failure — the database is dropped and the row deleted, so
     /// the name is free again. Returns the activated tenant.
+    ///
+    /// The compensation runs only if this future runs to the end. One dropped
+    /// part-way leaves the tenant `provisioning` until
+    /// [`Self::reap_stuck_provisioning`] abandons it.
     #[expect(
         clippy::needless_range_loop,
         reason = "indexed on purpose; a borrowed iterator held across an await \
@@ -188,7 +196,9 @@ impl ControlPlane {
                     Ok(conn) => {
                         conn.close().await.ok();
                     }
-                    // 42P04: already exists. The idempotent case, not a failure.
+                    // 42P04: already exists. Not expected — the name is new with
+                    // its `TenantId` — and not a failure: the migrations below
+                    // run against whatever is there.
                     Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("42P04") => {
                         tracing::debug!(
                             tenant = %tenant.id,
@@ -223,9 +233,9 @@ impl ControlPlane {
                 for index in 0..modules.len() {
                     let setup = modules[index].clone();
 
-                    // Entitlement before schema, so a retry can read back what was
-                    // wanted even if it died part-way through installing. Safe
-                    // here and *not* safe on a live tenant — see `install_module`.
+                    // Entitlement before schema. Harmless only because nothing
+                    // can see this tenant yet; on a live one it is the wrong
+                    // way round — see `install_module`.
                     if let Err(e) =
                         Box::pin(self.enable_module(tenant.id, &setup.module, Actor::system()))
                             .await
@@ -274,7 +284,8 @@ impl ControlPlane {
                             tenant = %tenant.id,
                             slug = %tenant.slug,
                             error = %cleanup,
-                            "could not abandon a half-built tenant; its name is still taken"
+                            "could not abandon a half-built tenant; the reaper's \
+                             stuck-provisioning sweep will retry it"
                         );
                     }
                     Err(e)
@@ -287,8 +298,8 @@ impl ControlPlane {
     ///
     /// # Schema first, entitlement second — the opposite of `provision`
     ///
-    /// During provisioning the tenant is invisible, so entitling early is free
-    /// and buys retry visibility. Here the tenant is *live*: entitling before
+    /// During provisioning the tenant is invisible, so the order does not
+    /// matter there. Here the tenant is *live*: entitling before
     /// the tables exist opens a window in which the module's routes are found
     /// and every one of them fails on a missing relation. So the schema goes in
     /// first, and the entitlement — the thing that makes it visible — last.
@@ -296,6 +307,12 @@ impl ControlPlane {
     /// Idempotent throughout, and it does not check dependencies: what a module
     /// needs underneath it is [`ModuleSetup::requires`], and refusing belongs at
     /// the boundary that can say so in the caller's language.
+    ///
+    /// **It does not reshape.** A module enabled again over the tables it had
+    /// before keeps them, and keeps the read-model version they were built
+    /// under; the migrator rebuilds a disabled module's groups with everyone
+    /// else's, so those are this build's unless a rebuild failed — and then its
+    /// routes answer 503 rather than serve them.
     pub async fn install_module(
         &self,
         tenant_id: TenantId,
@@ -345,7 +362,12 @@ impl ControlPlane {
     /// on a small tenant, minutes on a large one, and every screen in the
     /// product wrong for the whole of it. `just migrate-fleet refresh <module>`
     /// uses `erp_projection::rebuild_swap` instead, which builds the new tables
-    /// beside the live ones and exchanges them at the end.
+    /// beside the live ones and exchanges them at the end — and the bare
+    /// `migrator` does that on its own for every group whose recorded
+    /// read-model version is not this build's.
+    ///
+    /// The checkpoint's read-model version is set to the one `setup` declares,
+    /// in the same transaction: these are that shape's tables now.
     ///
     /// This stays as the fallback for a caller that has no projections to
     /// replay with — the swap needs them, and only a composition root has both
@@ -450,24 +472,87 @@ impl ControlPlane {
             .collect()
     }
 
-    /// Drops a half-built tenant's database and row.
+    /// Drops a half-built tenant's database and row. Returns whether it did:
+    /// `false` means the tenant is not half-built any more — it activated, or
+    /// it is already gone — and nothing was touched.
     ///
-    /// Refuses anything that is not still `provisioning`, so it cannot become a
-    /// delete-my-customer button.
-    async fn abandon(&self, tenant: Tenant) -> Result<(), AccessError> {
+    /// # Why it is safe to call with a stale value
+    ///
+    /// Provisioning's own failure path calls this, and so does the reaper's
+    /// [`Self::reap_stuck_provisioning`], which read the tenant a moment ago.
+    /// So the value passed in is not trusted:
+    ///
+    /// - **The row is the lock.** It is re-read `FOR UPDATE` while still
+    ///   `provisioning`, and held until the row is deleted. `activate_tenant`'s
+    ///   `UPDATE` waits on it, and so do the foreign-key checks behind
+    ///   `enable_module` and `grant_membership`, so nothing can make the tenant
+    ///   real between this look and the drop. A provisioner that loses the race
+    ///   is refused at activation (`moved()` answers `NoSuchTenant`).
+    /// - **The database is asked what is in it**, the question
+    ///   [`Self::drop_empty_orphans`] asks. Events, or a setting a person chose,
+    ///   and this refuses: a provisioning row over a database with data in it is
+    ///   a control plane restored to behind its database, not a dead signup.
+    ///   A database it cannot look inside is refused too (L6).
+    ///
+    /// # Errors
+    /// [`AccessError::TenantNotActive`] for a value that is not `provisioning`;
+    /// [`AccessError::Corrupt`] for an occupied or unreadable database.
+    pub async fn abandon(&self, tenant: Tenant) -> Result<bool, AccessError> {
         if !matches!(tenant.status, TenantStatus::Provisioning) {
             return Err(AccessError::TenantNotActive {
                 status: tenant.status,
             });
         }
 
-        self.drop_database(&tenant).await?;
-
-        sqlx::query!(
-            "DELETE FROM tenant WHERE id = $1 AND status = 'provisioning'",
+        let mut tx = self.pool.begin().await?;
+        let held = sqlx::query_scalar!(
+            "SELECT 1 FROM tenant WHERE id = $1 AND status = 'provisioning' FOR UPDATE",
             tenant.id.as_uuid(),
         )
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if held.is_none() {
+            return Ok(false);
+        }
+
+        match self
+            .occupancy_of(&tenant.cluster, &tenant.database_name)
+            .await
+        {
+            Ok(None) => {}
+            Ok(Some(why)) => {
+                return Err(AccessError::Corrupt(format!(
+                    "{} is provisioning but {why}; the control plane is behind its database \
+                     — refusing to drop it",
+                    tenant.id
+                )));
+            }
+            Err(why) => {
+                return Err(AccessError::Corrupt(format!(
+                    "cannot look inside {}'s database, so it is not dropped: {why}",
+                    tenant.id
+                )));
+            }
+        }
+
+        // Database first, for `reap_demo`'s reason: if the commit below fails,
+        // the row points at nothing, and the next sweep finds no database and
+        // deletes it.
+        self.drop_database(&tenant).await?;
+
+        sqlx::query!("DELETE FROM tenant WHERE id = $1", tenant.id.as_uuid())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        self.record(
+            Actor::system(),
+            Some(tenant.id),
+            "tenant.abandoned",
+            "tenant",
+            &tenant.id.to_string(),
+            serde_json::json!({ "slug": tenant.slug, "database": tenant.database_name }),
+        )
         .await?;
 
         tracing::info!(
@@ -475,7 +560,7 @@ impl ControlPlane {
             slug = %tenant.slug,
             "abandoned a half-built tenant; its name is free again"
         );
-        Ok(())
+        Ok(true)
     }
 
     /// Destroys a tenant's database. **No guard of its own** — every caller
@@ -544,6 +629,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            Some(tenant_id),
             "tenant.demo_expiry_set",
             "tenant",
             &tenant_id.to_string(),
@@ -643,6 +729,7 @@ impl ControlPlane {
 
         self.record(
             Actor::system(),
+            Some(tenant.id),
             "tenant.demo_reaped",
             "tenant",
             &tenant.id.to_string(),
@@ -682,14 +769,83 @@ impl ControlPlane {
 
         Ok(reaped)
     }
+
+    /// Abandons every tenant that has sat in `provisioning` for longer than
+    /// `grace_seconds`, up to `limit`. Returns how many went.
+    ///
+    /// The compensation a provisioning that never finished did not get to run:
+    /// its process died, or was killed by a deploy, between registering the
+    /// row and activating it. Each goes through [`Self::abandon`], which is
+    /// what makes a stale list safe, and one failure does not stop the sweep —
+    /// it is logged and retried next run, as [`Self::reap_expired_demos`] does.
+    pub async fn reap_stuck_provisioning(
+        &self,
+        grace_seconds: i64,
+        limit: i64,
+    ) -> Result<usize, AccessError> {
+        let rows = sqlx::query!(
+            r#"SELECT id, slug, display_name, status, cluster,
+                      database_name, demo_expires_at,
+                      requires_second_factor, created_at
+                 FROM tenant
+                WHERE status = 'provisioning'
+                  AND created_at <= now() - ($1::BIGINT * INTERVAL '1 second')
+                ORDER BY created_at
+                LIMIT $2"#,
+            grace_seconds,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut abandoned = 0;
+        for row in rows {
+            let tenant = crate::tenant_from_row(
+                TenantId::from_uuid(row.id),
+                row.slug,
+                row.display_name,
+                &row.status,
+                row.cluster,
+                row.database_name,
+                row.demo_expires_at,
+                row.requires_second_factor,
+                row.created_at,
+            )?;
+            let (id, slug) = (tenant.id, tenant.slug.clone());
+            match self.abandon(tenant).await {
+                Ok(true) => abandoned += 1,
+                Ok(false) => {}
+                Err(e) => tracing::error!(
+                    tenant = %id,
+                    slug = %slug,
+                    error = %e,
+                    "a tenant stuck in provisioning was not abandoned; it will be retried"
+                ),
+            }
+        }
+
+        Ok(abandoned)
+    }
 }
+
+/// How long a tenant may sit in `provisioning` before the reaper abandons it.
+///
+/// **Not what makes the sweep safe** — [`ControlPlane::abandon`]'s row lock and
+/// its look inside the database are. This is what keeps it from failing a
+/// signup that is still running: a confirmation builds on a task that outlives
+/// its request, and a statement can go on running on the server after the
+/// process that sent it died. A real signup builds in seconds, so a quarter of
+/// an hour is a wide margin. The name is held for up to this plus the
+/// reaper's schedule.
+pub const PROVISIONING_GRACE_SECONDS: i64 = 15 * 60;
 
 /// How settled a tenant database must be before its absence from the control
 /// plane is worth reporting.
 ///
-/// A day. **Not a safety margin** — nothing here deletes anything, so there is
-/// nothing to be safe from. It is a noise filter: something created minutes ago
-/// and not yet visible is a race with whoever is looking, not a finding.
+/// A day. **Not a safety margin** — what makes
+/// [`ControlPlane::drop_empty_orphans`] safe is its look inside, not the age.
+/// It is a noise filter: something created minutes ago and not yet visible is
+/// a race with whoever is looking, not a finding.
 pub const ORPHAN_GRACE_SECONDS: i64 = 24 * 60 * 60;
 
 impl ControlPlane {
@@ -701,10 +857,11 @@ impl ControlPlane {
     /// It was written as a sweep that dropped them, on the reasoning that a run
     /// dying between `CREATE DATABASE` and the row naming it leaves rubbish
     /// nothing else will ever find. **That reasoning was backwards and the
-    /// window does not exist**: `provision` writes the row first (`:159`) and
-    /// creates the database second (`:187`), so a provisioning that dies leaves
-    /// a row with no database — which `abandon` already handles — and never a
-    /// database with no row.
+    /// window does not exist**: `provision` writes the row first (`:167`) and
+    /// creates the database second (`:195`), so a provisioning that dies leaves
+    /// a `provisioning` row, with or without its database — which
+    /// [`Self::reap_stuck_provisioning`] abandons — and never a database with
+    /// no row.
     ///
     /// So an unclaimed tenant database has essentially one cause, and it is the
     /// opposite of rubbish: **a control plane that has lost rows.** A restore to
@@ -784,8 +941,9 @@ impl ControlPlane {
     ///   a person made, and nothing recreates that.
     ///
     /// Anything that cannot be opened or read is [`Unclaimed::Unreadable`] and
-    /// is never dropped. **Not knowing is not the same as knowing it is empty**,
-    /// and this is the one place that distinction is worth a whole variant.
+    /// is never dropped — except one that no longer exists, which is empty.
+    /// **Not knowing is not the same as knowing it is empty**, and this is the
+    /// one place that distinction is worth a whole variant.
     async fn look_inside(&self, cluster: &str, database: String) -> Unclaimed {
         match self.occupancy_of(cluster, &database).await {
             Ok(None) => Unclaimed::Empty(database),
@@ -807,9 +965,16 @@ impl ControlPlane {
             .maintenance_options(cluster)
             .map_err(|e| e.to_string())?
             .database(database);
-        let mut conn = PgConnection::connect_with(&options)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut conn = match PgConnection::connect_with(&options).await {
+            Ok(conn) => conn,
+            // 3D000: it does not exist, so there is nothing in it — and `DROP …
+            // IF EXISTS`, which both callers do next, agrees. A provisioning
+            // that died before `CREATE DATABASE` is exactly this.
+            Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("3D000") => {
+                return Ok(None);
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         let verdict = occupancy(&mut conn).await.map_err(|e| e.to_string());
         conn.close().await.ok();
         verdict
@@ -1082,8 +1247,14 @@ fn install_schema(
         // cross-crate `async fn` taking `&mut PgConnection` puts an `Acquire`
         // bound in this future that rustc will not discharge. Two statements is
         // cheaper than either problem.
+        //
+        // **Stamped with the version it is about to build, and only if the row
+        // is new.** An existing row means existing tables, which the
+        // `IF NOT EXISTS` DDL below will not reshape — a module disabled and
+        // enabled again keeps the stamp its tables were built under, so a
+        // shape older than this build is still seen as one.
         for index in 0..setup.groups.len() {
-            let (name, schema) = setup.groups[index];
+            let (name, schema, version) = setup.groups[index];
             let quoted = quote_ident(schema)?;
             conn = run_ddl(conn, format!("CREATE SCHEMA IF NOT EXISTS {quoted}"))
                 .await
@@ -1091,7 +1262,8 @@ fn install_schema(
             conn = run_ddl(
                 conn,
                 format!(
-                    "INSERT INTO projection_checkpoint (group_name) VALUES ('{name}')
+                    "INSERT INTO projection_checkpoint (group_name, read_model_version)
+                     VALUES ('{name}', {version})
                      ON CONFLICT (group_name) DO NOTHING"
                 ),
             )
@@ -1109,11 +1281,11 @@ fn install_schema(
         // does now too, and the two agree.
         //
         // ponytail: aimed at the *first* group, so a module with two would put
-        // both groups' tables in one schema. Every module has exactly one and
-        // `a_module_has_exactly_one_projection_group` keeps it that way; a
-        // second one needs the SQL to move onto the group.
+        // both groups' tables in one schema. No module has more than one, and
+        // `a_module_has_at_most_one_projection_group` in `erp-api` keeps it that
+        // way; a second one needs the SQL to move onto the group.
         let aimed = match setup.groups.first() {
-            Some((_, schema)) => Some(quote_ident(schema)?),
+            Some((_, schema, _)) => Some(quote_ident(schema)?),
             None => None,
         };
         if let Some(schema) = aimed {
@@ -1160,7 +1332,7 @@ fn rebuild_schema(
         // The lock first, so a projection run in flight finishes rather than
         // finding its tables gone mid-batch.
         for index in 0..setup.groups.len() {
-            let (name, _) = setup.groups[index];
+            let (name, _, _) = setup.groups[index];
             conn = run_ddl(
                 conn,
                 format!(
@@ -1172,15 +1344,18 @@ fn rebuild_schema(
         }
 
         for index in 0..setup.groups.len() {
-            let (name, schema) = setup.groups[index];
+            let (name, schema, version) = setup.groups[index];
             let quoted = quote_ident(schema)?;
             conn = run_ddl(conn, format!("DROP SCHEMA IF EXISTS {quoted} CASCADE"))
                 .await
                 .map_err(AccessError::Database)?;
+            // The version too: this really does rebuild, so the tables below
+            // are the shape `setup` declares, whatever the row said before.
             conn = run_ddl(
                 conn,
                 format!(
-                    "UPDATE projection_checkpoint SET position = 0 WHERE group_name = '{name}'"
+                    "UPDATE projection_checkpoint SET position = 0, read_model_version = {version}
+                      WHERE group_name = '{name}'"
                 ),
             )
             .await

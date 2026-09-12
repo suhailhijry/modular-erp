@@ -37,6 +37,7 @@
 //!
 //! `ETag`/`If-Match`. It needs a conflict real enough to shape it.
 
+mod audit;
 pub mod billing;
 mod calendar;
 mod catalog;
@@ -51,6 +52,8 @@ mod members;
 mod modules;
 mod origins;
 mod passwords;
+mod permission_limits;
+mod platform;
 mod realtime;
 mod routes;
 mod signup;

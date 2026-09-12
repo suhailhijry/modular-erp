@@ -82,7 +82,9 @@ pub async fn install(_conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> 
 /// own system should still be able to answer "what do we owe her".
 #[must_use]
 pub fn setup() -> erp_tenant::ModuleSetup {
-    erp_tenant::ModuleSetup::new(module_id(), "", &[], upcasters).requiring(&["hr"])
+    erp_tenant::ModuleSetup::new(module_id(), "", &[], upcasters)
+        .requiring(&["hr"])
+        .reading(&["hr"])
 }
 
 /// This module's entitlement name.

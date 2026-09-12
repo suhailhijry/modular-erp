@@ -211,7 +211,6 @@ impl PendingEffect {
     }
 }
 
-/// Counts an operator, and the per-tenant health check, cares about.
 /// An effect this system promised and gave up on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeadLetter {
@@ -261,24 +260,66 @@ pub async fn dead_letters(
         .collect())
 }
 
+/// The dead letter [`requeue`] or [`dismiss`] acted on, named the way an audit
+/// line may name it: its kind and its key, never its payload — which, for a
+/// sign-in code or a reset link, is the credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handled {
+    pub kind: EffectKind,
+    pub idempotency_key: String,
+}
+
 /// **Puts a dead letter back in the queue**, due now, with its attempts reset.
 ///
-/// `false` when there was no dead letter with that id — already requeued, or
-/// never dead. The idempotency key travels with it, so a delivery that in fact
+/// `None` when there was no dead letter with that id — already requeued or
+/// dismissed, or never dead. The idempotency key travels with it, so a delivery that in fact
 /// succeeded before the effect was given up on is still not performed twice by
 /// a handler that honours the key.
-pub async fn requeue(conn: &mut PgConnection, id: i64) -> Result<bool, sqlx::Error> {
-    let touched = sqlx::query!(
+pub async fn requeue(conn: &mut PgConnection, id: i64) -> Result<Option<Handled>, sqlx::Error> {
+    let row = sqlx::query!(
         "UPDATE outbox
             SET dead_at = NULL, attempts = 0, next_attempt_at = now(),
                 leased_until = NULL, last_error = NULL
-          WHERE id = $1 AND dead_at IS NOT NULL",
+          WHERE id = $1 AND dead_at IS NOT NULL
+          RETURNING kind, idempotency_key",
         id,
     )
-    .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    Ok(touched == 1)
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.map(|r| handled(r.kind, r.idempotency_key)).transpose()
+}
+
+/// **Deletes a dead letter**, and nothing else: `None` for a row that is
+/// pending, delivered or gone.
+///
+/// For the one that should not be sent: a promise that went stale while it was
+/// being retried. A credential that expires sooner than the retry schedule
+/// runs out — a sign-in code, a reset link — is dead before it is dead-lettered,
+/// and requeueing it mails somebody a link that no longer works. Without this
+/// the only ways to clear one were to send it or to write SQL, and a dead
+/// letter nobody can clear keeps `no_dead_letters` firing until people stop
+/// reading it.
+///
+/// This is the one way a dead letter is deleted. Both outbox migrations still
+/// say one is "never deleted"; they predate this and sqlx checksums them. What
+/// survives a dismissal is the caller's to keep: it gets back the kind and
+/// key, and the control plane's route records them (`effect.dismissed`).
+pub async fn dismiss(conn: &mut PgConnection, id: i64) -> Result<Option<Handled>, sqlx::Error> {
+    let row = sqlx::query!(
+        "DELETE FROM outbox WHERE id = $1 AND dead_at IS NOT NULL
+          RETURNING kind, idempotency_key",
+        id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.map(|r| handled(r.kind, r.idempotency_key)).transpose()
+}
+
+fn handled(kind: String, idempotency_key: String) -> Result<Handled, sqlx::Error> {
+    Ok(Handled {
+        kind: EffectKind::new(kind).map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+        idempotency_key,
+    })
 }
 
 /// Deletes delivered effects older than `before`.
@@ -317,6 +358,7 @@ pub async fn sweep_webhook_events(
     )
 }
 
+/// Counts an operator, and either plane's health check, cares about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutboxHealth {
     /// Promised, not yet delivered, not yet given up on.

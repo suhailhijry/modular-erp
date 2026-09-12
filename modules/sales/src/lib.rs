@@ -33,6 +33,7 @@
 mod commands;
 pub mod http;
 mod invoice;
+mod limit;
 pub mod messages;
 mod posting;
 mod projections;
@@ -41,13 +42,14 @@ mod vat;
 pub use commands::{
     APPROVE_CREDIT_NOTE, CreditLine, CreditNote, Draft, Numbered, Receipt, SalesError,
     attach_customer, cancel_invoice, credit_entry_of, credit_in, credit_invoice_part,
-    credit_part_in, credit_what_is_clear, issue_entry_of, issue_in, issue_invoice, pay_in,
-    record_payment, refund_in, refund_invoice,
+    credit_part_in, credit_what_is_clear, issue_entry_of, issue_in, issue_invoice, may_refund,
+    pay_in, record_payment, refund_in, refund_invoice,
 };
 pub use invoice::{
     Address, Allowance, Customer, Discount, DraftDiscount, DraftLine, Invoice, InvoiceEvent,
     InvoiceLine,
 };
+pub use limit::{Authority, Basis, DocumentLimit, EXCEED_DOCUMENT_LIMIT, NotALimit, may_issue};
 pub use posting::{
     PostingAccounts, entry_for_credit, entry_for_issue, entry_for_payment, entry_for_refund,
 };
@@ -123,10 +125,11 @@ pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 /// This module's projection group name, for `?consistent_after=`.
 pub const GROUP_NAME: &str = <Sales as erp_projection::ProjectionGroup>::NAME;
 
-/// This module's projection groups, as `(name, schema)`.
-const GROUPS: &[(&str, &str)] = &[(
+/// This module's projection groups, as `(name, schema, version)`.
+const GROUPS: &[(&str, &str, i16)] = &[(
     <Sales as erp_projection::ProjectionGroup>::NAME,
     <Sales as erp_projection::ProjectionGroup>::SCHEMA,
+    <Sales as erp_projection::ProjectionGroup>::VERSION,
 )];
 
 /// What a tenant enabling this module needs installed, and what it needs
@@ -156,6 +159,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
     // `sales.no_such_customer`, which is the honest answer — there is no such
     // customer, because there are none.
     .requiring(&["ledger"])
+    .reading(&["crm", "hr", "ledger"])
 }
 
 /// This module's entitlement name.

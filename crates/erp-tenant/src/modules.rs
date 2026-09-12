@@ -69,8 +69,14 @@ pub struct ModuleSetup {
     /// both the module's own tables and the tenant's `public` ones. Idempotent,
     /// like the DDL, because a rebuild runs both again.
     pub seed_sql: &'static str,
-    /// The projection groups this module owns, as `(name, schema)`.
-    pub groups: &'static [(&'static str, &'static str)],
+    /// The projection groups this module owns, as `(name, schema, version)`.
+    ///
+    /// Each field is copied from the group's `ProjectionGroup` declaration —
+    /// `NAME`, `SCHEMA` and `VERSION` — so it cannot drift from the type the
+    /// runner projects. The version is what provisioning stamps on the tables
+    /// it builds, and what a request is refused against when a tenant's are
+    /// older (see [`Self::reads`]).
+    pub groups: &'static [(&'static str, &'static str, i16)],
     /// Every event shape this module can read, and the version it writes.
     ///
     /// Declared here, and **required** in [`Self::new`] rather than added by a
@@ -105,6 +111,18 @@ pub struct ModuleSetup {
     /// shape that takes nested alternatives can arrive with the module that
     /// wants one.
     pub requires_any: &'static [&'static str],
+    /// **The modules whose code this one runs**: its crate's dependencies
+    /// among the module crates, by name, and `a_modules_reads_are_its_crate_dependencies`
+    /// in `erp-api` keeps the list equal to its `Cargo.toml`.
+    ///
+    /// A route of this module is served from their read models as well as its
+    /// own — every read across groups goes through the other module's crate,
+    /// because L3 forbids a qualified name reaching one — so a request is
+    /// refused while any read model in this module's closure over `reads` is
+    /// older than the build (decision 7 of 2026-09-11). Wider than
+    /// [`Self::requires`], which is what a tenant must *have*: `sales` reads
+    /// `crm`'s customers without requiring the module.
+    pub reads: &'static [&'static str],
     /// Why this module is no longer offered, if it is not.
     ///
     /// # Why modules are deprecated and never removed
@@ -127,7 +145,7 @@ impl ModuleSetup {
     pub const fn new(
         module: ModuleId,
         install_sql: &'static str,
-        groups: &'static [(&'static str, &'static str)],
+        groups: &'static [(&'static str, &'static str, i16)],
         upcasters: fn() -> &'static erp_eventlog::Upcasters,
     ) -> Self {
         Self {
@@ -138,6 +156,7 @@ impl ModuleSetup {
             upcasters,
             requires: &[],
             requires_any: &[],
+            reads: &[],
             deprecated: None,
         }
     }
@@ -170,6 +189,13 @@ impl ModuleSetup {
     #[must_use]
     pub const fn requiring_any(mut self, modules: &'static [&'static str]) -> Self {
         self.requires_any = modules;
+        self
+    }
+
+    /// Names the modules whose code this one runs. See [`Self::reads`].
+    #[must_use]
+    pub const fn reading(mut self, modules: &'static [&'static str]) -> Self {
+        self.reads = modules;
         self
     }
 }

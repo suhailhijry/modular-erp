@@ -390,6 +390,11 @@ is kept as written because the mechanism it describes is one line away from
 being true — a second caller of `enter_for_maintenance` that did not go through
 `claim_tenants` would have exactly this problem.
 
+*(2026-09-11, IMPLEMENTATION §59.)* It was one visit away from true once
+something could suspend a tenant: a visit already under way ran every remaining
+job, because `renew_lease` did not look at the status. It does now, and the
+visit stops before its next job.
+
 `enter_for_maintenance` refuses only `Deleted` and `Provisioning`. A
 `Suspended` tenant (non-payment, abuse) keeps having its saved cards charged,
 its deposits collected, its reminders sent, and its documents submitted to

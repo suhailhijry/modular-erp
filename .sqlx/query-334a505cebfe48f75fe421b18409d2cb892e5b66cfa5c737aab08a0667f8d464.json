@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT 1 FROM membership\n              WHERE identity_id = $1 AND scope_kind = 'platform' AND revoked_at IS NULL",
+  "query": "SELECT 1 FROM tenant WHERE id = $1 AND status = 'provisioning' FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       null
     ]
   },
-  "hash": "7805270de00b3e35e43aa5ca4ab258a4d5af618800234c4bd54107028067cc6d"
+  "hash": "334a505cebfe48f75fe421b18409d2cb892e5b66cfa5c737aab08a0667f8d464"
 }

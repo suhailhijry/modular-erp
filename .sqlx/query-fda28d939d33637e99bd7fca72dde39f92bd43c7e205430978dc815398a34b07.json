@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT sealed_with, count(*) as \"n!\" FROM module_secret GROUP BY sealed_with",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sealed_with",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "module_secret",
+            "name": "sealed_with"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "n!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "fda28d939d33637e99bd7fca72dde39f92bd43c7e205430978dc815398a34b07"
+}

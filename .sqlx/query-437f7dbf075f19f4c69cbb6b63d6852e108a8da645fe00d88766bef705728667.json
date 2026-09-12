@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO second_factor_reset (id, token_hash, identity_id, expires_at)\n             VALUES ($1, $2, $3, now() + ($4::BIGINT * INTERVAL '1 second'))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "437f7dbf075f19f4c69cbb6b63d6852e108a8da645fe00d88766bef705728667"
+}

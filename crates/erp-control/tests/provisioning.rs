@@ -7,6 +7,7 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use erp_control::{
@@ -31,13 +32,15 @@ fn toy_module() -> ModuleSetup {
         ModuleId::new("toy").expect("valid"),
         "CREATE SCHEMA IF NOT EXISTS proj_toy;
          CREATE TABLE IF NOT EXISTS proj_toy.thing (id INT PRIMARY KEY);",
-        &[("toy", "proj_toy")],
+        &[("toy", "proj_toy", 1)],
         no_events,
     )
 }
 
 struct Fixture {
-    control: ControlPlane,
+    /// Behind an `Arc` because `confirm_signup` spawns its build and the task
+    /// holds one too.
+    control: Arc<ControlPlane>,
     db: TestDb,
 }
 
@@ -69,7 +72,10 @@ impl Fixture {
             .await
             .expect("cluster registers");
 
-        Self { control, db }
+        Self {
+            control: Arc::new(control),
+            db,
+        }
     }
 
     async fn database_exists(&self, name: &str) -> bool {
@@ -297,7 +303,9 @@ async fn a_taken_name_fails_before_anything_is_built() {
     let _ = erp_testkit::drop_named_database(&first.tenant.database_name).await;
 }
 
-/// Provisioning is idempotent, so recovery and retry are the same operation.
+/// A module's install runs safely against a database that already has it.
+/// Nothing re-runs `provision` — each call is a new tenant — but
+/// `install_module` runs the same script on a live one.
 #[tokio::test]
 async fn provisioning_the_same_tenant_twice_is_safe() {
     let fixture = Fixture::new().await;
@@ -526,15 +534,103 @@ async fn a_tenant_that_is_not_a_demo_cannot_be_reaped_at_all() {
 // ---------------------------------------------------------------------------
 
 /// The toy module after somebody changed its read model — a new column, which
-/// `CREATE TABLE IF NOT EXISTS` alone would never add.
+/// `CREATE TABLE IF NOT EXISTS` alone would never add — and bumped its version,
+/// as the pin in `bin/migrator` makes them.
 fn toy_module_v2() -> ModuleSetup {
     ModuleSetup::new(
         ModuleId::new("toy").expect("valid"),
         "CREATE SCHEMA IF NOT EXISTS proj_toy;
          CREATE TABLE IF NOT EXISTS proj_toy.thing (id INT PRIMARY KEY, label TEXT NOT NULL);",
-        &[("toy", "proj_toy")],
+        &[("toy", "proj_toy", 2)],
         no_events,
     )
+}
+
+/// What the fleet survey says `tenant`'s toy group was built for.
+async fn toy_read_model(fixture: &Fixture, tenant: &erp_control::Tenant) -> Option<i16> {
+    let (fleet, failed) = fixture.control.survey_read_models().await.expect("surveys");
+    assert!(failed.is_empty(), "{failed:?}");
+    fleet
+        .into_iter()
+        .find(|found| found.tenant == tenant.id)
+        .and_then(|found| {
+            found
+                .installed
+                .into_iter()
+                .find(|(group, _)| group == "toy")
+                .map(|(_, version)| version)
+        })
+}
+
+/// **A tenant's tables say which read model built them.** At version 3, so
+/// neither the column's default nor a hard-coded 1 could pass for it.
+#[tokio::test]
+async fn a_new_tenant_is_stamped_with_the_read_model_it_was_built_from() {
+    let fixture = Fixture::new().await;
+    let toy_v3 = ModuleSetup::new(
+        ModuleId::new("toy").expect("valid"),
+        "CREATE SCHEMA IF NOT EXISTS proj_toy;
+         CREATE TABLE IF NOT EXISTS proj_toy.thing (id INT PRIMARY KEY);",
+        &[("toy", "proj_toy", 3)],
+        no_events,
+    );
+    let tenant = fixture
+        .control
+        .sign_up(
+            "owner@acme.test".to_owned(),
+            "correct horse battery staple".to_owned(),
+            "acme".to_owned(),
+            "acme".to_owned(),
+            vec![toy_v3],
+        )
+        .await
+        .expect("signs up")
+        .tenant;
+
+    assert_eq!(toy_read_model(&fixture, &tenant).await, Some(3));
+
+    fixture.cleanup_tenant(&tenant).await;
+}
+
+/// **Enabling a module again over the tables it had does not claim a newer
+/// shape for them.** `install.sql` is `IF NOT EXISTS`, so the old tables stay
+/// — and so must the old stamp, or the deploy step would never rebuild them
+/// and the request path would serve from them. Reached through the product:
+/// sign up on v1, disable, enable on v2.
+#[tokio::test]
+async fn re_enabling_over_an_old_shape_does_not_claim_the_new_one() {
+    let fixture = Fixture::new().await;
+    let tenant = tenant_with_toy(&fixture, "acme").await;
+    let toy = ModuleId::new("toy").expect("valid");
+
+    fixture
+        .control
+        .disable_module(tenant.id, &toy, Actor::system())
+        .await
+        .expect("disables");
+    // Still surveyed while disabled: the tables are kept, and have to be this
+    // build's the moment it is enabled again.
+    assert_eq!(toy_read_model(&fixture, &tenant).await, Some(1));
+
+    fixture
+        .control
+        .install_module(tenant.id, toy_module_v2(), Actor::system())
+        .await
+        .expect("enables again");
+
+    assert!(
+        !fixture
+            .column_exists(&tenant, "proj_toy", "thing", "label")
+            .await,
+        "the old shape is still what is there"
+    );
+    assert_eq!(
+        toy_read_model(&fixture, &tenant).await,
+        Some(1),
+        "and it says so, so the deploy step rebuilds it"
+    );
+
+    fixture.cleanup_tenant(&tenant).await;
 }
 
 /// **A changed read model is a rebuild, not a migration.**
@@ -605,6 +701,11 @@ async fn refreshing_a_module_rebuilds_its_schema_and_rewinds_its_checkpoint() {
     assert_eq!(
         checkpoint, 0,
         "and the checkpoint rewound, or the worker would think it had nothing to do"
+    );
+    assert_eq!(
+        toy_read_model(&fixture, &tenant).await,
+        Some(2),
+        "and it says which read model built the tables it now has"
     );
 
     let mut conn = fixture.tenant_connection(&tenant).await;
@@ -1252,4 +1353,537 @@ async fn a_database_that_cannot_be_opened_is_never_dropped() {
     .await
     .ok();
     let _ = erp_testkit::drop_named_database(&shut).await;
+}
+
+// ---------------------------------------------------------------------------
+// Builds that did not finish
+// ---------------------------------------------------------------------------
+
+const PASSWORD: &str = "correct horse battery staple";
+
+/// Polls until `done` answers true, or fails naming what never happened.
+async fn until<F, Fut>(what: &str, mut done: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
+    while !done().await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what} never happened"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+impl Fixture {
+    /// A signup request for `owner@{slug}.test`, and the token its email carries.
+    async fn request(&self, slug: &str, module: &ModuleSetup) -> String {
+        let (_, token) = self
+            .control
+            .request_signup(
+                erp_control::SignupRequest {
+                    email: format!("owner@{slug}.test"),
+                    password: PASSWORD.to_owned(),
+                    slug: slug.to_owned(),
+                    company: "Acme Trading".to_owned(),
+                    modules: vec![module.clone()],
+                },
+                "https://erp.test/v1/signups/",
+                erp_i18n::Locale::English,
+            )
+            .await
+            .expect("the request is recorded");
+        token.expose().to_owned()
+    }
+
+    async fn status(&self, slug: &str) -> Option<TenantStatus> {
+        self.control
+            .tenant_by_slug(slug)
+            .await
+            .expect("reads")
+            .map(|t| t.status)
+    }
+
+    /// Confirms, and drops the confirmation the moment the tenant row exists —
+    /// mid-build by construction, because every module these tests pass sleeps
+    /// after it. That is the drop the API's 30-second `TimeoutLayer` does to a
+    /// handler, and the one a client that goes away causes.
+    async fn confirm_and_cut_off(&self, token: &str, module: ModuleSetup, slug: &str) {
+        let finished = tokio::select! {
+            biased;
+            _ = self.control.confirm_signup(token, vec![module]) => true,
+            () = until("a tenant row", || async { self.status(slug).await.is_some() }) => false,
+        };
+        assert!(
+            !finished,
+            "the build finished before the request was cut off"
+        );
+        assert_eq!(
+            self.status(slug).await,
+            Some(TenantStatus::Provisioning),
+            "cut off mid-build"
+        );
+    }
+
+    /// A tenant whose build died mid-way, reached the way a crash or a deploy
+    /// kill reaches it. `sign_up` builds inline — nothing spawns it — so
+    /// dropping it is what a crash does to a confirmation's task. Dropped while
+    /// its module sleeps, so the database exists, is migrated, and a backend is
+    /// still in it.
+    async fn died_mid_build(&self, slug: &str) -> erp_control::Tenant {
+        let slow = ModuleSetup::new(
+            ModuleId::new("slow").expect("valid"),
+            "SELECT pg_sleep(30);",
+            &[],
+            no_events,
+        );
+        let asleep = || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_stat_activity a JOIN tenant t ON t.database_name = a.datname
+                      WHERE t.slug = $1 AND a.query LIKE '%pg_sleep%'
+                 )",
+            )
+            .bind(slug)
+            .fetch_one(self.db.pool())
+            .await
+            .unwrap_or(false)
+        };
+        tokio::select! {
+            biased;
+            _ = self.control.sign_up(
+                format!("owner@{slug}.test"),
+                PASSWORD.to_owned(),
+                slug.to_owned(),
+                "Acme Trading".to_owned(),
+                vec![slow],
+            ) => panic!("the build finished before it was killed"),
+            () = until("the module install", asleep) => {}
+        }
+        let stuck = self
+            .control
+            .tenant_by_slug(slug)
+            .await
+            .expect("reads")
+            .expect("the row outlived its build");
+        assert_eq!(stuck.status, TenantStatus::Provisioning);
+        stuck
+    }
+
+    /// Whether some backend in `database` is waiting for a lock.
+    async fn waits_on_a_lock(&self, database: &str) -> bool {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                             WHERE datname = $1 AND wait_event_type = 'Lock')",
+        )
+        .bind(database)
+        .fetch_one(self.db.pool())
+        .await
+        .expect("reads")
+    }
+}
+
+/// **A confirmation cut off mid-build still ends in a working company.**
+///
+/// Decision 8. Before it, the build ran inside the request's future, so the
+/// drop took the build with it: the tenant stayed `provisioning`, its name
+/// held and the link spent, and the customer had a 504 and nothing else.
+#[tokio::test]
+async fn a_confirmation_cut_off_mid_build_still_ends_in_a_working_company() {
+    let fixture = Fixture::new().await;
+    let slow = ModuleSetup::new(
+        ModuleId::new("slow").expect("valid"),
+        "SELECT pg_sleep(2);",
+        &[],
+        no_events,
+    );
+    let token = fixture.request("acme", &slow).await;
+
+    fixture.confirm_and_cut_off(&token, slow, "acme").await;
+
+    until("the tenant activating", || async {
+        fixture.status("acme").await == Some(TenantStatus::Active)
+    })
+    .await;
+
+    // And it is the customer's: the password they chose gets them in.
+    let identity = fixture
+        .control
+        .authenticate("owner@acme.test", PASSWORD)
+        .await
+        .expect("the owner's password works");
+    let tenant = fixture
+        .control
+        .tenant_by_slug("acme")
+        .await
+        .expect("reads")
+        .expect("exists");
+    fixture
+        .control
+        .enter(identity, tenant.id, Lane::Interactive)
+        .await
+        .expect("the owner enters the company they asked for");
+
+    fixture.cleanup_tenant(&tenant).await;
+}
+
+/// **And one that fails is still compensated**, the link included.
+///
+/// The name is freed and the link works again, and working again means the
+/// same link builds the company once the cause is gone.
+#[tokio::test]
+async fn a_confirmation_cut_off_mid_build_that_fails_is_still_compensated() {
+    let fixture = Fixture::new().await;
+    let broken = ModuleSetup::new(
+        ModuleId::new("broken").expect("valid"),
+        "SELECT pg_sleep(2); CREATE TABLE proj_nowhere.thing (id INT);",
+        &[],
+        no_events,
+    );
+    let token = fixture.request("acme", &broken).await;
+
+    fixture.confirm_and_cut_off(&token, broken, "acme").await;
+
+    until("the link working again", || async {
+        fixture.control.pending_signup_modules(&token).await.is_ok()
+    })
+    .await;
+    assert!(
+        !fixture.slug_taken("acme").await,
+        "the half-built tenant was abandoned before the link was put back"
+    );
+
+    let done = fixture
+        .control
+        .confirm_signup(&token, vec![toy_module()])
+        .await
+        .expect("the same link builds the company");
+    assert_eq!(done.tenant.status, TenantStatus::Active);
+
+    fixture.cleanup_tenant(&done.tenant).await;
+}
+
+/// **A build whose process died mid-way is swept, and its name freed.**
+///
+/// With a backend still in its database, which the drop has to end.
+#[tokio::test]
+async fn a_build_that_died_mid_provision_is_swept_and_its_name_freed() {
+    let fixture = Fixture::new().await;
+    let stuck = fixture.died_mid_build("acme").await;
+
+    assert_eq!(
+        fixture
+            .control
+            .reap_stuck_provisioning(0, 100)
+            .await
+            .expect("sweeps"),
+        1
+    );
+    assert!(!fixture.slug_taken("acme").await, "the name is free again");
+    assert!(!fixture.database_exists(&stuck.database_name).await);
+
+    let done = fixture
+        .control
+        .sign_up(
+            "owner2@acme.test".to_owned(),
+            PASSWORD.to_owned(),
+            "acme".to_owned(),
+            "Acme Trading".to_owned(),
+            vec![toy_module()],
+        )
+        .await
+        .expect("the name signs up again");
+    fixture.cleanup_tenant(&done.tenant).await;
+}
+
+/// The crash before `CREATE DATABASE`: a row and nothing else, reached through
+/// the product's own first step. And the abandonment is on the record.
+#[tokio::test]
+async fn a_provisioning_that_never_got_a_database_is_swept() {
+    let fixture = Fixture::new().await;
+    let tenant = fixture
+        .control
+        .register_tenant(
+            "acme",
+            "Acme",
+            erp_control::PlacementPolicy::Balanced,
+            Actor::system(),
+        )
+        .await
+        .expect("registers");
+
+    assert_eq!(
+        fixture
+            .control
+            .reap_stuck_provisioning(0, 100)
+            .await
+            .expect("sweeps"),
+        1,
+        "a database that does not exist holds nothing"
+    );
+    assert!(!fixture.slug_taken("acme").await);
+
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_entry
+          WHERE action = 'tenant.abandoned' AND subject_id = $1",
+    )
+    .bind(tenant.id.to_string())
+    .fetch_one(fixture.db.pool())
+    .await
+    .expect("counts");
+    assert_eq!(recorded, 1, "an abandonment is recorded");
+}
+
+/// A signup still building is not swept. Here that is the state right after
+/// `provision` registers the row.
+#[tokio::test]
+async fn a_provisioning_younger_than_the_grace_is_left_alone() {
+    let fixture = Fixture::new().await;
+    fixture
+        .control
+        .register_tenant(
+            "acme",
+            "Acme",
+            erp_control::PlacementPolicy::Balanced,
+            Actor::system(),
+        )
+        .await
+        .expect("registers");
+
+    assert_eq!(
+        fixture
+            .control
+            .reap_stuck_provisioning(erp_control::PROVISIONING_GRACE_SECONDS, 100)
+            .await
+            .expect("sweeps"),
+        0
+    );
+    assert!(fixture.slug_taken("acme").await);
+}
+
+/// **The sweep read it provisioning; it activated before the drop.**
+///
+/// The stale value is the race — nothing is written by hand. `abandon` asks the
+/// row again, under a lock, and leaves the company alone.
+#[tokio::test]
+async fn a_tenant_that_activated_after_the_sweep_read_it_survives() {
+    let fixture = Fixture::new().await;
+    let done = fixture
+        .control
+        .sign_up(
+            "owner@acme.test".to_owned(),
+            PASSWORD.to_owned(),
+            "acme".to_owned(),
+            "Acme Trading".to_owned(),
+            vec![toy_module()],
+        )
+        .await
+        .expect("signs up");
+
+    let mut seen = done.tenant.clone();
+    seen.status = TenantStatus::Provisioning;
+    assert!(
+        !fixture.control.abandon(seen).await.expect("answers"),
+        "an active tenant is not abandoned"
+    );
+
+    assert!(fixture.database_exists(&done.tenant.database_name).await);
+    fixture
+        .control
+        .enter(done.identity, done.tenant.id, Lane::Interactive)
+        .await
+        .expect("the owner still gets in");
+
+    fixture.cleanup_tenant(&done.tenant).await;
+}
+
+/// The provisioner loses the race: the sweep abandoned the tenant, and the
+/// activation that would have reported a company that no longer exists is
+/// refused.
+#[tokio::test]
+async fn activating_a_tenant_the_sweep_abandoned_is_refused() {
+    let fixture = Fixture::new().await;
+    let tenant = fixture
+        .control
+        .register_tenant(
+            "acme",
+            "Acme",
+            erp_control::PlacementPolicy::Balanced,
+            Actor::system(),
+        )
+        .await
+        .expect("registers");
+    assert_eq!(
+        fixture
+            .control
+            .reap_stuck_provisioning(0, 100)
+            .await
+            .expect("sweeps"),
+        1
+    );
+
+    let refused = fixture
+        .control
+        .activate_tenant(tenant.id, Actor::system())
+        .await
+        .expect_err("there is nothing to activate");
+    assert!(
+        matches!(refused, erp_control::AccessError::NoSuchTenant),
+        "{refused:?}"
+    );
+}
+
+/// **Nothing makes the tenant real while `abandon` is deciding.**
+///
+/// The race the row lock exists for, held open. `abandon` has re-read the row
+/// and is asking the database what is in it — kept there by a lock on the log —
+/// when the provisioner's activation arrives. The activation has to wait for
+/// the verdict and then find nothing to activate. Without the lock it commits
+/// first, and `abandon` goes on to drop an active company's database and row.
+#[tokio::test]
+async fn an_activation_waits_while_abandon_looks_and_then_finds_nothing() {
+    let fixture = Fixture::new().await;
+    let stuck = fixture.died_mid_build("acme").await;
+
+    let mut blocker = connect_named(&stuck.database_name).await;
+    let mut held = blocker.begin().await.expect("begins");
+    sqlx::query("LOCK TABLE public.event IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *held)
+        .await
+        .expect("locks the log");
+
+    let abandoning = tokio::spawn({
+        let (control, tenant) = (Arc::clone(&fixture.control), stuck.clone());
+        async move { control.abandon(tenant).await }
+    });
+    until("abandon waiting to read the log", || {
+        fixture.waits_on_a_lock(&stuck.database_name)
+    })
+    .await;
+
+    let mut activating = tokio::spawn({
+        let (control, id) = (Arc::clone(&fixture.control), stuck.id);
+        async move { control.activate_tenant(id, Actor::system()).await }
+    });
+    tokio::select! {
+        biased;
+        done = &mut activating => panic!("activated while abandon was looking: {done:?}"),
+        () = until("the activation waiting on the row", || {
+            fixture.waits_on_a_lock(fixture.db.name())
+        }) => {}
+    }
+
+    held.commit().await.expect("releases the log");
+    blocker.close().await.ok();
+
+    assert!(
+        abandoning.await.expect("joins").expect("abandons"),
+        "the half-built tenant was abandoned"
+    );
+    let refused = activating
+        .await
+        .expect("joins")
+        .expect_err("there is nothing to activate");
+    assert!(
+        matches!(refused, erp_control::AccessError::NoSuchTenant),
+        "{refused:?}"
+    );
+    assert!(!fixture.slug_taken("acme").await);
+    assert!(!fixture.database_exists(&stuck.database_name).await);
+}
+
+/// **A provisioning row over a database nobody can open is not dropped.**
+///
+/// The sweep's side of `a_database_that_cannot_be_opened_is_never_dropped`:
+/// not knowing what is inside is not knowing it is empty (L6). The
+/// `ALLOW_CONNECTIONS false` is set by hand — it simulates an operator locking
+/// the database during a restore, which is when a provisioning row is least
+/// likely to be the truth about it.
+#[tokio::test]
+async fn a_provisioning_tenant_whose_database_cannot_be_opened_is_never_dropped() {
+    let fixture = Fixture::new().await;
+    let stuck = fixture.died_mid_build("acme").await;
+
+    // The column's CHECK allows only `[a-z][a-z0-9_]*`, so `AssertSqlSafe` is
+    // true.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER DATABASE \"{}\" WITH ALLOW_CONNECTIONS false",
+        stuck.database_name
+    )))
+    .execute(fixture.control.pool())
+    .await
+    .expect("closes it");
+
+    let refused = fixture
+        .control
+        .abandon(stuck.clone())
+        .await
+        .expect_err("a database nobody can look inside is not called empty");
+    assert!(
+        matches!(refused, erp_control::AccessError::Corrupt(_)),
+        "{refused:?}"
+    );
+    assert!(fixture.database_exists(&stuck.database_name).await);
+    assert!(fixture.slug_taken("acme").await);
+
+    fixture.cleanup_tenant(&stuck).await;
+}
+
+/// **A provisioning row over a database with events in it is never dropped.**
+///
+/// The product cannot reach this state: provisioning ends before anybody can
+/// write an event. A control plane **restored** to a point mid-signup can, while
+/// its tenant went on running. The raw `UPDATE` below simulates that restore,
+/// as `a_tenant_whose_control_row_was_lost_is_never_dropped` does with a
+/// `DELETE`.
+#[tokio::test]
+async fn a_provisioning_tenant_with_events_is_never_dropped() {
+    let fixture = Fixture::new().await;
+    let done = fixture
+        .control
+        .sign_up(
+            "sara@bassat.test".to_owned(),
+            PASSWORD.to_owned(),
+            "bassat".to_owned(),
+            "Bassat".to_owned(),
+            vec![toy_module()],
+        )
+        .await
+        .expect("signs up");
+    let database = done.tenant.database_name.clone();
+    write_events(&database, 3).await;
+
+    sqlx::query("UPDATE tenant SET status = 'provisioning' WHERE id = $1")
+        .bind(done.tenant.id.as_uuid())
+        .execute(fixture.db.pool())
+        .await
+        .expect("the restore");
+
+    let mut restored = done.tenant.clone();
+    restored.status = TenantStatus::Provisioning;
+    let refused = fixture
+        .control
+        .abandon(restored)
+        .await
+        .expect_err("a database with events is somebody's");
+    assert!(
+        matches!(refused, erp_control::AccessError::Corrupt(_)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fixture
+            .control
+            .reap_stuck_provisioning(0, 100)
+            .await
+            .expect("sweeps"),
+        0
+    );
+
+    assert!(fixture.database_exists(&database).await);
+    assert_eq!(event_count(&database).await, 3);
+    assert!(fixture.slug_taken("bassat").await);
+
+    fixture.cleanup_tenant(&done.tenant).await;
 }

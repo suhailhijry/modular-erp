@@ -44,5 +44,9 @@ thiserror = { workspace = true }
 erp-control = { workspace = true }
 erp-testkit = { workspace = true }
 erp-i18n = { workspace = true }
+# **For the till's own claim test.** Taking a return issues a credit note, and
+# `sales:approve_credit_note` is granted on `hr`'s org chart — so proving the
+# till asks for it takes an org chart to grant it on.
+hr = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

@@ -50,6 +50,9 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 erp-testkit = { workspace = true }
+# For the read-model pin in `bin/migrator`: a stable hash of each install script.
+hex = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

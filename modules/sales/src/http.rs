@@ -3,7 +3,7 @@
 //! Translation only, like every module's — see [`ledger::http`] for why these
 //! live in the module rather than in the composition root.
 
-use crate::{Customer, Draft, DraftLine, Receipt, SalesError, VatCategory};
+use crate::{Authority, Customer, Draft, DraftLine, Receipt, SalesError, VatCategory};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use erp_eventlog::ExecuteError;
@@ -40,6 +40,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         // a value that reaches it has already been through the type that gives
         // it meaning. See `erp_eventlog::config`.
         .routes(routes!(posting_accounts, set_posting_accounts))
+        .routes(routes!(document_limit, set_document_limit))
 }
 
 /// How many invoices a page returns when the caller does not say, and the most
@@ -417,7 +418,7 @@ fn view(summary: crate::InvoiceSummary) -> InvoiceView {
         (status = CREATED, description = "Issued, or already issued under this key.", body = Issued),
         (status = BAD_REQUEST, description = "No lines that come to anything, mixed currencies, an unknown VAT category, or an unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = NOT_FOUND, description = "No such tenant, not yours, or the sales module is not enabled here", body = Problem),
         (status = CONFLICT, description = "Sustained contention on this invoice. Retryable.", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "The posting accounts are missing or closed", body = Problem),
@@ -521,9 +522,15 @@ async fn issue_invoice(
         note: body.note,
     };
 
-    let committed = crate::issue_invoice(&tenant.db, &id, &draft, &creating(&tenant, &key))
-        .await
-        .map_err(|e| sales_problem(&e, locale))?;
+    let committed = crate::issue_invoice(
+        &tenant.db,
+        &id,
+        &draft,
+        &creating(&tenant, &key),
+        Authority::of(&tenant.db),
+    )
+    .await
+    .map_err(|e| sales_problem(&e, locale))?;
 
     nudge(&state, tenant.db.tenant()).await;
 
@@ -619,7 +626,7 @@ async fn record_payment(
         (status = OK, description = "Refunded, or already refunded under this reference.", body = PaymentRecorded),
         (status = BAD_REQUEST, description = "A non-positive amount, or an unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, over the tenant's document limit (`sales.over_document_limit`), or — when the refund clears the invoice, because that issues a whole-invoice credit note — without the `sales:approve_credit_note` claim once the tenant uses claims (`sales.not_approved`)", body = Problem),
         (status = NOT_FOUND, body = Problem),
         (status = CONFLICT, description = "More than is held — read the invoice again and decide", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "No such invoice, or one that was never issued", body = Problem),
@@ -654,6 +661,7 @@ async fn refund_payment(
         },
         &reason,
         &metadata(&tenant),
+        Authority::of(&tenant.db),
     )
     .await
     .map_err(|e| sales_problem(&e, locale))?;
@@ -690,7 +698,7 @@ async fn refund_payment(
         (status = OK, description = "Credited, or already credited under this key.", body = Issued),
         (status = BAD_REQUEST, description = "An unusable id", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, without the `sales:approve_credit_note` claim once the tenant uses claims (`sales.not_approved`), or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = NOT_FOUND, body = Problem),
         (status = CONFLICT, description = "Already cancelled by a *different* credit note", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "No such invoice, or one with payments against it — refund those first", body = Problem),
@@ -716,6 +724,7 @@ async fn credit_note(
         &body.reason,
         body.on,
         &metadata(&tenant),
+        Authority::of(&tenant.db),
     )
     .await
     .map_err(|e| sales_problem(&e, locale))?;
@@ -878,7 +887,7 @@ async fn list_credit_notes(
         (status = OK, description = "Credited, or already credited under this key.", body = Issued),
         (status = BAD_REQUEST, description = "An unusable id, or an amount that is not one", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
-        (status = FORBIDDEN, body = Problem),
+        (status = FORBIDDEN, description = "Not a role that may, without the `sales:approve_credit_note` claim once the tenant uses claims (`sales.not_approved`), or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = NOT_FOUND, body = Problem),
         (status = CONFLICT, description = "The invoice was already cancelled outright", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "No such invoice, no such line, or more than is left to credit", body = Problem),
@@ -915,6 +924,7 @@ async fn credit_invoice_part(
             on: body.on,
         },
         &metadata(&tenant),
+        Authority::of(&tenant.db),
     )
     .await
     .map_err(|e| sales_problem(&e, locale))?;
@@ -1462,6 +1472,135 @@ async fn set_posting_accounts(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The document limit, as the owner reads and writes it.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({ "limit": { "amount": { "minor": 1_000_000, "currency": "SAR" }, "basis": "after_vat" } }))]
+struct DocumentLimitView {
+    /// `null`, or absent, is no limit — how every tenant starts, and how an
+    /// owner removes one.
+    limit: Option<LimitView>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+struct LimitView {
+    /// The most one invoice, credit note or refund may come to. More than
+    /// nothing. A document in another currency is refused as well, because it
+    /// cannot be compared with this.
+    amount: Amount,
+    /// `before_vat` or `after_vat`: which of a document's totals is compared.
+    #[schema(value_type = String, example = "after_vat")]
+    basis: crate::Basis,
+}
+
+/// How large a document a member may issue.
+///
+/// Every invoice, credit note and refund a member other than the owner issues
+/// — here, at the till, from the booking desk, by asking a gateway for a
+/// refund, or by charging a deposit whose prepayment invoice the gateway's
+/// settlement raises — is refused with `403 sales.over_document_limit` when it
+/// comes to more, unless the org chart gives them `sales:exceed_document_limit`
+/// in the branch they named. What nobody issues by hand is not limited: a
+/// customer's own deposit, the worker billing a completed booking.
+#[utoipa::path(
+    get,
+    path = "/v1/sales/document-limit",
+    tag = "sales",
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
+    responses(
+        (status = OK, description = "`limit: null` until the owner sets one.", body = DocumentLimitView, headers(("ETag" = String, description = "The version of this setting. Send it back as `If-Match` to write only if nobody else has since."))),
+        (status = INTERNAL_SERVER_ERROR, description = "The stored limit is one this build cannot use. Every document a member issues is refused until it is set again, which this route's `PUT` still can", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, description = "Not the owner", body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn document_limit(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+) -> Result<Versioned<DocumentLimitView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let version = erp_eventlog::configuration::version_of(&mut conn, crate::DocumentLimit::KEY)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    let limit = crate::DocumentLimit::resolve(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    Ok(Versioned(
+        version,
+        DocumentLimitView {
+            limit: limit.map(|limit| LimitView {
+                amount: Amount {
+                    minor: limit.limit().minor(),
+                    currency: limit.limit().currency().to_string(),
+                },
+                basis: limit.basis(),
+            }),
+        },
+    ))
+}
+
+/// Set it, or remove it with `limit: null`.
+///
+/// **Applies to the next document.** Nothing already issued is judged again,
+/// and a retry of a document issued before the limit was lowered answers with
+/// that document.
+#[utoipa::path(
+    put,
+    path = "/v1/sales/document-limit",
+    tag = "sales",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("If-Match" = Option<String>, Header, description = "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally."),
+    ),
+    request_body = DocumentLimitView,
+    responses(
+        (status = NO_CONTENT, description = "Set."),
+        (status = BAD_REQUEST, description = "An amount that is not more than nothing (`sales.document_limit_not_positive`), or a currency that is not one", body = Problem),
+        (status = PRECONDITION_FAILED, description = "`If-Match` named a version that is no longer current; reload and try again", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, description = "Not the owner", body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = UNPROCESSABLE_ENTITY, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn set_document_limit(
+    tenant: Allowed<ManageTenant>,
+    Language(locale): Language,
+    IfMatch(expected): IfMatch,
+    Json(body): Json<DocumentLimitView>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let limit = match body.limit {
+        Some(view) => Some(
+            crate::DocumentLimit::new(view.amount.parse(locale)?, view.basis)
+                .map_err(|e| ApiError::BadRequest(e.message()).into_problem(locale, &CATALOG))?,
+        ),
+        None => None,
+    };
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    erp_eventlog::configuration::set(
+        &mut conn,
+        crate::DocumentLimit::KEY,
+        &limit,
+        Some(&tenant.session.identity.to_string()),
+        expected,
+    )
+    .await
+    .map_err(|e| config_problem(&e, locale))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn config_problem(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem {
     erp_web::config_problem(error, locale, &CATALOG)
 }
@@ -1477,6 +1616,9 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
     let (status, message) = match error {
         CommandError::Execute(ExecuteError::Rejected(rejection)) => (
             match rejection {
+                // Who is asking, not what was asked: a claim, or the document
+                // limit.
+                refused if refused.refuses_the_caller() => StatusCode::FORBIDDEN,
                 // Well-formed, but about something that is not there or not in a
                 // state that allows it.
 

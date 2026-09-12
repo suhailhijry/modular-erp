@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE membership SET role = $2\n                  WHERE identity_id = $1 AND scope_kind = 'platform' AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cf44f2839a527509f55d67d369d048f582396d1daf81bca83b2bdc7168d61034"
+}

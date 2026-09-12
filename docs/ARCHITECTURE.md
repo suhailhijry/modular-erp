@@ -290,9 +290,17 @@ The identity → profile link crosses a database boundary, so no foreign key. Th
 tenant DB stores `IdentityId` plus a denormalized display name refreshed by a
 control-plane outbox event.
 
-**There is no `is_system` boolean.** Platform capability is explicit and scoped.
-Support access to a tenant is **impersonation**: first-class, logged, time-boxed,
-visible to the tenant, and attributed to both parties.
+**There is no `is_system` boolean.** Platform capability is explicit and scoped:
+a platform membership carries a role — `support`, `billing` or `superadmin` —
+and `PlatformRole::may` is the one table of what each may do. Every platform
+door asks it through `ControlPlane::staff_may`, which also demands a second
+factor. Support access to a tenant is **impersonation**: first-class, logged,
+time-boxed, visible to the tenant, and attributed to both parties. *(Built so
+far: it needs the `EnterForSupport` power and a second factor, and is logged
+with the staff member and the reason, which the tenant's owner reads in their
+audit trail, `GET /v1/audit` — the staff member by id, and by address only
+when they are, or were, a member of that tenant too.
+Time-boxing and naming the impersonated person are not built.)*
 
 ### 1.10 Money (D10) — revising an earlier proposal
 
@@ -452,8 +460,10 @@ leaves it doubly owned, for as long as the rollout takes.
 
 So a worker claims tenants that are **due**, holds them for the length of one
 visit, and lets the claim lapse. `FOR UPDATE SKIP LOCKED` makes simultaneous
-claims disjoint; a worker that dies is recovered from by doing nothing. Claiming
-and renewing are the same call, so long work needs no second code path.
+claims disjoint; a worker that dies is recovered from by doing nothing. A visit
+renews its lease before every job, and stops when the renewal is refused — the
+lease lapsed, or the tenant was suspended under it. Only active tenants are
+claimed, so **nothing runs for a suspended tenant**.
 
 The throttle is a separate column, and it is the one that matters for cost. A
 visit that finds nothing pushes `next_visit_at` out by an interval plus jitter
@@ -609,6 +619,20 @@ L3 pays for itself again: a group owns its schema *and* its checkpoint, so an
 upgrade touching only `ledger` rebuilds only `ledger` from position 0 while every
 other group keeps serving. The zero-downtime form is to build the new schema
 alongside, catch it up, and swap `search_path`.
+
+*Which* groups an upgrade touches is recorded rather than remembered. Each group
+declares a read-model version (`ProjectionGroup::VERSION`, bumped when its
+tables change shape or meaning — a pin test fails when `install.sql` changes
+without it), and its checkpoint records the version that built its tables. The
+deploy step (`migrator`) rebuilds every group whose recorded version is not the
+build's; `migrator check` lists them. A build projects only into groups
+stamped with its own version, so a draining build does not write its old rules
+into tables stamped new. Until one older than the build is rebuilt, every
+module route served from it — its own module's, those of modules whose code
+reads it, and those `erp-api` composes under a module's path that run it
+(`COMPOSED` in `erp-api/src/modules.rs`) — answers
+`503 request.read_model_rebuilding` rather than serve numbers worked out by
+rules the build has replaced.
 
 **Rebuild time is the upgrade window**, and it scales with log length rather than
 tenant size. For a five-year-old tenant that is the binding constraint, and for a
@@ -1009,6 +1033,20 @@ pub struct Rule<E> {
 `Rule<Verdict>` is a permission (`erp_tenant::limits`). `Rule<i32>` is pricing
 (`booking::Tariff`). One evaluator, one validator, one `explain`.
 
+A permission rule narrows a role and never widens it, and it can never touch
+`ManageTenant`: that capability is answered by the role alone, before any limit
+is read, so no rule set — and no stored one a later build cannot read — locks
+the owner out of the route that repairs it. A refusal that cannot be judged —
+an amount in another currency than the rule's — refuses; it is not a *no*.
+
+A permission rule judges a *capability*, at the edge, from facts the edge has.
+How large one sales document may be is not that question: an invoice's total
+exists only inside the command that prices it. So the tenant's document limit
+(`sales::DocumentLimit`) is judged there, at the roots every invoice, credit
+note and refund passes through, which take an explicit `Authority` — a member,
+or the system — so no path can reach them without saying who is acting. Its
+allow list is an `hr` claim, not a rule.
+
 The sketch this replaced also had `id`, `version`, `priority`, `effective` and
 `origin`. Each was dropped with an argument rather than by oversight, and
 `rule.rs` records them: order *is* priority, `Availability` already carries
@@ -1139,6 +1177,7 @@ doesn't.
 | Shutdown safety | SIGTERM mid-batch; assert the drain completes, then **rebuild the projection from the log and diff** rather than trusting the numbers left behind |
 | Effect delivery | At-least-once asserted, not exactly-once: a crash between the delivery and its record must redeliver, with the same idempotency key |
 | Deploy safety | A worker without a module's handler leaves those effects unclaimed rather than dead-lettering them |
+| Deploy overlap | Migrations are expand-only (`erp-control/tests/migrations.rs`): nothing a draining pod still uses is dropped, renamed, retyped or newly constrained unless `migrations/EXEMPTIONS` says why. A column added to an append-only table (one a `*_is_append_only` trigger guards: `event`, `audit_entry`) needs a `DEFAULT` other than `NULL`; or a row-level `BEFORE INSERT` trigger on that table in the same migration, which must fill it where the insert left it NULL (the scan checks only that the trigger exists, not what it does); or an `append-only-column` entry in `migrations/EXEMPTIONS` with a reason. The draining pod inserts without the column, and the table refuses the `UPDATE` that would fix those rows later |
 | Old data still reads | Golden files of real event JSON per schema version, decoded every build |
 | Migration equivalence | Schema migrated from v(N−1) must equal one built fresh at vN |
 | Tenant isolation (D1) | Two provisioned tenants; assert no code path reaches across |
@@ -1163,11 +1202,21 @@ checked for exactly what it has enabled.
 
 *Kernel:*
 
-- schema version = target, per module
+- schema version = target, per module — the migrations by `migrator check`,
+  and each projection group's read-model version by the same check across the
+  fleet, and continuously by the runner, which refuses to project into a group
+  not at its build's version (the job stalls, loudly), and by the request path,
+  which answers `503` on every module route served from one older than its
+  build
 - projection lag < threshold, per group
 - event positions contiguous (L1)
 - unresolved dead letters = 0
 - outbox backlog age < threshold
+
+The last two hold for the **control plane** as well, and are asserted there by
+the same job: its outbox is the tenant's table and carries every signup,
+invitation, reset and sign-in code. It has no log or read models, so nothing
+else applies.
 
 *Contributed by the ledger module:*
 

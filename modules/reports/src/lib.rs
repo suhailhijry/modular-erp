@@ -61,9 +61,10 @@ pub static CATALOG: StaticCatalog = StaticCatalog::new(messages::ENTRIES, messag
 /// This module's projection group name, for `?consistent_after=`.
 pub const GROUP_NAME: &str = <Reports as erp_projection::ProjectionGroup>::NAME;
 
-const GROUPS: &[(&str, &str)] = &[(
+const GROUPS: &[(&str, &str, i16)] = &[(
     <Reports as erp_projection::ProjectionGroup>::NAME,
     <Reports as erp_projection::ProjectionGroup>::SCHEMA,
+    <Reports as erp_projection::ProjectionGroup>::VERSION,
 )];
 
 /// Creates this module's read models in a tenant database.
@@ -102,6 +103,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         upcasters,
     )
     .requiring(&["ledger"])
+    .reading(&["booking", "ledger", "payroll", "pos", "sales"])
 }
 
 /// This module's entitlement name.

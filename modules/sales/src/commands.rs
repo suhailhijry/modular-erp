@@ -27,6 +27,7 @@ use crate::invoice::{
     Customer, Discount as InvoiceDiscount, DraftDiscount, DraftLine, Invoice, InvoiceEvent,
     InvoiceLine,
 };
+use crate::limit::Authority;
 use crate::posting::{
     PostingAccounts, entry_for_credit, entry_for_issue, entry_for_payment, entry_for_refund,
 };
@@ -37,27 +38,45 @@ use crate::vat::TaxError;
 /// of hands.
 pub const APPROVE_CREDIT_NOTE: &str = "sales:approve_credit_note";
 
-/// Refuses unless this caller may credit an invoice here.
+/// **Whether this caller may credit an invoice here.**
 ///
-/// One helper for both credit paths — a full cancellation and a partial credit
-/// are the same authority, and two copies of this check would eventually differ.
-/// `hr::may` answers whether the tenant uses claims at all, whether the caller
-/// owns it, and whether they hold the claim in the branch they named.
+/// **In the roots, so every path is judged the same.** A full cancellation and
+/// a partial credit are the same authority, and until §70 this lived in the two
+/// `sales` wrappers the `/v1/sales` routes call — so `pos::take_back`, which
+/// calls the roots directly, took a return at the till that the sales screen
+/// refused the same clerk. It is asked in [`cancel_in`] and [`credit_part_in`],
+/// which every credit note in this system goes through, and in [`may_refund`]
+/// for the credit note a gateway's refund will leave owing — that one is issued
+/// with [`Authority::System`], when there is nobody left to ask.
+///
+/// **An answer rather than a refusal**, which is the shape
+/// [`crate::limit::binding`] has and for the same reason: the question is async
+/// and a decision is not. Each caller applies it *inside* the decision, after
+/// the retry check, so the retry of a credit note issued while the caller held
+/// the claim answers with that document instead of refusing once the claim is
+/// revoked.
+///
+/// **The branch is §68's**, exactly: a member who is not the owner.
+/// [`Authority::System`] — a gateway's confirmed refund, a worker's sweep — is
+/// not claim-judged, the same way it is not limit-judged, because there is
+/// nobody to ask. The owner is exempt here rather than inside `hr::may`, which
+/// reads the handle's role: a root has no handle, and `Authority::of` has
+/// already read that same role off it.
+///
+/// `hr::may` answers the rest, and the first of its answers is what keeps this
+/// opt-in: a tenant that has never granted a claim is permitted, so a till that
+/// worked yesterday works today.
 async fn may_credit(
     conn: &mut sqlx::PgConnection,
+    authority: Authority,
     metadata: &Metadata,
-    access: Option<&erp_tenant::Access>,
-) -> Result<(), ExecuteError<SalesError>> {
-    if hr::may(&mut *conn, APPROVE_CREDIT_NOTE, metadata, access)
+) -> Result<bool, ExecuteError<SalesError>> {
+    let Authority::Member { owner: false } = authority else {
+        return Ok(true);
+    };
+    hr::may(&mut *conn, APPROVE_CREDIT_NOTE, metadata, None)
         .await
-        .map_err(ExecuteError::Database)?
-    {
-        Ok(())
-    } else {
-        Err(ExecuteError::Rejected(SalesError::NotApproved(
-            APPROVE_CREDIT_NOTE.to_owned(),
-        )))
-    }
+        .map_err(ExecuteError::Database)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +89,12 @@ pub enum SalesError {
     /// relied on while nothing consulted it.
     #[error("issuing a credit note needs the {0} claim")]
     NotApproved(String),
+    /// **More than this caller may issue in one document** — the limit the
+    /// owner set at `/v1/sales/document-limit`. `amount` is the document's
+    /// total on the limit's basis, and in another currency than the limit's
+    /// when that is why. See `limit.rs`.
+    #[error("{amount} is more than the {limit} one document may come to")]
+    OverDocumentLimit { limit: Money, amount: Money },
     /// **A line that carries no tax must say why**, and only the tenant knows.
     ///
     /// The reason is a code from the tax authority's list, configured once at
@@ -158,6 +183,19 @@ impl erp_i18n::Localize for SalesError {
             Self::NotApproved(claim) => {
                 Message::new(messages::NOT_APPROVED).with("claim", MessageArg::text(claim.clone()))
             }
+            Self::OverDocumentLimit { limit, amount } => {
+                Message::new(if limit.currency() == amount.currency() {
+                    messages::OVER_DOCUMENT_LIMIT
+                } else {
+                    messages::DOCUMENT_LIMIT_CURRENCY
+                })
+                .with("limit", MessageArg::text(limit.to_string()))
+                .with("amount", MessageArg::text(amount.to_string()))
+                .with(
+                    "claim",
+                    MessageArg::text(crate::limit::EXCEED_DOCUMENT_LIMIT.to_owned()),
+                )
+            }
             Self::NoExemptionReason { category } => Message::new(messages::NO_EXEMPTION_REASON)
                 .with("category", MessageArg::text(category.as_str().to_owned())),
             Self::NoSuchCustomer(id) => Message::new(messages::NO_SUCH_CUSTOMER)
@@ -213,6 +251,17 @@ impl erp_i18n::Localize for SalesError {
             Self::Unbalanced(e) => e.message(),
             Self::Ledger(e) => e.message(),
         }
+    }
+}
+
+impl SalesError {
+    /// **A refusal of who is asking**, not of what was asked: a claim they do
+    /// not hold, or a limit only the owner or a claim lifts. A 403 at every
+    /// route a sales refusal surfaces from, so the sales routes, the till and
+    /// the booking desk cannot answer the same refusal differently.
+    #[must_use]
+    pub const fn refuses_the_caller(&self) -> bool {
+        matches!(self, Self::NotApproved(_) | Self::OverDocumentLimit { .. })
     }
 }
 
@@ -290,6 +339,7 @@ pub async fn issue_invoice(
     id: &AggregateId,
     draft: &Draft,
     metadata: &Metadata,
+    authority: Authority,
 ) -> NumberedOutcome {
     if draft.lines.is_empty() {
         return Err(rejected(SalesError::NothingToInvoice));
@@ -299,7 +349,7 @@ pub async fn issue_invoice(
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
-        match issue_in(&mut tx, id, draft, &memo, metadata).await {
+        match issue_in(&mut tx, id, draft, &memo, metadata, authority).await {
             Ok(numbered) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
                 return Ok(numbered);
@@ -324,12 +374,17 @@ pub async fn issue_invoice(
 /// invoice and its payment in one transaction, for the same reason this module
 /// calls `ledger::post_entry_in` rather than posting a moment later: a sale that
 /// exists in one place and not the other is a state nobody could explain.
+///
+/// `authority` is who is issuing it, for the tenant's document limit — see
+/// [`DocumentLimit`](crate::DocumentLimit). Every invoice this system issues
+/// passes through here, so this is where that limit is judged.
 pub async fn issue_in(
     conn: &mut sqlx::PgConnection,
     id: &AggregateId,
     draft: &Draft,
     memo: &str,
     metadata: &Metadata,
+    authority: Authority,
 ) -> Result<Numbered, ExecuteError<SalesError>> {
     // **Derived here and not taken as an argument.** It used to be a parameter,
     // and `cancel_in` reverses it by rebuilding the same name — so a caller that
@@ -397,6 +452,10 @@ pub async fn issue_in(
         None => totals,
     };
     let totals = &totals;
+    // **Only now, with the total this document charges.** Compared inside the
+    // decision below, so a retry of an invoice issued before a limit was
+    // lowered answers with its number rather than a refusal.
+    let limit = crate::limit::binding(&mut *conn, authority, metadata).await?;
 
     // Resolved **in this transaction**, so what the invoice was posted to and
     // what the tenant had configured cannot disagree — and the generation goes
@@ -435,6 +494,9 @@ pub async fn issue_in(
         crate::upcasters(),
         &metadata,
         |_loaded| {
+            if let Some(limit) = limit {
+                limit.judge(totals.net, totals.gross)?;
+            }
             Ok(Decision::one(InvoiceEvent::Issued {
                 number: Some(number.clone()),
                 prepayment: draft.prepayment,
@@ -632,18 +694,17 @@ pub async fn attach_customer(
 /// Both in one transaction: a refund recorded without its credit note is a
 /// document nobody would go looking for.
 ///
-/// **A partial refund gets no credit note**, and that is the deferral rather
-/// than a decision taken here — one for part of an invoice carries tax bands of
-/// its own, and how an arbitrary amount divides across a standard-rated line
-/// and a zero-rated one is not something this system may guess. [`cancel_in`]
-/// answers `HasPayments` while the invoice is still holding money, which is
-/// what that refusal means and why it is read rather than propagated.
+/// **A partial refund gets a partial credit note only on a single-band
+/// invoice**: how an arbitrary amount divides across a standard-rated line and
+/// a zero-rated one is not something this system may guess. Which document a
+/// refund leaves owing is [`credit_what_is_clear`]'s to decide.
 pub async fn refund_invoice(
     db: &TenantDb,
     invoice: &AggregateId,
     receipt: &Receipt,
     reason: &str,
     metadata: &Metadata,
+    authority: Authority,
 ) -> Outcome {
     if !receipt.amount.is_positive() {
         return Err(rejected(SalesError::NotAPayment));
@@ -653,7 +714,8 @@ pub async fn refund_invoice(
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
         let refunded = async {
-            let committed = refund_in(&mut tx, invoice, receipt, &memo, metadata).await?;
+            let committed =
+                refund_in(&mut tx, invoice, receipt, &memo, metadata, authority).await?;
             credit_what_is_clear(
                 &mut tx,
                 invoice,
@@ -662,6 +724,7 @@ pub async fn refund_invoice(
                 reason,
                 receipt.received_on,
                 metadata,
+                authority,
             )
             .await?;
             Ok::<_, ExecuteError<SalesError>>(committed)
@@ -685,23 +748,89 @@ pub async fn refund_invoice(
     Err(contended(invoice))
 }
 
+/// **Refuses a refund this caller may not hand back**, before anybody is
+/// asked to hand it back.
+///
+/// For the refund a gateway carries out: the member asks, the worker tells the
+/// gateway, and [`refund_in`] is written from what the gateway confirms — by
+/// then the money has gone, and refusing to record it, or the credit note it
+/// implies, would only make the books wrong. So the member is judged when they
+/// ask, on what the refund at `/v1/sales` would be judged on: the money, as
+/// [`refund_in`] judges it, and the **whole-invoice credit note** a refund that
+/// clears the invoice issues, by the same `owed` that decides which credit
+/// note [`credit_what_is_clear`] issues. A partial credit note credits exactly
+/// what went back, so the money covers it.
+///
+/// Judged on the invoice as it stands when they ask. A refund or credit note
+/// that lands between the asking and the gateway's answer can change which
+/// credit note the answer issues, and that one is not judged again.
+///
+/// **The limit and the claim, both.** The credit note the gateway's answer
+/// leaves owing is written by [`credit_what_is_clear`] with
+/// [`Authority::System`], which no claim judges — so [`APPROVE_CREDIT_NOTE`] is
+/// asked for *here*, while there is still somebody to ask, exactly as the limit
+/// is. Whole or part: a partial credit note is still a credit note, and the
+/// money covering it answers the limit's question rather than this one's.
+///
+/// **Here rather than beside the rest of the limit** (`limit.rs`) because it
+/// loads the aggregate, and L7 keeps that to command handling — which this is:
+/// it runs inside `payments::request_refund_in`'s transaction, and decides
+/// from history what that write may do.
+///
+/// # Errors
+/// [`SalesError::OverDocumentLimit`], [`SalesError::NotApproved`], or whatever
+/// reading the invoice raised.
+pub async fn may_refund(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    refunded: Money,
+    authority: Authority,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<SalesError>> {
+    let limit = crate::limit::binding(&mut *conn, authority, metadata).await?;
+    let approved = may_credit(&mut *conn, authority, metadata).await?;
+    // Nothing to judge, so nothing to read: the invoice is loaded here only to
+    // answer one of those two.
+    if limit.is_none() && approved {
+        return Ok(());
+    }
+    let state = erp_eventlog::load::<Invoice>(&mut *conn, invoice, crate::upcasters())
+        .await?
+        .aggregate;
+    let judged = || {
+        if let Some(limit) = limit {
+            limit.judge_refund(&state, invoice.as_str(), refunded)?;
+        }
+        let held = state
+            .held()
+            .ok_or_else(|| SalesError::NotIssued(invoice.as_str().to_owned()))?
+            .checked_sub(refunded)
+            .map_err(|e| SalesError::Tax(e.into()))?;
+        let owed = owed(&state, held, refunded);
+        // **The credit note this refund will leave owing**, asked for now
+        // because the gateway's answer issues it with `System` and there is
+        // nobody to ask by then. Whole or part: both are credit notes.
+        if !approved && matches!(owed, Owed::Whole | Owed::Part(_)) {
+            return Err(SalesError::NotApproved(APPROVE_CREDIT_NOTE.to_owned()));
+        }
+        match owed {
+            // The whole-invoice credit note that clearing it issues, which
+            // the line above does not cover: that one judges the money.
+            Owed::Whole => {
+                limit.map_or(Ok(()), |limit| limit.judge_whole(&state, invoice.as_str()))
+            }
+            // A partial credit note credits exactly what went back, which is
+            // what was just judged, and no credit note is nothing to judge.
+            Owed::Nothing | Owed::Part(_) | Owed::Overstated(_) => Ok(()),
+        }
+    };
+    judged().map_err(ExecuteError::Rejected)
+}
+
 /// Credits what a refund undid: the whole invoice when it now holds nothing,
 /// and **the refunded part when it still holds some** and the invoice has one
-/// tax band.
-///
-/// **A whole cancellation first.** `AlreadyCancelled` is the outcome wanted —
-/// the document exists. `HasPayments` is what [`cancel_in`] says while the
-/// invoice still holds money, which after a partial refund is simply true, and
-/// that is where the partial credit note comes in.
-///
-/// **Only a single-band invoice gets one.** A credit note for part of an
-/// invoice carries bands of its own, and how an arbitrary refund divides
-/// across a standard-rated line and a zero-rated one is not something this
-/// system may guess. With one band there is one answer: the net that, taxed at
-/// that band's rate, comes to what went back. Every deposit is such an
-/// invoice, which is why this exists. A multi-band invoice refunded in part
-/// is left as it was — a document this system knows is overstated — and says
-/// so in the log rather than looking like success.
+/// tax band. Which of those is `owed`'s to say, from the invoice as the
+/// refund left it; this carries it out.
 ///
 /// `refunded` is what went back under `reference`, tax included; the credit
 /// note is keyed on the same reference, so a retried refund credits once.
@@ -710,6 +839,18 @@ pub async fn refund_invoice(
 /// primitive — a till calls it once per tender — and a credit note is per
 /// document. Crediting there would issue one against a single tender's
 /// reference and try again for every other.
+///
+/// `authority` is the refund's, and the credit note it issues is judged like
+/// any other: against the document limit, so a refund that clears an invoice is
+/// refused when the whole-invoice credit note would be over it, and — since
+/// §70 — for [`APPROVE_CREDIT_NOTE`], so a member who may not issue a credit
+/// note may not refund their way to one either. A refund a gateway makes passes
+/// `System` here and is judged for neither; its member was judged on the same
+/// `owed` when they asked, for the limit — see [`may_refund`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every one is a fact about the refund that already happened"
+)]
 pub async fn credit_what_is_clear(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,
@@ -718,40 +859,28 @@ pub async fn credit_what_is_clear(
     reason: &str,
     on: Timestamp,
     metadata: &Metadata,
+    authority: Authority,
 ) -> Result<(), ExecuteError<SalesError>> {
-    match credit_in(&mut *conn, invoice, reference, reason, on, metadata).await {
-        Err(ExecuteError::Rejected(SalesError::AlreadyCancelled { .. })) => return Ok(()),
-        // Still holding money — or already partly credited, which is what a
-        // second partial refund, or a retry of the first, finds. Both go on
-        // to the partial credit, which dedupes on the reference.
-        Err(ExecuteError::Rejected(
-            SalesError::HasPayments(_) | SalesError::AlreadyCredited(_),
-        )) => {}
-        other => return other.map(|_| ()),
-    }
-
-    // Still holding money: credit the part that went back, if there is one
-    // honest way to.
     let state = erp_eventlog::load::<Invoice>(&mut *conn, invoice, crate::upcasters())
         .await?
         .aggregate;
-    let [band] = state.bands.as_slice() else {
-        tracing::warn!(
-            %invoice,
-            %reference,
-            bands = state.bands.len(),
-            "a partial refund of a multi-band invoice gets no credit note; the document is overstated by the refund"
-        );
-        return Ok(());
-    };
-    let Some(net) = net_of_gross(refunded, band.basis_points) else {
-        tracing::warn!(
-            %invoice,
-            %reference,
-            %refunded,
-            "no net at this band's rate comes to exactly what was refunded; no credit note"
-        );
-        return Ok(());
+    let held = state.held().ok_or_else(|| {
+        ExecuteError::Rejected(SalesError::NotIssued(invoice.as_str().to_owned()))
+    })?;
+    let net = match owed(&state, held, refunded) {
+        Owed::Nothing => return Ok(()),
+        Owed::Whole => {
+            return credit_in(
+                &mut *conn, invoice, reference, reason, on, metadata, authority,
+            )
+            .await
+            .map(|_| ());
+        }
+        Owed::Overstated(why) => {
+            tracing::warn!(%invoice, %reference, %refunded, bands = state.bands.len(), "{why}");
+            return Ok(());
+        }
+        Owed::Part(net) => net,
     };
     let lines = spread_over_lines(&state, net);
 
@@ -765,6 +894,7 @@ pub async fn credit_what_is_clear(
             on,
         },
         metadata,
+        authority,
     )
     .await
     {
@@ -785,6 +915,60 @@ pub async fn credit_what_is_clear(
         }
         Err(e) => Err(e),
     }
+}
+
+/// The credit note a refund leaves an invoice owing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Owed {
+    /// None: the invoice already has its whole credit note.
+    Nothing,
+    /// A whole cancellation: it holds nothing, and no part is credited yet.
+    Whole,
+    /// A partial credit note for this net, which taxed at the invoice's one
+    /// rate comes to exactly the refund.
+    Part(Money),
+    /// A part with no honest way to write it. The invoice stays overstated by
+    /// the refund, and this says why.
+    Overstated(&'static str),
+}
+
+/// **Which credit note a refund of `refunded` leaves this invoice owing**,
+/// when it holds `held` once the refund is recorded.
+///
+/// One decision in two places. [`credit_what_is_clear`] carries it out after a
+/// refund; `limit::may_refund` judges it before a gateway is asked for one,
+/// because the credit note a gateway refund implies is issued once the money
+/// has gone, with nobody acting. Two copies of this question drifted once
+/// already: the first `may_refund` judged the money and not the whole-invoice
+/// credit note clearing an invoice issues.
+///
+/// **Only a single-band invoice gets a part.** A credit note for part of an
+/// invoice carries bands of its own, and how an arbitrary refund divides
+/// across a standard-rated line and a zero-rated one is not something this
+/// system may guess. With one band there is one answer: the net that, taxed at
+/// that band's rate, comes to what went back. Every deposit is such an
+/// invoice.
+pub(crate) fn owed(state: &Invoice, held: Money, refunded: Money) -> Owed {
+    if state.cancelled_by.is_some() {
+        return Owed::Nothing;
+    }
+    // What [`cancel_in`] requires, read the same way: a cancellation reverses
+    // the whole issue entry, so not after a part of it has been credited, and
+    // not while the business still holds money for it.
+    if held.is_zero() && !state.is_partly_credited() {
+        return Owed::Whole;
+    }
+    let [band] = state.bands.as_slice() else {
+        return Owed::Overstated(
+            "a partial refund of a multi-band invoice gets no credit note; the document is overstated by the refund",
+        );
+    };
+    net_of_gross(refunded, band.basis_points).map_or(
+        Owed::Overstated(
+            "no net at this band's rate comes to exactly what was refunded; no credit note",
+        ),
+        Owed::Part,
+    )
 }
 
 /// The net that, taxed at `basis_points` the way every invoice is, comes to
@@ -842,14 +1026,19 @@ fn spread_over_lines(state: &Invoice, net: Money) -> Vec<CreditLine> {
 /// One attempt at refunding, in the caller's transaction. Public for the reason
 /// [`issue_in`] is: a till hands the money back in the same write that credits
 /// the sale.
+///
+/// **Every refund is judged against the document limit here**, on what goes
+/// back — a till's once per tender, and its credit note once for the return.
 pub async fn refund_in(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,
     receipt: &Receipt,
     memo: &str,
     metadata: &Metadata,
+    authority: Authority,
 ) -> Result<Committed<InvoiceEvent>, ExecuteError<SalesError>> {
     let entry_id = &money_entry("sr", invoice, &receipt.reference)?;
+    let limit = crate::limit::binding(&mut *conn, authority, metadata).await?;
     let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
 
     let entry_lines = entry_for_refund(receipt.amount, &receipt.into, &accounts)
@@ -884,6 +1073,9 @@ pub async fn refund_in(
                     held,
                     offered: receipt.amount,
                 });
+            }
+            if let Some(limit) = limit {
+                limit.judge_refund(state, invoice.as_str(), receipt.amount)?;
             }
 
             Ok(Decision::one(InvoiceEvent::Refunded {
@@ -1029,18 +1221,12 @@ pub async fn cancel_invoice(
     reason: &str,
     on: Timestamp,
     metadata: &Metadata,
+    authority: Authority,
 ) -> NumberedOutcome {
     let unusable = |_| ExecuteError::Rejected(SalesError::NotIssued(invoice.as_str().to_owned()));
     let entry_id = derived_id("si", &[invoice.as_str()]).map_err(unusable)?;
     let credit_id = derived_id("cn", &[invoice.as_str(), credit_note]).map_err(unusable)?;
     let memo = format!("Credit note {credit_note} · invoice {invoice}");
-
-    // **Before the retry loop.** The answer cannot change between attempts, and
-    // asking inside would ask again on every optimistic-concurrency retry.
-    {
-        let mut conn = db.acquire().await?;
-        may_credit(&mut conn, metadata, db.access()).await?;
-    }
 
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
@@ -1054,6 +1240,7 @@ pub async fn cancel_invoice(
             on,
             &memo,
             metadata,
+            authority,
         )
         .await
         {
@@ -1129,6 +1316,7 @@ pub async fn credit_in(
     reason: &str,
     on: Timestamp,
     metadata: &Metadata,
+    authority: Authority,
 ) -> Result<Numbered, ExecuteError<SalesError>> {
     let entry_id = issue_entry(invoice)?;
     let credit_id = money_entry("cn", invoice, credit_note)?;
@@ -1143,12 +1331,16 @@ pub async fn credit_in(
         on,
         &memo,
         metadata,
+        authority,
     )
     .await
 }
 
 /// One attempt at crediting: the ledger reversal and the invoice's own event,
-/// in the caller's transaction.
+/// in the caller's transaction. The root of every whole-invoice credit note, so
+/// where one is judged against the document limit — on the whole invoice, which
+/// is what it credits — and where a member is asked for
+/// [`APPROVE_CREDIT_NOTE`].
 #[expect(
     clippy::too_many_arguments,
     reason = "every one is a value computed before the transaction opened"
@@ -1163,10 +1355,16 @@ async fn cancel_in(
     on: Timestamp,
     memo: &str,
     metadata: &Metadata,
+    authority: Authority,
 ) -> Result<Numbered, ExecuteError<SalesError>> {
     let reference = credit_note.to_owned();
     let reason = reason.trim().to_owned();
     let mut already = false;
+    // **Who is asking, before the decision.** Both are async and a decision is
+    // not, and both answers are the same on every optimistic-concurrency
+    // attempt. Both are applied *inside* it, after the retry check.
+    let approved = may_credit(&mut *conn, authority, metadata).await?;
+    let limit = crate::limit::binding(&mut *conn, authority, metadata).await?;
 
     // Same order as issuing: the counter first. A credit note is a statutory
     // document in its own right and gets its own gapless series.
@@ -1191,6 +1389,13 @@ async fn cancel_in(
             if state.cancelled_by.as_deref() == Some(reference.as_str()) {
                 return Ok(Decision::nothing());
             }
+            // **After the retry**, where the limit's comparison also sits: a
+            // credit note issued while the caller held the claim is still their
+            // document when the client resends its reference, claim or no
+            // claim.
+            if !approved {
+                return Err(SalesError::NotApproved(APPROVE_CREDIT_NOTE.to_owned()));
+            }
             if let Some(by) = &state.cancelled_by {
                 return Err(SalesError::AlreadyCancelled {
                     invoice: invoice.as_str().to_owned(),
@@ -1214,6 +1419,11 @@ async fn cancel_in(
                 .held()
                 .ok_or_else(|| SalesError::NotIssued(invoice.as_str().to_owned()))?;
             if held.is_zero() {
+                // Only once it would be issued: an invoice still holding
+                // money is refused for that, not for its size.
+                if let Some(limit) = limit {
+                    limit.judge_whole(state, invoice.as_str())?;
+                }
                 Ok(Decision::one(InvoiceEvent::Cancelled {
                     credit_note: credit_note.clone(),
                     reference: Some(reference.clone()),
@@ -1369,7 +1579,7 @@ const _: fn() = || {
         receipt: &Receipt,
         metadata: &Metadata,
     ) {
-        assert_send(issue_invoice(db, id, draft, metadata));
+        assert_send(issue_invoice(db, id, draft, metadata, Authority::of(db)));
         assert_send(record_payment(db, id, receipt, metadata));
         assert_send(cancel_invoice(
             db,
@@ -1378,6 +1588,7 @@ const _: fn() = || {
             "",
             erp_types::Timestamp::UNIX_EPOCH,
             metadata,
+            Authority::of(db),
         ));
     }
     let _ = commands_are_send;
@@ -1481,17 +1692,11 @@ pub async fn credit_invoice_part(
     invoice: &AggregateId,
     note: &CreditNote,
     metadata: &Metadata,
+    authority: Authority,
 ) -> NumberedOutcome {
-    // The same authority as a full cancellation — crediting part of an invoice
-    // is crediting an invoice.
-    {
-        let mut conn = db.acquire().await?;
-        may_credit(&mut conn, metadata, db.access()).await?;
-    }
-
     for _ in 1..=MAX_ATTEMPTS {
         let mut tx = db.begin().await?;
-        match credit_part_in(&mut tx, invoice, note, metadata).await {
+        match credit_part_in(&mut tx, invoice, note, metadata, authority).await {
             Ok(numbered) => {
                 tx.commit().await.map_err(ExecuteError::from)?;
                 return Ok(numbered);
@@ -1512,16 +1717,24 @@ pub async fn credit_invoice_part(
 /// One attempt at crediting part of an invoice, in the caller's transaction.
 ///
 /// Public for the reason [`issue_in`] and [`refund_in`] are: a cancellation
-/// policy that keeps half a deposit credits and refunds in one write.
+/// policy that keeps half a deposit credits and refunds in one write. The root
+/// of every partial credit note, and so where one is judged against the
+/// document limit, on its own totals, and where a member is asked for
+/// [`APPROVE_CREDIT_NOTE`].
 pub async fn credit_part_in(
     conn: &mut sqlx::PgConnection,
     invoice: &AggregateId,
     note: &CreditNote,
     metadata: &Metadata,
+    authority: Authority,
 ) -> Result<Numbered, ExecuteError<SalesError>> {
     if note.lines.is_empty() {
         return Err(ExecuteError::Rejected(SalesError::NothingToCredit));
     }
+    // Both before the number is reserved, both the same on every attempt, and
+    // both applied inside the decision below, after the retry check.
+    let approved = may_credit(&mut *conn, authority, metadata).await?;
+    let limit = crate::limit::binding(&mut *conn, authority, metadata).await?;
     let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
     let credit_id = money_entry("cn", invoice, &note.reference)?;
     let memo = format!("Credit note · invoice {invoice}");
@@ -1548,6 +1761,10 @@ pub async fn credit_part_in(
             // above is simply not consumed.
             if state.has_credit(&note.reference) {
                 return Ok(Decision::nothing());
+            }
+            // After the retry, for the reason [`cancel_in`] gives.
+            if !approved {
+                return Err(SalesError::NotApproved(APPROVE_CREDIT_NOTE.to_owned()));
             }
             // Already cancelled outright, so there is nothing left to credit.
             if state.cancelled_by.is_some() {
@@ -1581,6 +1798,9 @@ pub async fn credit_part_in(
                 if band.net.minor() > left.minor() {
                     return Err(SalesError::CreditTooLarge { amount: band.net });
                 }
+            }
+            if let Some(limit) = limit {
+                limit.judge(totals.net, totals.gross)?;
             }
 
             Ok(Decision::one(InvoiceEvent::Credited {

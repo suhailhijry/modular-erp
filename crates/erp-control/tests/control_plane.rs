@@ -335,44 +335,102 @@ async fn a_tenant_still_provisioning_cannot_be_entered() {
     fixture.cleanup().await;
 }
 
-/// Platform staff get in through the audited path, not by a privilege flag.
+/// Enrols a second factor the way a person does, so a door that asks for one
+/// finds it.
+async fn enrol(control: &ControlPlane, identity: IdentityId) {
+    let sealing = erp_eventlog::SealingKey::new("test", &[5u8; 32]).expect("32 bytes");
+    let enrolment = control
+        .begin_second_factor(identity, "ERP", "staff", &sealing, None)
+        .await
+        .expect("enrolment begins");
+    let secret = erp_control::totp::unbase32(&enrolment.secret).expect("base32");
+    let now = chrono::Utc::now();
+    let seconds = u64::try_from(now.timestamp()).expect("after 1970");
+    let code =
+        erp_control::totp::code_at(&secret, seconds, erp_control::totp::DIGITS).expect("a code");
+    control
+        .confirm_second_factor(identity, &code, None, now, &sealing, None, None)
+        .await
+        .expect("enrolment confirms");
+}
+
+/// Platform staff get in through the audited path, not by a privilege flag —
+/// and only staff whose role may, holding a second factor.
+///
+/// **Billing is refused.** Billing suspends tenants; it never reads their
+/// books, and before the platform had roles any live platform membership was
+/// enough.
 #[tokio::test]
-async fn support_access_requires_platform_membership_and_is_audited() {
+async fn support_access_needs_the_power_and_a_second_factor_and_is_audited() {
     let mut fixture = Fixture::new().await;
     let tenant = fixture.provision("acme").await;
+    let staff_member = |role: &'static str| {
+        let control = &fixture.control;
+        async move {
+            let who = control
+                .create_identity(Actor::system())
+                .await
+                .expect("creates");
+            control
+                .grant_membership(who.id, Scope::Platform, role, Actor::system())
+                .await
+                .expect("grants");
+            who.id
+        }
+    };
 
     let outsider = fixture
         .control
         .create_identity(Actor::system())
         .await
         .expect("creates");
+    let billing = staff_member("billing").await;
+    enrol(&fixture.control, billing).await;
+    for (who, what) in [(outsider.id, "an outsider"), (billing, "billing")] {
+        assert!(
+            matches!(
+                fixture
+                    .control
+                    .enter_for_support(who, tenant, "curiosity")
+                    .await,
+                Err(AccessError::StaffOnly(
+                    erp_control::PlatformPower::EnterForSupport
+                ))
+            ),
+            "{what} entered a tenant's books for support"
+        );
+    }
+
+    let staff = staff_member("support").await;
     assert!(
         matches!(
             fixture
                 .control
-                .enter_for_support(outsider.id, tenant, "curiosity")
+                .enter_for_support(staff, tenant, "ticket #42")
                 .await,
-            Err(erp_control::AccessError::NotAMember)
+            Err(AccessError::StaffSecondFactorRequired)
         ),
-        "support access must require a platform membership"
+        "support without a second factor entered a tenant's books"
     );
 
-    let staff = fixture
-        .control
-        .create_identity(Actor::system())
-        .await
-        .expect("creates");
+    enrol(&fixture.control, staff).await;
     fixture
         .control
-        .grant_membership(staff.id, Scope::Platform, "support", Actor::system())
+        .enter_for_support(staff, tenant, "ticket #42")
         .await
-        .expect("grants");
+        .expect("support with a second factor may enter");
 
-    fixture
-        .control
-        .enter_for_support(staff.id, tenant, "ticket #42")
-        .await
-        .expect("staff may enter for support");
+    // A stored platform role this build does not know is corrupt data, and
+    // refused — never read as "no role", and never as a role that may.
+    let odd = staff_member("root").await;
+    enrol(&fixture.control, odd).await;
+    assert!(
+        matches!(
+            fixture.control.enter_for_support(odd, tenant, "?").await,
+            Err(AccessError::Corrupt(_))
+        ),
+        "an unknown platform role was not refused as corrupt"
+    );
 
     // The audit trail must name who, what, and why — otherwise support access
     // is indistinguishable from the tenant acting for themselves.
@@ -390,6 +448,266 @@ async fn support_access_requires_platform_membership_and_is_audited() {
     fixture.cleanup().await;
 }
 
+/// **A suspension closes every door on this node at once, and reinstating
+/// opens them again at once.** No `clear_caches`: the first `enter` puts the
+/// tenant in the entry cache, and a suspension that did not forget it would be
+/// answered from there for five more seconds.
+#[tokio::test]
+async fn a_suspended_tenant_is_refused_at_every_door_and_reinstated_at_once() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let owner = fixture.member_of(tenant).await;
+    let support = fixture
+        .control
+        .create_identity(Actor::system())
+        .await
+        .expect("creates")
+        .id;
+    fixture
+        .control
+        .grant_membership(support, Scope::Platform, "support", Actor::system())
+        .await
+        .expect("grants");
+    enrol(&fixture.control, support).await;
+
+    let control = &fixture.control;
+    let enter = || async {
+        control
+            .enter(owner, tenant, Lane::Interactive)
+            .await
+            .map(drop)
+    };
+    let public = || async { control.enter_for_the_public(tenant).await.map(drop) };
+    enter().await.expect("opens, and caches the tenant");
+    public().await.expect("the booking page opens");
+
+    control
+        .suspend_tenant(tenant, "unpaid", Actor::identity(support))
+        .await
+        .expect("suspends");
+
+    for (door, answer) in [("a member", enter().await), ("the public", public().await)] {
+        assert!(
+            matches!(
+                answer,
+                Err(AccessError::TenantNotActive {
+                    status: TenantStatus::Suspended
+                })
+            ),
+            "{door} got into a suspended tenant: {answer:?}"
+        );
+    }
+    // Finding out why is a normal reason for support to need to get in.
+    control
+        .enter_for_support(support, tenant, "why was acme suspended")
+        .await
+        .expect("support still opens a suspended tenant");
+
+    control
+        .reinstate_tenant(tenant, Actor::identity(support))
+        .await
+        .expect("reinstates");
+    enter().await.expect("a reinstated tenant opens at once");
+    public().await.expect("and so does its booking page");
+
+    fixture.cleanup().await;
+}
+
+/// **A tenant moves only from the status the move starts from**, and a move
+/// asked of any other is refused naming the status it is in — never answered
+/// `Ok` as a no-op, which is what `activate_tenant` used to do, auditing a
+/// `tenant.activated` that had activated nothing.
+#[tokio::test]
+async fn a_tenant_moves_only_from_the_status_it_is_in() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let control = &fixture.control;
+    let wrong = |answer: Result<(), AccessError>, status, expected| {
+        assert!(
+            matches!(
+                answer,
+                Err(AccessError::WrongTenantStatus { status: s, expected: e })
+                    if s == status && e == expected
+            ),
+            "expected {status:?} refused for needing {expected:?}, got {answer:?}"
+        );
+    };
+    let status = |id| async move {
+        control
+            .tenant(id)
+            .await
+            .expect("reads")
+            .expect("exists")
+            .status
+    };
+
+    // Still provisioning: there is nothing to suspend yet.
+    let half_built = control
+        .register_tenant_on("halfbuilt", "Half Built", "primary", Actor::system())
+        .await
+        .expect("registers");
+    wrong(
+        control
+            .suspend_tenant(half_built.id, "unpaid", Actor::system())
+            .await,
+        TenantStatus::Provisioning,
+        TenantStatus::Active,
+    );
+    assert_eq!(status(half_built.id).await, TenantStatus::Provisioning);
+    wrong(
+        control
+            .reinstate_tenant(half_built.id, Actor::system())
+            .await,
+        TenantStatus::Provisioning,
+        TenantStatus::Suspended,
+    );
+
+    wrong(
+        control.reinstate_tenant(tenant, Actor::system()).await,
+        TenantStatus::Active,
+        TenantStatus::Suspended,
+    );
+    control
+        .suspend_tenant(tenant, "unpaid", Actor::system())
+        .await
+        .expect("suspends");
+    wrong(
+        control
+            .suspend_tenant(tenant, "again", Actor::system())
+            .await,
+        TenantStatus::Suspended,
+        TenantStatus::Active,
+    );
+    // Activating is not reinstating.
+    wrong(
+        control.activate_tenant(tenant, Actor::system()).await,
+        TenantStatus::Suspended,
+        TenantStatus::Provisioning,
+    );
+    assert_eq!(status(tenant).await, TenantStatus::Suspended);
+
+    let nobody = TenantId::new();
+    for answer in [
+        control
+            .suspend_tenant(nobody, "unpaid", Actor::system())
+            .await,
+        control.reinstate_tenant(nobody, Actor::system()).await,
+        control.activate_tenant(nobody, Actor::system()).await,
+    ] {
+        assert!(
+            matches!(answer, Err(AccessError::NoSuchTenant)),
+            "{answer:?}"
+        );
+    }
+
+    // Only the moves that happened are on the record.
+    let actions: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit_entry
+          WHERE subject_type = 'tenant' AND subject_id = $1 AND action <> 'tenant.registered'
+          ORDER BY at, id",
+    )
+    .bind(tenant.to_string())
+    .fetch_all(control.pool())
+    .await
+    .expect("reads");
+    assert_eq!(actions, ["tenant.activated", "tenant.suspended"]);
+
+    fixture.cleanup().await;
+}
+
+/// **A suspension says why, under whose name, and the schema refuses one that
+/// does not.** The raw `UPDATE` is the point here, not a shortcut: it is the
+/// hand edit an operator might make, and the database is what refuses it.
+#[tokio::test]
+async fn a_suspension_says_why_and_is_audited_and_the_schema_refuses_one_that_does_not() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let staff = fixture
+        .control
+        .create_identity(Actor::system())
+        .await
+        .expect("creates")
+        .id;
+    let control = &fixture.control;
+    let row = || async {
+        sqlx::query_as::<_, (String, Option<String>, bool)>(
+            "SELECT status, suspended_reason, suspended_at IS NOT NULL FROM tenant WHERE id = $1",
+        )
+        .bind(tenant.as_uuid())
+        .fetch_one(control.pool())
+        .await
+        .expect("reads")
+    };
+    let entry = |action: &'static str| async move {
+        sqlx::query_as::<_, (Option<uuid::Uuid>, serde_json::Value)>(
+            "SELECT actor_identity_id, detail FROM audit_entry
+              WHERE action = $1 AND subject_id = $2",
+        )
+        .bind(action)
+        .bind(tenant.to_string())
+        .fetch_one(control.pool())
+        .await
+        .expect("an audit entry was written")
+    };
+
+    // Blank, or longer than the owner should have to read: refused, by name.
+    for reason in ["   ", &"x".repeat(501)] {
+        assert!(
+            matches!(
+                control
+                    .suspend_tenant(tenant, reason, Actor::identity(staff))
+                    .await,
+                Err(AccessError::SuspensionReason)
+            ),
+            "a {}-character reason was not refused",
+            reason.len()
+        );
+    }
+    assert_eq!(row().await, ("active".to_owned(), None, false));
+
+    control
+        .suspend_tenant(tenant, " unpaid since August ", Actor::identity(staff))
+        .await
+        .expect("suspends");
+    assert_eq!(
+        row().await,
+        (
+            "suspended".to_owned(),
+            Some("unpaid since August".to_owned()),
+            true
+        )
+    );
+    assert_eq!(
+        entry("tenant.suspended").await,
+        (
+            Some(staff.into_uuid()),
+            serde_json::json!({ "reason": "unpaid since August" })
+        )
+    );
+
+    control
+        .reinstate_tenant(tenant, Actor::identity(staff))
+        .await
+        .expect("reinstates");
+    assert_eq!(row().await, ("active".to_owned(), None, false));
+    assert_eq!(entry("tenant.reinstated").await.0, Some(staff.into_uuid()));
+
+    // By hand, with no reason: the database refuses what the method would not.
+    let hand_edit = sqlx::query("UPDATE tenant SET status = 'suspended' WHERE id = $1")
+        .bind(tenant.as_uuid())
+        .execute(control.pool())
+        .await
+        .expect_err("a suspension with no reason was stored");
+    assert_eq!(
+        hand_edit
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("tenant_suspension_is_complete")
+    );
+
+    fixture.cleanup().await;
+}
+
 #[tokio::test]
 async fn the_audit_trail_cannot_be_rewritten() {
     let fixture = Fixture::new().await;
@@ -397,6 +715,7 @@ async fn the_audit_trail_cannot_be_rewritten() {
         .control
         .record(
             Actor::system(),
+            None,
             "test.action",
             "thing",
             "1",
@@ -945,6 +1264,24 @@ async fn the_audit_trail_is_still_append_only_for_everything_else() {
             .await
             .is_err(),
         "one person's actions were attributed to another"
+    );
+
+    // Taking an entry out of its tenant's trail, or moving one into another's.
+    // `tenant_id` came after the whitelist `0007` wrote, and `0019` pins it.
+    assert!(
+        sqlx::query("UPDATE audit_entry SET tenant_id = NULL WHERE action = 'tenant.registered'")
+            .execute(pool)
+            .await
+            .is_err(),
+        "an entry was taken out of its tenant's trail"
+    );
+    assert!(
+        sqlx::query("UPDATE audit_entry SET tenant_id = $1 WHERE action = 'identity.suspended'")
+            .bind(tenant.as_uuid())
+            .execute(pool)
+            .await
+            .is_err(),
+        "an entry was moved into a tenant's trail"
     );
 
     // Deleting one outright.

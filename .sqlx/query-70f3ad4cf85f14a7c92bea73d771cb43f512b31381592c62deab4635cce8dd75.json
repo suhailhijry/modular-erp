@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE module_secret SET sealed = $1, sealed_with = $2\n                  WHERE key = $3 AND sealed = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "70f3ad4cf85f14a7c92bea73d771cb43f512b31381592c62deab4635cce8dd75"
+}

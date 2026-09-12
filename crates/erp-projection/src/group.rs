@@ -27,6 +27,20 @@ pub trait ProjectionGroup: Send + Sync + 'static {
     /// so a projection that reaches into another group's tables fails the first
     /// time it runs rather than passing review (law L3).
     const SCHEMA: &'static str;
+
+    /// **The shape and meaning of this group's tables.** Stamped on the
+    /// group's checkpoint by whatever builds them (`ensure_group_schema`,
+    /// provisioning, [`rebuild_swap`](crate::rebuild_swap)). A build projects
+    /// only into tables stamped with its own version, and its request path
+    /// refuses a module's routes while a group they are served from is
+    /// stamped older.
+    ///
+    /// Bump it when a rebuild would produce different tables from the ones live
+    /// tenants hold. A change to the module's `install.sql` always does, and
+    /// `a_read_model_change_bumps_its_version` in `bin/migrator` fails until
+    /// the number moves. A projection change that alters rows already written
+    /// may too; that one is your judgement, because nothing can see it.
+    const VERSION: i16 = 1;
 }
 
 /// Fixed namespace for [`ProjectionCtx::derive_id`].

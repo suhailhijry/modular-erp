@@ -52,6 +52,17 @@ pub struct AppState {
     /// `None` when the deployment has no Redis, and then the stream routes
     /// **refuse** rather than open a stream nothing would ever write to (L6).
     pub realtime: Option<Arc<crate::realtime::Hub>>,
+    /// **What this build projects, by module**: every `(group, version)` a
+    /// module's routes are served from — its own group, those of the modules
+    /// `erp-api` composes routes under its path from, and those of every module
+    /// in the closure of those over `ModuleSetup::reads`.
+    ///
+    /// A route of a module named here is refused `503` while any of them is
+    /// older in the tenant (see [`crate::extract::Tenant`]). Filled by
+    /// `erp_api::router`, the one place that knows the modules, so every server
+    /// built from it carries this build's list; empty here, where there are no
+    /// module routes to refuse.
+    pub read_models: Arc<std::collections::HashMap<erp_types::ModuleId, Vec<(&'static str, i16)>>>,
 }
 
 impl AppState {
@@ -73,6 +84,7 @@ impl AppState {
             storage: None,
             realtime: None,
             trust_forwarded: false,
+            read_models: Arc::default(),
         }
     }
 

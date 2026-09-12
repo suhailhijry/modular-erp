@@ -93,9 +93,10 @@ pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 /// This module's projection group name, for `?consistent_after=`.
 pub const GROUP_NAME: &str = <Purchases as erp_projection::ProjectionGroup>::NAME;
 
-const GROUPS: &[(&str, &str)] = &[(
+const GROUPS: &[(&str, &str, i16)] = &[(
     <Purchases as erp_projection::ProjectionGroup>::NAME,
     <Purchases as erp_projection::ProjectionGroup>::SCHEMA,
+    <Purchases as erp_projection::ProjectionGroup>::VERSION,
 )];
 
 /// What a tenant enabling this module needs installed.
@@ -111,6 +112,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         upcasters,
     )
     .requiring(&["ledger"])
+    .reading(&["hr", "ledger"])
 }
 
 /// This module's entitlement name.

@@ -45,11 +45,11 @@ pub use append::{AppendError, NewEvent, append};
 pub use envelope::{Envelope, Metadata};
 pub use outbox::{
     DeadLetter, DeliveryError, DispatchError, Dispatched, Dispatcher, Effect, EffectHandler,
-    EnqueueError, OutboxHealth, PendingEffect, RetryPolicy, Settlement, dead_letters, enqueue,
-    outbox_health, requeue, sweep_delivered, sweep_webhook_events,
+    EnqueueError, Handled, OutboxHealth, PendingEffect, RetryPolicy, Settlement, dead_letters,
+    dismiss, enqueue, outbox_health, requeue, sweep_delivered, sweep_webhook_events,
 };
 pub use read::{Integrity, ReadError, integrity, read_since, read_stream, read_stream_since};
-pub use secrets::{SealingKey, SecretError};
+pub use secrets::{Census, SealingKey, SecretError};
 pub use upcast::{UpcastError, UpcastStep, Upcasters};
 
 use erp_i18n::StaticCatalog;

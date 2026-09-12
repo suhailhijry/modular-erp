@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.identity_id as \"identity: IdentityId\"\n                 FROM membership m\n                 JOIN identity i ON i.id = m.identity_id\n                WHERE m.scope_kind = 'platform' AND m.role = 'superadmin'\n                  AND m.revoked_at IS NULL AND i.status = 'active'\n                ORDER BY m.identity_id\n                  FOR UPDATE OF m",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "identity: IdentityId",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "membership",
+            "name": "identity_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dcc3f67bcda010752f95db0d2c461223789483ed7c78edc678b28849b1fbc5c2"
+}

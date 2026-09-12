@@ -232,6 +232,7 @@ impl ControlPlane {
 
         self.record(
             Actor::identity(invited_by),
+            Some(tenant_id),
             "invitation.created",
             "tenant",
             &tenant_id.to_string(),
@@ -322,6 +323,7 @@ impl ControlPlane {
 
         self.record(
             actor,
+            Some(tenant_id),
             "invitation.revoked",
             "tenant",
             &tenant_id.to_string(),
@@ -422,6 +424,7 @@ impl ControlPlane {
 
                 self.record(
                     Actor::identity(identity),
+                    Some(tenant),
                     "invitation.accepted",
                     "tenant",
                     &tenant.to_string(),

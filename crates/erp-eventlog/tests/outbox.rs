@@ -18,7 +18,7 @@ use std::time::Duration;
 use erp_eventlog::{
     Aggregate, Decision, DeliveryError, Dispatcher, DomainEvent, Effect, EffectHandler,
     EnqueueError, ExecuteError, Metadata, PendingEffect, RetryPolicy, Upcasters, append_events,
-    dead_letters, enqueue, execute, outbox_health, requeue, sweep_delivered,
+    dead_letters, dismiss, enqueue, execute, outbox_health, requeue, sweep_delivered,
 };
 use erp_testkit::{Schema, Template, TestDb};
 use erp_types::{AggregateId, DomainName, EffectKind, EventName, SchemaVersion, Sequence};
@@ -881,9 +881,17 @@ async fn a_dead_letter_can_be_requeued_and_is_then_delivered_under_its_own_key()
         .await
         .expect("winds the backoff forward");
 
-    assert!(requeue(&mut conn, dead[0].id).await.expect("requeues"));
     assert!(
-        !requeue(&mut conn, dead[0].id).await.expect("requeues"),
+        requeue(&mut conn, dead[0].id)
+            .await
+            .expect("requeues")
+            .is_some()
+    );
+    assert!(
+        requeue(&mut conn, dead[0].id)
+            .await
+            .expect("requeues")
+            .is_none(),
         "a second requeue finds nothing dead, and says so"
     );
     let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM outbox")
@@ -918,6 +926,71 @@ async fn a_dead_letter_can_be_requeued_and_is_then_delivered_under_its_own_key()
         "the idempotency key travels with the requeued effect"
     );
     assert_eq!(pending_count(&db).await, 0);
+}
+
+/// **Dismissing deletes a dead letter and nothing else.** It is the one delete
+/// a person asks for in a table whose open promises are otherwise never
+/// deleted, so a pending effect and a delivered one are both refused, the dead
+/// one goes and says what it was, and a second dismissal finds nothing.
+#[tokio::test]
+async fn only_a_dead_letter_can_be_dismissed() {
+    let db = tenant_db().await;
+    promise(
+        &db,
+        vec![
+            Effect::with_key(kind("email.send"), "dies", serde_json::json!({})),
+            Effect::with_key(kind("sms.send"), "delivered", serde_json::json!({})),
+            Effect::with_key(kind("push.send"), "pending", serde_json::json!({})),
+        ],
+    )
+    .await;
+    Dispatcher::new(fast_policy(1))
+        .register(Arc::new(Recorder::always(
+            kind("email.send"),
+            Outcome::Permanent,
+        )))
+        .register(Arc::new(Recorder::always(
+            kind("sms.send"),
+            Outcome::Succeed,
+        )))
+        .dispatch_once(db.pool(), 10)
+        .await
+        .expect("runs");
+
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT idempotency_key, id FROM outbox ORDER BY idempotency_key")
+            .fetch_all(db.pool())
+            .await
+            .expect("reads");
+    let id_of = |key: &str| rows.iter().find(|(k, _)| k == key).expect("promised").1;
+    let mut conn = db.pool().acquire().await.expect("connection");
+
+    for open in ["delivered", "pending"] {
+        assert_eq!(
+            dismiss(&mut conn, id_of(open)).await.expect("runs"),
+            None,
+            "the {open} effect is not a dead letter, and was dismissed anyway"
+        );
+    }
+    assert_eq!(
+        dismiss(&mut conn, id_of("dies")).await.expect("runs"),
+        Some(erp_eventlog::Handled {
+            kind: kind("email.send"),
+            idempotency_key: "dies".to_owned(),
+        })
+    );
+    assert_eq!(
+        dismiss(&mut conn, id_of("dies")).await.expect("runs"),
+        None,
+        "a second dismissal finds nothing, and says so"
+    );
+    drop(conn);
+
+    let left: Vec<String> = sqlx::query_scalar("SELECT idempotency_key FROM outbox ORDER BY 1")
+        .fetch_all(db.pool())
+        .await
+        .expect("reads");
+    assert_eq!(left, ["delivered", "pending"]);
 }
 
 /// A delivered row is a receipt, kept for a while and not for ever. Nothing

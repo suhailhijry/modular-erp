@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE second_factor_reset SET used_at = now()\n              WHERE identity_id = $1 AND used_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "397a76a0ab26d01da52b73ccc8d621705b6f9603dad60cb25d794260b41e6997"
+}

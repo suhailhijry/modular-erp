@@ -195,6 +195,85 @@ pub fn available() -> Vec<(&'static str, ModuleSetup)> {
         .collect()
 }
 
+/// **What this build projects, by module**: every `(group, version)` a
+/// module's routes are served from — the groups of every module in its
+/// [`closure`]. A module with none is absent.
+///
+/// What `erp_web::AppState::read_models` holds, and [`crate::router`] is what
+/// puts it there.
+#[must_use]
+pub(crate) fn read_models()
+-> std::collections::HashMap<erp_types::ModuleId, Vec<(&'static str, i16)>> {
+    let modules = available();
+    modules
+        .iter()
+        .filter_map(|(name, setup)| {
+            let mut groups: Vec<(&'static str, i16)> = closure(&modules, name)
+                .into_iter()
+                // A name no module has cannot be here:
+                // `a_modules_reads_are_its_crate_dependencies` holds `reads`
+                // to registered modules, and `COMPOSED` is checked the same.
+                .filter_map(|module| modules.iter().find(|(known, _)| *known == module))
+                .flat_map(|(_, read)| {
+                    read.groups
+                        .iter()
+                        .map(|(group, _, version)| (*group, *version))
+                })
+                .collect();
+            groups.sort_unstable();
+            (!groups.is_empty()).then(|| (setup.module.clone(), groups))
+        })
+        .collect()
+}
+
+/// **The modules whose code a module's routes run**: the module, what this
+/// crate's own routes under its path run ([`COMPOSED`]), and everything those
+/// read over [`ModuleSetup::reads`], transitively.
+///
+/// Transitively because a read goes through code: `notifications` runs
+/// `messaging`, which reads `booking`'s tables to fill a template, and
+/// `messaging` has no tables of its own. `COMPOSED` only at the root: another
+/// module reading `booking` runs `booking`'s crate, not these routes.
+fn closure(
+    modules: &[(&'static str, ModuleSetup)],
+    root: &'static str,
+) -> std::collections::BTreeSet<&'static str> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut next: Vec<&'static str> = COMPOSED
+        .iter()
+        .filter(|(module, _)| *module == root)
+        .flat_map(|(_, runs)| runs.iter().copied())
+        .chain([root])
+        .collect();
+    while let Some(name) = next.pop() {
+        if seen.insert(name)
+            && let Some((_, read)) = modules.iter().find(|(known, _)| *known == name)
+        {
+            next.extend(read.reads.iter().copied());
+        }
+    }
+    seen
+}
+
+/// **Routes this crate serves under a module's path, and the modules they run
+/// beyond that module's own `reads`.**
+///
+/// A route is refused by the module its path names, and a module crate's
+/// `reads` is its `Cargo.toml` — which cannot see what this crate composes
+/// under `/v1/booking`: a reservation's final invoice (`billing.rs`) is issued
+/// through `sales` against `payments`' deposits, and a public deposit
+/// (`deposits.rs`) is taken through `payments`, posted through `ledger`,
+/// announced through `messaging` and taxed by asking `tax_sa`. Without these,
+/// a stale `sales` would 503 `/v1/sales/*` and still let the invoice route
+/// issue a tax invoice from it.
+///
+/// `composed_routes_run_only_what_their_module_is_refused_on` scans this
+/// crate's files and fails on a module one of them runs that is missing here.
+const COMPOSED: &[(&str, &[&str])] = &[(
+    "booking",
+    &["ledger", "messaging", "payments", "sales", "tax_sa"],
+)];
+
 /// Every module's catalogue, for the completeness audit.
 ///
 /// Exists so `every_module_reaches_the_reference` can ask the registry rather
@@ -722,7 +801,7 @@ mod tests {
     fn a_modules_schema_is_named_after_its_crate() {
         for (name, setup) in available() {
             let expected = format!("proj_{}", name.replace('-', "_"));
-            for (group, schema) in setup.groups {
+            for (group, schema, _) in setup.groups {
                 assert_eq!(
                     *schema, expected,
                     "{name}'s group `{group}` is in `{schema}`, and `just prepare` \
@@ -730,6 +809,153 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **One install script, so one group.** `install_schema` aims the script
+    /// at the first group's schema, and the read-model pin in `bin/migrator`
+    /// hashes one script per group; a second group needs both to change first.
+    #[test]
+    fn a_module_has_at_most_one_projection_group() {
+        for (name, setup) in available() {
+            assert!(
+                setup.groups.len() <= 1,
+                "{name} declares {} projection groups, and its install script can only \
+                 be aimed at one",
+                setup.groups.len()
+            );
+        }
+    }
+
+    /// **`reads` is the module's `Cargo.toml`, not a list somebody keeps.**
+    ///
+    /// A route is refused while a read model it serves from is older than the
+    /// build, and every read across groups goes through the other module's
+    /// crate (L3 leaves no other way). So the modules a crate depends on are
+    /// the read models its routes may be served from; a dependency missing
+    /// from `reads` is a route that would serve from a stale shape without a
+    /// word.
+    #[test]
+    fn a_modules_reads_are_its_crate_dependencies() {
+        let registered: Vec<&str> = available().iter().map(|(name, _)| *name).collect();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules");
+
+        for (name, setup) in available() {
+            let manifest = root.join(name).join("Cargo.toml");
+            let text = std::fs::read_to_string(&manifest)
+                .unwrap_or_else(|e| panic!("{} is not readable: {e}", manifest.display()));
+
+            // `[dependencies]` only: a dev-dependency is a test's, not a route's.
+            let mut depends: Vec<&str> = text
+                .split("\n[")
+                .find(|section| section.starts_with("dependencies]"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| line.split('=').next().map(str::trim))
+                .filter(|crate_name| registered.contains(crate_name))
+                .collect();
+            depends.sort_unstable();
+
+            let mut reads = setup.reads.to_vec();
+            reads.sort_unstable();
+            assert_eq!(
+                reads, depends,
+                "{name}'s `reads` must be the modules its crate depends on: \
+                 `.reading(&{depends:?})` in its `setup()`"
+            );
+        }
+    }
+
+    /// The closure is what the request path refuses on, so it is worth one
+    /// look: `notifications` has no tables and runs `messaging`, which has none
+    /// either and reads `booking`'s.
+    #[test]
+    fn a_modules_read_models_are_its_closure_over_reads() {
+        let models = super::read_models();
+        let groups = |module: &str| -> Vec<&str> {
+            models
+                .get(&erp_types::ModuleId::new(module).expect("a module id"))
+                .map(|groups| groups.iter().map(|(group, _)| *group).collect())
+                .unwrap_or_default()
+        };
+
+        assert_eq!(groups("files"), ["files"]);
+        assert!(groups("notifications").contains(&"booking"));
+        assert!(groups("notifications").contains(&"notifications"));
+        assert!(!groups("ledger").contains(&"files"));
+        // Through `COMPOSED`: the reservation invoice is issued from `sales`.
+        assert!(groups("booking").contains(&"sales"));
+        // And only at the root: `notifications` reads `booking`'s crate, not
+        // the routes this crate serves under `/v1/booking`.
+        assert!(!groups("notifications").contains(&"tax_sa"));
+    }
+
+    /// **A route this crate serves under a module's path is refused on
+    /// everything it runs.** `a_modules_reads_are_its_crate_dependencies`
+    /// cannot see this crate's files, and `/v1/booking/reservations/{r}/invoice`
+    /// issued tax invoices from `sales` while `sales` was stale because of it.
+    ///
+    /// Per file: every registered module named as `x::` in a file (comments
+    /// aside) that declares a `path = "/v1/{m}/…"` must be in `m`'s
+    /// [`super::closure`]. A helper in another file of this crate is not
+    /// followed; the three files that serve module paths call none that reads
+    /// a module outside `booking`'s own.
+    #[test]
+    fn composed_routes_run_only_what_their_module_is_refused_on() {
+        let modules = available();
+        let names: Vec<&'static str> = modules.iter().map(|(name, _)| *name).collect();
+        for (module, runs) in super::COMPOSED {
+            for name in std::iter::once(module).chain(runs.iter()) {
+                assert!(names.contains(name), "COMPOSED names {name}, not a module");
+            }
+        }
+
+        // `x::` not preceded by an identifier character: `hr::`, not `erp_hr::`.
+        let names_module = |code: &str, module: &str| {
+            code.match_indices(&format!("{module}::")).any(|(at, _)| {
+                !code[..at].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            })
+        };
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut served = 0;
+        for entry in std::fs::read_dir(&src).expect("src is readable") {
+            let path = entry.expect("an entry").path();
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("readable");
+            let code: String = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            for module in names
+                .iter()
+                .filter(|m| text.contains(&format!("path = \"/v1/{m}/")))
+            {
+                served += 1;
+                let refused_on = super::closure(&modules, module);
+                let missing: Vec<&str> = names
+                    .iter()
+                    .copied()
+                    .filter(|x| names_module(&code, x) && !refused_on.contains(x))
+                    .collect();
+                assert!(
+                    missing.is_empty(),
+                    "{} serves routes under /v1/{module}/ that run {missing:?}, and a \
+                     stale read model of theirs would not refuse them: add them to \
+                     `COMPOSED` for {module}",
+                    path.display()
+                );
+            }
+        }
+        // Non-vacuity: billing.rs, deposits.rs and realtime.rs serve `booking`.
+        assert!(
+            served >= 3,
+            "expected this crate to serve routes under a module's path in at least three \
+             files, found {served}"
+        );
     }
 
     #[test]

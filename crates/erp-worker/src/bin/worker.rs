@@ -129,18 +129,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The composition root, and the only place that knows both the kernel and
     // the modules. `erp-worker` itself depends on no module, which is what keeps
     // the dependency arrow pointing one way.
+    //
+    // One health job for both planes: every tenant's invariants, and the
+    // control plane's outbox on its own turn of the same interval.
+    let health = Arc::new(
+        HealthJob::every(Duration::from_mins(5))
+            .with(Arc::new(TrialBalance))
+            .with(Arc::new(ReportsReconcile))
+            .with(Arc::new(NoOverpaidInvoice))
+            .with(Arc::new(NoOverpaidBill))
+            .with(Arc::new(CertificateExpiry))
+            .with(Arc::new(WorkDocumentExpiry)),
+    );
     let mut worker = Worker::new(control, config)
         .with_platform_job(Arc::new(PlatformOutboxJob::new(platform, EMAIL_BATCH)))
+        .with_platform_job(health.clone())
         .with_job(Arc::new(OutboxJob::new(dispatcher, 64)))
-        .with_job(Arc::new(
-            HealthJob::every(Duration::from_mins(5))
-                .with(Arc::new(TrialBalance))
-                .with(Arc::new(ReportsReconcile))
-                .with(Arc::new(NoOverpaidInvoice))
-                .with(Arc::new(NoOverpaidBill))
-                .with(Arc::new(CertificateExpiry))
-                .with(Arc::new(WorkDocumentExpiry)),
-        ));
+        .with_job(health);
     for job in module_jobs(signals.as_ref()) {
         worker = worker.with_job(job);
     }
@@ -164,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Ok(configured) = std::env::var("SEALING_KEY") {
         let sealing = erp_eventlog::SealingKey::parse(&configured)?;
         tracing::info!(
-            key = sealing.id(),
+            key = ?sealing,
             "sealing key loaded; ZATCA sweeps enabled"
         );
         for job in zatca_jobs(&sealing) {

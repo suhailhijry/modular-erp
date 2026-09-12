@@ -313,7 +313,8 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  # Destroys expired demo tenants. Scheduled, not resident — it exits when done.
+  # Destroys expired demo tenants, abandons signups whose build died, and sweeps
+  # stale links. Schedule it at least hourly; it exits when done.
   #   docker compose run --rm reaper
   reaper:
     <<: *app

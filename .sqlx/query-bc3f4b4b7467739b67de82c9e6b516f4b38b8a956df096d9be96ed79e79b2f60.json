@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pending_signup SET identity_id = $2, password_hash = NULL\n                      WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bc3f4b4b7467739b67de82c9e6b516f4b38b8a956df096d9be96ed79e79b2f60"
+}

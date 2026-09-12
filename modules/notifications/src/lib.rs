@@ -96,9 +96,10 @@ pub const GROUP_NAME: &str = <Notifications as erp_projection::ProjectionGroup>:
 /// so, and until they do, nothing is billed for a notification.
 pub const DEFAULT_CHANNELS: [messaging::Channel; 1] = [messaging::Channel::InSystem];
 
-const GROUPS: &[(&str, &str)] = &[(
+const GROUPS: &[(&str, &str, i16)] = &[(
     <Notifications as erp_projection::ProjectionGroup>::NAME,
     <Notifications as erp_projection::ProjectionGroup>::SCHEMA,
+    <Notifications as erp_projection::ProjectionGroup>::VERSION,
 )];
 
 /// Creates this module's read models in a tenant database.
@@ -134,6 +135,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         upcasters,
     )
     .requiring(&["messaging"])
+    .reading(&["messaging"])
 }
 
 /// This module's entitlement name.

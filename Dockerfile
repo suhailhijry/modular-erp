@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 #
-# One image, five binaries.
+# One image, six binaries.
 #
-# `api`, `worker`, `migrator`, `reaper` and `demo` are the same build of the same
-# workspace and differ only in which `main` runs. Five images would be five
-# things to keep at the same version, and "the worker is one deploy behind the
+# `api`, `worker`, `migrator`, `reaper`, `operator` and `demo` are the same build
+# of the same workspace and differ only in which `main` runs. Six images would be
+# six things to keep at the same version, and "the worker is one deploy behind the
 # API" is a class of bug this system takes seriously enough to have a pre-deploy
 # gate for it (`just migrate-fleet versions`). One image makes it impossible.
 #
@@ -39,10 +39,10 @@ RUN --mount=type=cache,target=/src/target,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     set -eux; \
     cargo build --release --workspace \
-      --bin api --bin worker --bin migrator --bin reaper --bin demo; \
+      --bin api --bin worker --bin migrator --bin reaper --bin operator --bin demo; \
     mkdir -p /out; \
     cp target/release/api target/release/worker target/release/migrator \
-       target/release/reaper target/release/demo /out/
+       target/release/reaper target/release/operator target/release/demo /out/
 
 # ---------------------------------------------------------------------------
 # Run
@@ -65,6 +65,7 @@ COPY --from=build /out/api      /usr/local/bin/
 COPY --from=build /out/worker   /usr/local/bin/
 COPY --from=build /out/migrator /usr/local/bin/
 COPY --from=build /out/reaper   /usr/local/bin/
+COPY --from=build /out/operator /usr/local/bin/
 COPY --from=build /out/demo     /usr/local/bin/
 
 ENV BIND=0.0.0.0:8080

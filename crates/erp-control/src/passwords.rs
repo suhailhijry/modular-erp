@@ -254,7 +254,10 @@ impl ControlPlane {
         Ok(())
     }
 
-    async fn password_handle(&self, identity: IdentityId) -> Result<String, AuthError> {
+    /// The address a password login signs in with, which is the only address
+    /// this system knows for an identity. [`Self::reset_second_factor_by`]
+    /// mails the enrolment link there.
+    pub(crate) async fn password_handle(&self, identity: IdentityId) -> Result<String, AuthError> {
         sqlx::query_scalar!(
             "SELECT handle FROM authenticator WHERE identity_id = $1 AND kind = 'password'",
             identity.as_uuid(),

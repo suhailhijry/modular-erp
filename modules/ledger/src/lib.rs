@@ -36,8 +36,8 @@ pub use account::{Account, AccountEvent, AccountKind};
 pub use charts::{CHARTS, Chart, Installed, TemplateAccount, chart};
 pub use commands::{
     LedgerError, accepts_postings, close_account, install_chart, install_chart_in, open_account,
-    open_account_in, post_entry, post_entry_in, preview_chart, rename_account, reverse_entry,
-    reverse_in,
+    open_account_in, post_entry, post_entry_in, posted_lines, preview_chart, rename_account,
+    reverse_entry, reverse_in,
 };
 pub use entry::{JournalEntry, JournalEntryEvent};
 pub use lines::{BalancedLines, Line, Unbalanced};
@@ -88,10 +88,11 @@ pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 /// This module's projection group name, for `?consistent_after=`.
 pub const GROUP_NAME: &str = <Ledger as erp_projection::ProjectionGroup>::NAME;
 
-/// This module's projection groups, as `(name, schema)`.
-const GROUPS: &[(&str, &str)] = &[(
+/// This module's projection groups, as `(name, schema, version)`.
+const GROUPS: &[(&str, &str, i16)] = &[(
     <Ledger as erp_projection::ProjectionGroup>::NAME,
     <Ledger as erp_projection::ProjectionGroup>::SCHEMA,
+    <Ledger as erp_projection::ProjectionGroup>::VERSION,
 )];
 
 /// What a tenant enabling this module needs installed.
@@ -106,6 +107,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         GROUPS,
         upcasters,
     )
+    .reading(&["branches"])
 }
 
 /// This module's entitlement name.

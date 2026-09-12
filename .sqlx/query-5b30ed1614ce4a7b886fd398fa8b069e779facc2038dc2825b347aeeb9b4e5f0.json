@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE authenticator\n                        SET secret = $2 || substr(secret, length(split_part(secret, '|', 1)) + 1),\n                            sealed_with = $3\n                      WHERE id = $1 AND split_part(secret, '|', 1) = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5b30ed1614ce4a7b886fd398fa8b069e779facc2038dc2825b347aeeb9b4e5f0"
+}

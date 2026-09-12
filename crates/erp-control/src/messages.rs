@@ -70,6 +70,54 @@ pub const RESET_BODY: MessageCode = MessageCode::new("mail.reset_body");
 pub const RESET_NOT_VALID: MessageCode = MessageCode::new("auth.reset_not_valid");
 pub const RESET_TOO_SOON: MessageCode = MessageCode::new("auth.reset_too_soon");
 pub const LAST_OWNER: MessageCode = MessageCode::new("members.last_owner");
+/// Staff whose role may, with no second factor. A 403, and not `not_permitted`:
+/// the one thing they can do about it is enrol.
+pub const STAFF_SECOND_FACTOR_REQUIRED: MessageCode =
+    MessageCode::new("access.staff_second_factor_required");
+/// Staff turning their second factor off. A 403: the answer is "come off the
+/// staff first", not "try again".
+pub const STAFF_KEEPS_SECOND_FACTOR: MessageCode =
+    MessageCode::new("auth.staff_keeps_second_factor");
+/// A member of a tenant that requires a second factor turning theirs off. A
+/// 403, for the same reason: the answer is the owner's — removing them, or no
+/// longer requiring it. No route lets a member leave on their own.
+pub const TENANT_KEEPS_SECOND_FACTOR: MessageCode =
+    MessageCode::new("auth.tenant_keeps_second_factor");
+/// Enrolling a second factor on an account whose factor somebody else reset,
+/// without the link that was mailed. A 403: the password is not the missing
+/// thing, and it holds after the link expires.
+pub const ENROLMENT_LINK_REQUIRED: MessageCode = MessageCode::new("auth.enrolment_link_required");
+/// Resetting your own second factor, at either reset route. Removing your own
+/// is `DELETE /v1/sessions/second-factor`, which costs a code and is refused
+/// outright where a factor is required — this must not become a way round it.
+pub const RESET_YOURSELF: MessageCode = MessageCode::new("second_factor.reset_yourself");
+/// A member resetting the owner's second factor.
+pub const RESET_THE_OWNER: MessageCode = MessageCode::new("second_factor.reset_the_owner");
+/// A member resetting a platform staff member's second factor.
+pub const RESET_PLATFORM_STAFF: MessageCode =
+    MessageCode::new("second_factor.reset_platform_staff");
+/// The target belongs to another company too, so no one company may weaken
+/// their sign-in. **It says to contact support**, who can.
+pub const RESET_ANOTHER_COMPANY: MessageCode =
+    MessageCode::new("second_factor.reset_another_company");
+/// Nothing to mail the link to: the account has no password login, so no
+/// address. Refused rather than resetting into a lockout (L6).
+pub const RESET_NO_LOGIN: MessageCode = MessageCode::new("second_factor.reset_no_login");
+/// A platform reset with no reason, or one over 500 characters.
+pub const RESET_REASON: MessageCode = MessageCode::new("second_factor.reset_reason");
+/// The subject line of the enrolment link mailed after a reset.
+pub const ENROLMENT_SUBJECT: MessageCode = MessageCode::new("mail.enrolment_subject");
+/// Its body.
+pub const ENROLMENT_BODY: MessageCode = MessageCode::new("mail.enrolment_body");
+pub const STAFF_NO_SUCH_ACCOUNT: MessageCode = MessageCode::new("staff.no_such_account");
+pub const ALREADY_STAFF: MessageCode = MessageCode::new("staff.already_staff");
+pub const STAFF_NO_SECOND_FACTOR: MessageCode = MessageCode::new("staff.no_second_factor");
+pub const NOT_STAFF: MessageCode = MessageCode::new("staff.not_staff");
+pub const LAST_SUPERADMIN: MessageCode = MessageCode::new("staff.last_superadmin");
+/// Suspending a tenant that is not active, reinstating one that is not
+/// suspended. Staff-facing, and it names both statuses.
+pub const WRONG_TENANT_STATUS: MessageCode = MessageCode::new("tenants.wrong_status");
+pub const SUSPENSION_REASON: MessageCode = MessageCode::new("tenants.suspension_reason");
 /// Not a phone number this system can send to.
 pub const NOT_A_PHONE_NUMBER: MessageCode = MessageCode::new("codes.not_a_phone_number");
 /// A code went to this number moments ago, so the next one waits. Answered as a
@@ -89,6 +137,9 @@ pub const NOT_A_SCOPE: MessageCode = MessageCode::new("keys.not_a_scope");
 /// names the scope — "ask for a key that can do this" is only actionable when
 /// you know which scope to ask for.
 pub const OUT_OF_SCOPE: MessageCode = MessageCode::new("keys.out_of_scope");
+/// A route about a person, asked by a key. No scope reaches it, so this names
+/// none: the answer is to sign in.
+pub const NOT_A_PERSON: MessageCode = MessageCode::new("keys.not_a_person");
 /// No key by that id in this tenant.
 pub const NO_SUCH_KEY: MessageCode = MessageCode::new("keys.no_such_key");
 
@@ -125,6 +176,25 @@ pub static CODES: &[MessageCode] = &[
     NOT_A_MEMBER,
     INVITATION_NOT_VALID,
     LAST_OWNER,
+    STAFF_SECOND_FACTOR_REQUIRED,
+    STAFF_KEEPS_SECOND_FACTOR,
+    TENANT_KEEPS_SECOND_FACTOR,
+    ENROLMENT_LINK_REQUIRED,
+    RESET_YOURSELF,
+    RESET_THE_OWNER,
+    RESET_PLATFORM_STAFF,
+    RESET_ANOTHER_COMPANY,
+    RESET_NO_LOGIN,
+    RESET_REASON,
+    ENROLMENT_SUBJECT,
+    ENROLMENT_BODY,
+    STAFF_NO_SUCH_ACCOUNT,
+    ALREADY_STAFF,
+    STAFF_NO_SECOND_FACTOR,
+    NOT_STAFF,
+    LAST_SUPERADMIN,
+    WRONG_TENANT_STATUS,
+    SUSPENSION_REASON,
     SIGNUP_NOT_VALID,
     SIGNUP_TOO_SOON,
     SIGNUP_SUBJECT,
@@ -135,6 +205,7 @@ pub static CODES: &[MessageCode] = &[
     RESET_TOO_SOON,
     NOT_A_SCOPE,
     OUT_OF_SCOPE,
+    NOT_A_PERSON,
     NO_SUCH_KEY,
     NOT_A_PHONE_NUMBER,
     CODE_TOO_SOON,
@@ -293,6 +364,16 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         OUT_OF_SCOPE,
         Locale::Arabic,
         Template::Simple("هذا المفتاح لا يحمل {scope}."),
+    ),
+    (
+        NOT_A_PERSON,
+        Locale::English,
+        Template::Simple("This is about a person, and a key is not one. Sign in to read it."),
+    ),
+    (
+        NOT_A_PERSON,
+        Locale::Arabic,
+        Template::Simple("هذا يخص شخصًا، والمفتاح ليس شخصًا. سجّل الدخول لتقرأه."),
     ),
     (
         NO_SUCH_KEY,
@@ -499,6 +580,269 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         LAST_OWNER,
         Locale::Arabic,
         Template::Simple("يجب أن يبقى للمساحة مالك واحد على الأقل. عيّن مالكًا آخر أولاً."),
+    ),
+    // -- platform staff ----------------------------------------------------
+    (
+        STAFF_SECOND_FACTOR_REQUIRED,
+        Locale::English,
+        Template::Simple(
+            "Platform staff must use two-step sign-in. Set up an authenticator app on your account, then try again.",
+        ),
+    ),
+    (
+        STAFF_SECOND_FACTOR_REQUIRED,
+        Locale::Arabic,
+        Template::Simple(
+            "يجب على موظفي المنصة استخدام تسجيل الدخول بخطوتين. فعّل تطبيق المصادقة في حسابك ثم أعد المحاولة.",
+        ),
+    ),
+    (
+        STAFF_KEEPS_SECOND_FACTOR,
+        Locale::English,
+        Template::Simple(
+            "Platform staff cannot turn two-step sign-in off. You can replace your authenticator app, or ask a superadmin to take you off the staff first.",
+        ),
+    ),
+    (
+        STAFF_KEEPS_SECOND_FACTOR,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يمكن لموظفي المنصة إيقاف تسجيل الدخول بخطوتين. يمكنك استبدال تطبيق المصادقة، أو اطلب من مشرف عام إخراجك من الموظفين أولًا.",
+        ),
+    ),
+    (
+        TENANT_KEEPS_SECOND_FACTOR,
+        Locale::English,
+        Template::Simple(
+            "An organisation you belong to requires two-step sign-in, so you cannot turn it off. You can replace your authenticator app. To turn it off, ask that organisation's owner to remove you from it or to stop requiring two-step sign-in.",
+        ),
+    ),
+    (
+        TENANT_KEEPS_SECOND_FACTOR,
+        Locale::Arabic,
+        Template::Simple(
+            "تشترط منشأة أنت عضو فيها تسجيل الدخول بخطوتين، فلا يمكنك إيقافه. يمكنك استبدال تطبيق المصادقة. ولإيقافه، اطلب من مالك تلك المنشأة إزالتك منها أو إلغاء اشتراط تسجيل الدخول بخطوتين.",
+        ),
+    ),
+    (
+        ENROLMENT_LINK_REQUIRED,
+        Locale::English,
+        Template::Simple(
+            "Two-step sign-in for this account was reset by somebody else, so a new authenticator app can only be set up from the link that was emailed to you. Open that link and try again, or ask whoever reset it to send a fresh one.",
+        ),
+    ),
+    (
+        ENROLMENT_LINK_REQUIRED,
+        Locale::Arabic,
+        Template::Simple(
+            "أعاد شخص آخر تعيين تسجيل الدخول بخطوتين لهذا الحساب، فلا يمكن إعداد تطبيق مصادقة جديد إلا من الرابط المُرسل إلى بريدك. افتح ذلك الرابط ثم أعد المحاولة، أو اطلب ممن أعاد التعيين إرسال رابط جديد.",
+        ),
+    ),
+    (
+        RESET_YOURSELF,
+        Locale::English,
+        Template::Simple(
+            "You cannot reset your own two-step sign-in. Replace your authenticator app instead, or ask somebody else to reset it for you.",
+        ),
+    ),
+    (
+        RESET_YOURSELF,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يمكنك إعادة تعيين تسجيل الدخول بخطوتين لحسابك. استبدل تطبيق المصادقة بدلًا من ذلك، أو اطلب من شخص آخر إعادة التعيين نيابة عنك.",
+        ),
+    ),
+    (
+        RESET_THE_OWNER,
+        Locale::English,
+        Template::Simple(
+            "The owner's two-step sign-in cannot be reset from here. Ask support to do it.",
+        ),
+    ),
+    (
+        RESET_THE_OWNER,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يمكن إعادة تعيين تسجيل الدخول بخطوتين للمالك من هنا. اطلب ذلك من الدعم.",
+        ),
+    ),
+    (
+        RESET_PLATFORM_STAFF,
+        Locale::English,
+        Template::Simple(
+            "That account belongs to platform staff, and only the platform can reset its two-step sign-in.",
+        ),
+    ),
+    (
+        RESET_PLATFORM_STAFF,
+        Locale::Arabic,
+        Template::Simple(
+            "هذا الحساب لأحد موظفي المنصة، ولا يمكن إعادة تعيين تسجيل الدخول بخطوتين له إلا من المنصة.",
+        ),
+    ),
+    (
+        RESET_ANOTHER_COMPANY,
+        Locale::English,
+        Template::Simple(
+            "That person also belongs to another organisation, and two-step sign-in is for their account everywhere, not just here. Contact support and they will reset it.",
+        ),
+    ),
+    (
+        RESET_ANOTHER_COMPANY,
+        Locale::Arabic,
+        Template::Simple(
+            "هذا الشخص عضو في منشأة أخرى أيضًا، وتسجيل الدخول بخطوتين يخص حسابه في كل مكان لا هنا فقط. تواصل مع الدعم وسيتولّون إعادة التعيين.",
+        ),
+    ),
+    (
+        RESET_NO_LOGIN,
+        Locale::English,
+        Template::Simple(
+            "That account has no email login, so there is nowhere to send an enrolment link. Nothing was changed.",
+        ),
+    ),
+    (
+        RESET_NO_LOGIN,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يملك هذا الحساب تسجيل دخول ببريد إلكتروني، فلا يوجد عنوان يُرسل إليه رابط التفعيل. لم يتغير شيء.",
+        ),
+    ),
+    (
+        RESET_REASON,
+        Locale::English,
+        Template::Simple(
+            "Say why in 1 to 500 characters. It is recorded in the platform audit trail under your name.",
+        ),
+    ),
+    (
+        RESET_REASON,
+        Locale::Arabic,
+        Template::Simple("اذكر السبب في حدود 1 إلى 500 حرف. يُسجَّل في سجل تدقيق المنصة باسمك."),
+    ),
+    (
+        ENROLMENT_SUBJECT,
+        Locale::English,
+        Template::Simple("Set up two-step sign-in again"),
+    ),
+    (
+        ENROLMENT_SUBJECT,
+        Locale::Arabic,
+        Template::Simple("أعد إعداد تسجيل الدخول بخطوتين"),
+    ),
+    (
+        ENROLMENT_BODY,
+        Locale::English,
+        Template::Simple(
+            "Two-step sign-in for this account was reset, and your old \
+             authenticator app and recovery codes no longer work.\n\n\
+             Open this link, sign in with your password, and set up an \
+             authenticator app again:\n{link}\n\n\
+             The link works once and expires within an hour. Until you use one, \
+             your password alone cannot set up a new app — so if the link has \
+             expired, ask whoever reset it for a fresh one. If you did not \
+             expect this, contact whoever runs your organisation: somebody \
+             asked for it, and it is recorded under their name.",
+        ),
+    ),
+    (
+        ENROLMENT_BODY,
+        Locale::Arabic,
+        Template::Simple(
+            "أُعيد تعيين تسجيل الدخول بخطوتين لهذا الحساب، ولم يعد تطبيق \
+             المصادقة القديم ولا رموز الاسترداد يعملان.\n\n\
+             افتح هذا الرابط، وسجّل الدخول بكلمة المرور، ثم أعد إعداد تطبيق \
+             المصادقة:\n{link}\n\n\
+             يعمل الرابط مرة واحدة وتنتهي صلاحيته خلال ساعة. وإلى أن تستخدم \
+             رابطًا، لا تكفي كلمة المرور وحدها لإعداد تطبيق جديد — فإن انتهت \
+             صلاحية الرابط فاطلب ممن أعاد التعيين رابطًا جديدًا. وإن لم تكن \
+             تتوقع ذلك فتواصل مع المسؤول عن منشأتك: طلب أحدهم هذا الإجراء، \
+             وهو مسجَّل باسمه.",
+        ),
+    ),
+    (
+        STAFF_NO_SUCH_ACCOUNT,
+        Locale::English,
+        Template::Simple(
+            "No account signs in as {handle}. They need an account before they can join the staff.",
+        ),
+    ),
+    (
+        STAFF_NO_SUCH_ACCOUNT,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يوجد حساب يسجّل الدخول باسم {handle}. يلزمه حساب قبل الانضمام إلى الموظفين.",
+        ),
+    ),
+    (
+        ALREADY_STAFF,
+        Locale::English,
+        Template::Simple("{handle} is already platform staff. Change their role instead."),
+    ),
+    (
+        ALREADY_STAFF,
+        Locale::Arabic,
+        Template::Simple("{handle} من موظفي المنصة بالفعل. يمكنك تغيير دوره بدلاً من ذلك."),
+    ),
+    (
+        STAFF_NO_SECOND_FACTOR,
+        Locale::English,
+        Template::Simple(
+            "{handle} has not set up two-step sign-in, and platform staff must have it. Ask them to set up an authenticator app first.",
+        ),
+    ),
+    (
+        STAFF_NO_SECOND_FACTOR,
+        Locale::Arabic,
+        Template::Simple(
+            "لم يفعّل {handle} تسجيل الدخول بخطوتين، وهو شرط لموظفي المنصة. اطلب منه تفعيل تطبيق المصادقة أولًا.",
+        ),
+    ),
+    (
+        NOT_STAFF,
+        Locale::English,
+        Template::Simple("That person is not platform staff."),
+    ),
+    (
+        NOT_STAFF,
+        Locale::Arabic,
+        Template::Simple("هذا الشخص ليس من موظفي المنصة."),
+    ),
+    (
+        LAST_SUPERADMIN,
+        Locale::English,
+        Template::Simple(
+            "The platform must keep at least one superadmin. Make someone else a superadmin first.",
+        ),
+    ),
+    (
+        LAST_SUPERADMIN,
+        Locale::Arabic,
+        Template::Simple("يجب أن يبقى للمنصة مشرف عام واحد على الأقل. عيّن مشرفًا عامًا آخر أولًا."),
+    ),
+    (
+        WRONG_TENANT_STATUS,
+        Locale::English,
+        Template::Simple(
+            "This workspace is {status}, and this can only be done to one that is {expected}.",
+        ),
+    ),
+    (
+        WRONG_TENANT_STATUS,
+        Locale::Arabic,
+        Template::Simple(
+            "حالة مساحة العمل هذه {status}، ولا يمكن تنفيذ هذا الإجراء إلا عندما تكون حالتها {expected}.",
+        ),
+    ),
+    (
+        SUSPENSION_REASON,
+        Locale::English,
+        Template::Simple("Say why in 1 to 500 characters, written for the workspace's owner."),
+    ),
+    (
+        SUSPENSION_REASON,
+        Locale::Arabic,
+        Template::Simple("اذكر السبب في حدود 1 إلى 500 حرف، بصياغة موجّهة إلى مالك مساحة العمل."),
     ),
     (
         INVITATION_NOT_VALID,

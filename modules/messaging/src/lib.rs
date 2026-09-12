@@ -136,7 +136,9 @@ pub async fn install(_conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> 
 /// reason to be switched on.
 #[must_use]
 pub fn setup() -> erp_tenant::ModuleSetup {
-    erp_tenant::ModuleSetup::new(module_id(), "", &[], upcasters).requiring(&["crm"])
+    erp_tenant::ModuleSetup::new(module_id(), "", &[], upcasters)
+        .requiring(&["crm"])
+        .reading(&["booking", "branches", "crm", "hr", "sales"])
 }
 
 /// This module's entitlement name.

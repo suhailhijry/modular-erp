@@ -109,6 +109,12 @@ pub enum PaymentsError {
     Config(#[from] erp_eventlog::ConfigError),
     #[error("the sale could not be settled: {0}")]
     Sales(String),
+    /// **A refund or a deposit `sales` will not let this member ask for** —
+    /// over the tenant's document limit. Carried as `sales` said it, rather than as
+    /// [`Self::Sales`]' flattened sentence, because the sentence and the 403
+    /// are both `sales`' to give (`SalesError::refuses_the_caller`).
+    #[error(transparent)]
+    Refused(sales::SalesError),
 }
 
 type Outcome = Result<Committed<PaymentEvent>, ExecuteError<PaymentsError>>;
@@ -132,14 +138,20 @@ pub struct Attempt {
 /// **Written before the customer is sent anywhere.** An attempt this system did
 /// not write down is an attempt no callback can be matched to, and the customer
 /// will still have been charged.
+///
+/// `authority` is whoever started it. A deposit it starts is judged against the
+/// document limit here, on what its prepayment invoice will come to, because
+/// that invoice is raised when the gateway settles and by then the customer
+/// has paid.
 pub async fn start_in(
     conn: &mut sqlx::PgConnection,
     id: &AggregateId,
     attempt: &Attempt,
     at: Timestamp,
     metadata: &Metadata,
+    authority: sales::Authority,
 ) -> Outcome {
-    try_execute::<Payment, _, PaymentsError>(
+    let committed = try_execute::<Payment, _, PaymentsError>(
         &mut *conn,
         id,
         crate::upcasters(),
@@ -179,7 +191,18 @@ pub async fn start_in(
             }))
         },
     )
-    .await
+    .await?;
+
+    // Only when something was written, so a retry answers as the first did.
+    if let Some(PaymentEvent::Started {
+        advance: Some(advance),
+        amount,
+        ..
+    }) = committed.events.first()
+    {
+        may_bill(&mut *conn, advance, *amount, authority, metadata).await?;
+    }
+    Ok(committed)
 }
 
 /// Records what the gateway said, and posts it.
@@ -381,6 +404,12 @@ async fn bill_the_deposit(
         },
         &format!("Deposit · {}", advance.against),
         metadata,
+        // **Nobody issues this by hand.** The gateway has settled money the
+        // customer already paid; the document follows from that, and refusing
+        // it would leave the money undeclared rather than unpaid. A member who
+        // started the charge was judged on this invoice when they asked, by
+        // `request_in` or `start_in`.
+        sales::Authority::System,
     )
     .await
     .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))?;
@@ -637,6 +666,10 @@ pub async fn refund_in(
         },
         &format!("Refund · {reference}"),
         metadata,
+        // **Judged when it was asked for**, by `request_refund_in`. This
+        // records what the gateway already did; refusing it now would leave
+        // the books saying the money is still here.
+        sales::Authority::System,
     )
     .await
     .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))?;
@@ -664,6 +697,17 @@ pub async fn refund_in(
 /// first is still awaited, already refunded, or already refused — the last
 /// answers with the gateway's refusal rather than trying again, because the
 /// gateway's answer does not change by asking.
+///
+/// **This is where a member's gateway refund is judged**, since by the time
+/// [`refund_in`] records it the money has gone. `authority` is whoever asked;
+/// `sales::may_refund` judges the money and the credit note it will leave
+/// owing — against the tenant's document limit, and for
+/// `sales::APPROVE_CREDIT_NOTE` when a credit note follows — the way a refund
+/// recorded on the spot is judged.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is a fact about the request, and the last is who made it"
+)]
 pub async fn request_refund_in(
     conn: &mut sqlx::PgConnection,
     id: &AggregateId,
@@ -672,6 +716,7 @@ pub async fn request_refund_in(
     reason: &str,
     at: Timestamp,
     metadata: &Metadata,
+    authority: sales::Authority,
 ) -> Outcome {
     if !amount.is_positive() {
         return Err(ExecuteError::Rejected(PaymentsError::RefundTooLarge(
@@ -679,7 +724,7 @@ pub async fn request_refund_in(
         )));
     }
     let reason = reason.trim().to_owned();
-    try_execute::<Payment, _, PaymentsError>(
+    let committed = try_execute::<Payment, _, PaymentsError>(
         &mut *conn,
         id,
         crate::upcasters(),
@@ -713,7 +758,54 @@ pub async fn request_refund_in(
             }))
         },
     )
-    .await
+    .await?;
+
+    // **Judged only when the request is new**, so a retry answers the way the
+    // first one did. A refusal here is an error from this function, and the
+    // caller's transaction takes the request back out with it.
+    if !committed.events.is_empty() {
+        let payment = erp_eventlog::load::<Payment>(&mut *conn, id, crate::upcasters())
+            .await?
+            .aggregate;
+        if let Some(collects) = &payment.collects {
+            sales::may_refund(conn, &collects.invoice(id), amount, authority, metadata)
+                .await
+                .map_err(refused)?;
+        }
+    }
+    Ok(committed)
+}
+
+/// **What `sales` refused a member**, as `sales` said it — see
+/// [`PaymentsError::Refused`].
+fn refused(e: ExecuteError<sales::SalesError>) -> ExecuteError<PaymentsError> {
+    match e {
+        ExecuteError::Rejected(refused) => ExecuteError::Rejected(PaymentsError::Refused(refused)),
+        ExecuteError::Load(e) => ExecuteError::Load(e),
+        ExecuteError::Append(e) => ExecuteError::Append(e),
+        ExecuteError::Enqueue(e) => ExecuteError::Enqueue(e),
+        ExecuteError::Database(e) => ExecuteError::Database(e),
+        ExecuteError::Contended { stream, attempts } => {
+            ExecuteError::Contended { stream, attempts }
+        }
+        ExecuteError::AlreadyExists { stream } => ExecuteError::AlreadyExists { stream },
+    }
+}
+
+/// **A member asking for a deposit is issuing its invoice**, so they are
+/// judged against the document limit now — see `sales::may_issue`. The
+/// prepayment invoice itself is raised by [`settle_in`] once the customer has
+/// paid, with nobody acting, and must not be refused then.
+async fn may_bill(
+    conn: &mut sqlx::PgConnection,
+    advance: &crate::Advance,
+    amount: Money,
+    authority: sales::Authority,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<PaymentsError>> {
+    sales::may_issue(conn, advance.net, amount, authority, metadata)
+        .await
+        .map_err(refused)
 }
 
 /// Records that the gateway would not give it back. Posts nothing; the money
@@ -801,7 +893,16 @@ async fn credit_the_invoice(
     metadata: &Metadata,
 ) -> Result<(), ExecuteError<PaymentsError>> {
     sales::credit_what_is_clear(
-        &mut *conn, invoice, reference, refunded, reason, at, metadata,
+        &mut *conn,
+        invoice,
+        reference,
+        refunded,
+        reason,
+        at,
+        metadata,
+        // The refund's own, and for the same reason: the gateway has
+        // already handed the money back, and this is the document it implies.
+        sales::Authority::System,
     )
     .await
     .map_err(|e| ExecuteError::Rejected(PaymentsError::Sales(e.to_string())))
@@ -1280,12 +1381,19 @@ pub struct Collection {
 /// is [`crate::charge_requested`], which fails the payment with a reason when
 /// the token has gone. The route ahead of this reads `proj_payments.card` for a
 /// friendly refusal on the common mistake, which is a typo rather than a race.
+///
+/// # Who asked
+///
+/// `authority` is a member charging a card, or `System` for a customer's own
+/// deposit. A member's deposit is judged against the document limit here, for
+/// the reason [`start_in`] gives.
 pub async fn request_in(
     conn: &mut sqlx::PgConnection,
     id: &AggregateId,
     collection: &Collection,
     at: Timestamp,
     metadata: &Metadata,
+    authority: sales::Authority,
 ) -> Outcome {
     let committed = try_execute::<Payment, _, PaymentsError>(
         &mut *conn,
@@ -1320,6 +1428,7 @@ pub async fn request_in(
     // already holds its claim and is not asked again.
     if let (false, Collects::Advance(advance)) = (committed.events.is_empty(), &collection.collects)
     {
+        may_bill(&mut *conn, advance, collection.amount, authority, metadata).await?;
         try_execute::<Awaiting, _, PaymentsError>(
             &mut *conn,
             &advance.against,

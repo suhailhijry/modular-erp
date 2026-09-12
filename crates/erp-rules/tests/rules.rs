@@ -88,6 +88,37 @@ fn ordering_a_yes_or_no_is_refused() {
     }
 }
 
+/// **A value the fact never takes is refused**, and so is ordering one. Without
+/// the list, `capability == "raed"` validates and is never once true.
+#[test]
+fn a_text_fact_with_known_values_refuses_one_it_does_not_know() {
+    let listed = FactRegistry::new().one_of("capability", ["read"]);
+
+    let refused = is("capability", Op::Eq, Value::Text("raed".to_owned())).validate(&listed);
+    assert_eq!(
+        refused,
+        Err(Invalid::NoSuchValue {
+            name: "capability".to_owned(),
+            value: "raed".to_owned(),
+            known: vec!["read".to_owned()],
+        })
+    );
+    is("capability", Op::Eq, Value::Text("read".to_owned()))
+        .validate(&listed)
+        .expect("a value it takes is fine");
+    for op in [Op::Lt, Op::Lte, Op::Gt, Op::Gte] {
+        let refused = is("capability", op, Value::Text("read".to_owned())).validate(&listed);
+        assert!(
+            matches!(refused, Err(Invalid::NotOrderable { .. })),
+            "{op:?} should not order a listed fact, got {refused:?}"
+        );
+    }
+    // A text fact with no list still takes anything, and orders.
+    is("branch", Op::Gt, Value::Text("anything".to_owned()))
+        .validate(&registry())
+        .expect("an unlisted text fact is open");
+}
+
 #[test]
 fn validation_reaches_inside_the_combinators() {
     let nested = DynCondition::All {
@@ -116,6 +147,59 @@ fn an_amount_is_compared_in_its_own_currency_and_never_across_two() {
     // rate, so it is no answer, and no answer does not fire a rule.
     let dollars = Money::from_minor(20_000, "USD".parse().expect("a currency"));
     assert!(!is("amount", Op::Lt, Value::Money(dollars)).holds(&facts));
+}
+
+/// **No answer stays no answer on the way up.** Were it a false, `Not` would
+/// turn it into a true and fire. An unknown part decides the whole only when
+/// the other parts do not.
+#[test]
+fn an_amount_in_another_currency_is_no_answer_and_stays_one() {
+    let facts = Facts::new().with("amount", Value::Money(riyals(100)));
+    let across = is(
+        "amount",
+        Op::Lt,
+        Value::Money(Money::from_minor(
+            20_000,
+            "USD".parse().expect("a currency"),
+        )),
+    );
+    let yes = is("amount", Op::Gt, Value::Money(riyals(1)));
+    let no = is("amount", Op::Gt, Value::Money(riyals(1_000)));
+    let not = |c: &DynCondition| DynCondition::Not {
+        of: Box::new(c.clone()),
+    };
+    let all = |a: &DynCondition, b: &DynCondition| DynCondition::All {
+        of: vec![a.clone(), b.clone()],
+    };
+    let any = |a: &DynCondition, b: &DynCondition| DynCondition::Any {
+        of: vec![a.clone(), b.clone()],
+    };
+
+    assert_eq!(across.decide(&facts), None);
+    assert_eq!(not(&across).decide(&facts), None, "not of no answer");
+    assert!(!not(&across).holds(&facts), "does not fire");
+    assert_eq!(all(&no, &across).decide(&facts), Some(false));
+    assert_eq!(all(&yes, &across).decide(&facts), None);
+    assert_eq!(any(&yes, &across).decide(&facts), Some(true));
+    assert_eq!(any(&no, &across).decide(&facts), None);
+
+    // Whoever acts on the rule says what no answer means.
+    let rules = Rules::new(vec![Rule {
+        name: "Across".to_owned(),
+        when: across,
+        then: 1,
+    }]);
+    assert!(
+        rules.evaluate(&facts).is_none(),
+        "by default, it does not apply"
+    );
+    assert_eq!(
+        rules
+            .explain_undecided(&facts, |_| true)
+            .matched
+            .map(|r| r.then),
+        Some(1)
+    );
 }
 
 /// **A fact nobody supplied is not true.**

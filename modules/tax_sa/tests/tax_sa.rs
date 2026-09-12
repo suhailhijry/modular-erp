@@ -226,6 +226,7 @@ impl Fixture {
                 note: String::new(),
             },
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
     }
@@ -609,6 +610,7 @@ impl Fixture {
                 note: String::new(),
             },
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .expect("issues");
@@ -743,6 +745,7 @@ async fn a_rebuild_reproduces_every_document_exactly() {
         "wrong address",
         on("2026-02-20"),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("cancels");
@@ -795,6 +798,7 @@ async fn a_credit_note_is_its_own_document_pointing_at_the_invoice() {
         "the wrong service",
         on("2026-02-20"),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("cancels");

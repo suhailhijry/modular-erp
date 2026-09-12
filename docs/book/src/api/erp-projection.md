@@ -28,8 +28,9 @@ reproducible" from a claim into something CI checks.
 
 ```rust
 pub trait ProjectionGroup: Send + Sync + 'static {
-    const NAME:   &'static str;   // checkpoint key. Lowercase, underscores
-    const SCHEMA: &'static str;   // the Postgres schema this group owns exclusively
+    const NAME:    &'static str;   // checkpoint key. Lowercase, underscores
+    const SCHEMA:  &'static str;   // the Postgres schema this group owns exclusively
+    const VERSION: i16 = 1;        // the read model: the shape and meaning of its tables
 }
 ```
 
@@ -54,6 +55,31 @@ impl ProjectionGroup for Sales {
     const SCHEMA: &'static str = "proj_sales";
 }
 ```
+
+### VERSION
+
+The group's read model, stamped on its checkpoint by whatever builds its tables:
+`ensure_group_schema`, provisioning, and `rebuild_swap`'s swap. Bump it when a
+rebuild would produce different tables from the ones tenants hold. A change to
+the module's `install.sql` always does, and `a_read_model_change_bumps_its_version`
+in `bin/migrator` fails until the number moves (it pins a hash of each script). A
+change to a projection that alters rows already written may too, and nothing can
+see that one, so it is your judgement.
+
+What the stamp buys:
+
+- the runner projects only into tables stamped with its build's version
+  (`RunError::OtherReadModel` otherwise). Older is a group the migrator has
+  not rebuilt; newer is the draining build during a rolling deploy, whose rows
+  would carry its old rules into tables stamped new, where nothing would find
+  them. The changed groups wait for the new build's workers;
+- the request path answers every module route served from an older group
+  `503 request.read_model_rebuilding` (see `erp-web`);
+- the migrator rebuilds every group whose stamp is not the build's, and its
+  `check` lists them.
+
+A checkpoint at 0 was built before stamps were recorded, and is behind every
+build.
 
 ## Projection
 
@@ -184,13 +210,19 @@ pub async fn run_to_head<G: ProjectionGroup>(
 ```
 
 `Busy` is not an error. The group is being processed, just not by this caller.
+`RunError::OtherReadModel { group, installed, expected }` is: the group's
+tables were built for another read model than `G::VERSION`, older or newer, so
+nothing is applied and the checkpoint stays put until the build they are
+stamped for projects them, or its migrator rebuilds them.
 
 ### What makes run_once_in correct
 
 Everything below happens in one transaction:
 
 1. `SELECT … FOR UPDATE NOWAIT` on the checkpoint row. This is the lease, so a
-   second worker gets `Busy` instead of applying the same events twice.
+   second worker gets `Busy` instead of applying the same events twice. It
+   also reads the row's read-model version, and refuses one that is not
+   `G::VERSION`.
 2. `SET LOCAL search_path` to the group's schema. This is L3, so a projection
    reaching into another group's tables fails here.
 3. Apply each event, in position order, through every projection.
@@ -209,7 +241,7 @@ its return.
 ```rust
 pub async fn ensure_group_schema<G: ProjectionGroup>(conn: &mut PgConnection)
     -> Result<(), sqlx::Error>;
-pub async fn ensure_group(conn: &mut PgConnection, name: &str, schema: &str)
+pub async fn ensure_group(conn: &mut PgConnection, name: &str, schema: &str, version: i16)
     -> Result<(), sqlx::Error>;
 
 pub async fn checkpoint<G: ProjectionGroup>(conn: &mut PgConnection)
@@ -220,7 +252,9 @@ pub async fn checkpoint_of(conn: &mut PgConnection, group: &str)
 
 `ensure_group_schema` is called when a module is enabled for a tenant, separate
 from the migrations because which groups exist depends on which modules that
-tenant has.
+tenant has. It stamps `G::VERSION` on a checkpoint it creates, and leaves an
+existing one alone: an existing row means existing tables, which
+`IF NOT EXISTS` DDL did not reshape.
 
 Both have an untyped twin, and the reason is worth knowing if you ever wonder why
 there are two. Provisioning installs whichever modules a tenant chose, which is a
@@ -288,7 +322,9 @@ a nicer name.
 
 `rebuild_swap` builds the new tables in a staging schema from position zero while
 the live ones keep serving, and exchanges the two at the end. Readers see the old
-shape, then the new one.
+shape, then the new one. The swap sets the checkpoint's read-model version to
+`G::VERSION` in the same transaction as the rename, so the stamp always names
+the tables that are live.
 
 This is also why a module's `install.sql` is schema-relative and says `invoice`
 and not `proj_sales.invoice`. The same SQL has to be aimable at a staging

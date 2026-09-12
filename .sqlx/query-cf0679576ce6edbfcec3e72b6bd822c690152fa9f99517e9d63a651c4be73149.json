@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.tenant_id as \"tenant!: TenantId\", m.role\n                 FROM membership m\n                 JOIN tenant t ON t.id = m.tenant_id\n                WHERE m.identity_id = $1 AND m.revoked_at IS NULL\n                  AND t.status <> 'deleted'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tenant!: TenantId",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "membership",
+            "name": "tenant_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "membership",
+            "name": "role"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "cf0679576ce6edbfcec3e72b6bd822c690152fa9f99517e9d63a651c4be73149"
+}

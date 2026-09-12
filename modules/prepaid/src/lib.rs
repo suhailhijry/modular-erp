@@ -97,9 +97,10 @@ pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 /// This module's projection group name, for `?consistent_after=`.
 pub const GROUP_NAME: &str = <Prepaid as erp_projection::ProjectionGroup>::NAME;
 
-const GROUPS: &[(&str, &str)] = &[(
+const GROUPS: &[(&str, &str, i16)] = &[(
     <Prepaid as erp_projection::ProjectionGroup>::NAME,
     <Prepaid as erp_projection::ProjectionGroup>::SCHEMA,
+    <Prepaid as erp_projection::ProjectionGroup>::VERSION,
 )];
 
 /// Creates this module's read models in a tenant database.
@@ -135,6 +136,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         upcasters,
     )
     .requiring(&["ledger", "crm"])
+    .reading(&["crm", "ledger"])
 }
 
 /// This module's entitlement name.

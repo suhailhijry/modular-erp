@@ -414,6 +414,62 @@ async fn only_active_tenants_are_visited() {
     );
 }
 
+/// **Nothing runs for a suspended tenant — including a visit that was already
+/// under way.** `claim_tenants` never picked suspended tenants; a visit that
+/// began before the suspension used to renew its lease regardless and run
+/// every remaining job, saved-card charges among them. The renewal before each
+/// job now answers "stop".
+#[tokio::test]
+async fn a_suspended_tenant_is_not_visited_and_its_visit_stops() {
+    let fixture = Fixture::new().await;
+    let tenant = fixture.tenant("acme").await;
+    let renew = || {
+        fixture
+            .control
+            .renew_lease(tenant, "worker-a", schedule().lease)
+    };
+
+    fixture
+        .control
+        .claim_tenants("worker-a", 10, schedule())
+        .await
+        .expect("claims");
+    assert!(renew().await.expect("renews"), "the visit is ours");
+
+    fixture
+        .control
+        .suspend_tenant(tenant, "unpaid", Actor::system())
+        .await
+        .expect("suspends");
+    assert!(
+        !renew().await.expect("answers"),
+        "a visit went on running jobs for a suspended tenant"
+    );
+
+    fixture.expire_lease(tenant).await;
+    assert!(
+        fixture
+            .control
+            .claim_tenants("worker-b", 10, schedule())
+            .await
+            .expect("claims")
+            .is_empty(),
+        "a suspended tenant was claimed"
+    );
+
+    fixture
+        .control
+        .reinstate_tenant(tenant, Actor::system())
+        .await
+        .expect("reinstates");
+    let back = fixture
+        .control
+        .claim_tenants("worker-b", 10, schedule())
+        .await
+        .expect("claims");
+    assert_eq!(back.len(), 1, "a reinstated tenant is visited again");
+}
+
 #[tokio::test]
 async fn a_claim_is_bounded_by_its_limit() {
     let fixture = Fixture::new().await;

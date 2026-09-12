@@ -203,3 +203,19 @@ pub fn reset_messages(link: &str) -> (Message, Message) {
         Message::new(crate::messages::RESET_BODY).with("link", MessageArg::text(link.to_owned())),
     )
 }
+
+/// Subject and body for the enrolment link mailed after somebody else reset an
+/// account's second factor.
+///
+/// **No company name and nobody's name**, for the reason [`reset_messages`]
+/// gives and one more: the same link is mailed whether a tenant's owner or
+/// platform support asked for it, and naming which would tell a leaked mailbox
+/// where its owner works.
+#[must_use]
+pub fn enrolment_messages(link: &str) -> (Message, Message) {
+    (
+        Message::new(crate::messages::ENROLMENT_SUBJECT),
+        Message::new(crate::messages::ENROLMENT_BODY)
+            .with("link", MessageArg::text(link.to_owned())),
+    )
+}

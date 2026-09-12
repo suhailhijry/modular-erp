@@ -199,6 +199,7 @@ impl Fixture {
                 note: String::new(),
             },
             &Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .unwrap_or_else(|e| panic!("{id} is issued: {e:?}"));
@@ -350,6 +351,7 @@ async fn every_figure_agrees_with_the_books() {
         "خطأ في الفاتورة",
         on("2026-02-10"),
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("credits");
@@ -459,6 +461,7 @@ async fn a_partial_credit_leaves_revenue_and_reconciles_like_a_document() {
             on: on("2026-02-10"),
         },
         &Metadata::default(),
+        sales::Authority::System,
     )
     .await
     .expect("credits part");
@@ -750,6 +753,7 @@ async fn takings_are_attributed_to_whoever_had_the_till_open() {
             at: on("2026-04-01"),
         },
         &Metadata::default(),
+        sales::Authority::Member { owner: false },
     )
     .await
     .expect("sells");

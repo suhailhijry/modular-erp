@@ -189,12 +189,12 @@ connection from the tenant's budget, and that is the normal path.
 Reach for `try_execute` when the command writes something else in the same
 transaction. The retry loop then has to be yours, because the transaction has to
 come from wherever the connection budget is. From
-[`modules/sales/src/commands.rs:180`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/commands.rs):
+[`modules/sales/src/commands.rs:332`](https://github.com/suhailhijry/modular-erp/blob/main/modules/sales/src/commands.rs):
 
 ```rust
 for _ in 1..=MAX_ATTEMPTS {
     let mut tx = db.begin().await?;
-    match issue_in(&mut tx, id, &entry_id, draft, &memo, metadata).await {
+    match issue_in(&mut tx, id, draft, &memo, metadata, authority).await {
         Ok(numbered) => {
             tx.commit().await.map_err(ExecuteError::from)?;
             return Ok(numbered);
@@ -507,15 +507,16 @@ from anything, both surviving a projection rebuild, both rotatable, and neither
 readable by everything that can read the tenant.
 
 ```rust
-pub struct SealingKey { … }   // Debug shows the id and the length, never the bytes
+pub struct SealingKey { … }   // Debug shows the ids, never the bytes
 
 impl SealingKey {
     pub fn new(id: impl Into<String>, bytes: &[u8]) -> Result<Self, SecretError>;
-    pub fn parse(configured: &str) -> Result<Self, SecretError>;   // "<id>:<64 hex>"
+    pub fn parse(configured: &str) -> Result<Self, SecretError>;   // "<id>:<64 hex>[,<id>:<64 hex>…]"
     pub fn generate(id: impl Into<String>) -> Result<Self, SecretError>;
-    pub fn id(&self) -> &str;
-    pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, SecretError>;
-    pub fn unseal(&self, key: &str, sealed: &[u8]) -> Result<Vec<u8>, SecretError>;
+    pub fn id(&self) -> &str;                                       // the one that seals
+    pub fn seal(&self, key: &str, plaintext: &[u8]) -> Result<Vec<u8>, SecretError>;
+    pub fn unseal(&self, sealed_with: Option<&str>, key: &str, sealed: &[u8])
+        -> Result<Vec<u8>, SecretError>;
 }
 
 pub async fn put(conn: &mut PgConnection, sealing: &SealingKey,
@@ -524,18 +525,43 @@ pub async fn get(conn: &mut PgConnection, sealing: &SealingKey, key: &str)
     -> Result<Option<Vec<u8>>, SecretError>;
 pub async fn exists(conn: &mut PgConnection, key: &str) -> Result<bool, SecretError>;
 pub async fn forget(conn: &mut PgConnection, key: &str) -> Result<(), SecretError>;
+
+pub struct Census { pub under: BTreeMap<String, u64>, pub resealed: u64, pub unsealable: Vec<String> }
+impl Census {
+    pub fn absorb(&mut self, other: Census, place: &str);
+    pub fn is_settled(&self, current: &str) -> bool;
+}
+pub async fn reseal(conn: &mut PgConnection, sealing: &SealingKey, apply: bool)
+    -> Result<Census, SecretError>;
 ```
 
 AES-256-GCM through OpenSSL, which the workspace already links for Postgres TLS.
 The nonce is 12 random bytes and lives in the ciphertext, so a row is
 self-describing and there is no second column to fall out of step with the first.
+`key`, the row's name, is the associated data, so a value moved to another row
+does not open.
 
-`parse` takes the id and the key in one string on purpose. A rotation means two
-keys existing at once, and a deployment that carries them separately has two
-things to keep in step.
+**A `SealingKey` is a ring.** `parse` takes a comma-separated list; the first
+entry seals and the rest are only read. It refuses an empty entry or id, a
+repeated id, and the same bytes under two ids (a rotation that only renamed the
+key). The id and the key are in one string on purpose: a deployment that carries
+them separately has two lists to keep in step.
 
-`unseal` never guesses. GCM authenticates, so a tampered value fails instead of
-decrypting to something.
+**`unseal` opens a row with the key the row names.** `put` records the sealing
+id in `module_secret.sealed_with` and `get` passes it back. Only that key is
+tried, and an id the ring does not hold is `SecretError::UnknownKey`: refused,
+not tried under whatever else is there. `None` is for a value sealed before its
+id was recorded (an authenticator enrolled before control migration `0020`),
+and is tried under every held key. GCM authenticates, so a wrong key or a
+tampered value fails instead of decrypting to something.
+
+**`reseal` moves one database's rows onto the current key**, one
+compare-and-swap per row, so it can be interrupted and run again, and a `put`
+racing it wins. Every row is opened, those already under the current id
+included, and only the stale ones are written. A row no held key opens goes in
+`Census::unsealable` by name and is left as it was. `Census::is_settled` is the gate for retiring a key. The
+fleet walk is `erp_control::ControlPlane::reseal_fleet`, and the operator's
+command is `migrator reseal`.
 
 `get` returns `Result<Option<_>>` because "there is none" and "there is one that
 will not unseal" are different answers and the caller has to tell them apart.
@@ -745,5 +771,27 @@ impl OutboxHealth { pub fn is_healthy(&self, max_backlog_age_seconds: i64) -> bo
 pub async fn outbox_health(conn: &mut PgConnection) -> Result<OutboxHealth, sqlx::Error>;
 ```
 
-Unresolved dead letters and backlog age. Both are continuously asserted per
-tenant.
+Unresolved dead letters and backlog age. Both are continuously asserted, per
+tenant and for the control plane.
+
+### Dead letters
+
+```rust
+pub struct DeadLetter { pub id: i64, pub kind: EffectKind, pub idempotency_key: String, … }
+pub struct Handled { pub kind: EffectKind, pub idempotency_key: String }
+
+pub async fn dead_letters(conn: &mut PgConnection, limit: i64) -> Result<Vec<DeadLetter>, sqlx::Error>;
+pub async fn requeue(conn: &mut PgConnection, id: i64) -> Result<Option<Handled>, sqlx::Error>;
+pub async fn dismiss(conn: &mut PgConnection, id: i64) -> Result<Option<Handled>, sqlx::Error>;
+```
+
+A dead letter is a queue, not a grave. `requeue` puts one back, due now, with
+its attempts reset and its key intact. `dismiss` deletes one, for a promise that
+went stale while it was retried: a credential that expires before the schedule
+gives up is dead before it is dead-lettered. Both act on a dead row and nothing
+else, answer `None` otherwise, and hand back its kind and key so the caller can
+say what it did without repeating the payload. `dismiss` is the only way a dead
+letter is deleted; the migrations' "never deleted" predates it. They take a
+bare connection, so the control plane's `/v1/platform/effects/dead` uses all
+three and the tenant's `/v1/effects/dead` the first two; a tenant dismiss route
+is not built yet.

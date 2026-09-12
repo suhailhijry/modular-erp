@@ -69,9 +69,10 @@ pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 /// This module's projection group name, for `?consistent_after=`.
 pub const GROUP_NAME: &str = <Pos as erp_projection::ProjectionGroup>::NAME;
 
-const GROUPS: &[(&str, &str)] = &[(
+const GROUPS: &[(&str, &str, i16)] = &[(
     <Pos as erp_projection::ProjectionGroup>::NAME,
     <Pos as erp_projection::ProjectionGroup>::SCHEMA,
+    <Pos as erp_projection::ProjectionGroup>::VERSION,
 )];
 
 /// Creates this module's read models in a tenant database.
@@ -105,6 +106,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         upcasters,
     )
     .requiring(&["sales", "ledger", "crm"])
+    .reading(&["crm", "ledger", "sales"])
 }
 
 /// This module's entitlement name.

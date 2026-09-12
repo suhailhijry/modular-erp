@@ -475,7 +475,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
         replays.iter().map(|report| report.group).collect();
     let declared: std::collections::BTreeSet<&str> = erp_api::modules()
         .iter()
-        .flat_map(|(_, setup)| setup.groups.iter().map(|(name, _)| *name))
+        .flat_map(|(_, setup)| setup.groups.iter().map(|(name, _, _)| *name))
         .collect();
     assert_eq!(
         replayed, declared,

@@ -84,8 +84,9 @@ fn sources() -> Vec<std::path::PathBuf> {
 /// **Every declared fact is supplied by somebody.**
 ///
 /// The edge supplies what a request knows before its body is read —
-/// `capability`, `branch`. A handler that has parsed a body supplies the rest —
-/// `amount`, from `ledger::post_entry`. Both count; neither alone does.
+/// `capability`, `branch` — and `TenantDb::permits` adds `role`, which only it
+/// knows. A handler that has parsed a body supplies the rest — `amount`, from
+/// `ledger::post_entry`. All count; none alone does.
 #[test]
 fn every_declared_fact_is_assembled_somewhere() {
     let limits_src =
@@ -142,8 +143,8 @@ fn nothing_is_assembled_that_no_rule_may_name() {
 #[test]
 fn the_registry_declares_something() {
     assert!(
-        declared().len() >= 3,
-        "expected at least amount, branch and capability; found {:?}",
+        declared().len() >= 4,
+        "expected at least amount, branch, capability and role; found {:?}",
         declared()
     );
 }

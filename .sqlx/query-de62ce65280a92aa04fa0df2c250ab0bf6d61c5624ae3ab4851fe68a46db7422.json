@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT coalesce(sealed_with, '(unrecorded)') as \"sealed_with!\", count(*) as \"n!\"\n                 FROM authenticator\n                WHERE kind IN ('totp', 'totp_pending')\n                GROUP BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sealed_with!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "n!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "de62ce65280a92aa04fa0df2c250ab0bf6d61c5624ae3ab4851fe68a46db7422"
+}

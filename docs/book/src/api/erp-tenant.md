@@ -30,6 +30,7 @@ four module manifests, so it cannot go green by finding nothing.
 | [`db.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-tenant/src/db.rs) | `TenantDb`, `CommandError` |
 | [`budget.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-tenant/src/budget.rs) | `Budget`, `Lane`, `PoolError`, `Conn`, `Tx` |
 | [`roles.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-tenant/src/roles.rs) | `Role`, `Capability`, `Access` |
+| [`limits.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-tenant/src/limits.rs) | `Limits`, `Verdict`, `Unusable`, the fact registry, `narrows` |
 | [`modules.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-tenant/src/modules.rs) | `EnabledModules`, `ModuleSetup` |
 | [`messages.rs`](https://github.com/suhailhijry/modular-erp/blob/main/crates/erp-tenant/src/messages.rs) | `system.overloaded` and `system.internal_error` |
 
@@ -51,6 +52,8 @@ impl TenantDb {
     pub const fn access(&self) -> Option<&Access>;
     pub fn allows(&self, capability: Capability) -> bool;
     pub fn allows_in(&self, capability: Capability, module: Option<&ModuleId>) -> bool;
+    pub async fn permits(&self, capability: Capability, module: Option<&ModuleId>,
+        facts: &Facts) -> Result<bool, ConfigError>;   // the role, narrowed by limits
 
     // what this tenant is
     pub const fn tenant(&self) -> TenantId;
@@ -184,7 +187,7 @@ safe default and matches sqlx.
 ```rust
 pub enum Role { Owner, Accountant, Clerk, Viewer }
 
-pub enum Capability { Read, PostEntries, ManageAccounts, ManageTenant }
+pub enum Capability { Read, PostEntries, ManageAccounts, ManageTenant }   // ALL: [Self; 4]
 
 impl Role {
     pub const fn allows(self, capability: Capability) -> bool;
@@ -259,6 +262,48 @@ A stored role this build does not recognise is refused and not defaulted.
 Defaulting down to `Viewer` would silently lock somebody out, and defaulting up
 would silently let them in. Both are worse than an error naming the row.
 
+### Permission limits
+
+```rust
+pub struct Limits { … }        // serialised as the bare list of rules
+impl Limits {
+    pub fn new(rules: Rules<Verdict>) -> Result<Self, Unusable>;
+    pub fn narrow(&self, allowed: bool, facts: &Facts) -> bool;
+}
+pub enum Verdict { Refuse, Allow }
+pub const fn narrows(capability: Capability) -> bool;   // false for ManageTenant
+```
+
+A tenant's own rules on top of the matrix, stored under
+`tenant.permission_limits` and written by its owner at
+`PUT /v1/tenant/permission-limits`. A rule may ask about `amount`, `branch`,
+`capability` and `role`. **A limit narrows and never widens**: `narrow` takes
+the role's answer and can only turn a yes into a no.
+
+**A refusal it cannot judge refuses.** An amount in another currency than a
+rule's has no answer (`DynCondition::decide` is `None`), and counting that as
+*no* let a bookkeeper who opened dollar accounts post any sum past a limit in
+riyals. So a `refuse` rule that cannot be told counts as matching, and an
+`allow` rule that cannot be told does not; both are the narrower answer.
+
+**It judges capabilities, not documents.** An amount reaches it only where a
+route has one before anything is written — the ledger's own entries and
+reversals. How large one invoice, credit note or refund may be is `sales`'
+document limit, judged inside the command where the total exists.
+
+`TenantDb::permits` is where it applies, and every `Allowed<C>` goes through
+it. It answers `ManageTenant` from the role alone, **before reading any limit**,
+so a rule that refuses everything, or a stored row this build can no longer
+read, cannot lock the owner out of the route that fixes it. It adds the role
+that applies in the module as the `role` fact, which is what lets a rule name
+the bookkeeper and leave the owner alone.
+
+A `Limits` cannot exist unchecked. `new` refuses a rule naming a fact or a
+value nothing supplies — `capability == "post_entires"`, or `manage_tenant`,
+which is never narrowed — and deserialising one checks the same way, so a
+stored row that stops validating is a 503 on every check it would narrow, not
+the unlimited answer. That makes the registry expand-only.
+
 ### Where the check actually goes
 
 Not here. `Allowed<C>` in `erp-web` is the extractor form, and
@@ -288,20 +333,32 @@ logging are stable.
 pub struct ModuleSetup {
     pub module: ModuleId,
     pub install_sql: &'static str,
-    // groups, upcasters, seed_sql, deprecated, requires, requires_any
+    // groups, upcasters, seed_sql, deprecated, requires, requires_any, reads
 }
 
 impl ModuleSetup {
     pub const fn new(module: ModuleId, install_sql: &'static str,
-        groups: &'static [(&'static str, &'static str)],
+        groups: &'static [(&'static str, &'static str, i16)],   // (name, schema, version)
         upcasters: fn() -> &'static Upcasters) -> Self;
 
     pub const fn seeding(self, sql: &'static str) -> Self;
     pub const fn deprecated(self, why: &'static str) -> Self;
     pub const fn requiring(self, modules: &'static [&'static str]) -> Self;
     pub const fn requiring_any(self, modules: &'static [&'static str]) -> Self;
+    pub const fn reading(self, modules: &'static [&'static str]) -> Self;
 }
 ```
+
+`groups` copies each group's `NAME`, `SCHEMA` and `VERSION` from its
+`ProjectionGroup`, so it cannot drift from the type the runner projects;
+provisioning stamps the version on the tables it builds. `reads` names the
+modules whose code this one runs — its crate's module dependencies, and
+`a_modules_reads_are_its_crate_dependencies` in `erp-api` keeps it equal to its
+`Cargo.toml`. A route is served from the read models of its module's closure
+over `reads` — and over what `erp-api` composes under that module's path — so it
+is refused while any of them is older than the build. It is
+wider than `requires`, which is what a tenant must *have*: `sales` reads `crm`'s
+customers without requiring the module.
 
 What a module needs installed in a tenant that enables it. Data and not a trait,
 because there is exactly one thing to do with it and a trait would be an
@@ -331,6 +388,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         .seeding(include_str!("../schema/seed.sql"))
         .requiring(&["ledger"])
         .requiring_any(&["sales", "purchases"])
+        .reading(&["ledger", "purchases", "sales"])
 }
 ```
 

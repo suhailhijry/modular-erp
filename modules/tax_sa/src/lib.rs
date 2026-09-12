@@ -114,9 +114,10 @@ pub(crate) const VERSION_1: SchemaVersion = SchemaVersion::ONE;
 /// This module's projection group name, for `?consistent_after=`.
 pub const GROUP_NAME: &str = <TaxSa as erp_projection::ProjectionGroup>::NAME;
 
-const GROUPS: &[(&str, &str)] = &[(
+const GROUPS: &[(&str, &str, i16)] = &[(
     <TaxSa as erp_projection::ProjectionGroup>::NAME,
     <TaxSa as erp_projection::ProjectionGroup>::SCHEMA,
+    <TaxSa as erp_projection::ProjectionGroup>::VERSION,
 )];
 
 /// What a tenant enabling this module needs installed.
@@ -152,6 +153,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
     .seeding(include_str!("../schema/seed.sql"))
     .requiring(&["ledger"])
     .requiring_any(&["sales", "purchases"])
+    .reading(&["ledger", "purchases", "sales"])
 }
 
 /// This module's entitlement name.

@@ -30,7 +30,8 @@
 //! a list of the same form submissions a tenant makes, against one consumer's
 //! own configuration shape — `booking::PACKS` — so nothing about it is generic
 //! until a second consumer has both templates and a screen. `erp_tenant::Limits`
-//! is not that yet: nothing writes it.
+//! is not that yet: `PUT /v1/tenant/permission-limits` writes it, but only as
+//! rules written out, with no templates.
 
 pub mod authoring;
 pub mod condition;

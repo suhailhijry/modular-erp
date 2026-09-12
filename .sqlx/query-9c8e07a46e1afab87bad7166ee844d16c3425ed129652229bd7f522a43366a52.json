@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE identity SET second_factor_reset_at = NULL\n              WHERE id = $1 AND second_factor_reset_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9c8e07a46e1afab87bad7166ee844d16c3425ed129652229bd7f522a43366a52"
+}

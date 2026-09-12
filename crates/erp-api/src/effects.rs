@@ -33,12 +33,14 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(requeue_dead_letter))
 }
 
-/// Oldest first, and this many. A tenant with more dead letters than this has
+/// Oldest first, and this many. A plane with more dead letters than this has
 /// a provider down, not a paging problem.
-const PAGE: i64 = 200;
+pub(crate) const PAGE: i64 = 200;
 
+/// One dead letter, on either plane's list — the tenant's here, the control
+/// plane's under `/v1/platform/effects/dead`.
 #[derive(Debug, Serialize, ToSchema)]
-struct DeadLetterView {
+pub(crate) struct DeadLetterView {
     pub id: i64,
     /// The routing key — `email.send`, `webhook.post`.
     pub kind: String,
@@ -49,6 +51,41 @@ struct DeadLetterView {
     pub enqueued_at: Timestamp,
     #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     pub dead_at: Timestamp,
+}
+
+impl From<erp_eventlog::DeadLetter> for DeadLetterView {
+    fn from(d: erp_eventlog::DeadLetter) -> Self {
+        Self {
+            id: d.id,
+            kind: d.kind.to_string(),
+            idempotency_key: d.idempotency_key,
+            attempts: d.attempts,
+            last_error: d.last_error,
+            enqueued_at: d.enqueued_at,
+            dead_at: d.dead_at,
+        }
+    }
+}
+
+/// A dead letter's id from its path segment.
+///
+/// Parsed here rather than by `Path<i64>`, so a bad id is a problem+json like
+/// every other refusal and not axum's plain-text rejection.
+pub(crate) fn dead_letter_id(raw: &str, locale: Locale) -> Result<i64, Problem> {
+    raw.parse()
+        .map_err(|_| bad_request(erp_web::messages::INVALID_ID, "id", raw, locale))
+}
+
+/// The `404` for an id that names no dead letter — never dead, or already
+/// dealt with, so a second click on the same row says so.
+pub(crate) fn no_such_dead_letter(id: i64, locale: Locale) -> Problem {
+    Problem::new(
+        StatusCode::NOT_FOUND,
+        &erp_i18n::Message::new(erp_web::messages::NO_SUCH_DEAD_LETTER)
+            .with("id", erp_i18n::MessageArg::text(id.to_string())),
+        locale,
+        &crate::CATALOG,
+    )
 }
 
 /// Every effect given up on, oldest first.
@@ -75,19 +112,7 @@ async fn list_dead_letters(
     let dead = erp_eventlog::dead_letters(&mut conn, PAGE)
         .await
         .map_err(|e| unwell(e, locale))?;
-    Ok(Json(
-        dead.into_iter()
-            .map(|d| DeadLetterView {
-                id: d.id,
-                kind: d.kind.to_string(),
-                idempotency_key: d.idempotency_key,
-                attempts: d.attempts,
-                last_error: d.last_error,
-                enqueued_at: d.enqueued_at,
-                dead_at: d.dead_at,
-            })
-            .collect(),
-    ))
+    Ok(Json(dead.into_iter().map(DeadLetterView::from).collect()))
 }
 
 /// Put one back in the queue, due now.
@@ -118,11 +143,7 @@ async fn requeue_dead_letter(
     Language(locale): Language,
     Path(id): Path<String>,
 ) -> Result<StatusCode, Problem> {
-    // Parsed here rather than by `Path<i64>`, so a bad id is a problem+json
-    // like every other refusal and not axum's plain-text rejection.
-    let id: i64 = id
-        .parse()
-        .map_err(|_| bad_request(erp_web::messages::INVALID_ID, "id", &id, locale))?;
+    let id = dead_letter_id(&id, locale)?;
     let mut conn = tenant.db.acquire().await.map_err(|e| {
         Problem::from_error(StatusCode::SERVICE_UNAVAILABLE, &e, locale, &crate::CATALOG)
     })?;
@@ -130,14 +151,8 @@ async fn requeue_dead_letter(
         .await
         .map_err(|e| unwell(e, locale))?;
     drop(conn);
-    if !found {
-        return Err(Problem::new(
-            StatusCode::NOT_FOUND,
-            &erp_i18n::Message::new(erp_web::messages::NO_SUCH_DEAD_LETTER)
-                .with("id", erp_i18n::MessageArg::text(id.to_string())),
-            locale,
-            &crate::CATALOG,
-        ));
+    if found.is_none() {
+        return Err(no_such_dead_letter(id, locale));
     }
     nudge(&state, tenant.db.tenant()).await;
     Ok(StatusCode::NO_CONTENT)

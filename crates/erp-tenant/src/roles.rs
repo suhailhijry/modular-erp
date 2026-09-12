@@ -11,7 +11,15 @@
 //! permissions derived from *facts*, so a bookkeeper can be allowed to post
 //! entries under ten thousand riyals, or only to their own branch. That refines
 //! [`Role::allows`]; it does not replace it. Every capability check goes through
-//! one function, which is where a fact-based override attaches.
+//! one function, which is where a fact-based override attaches: `crate::limits`,
+//! which a tenant's owner writes at `PUT /v1/tenant/permission-limits`. The
+//! first example is one rule there, naming the `accountant` role, and it holds
+//! on the ledger's entries and reversals in any currency. An invoice or a till
+//! sale reaches this check before it has a total, so an amount rule cannot
+//! judge one; how large one sales document may be is a different control,
+//! `sales`' document limit, judged inside the command where the total exists.
+//! "Their own branch" waits on something that records which branch is a
+//! member's own.
 //!
 //! # Why the check is a type, not a call
 //!
@@ -81,6 +89,15 @@ impl Capability {
             Self::ManageTenant => "manage_tenant",
         }
     }
+
+    /// Every capability — the values a permission limit may name, less the
+    /// one it cannot (`limits::narrows`).
+    pub const ALL: [Self; 4] = [
+        Self::Read,
+        Self::PostEntries,
+        Self::ManageAccounts,
+        Self::ManageTenant,
+    ];
 }
 
 impl Role {

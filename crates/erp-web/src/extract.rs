@@ -8,7 +8,7 @@ use erp_i18n::Locale;
 
 use crate::error::ApiError;
 use crate::problem::Problem;
-use erp_types::{AggregateId, ModuleId};
+use erp_types::{AggregateId, ModuleId, TenantId};
 
 use crate::state::AppState;
 
@@ -219,6 +219,11 @@ impl FromRequestParts<AppState> for Authenticated {
 /// the identity is active, the tenant is enterable, and a live membership joins
 /// them. A handler taking this has been handed proof of all three, and cannot
 /// obtain a `TenantDb` any other way.
+///
+/// On a module's route it also refuses, `503 request.read_model_rebuilding`,
+/// while a read model that route is served from is older than this build's —
+/// see [`read_models_current`]. [`Allowed`] comes through here, and
+/// [`Public`] asks the same question.
 #[derive(Debug)]
 pub struct Tenant {
     pub db: TenantDb,
@@ -253,6 +258,7 @@ impl FromRequestParts<AppState> for Tenant {
             .enter(auth.session.identity, tenant.id, Lane::Interactive)
             .await
             .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
+        read_models_current(parts, state, &db, locale).await?;
 
         Ok(Self {
             db,
@@ -348,6 +354,7 @@ impl FromRequestParts<AppState> for Public {
             .enter_for_the_public(tenant.id)
             .await
             .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
+        read_models_current(parts, state, &db, locale).await?;
 
         Ok(Self {
             db,
@@ -356,6 +363,65 @@ impl FromRequestParts<AppState> for Public {
             locale,
         })
     }
+}
+
+/// **A module's route is not served from a read model this build no longer
+/// projects.** Decision 7 of 2026-09-11: while the tenant's tables for the
+/// module — or for any module whose code its routes run: `ModuleSetup::reads`,
+/// and what `erp-api` composes under its path — were built for an older
+/// read-model version than [`AppState::read_models`] says, the answer is
+/// `503 request.read_model_rebuilding`, never numbers worked out by rules this
+/// build has replaced. Other modules' routes are untouched.
+///
+/// Asked after entry, so only a caller who may be here learns the module is
+/// being rebuilt, and on the module [`module_of`] finds — the same answer the
+/// capability check uses. A path that is no module the tenant has is not
+/// checked: its handler answers 404.
+///
+/// Per request, one cache read per group, and a query only for a group not
+/// known current — see `ControlPlane::read_model_behind` for why a stale
+/// answer is never cached and a finished rebuild is served at once.
+async fn read_models_current(
+    parts: &Parts,
+    state: &AppState,
+    db: &TenantDb,
+    locale: Locale,
+) -> Result<(), Problem> {
+    let Some(module) = module_of(parts.uri.path(), db.modules()) else {
+        return Ok(());
+    };
+    let Some(wanted) = state.read_models.get(&module) else {
+        return Ok(());
+    };
+    let behind = state
+        .control
+        .read_model_behind(db, wanted)
+        .await
+        .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
+    let Some((group, installed)) = behind else {
+        return Ok(());
+    };
+
+    // A warning per request, not an error: the alarm is the worker's stalled
+    // job for the same group, once a visit, and this would repeat it for
+    // every caller.
+    tracing::warn!(
+        tenant = %db.tenant(),
+        module = module.as_str(),
+        group,
+        installed,
+        "refusing a module's route: a read model it serves from is older than this build's; \
+         `just migrate-fleet` rebuilds it"
+    );
+    Err(Problem::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &erp_i18n::Message::new(crate::messages::READ_MODEL_REBUILDING).with(
+            "module",
+            erp_i18n::MessageArg::text(module.as_str().to_owned()),
+        ),
+        locale,
+        &crate::CATALOG,
+    ))
 }
 
 /// **Where a request came from, as something the caller did not write.**
@@ -505,8 +571,9 @@ async fn charge_for_a_code(state: &AppState, address: &str, locale: Locale) -> R
 ///
 /// It is not trusted with anything. A forged host reaches a tenant the caller is
 /// **already a member of**, or it reaches nothing: `ControlPlane::enter` is what
-/// decides, and it is the same check a forged `{slug}` used to run into. What a
-/// host does is *name* a tenant, and the name has never been the secret.
+/// decides (`admit`, for [`ManagesTenant`]), and it is the same check a forged
+/// `{slug}` used to run into. What a host does is *name* a tenant, and the name
+/// has never been the secret.
 ///
 /// # Where it comes from
 ///
@@ -726,12 +793,13 @@ pub struct Allowed<C: Capability> {
 impl<C: Capability> Allowed<C> {
     /// **Narrows again, with a fact the edge could not know.**
     ///
-    /// An amount is in the request body, which the extractor has not read when
-    /// it decides. So a limit like *"a bookkeeper may post entries under ten
+    /// An amount is in the request body — or, for a reversal, in the entry it
+    /// undoes — which the extractor has not read when it decides. So a limit like *"a bookkeeper may post entries under ten
     /// thousand riyals"* is checked here, by the handler that has parsed one.
     ///
-    /// The branch and the capability are supplied again, so a rule naming any
-    /// combination of the three sees all of them.
+    /// The branch and the capability are supplied again, and `TenantDb::permits`
+    /// adds the role, so a rule naming any combination of the four sees all of
+    /// them.
     ///
     /// # Errors
     /// `403` naming the capability when a limit refuses, or `503` when the
@@ -772,15 +840,7 @@ impl<C: Capability> Allowed<C> {
         if permitted {
             Ok(())
         } else {
-            Err(Problem::new(
-                StatusCode::FORBIDDEN,
-                &erp_i18n::Message::new(erp_control::messages::NOT_PERMITTED).with(
-                    "capability",
-                    erp_i18n::MessageArg::text(C::CAPABILITY.as_str()),
-                ),
-                locale,
-                &crate::CATALOG,
-            ))
+            Err(not_permitted(C::CAPABILITY, locale))
         }
     }
 }
@@ -856,19 +916,7 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
                 module.as_ref().map(erp_types::ModuleId::as_str),
             )
         {
-            return Err(Problem::new(
-                StatusCode::FORBIDDEN,
-                &erp_i18n::Message::new(erp_control::messages::OUT_OF_SCOPE).with(
-                    "scope",
-                    erp_i18n::MessageArg::text(format!(
-                        "{}:{}",
-                        module.as_ref().map_or("*", erp_types::ModuleId::as_str),
-                        C::CAPABILITY.as_str()
-                    )),
-                ),
-                locale,
-                &crate::CATALOG,
-            ));
+            return Err(out_of_scope(module.as_ref(), C::CAPABILITY, locale));
         }
 
         // **Parsed before the check, because it is one of the facts.** A limit
@@ -918,15 +966,7 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
             // 403, not 404. The caller has already proved they are a member, so
             // hiding the tenant's existence buys nothing — and "you cannot do
             // this" is the answer they need in order to ask someone who can.
-            return Err(Problem::new(
-                StatusCode::FORBIDDEN,
-                &erp_i18n::Message::new(erp_control::messages::NOT_PERMITTED).with(
-                    "capability",
-                    erp_i18n::MessageArg::text(C::CAPABILITY.as_str()),
-                ),
-                locale,
-                &crate::CATALOG,
-            ));
+            return Err(not_permitted(C::CAPABILITY, locale));
         }
 
         Ok(Self {
@@ -937,8 +977,221 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
     }
 }
 
+/// The 403 a role that does not allow `capability` gets, naming it.
+///
+/// Public because one route is not decided by its extractor alone:
+/// `reset_member_second_factor` is the owner's **or** a claim-holder's, and a
+/// claim lives in the tenant's own database, which this crate cannot reach. It
+/// answers with this rather than a second shape, so every "you may not" in the
+/// API is one sentence with one argument in it.
+pub fn not_permitted(capability: erp_control::Capability, locale: Locale) -> Problem {
+    Problem::new(
+        StatusCode::FORBIDDEN,
+        &erp_i18n::Message::new(erp_control::messages::NOT_PERMITTED).with(
+            "capability",
+            erp_i18n::MessageArg::text(capability.as_str()),
+        ),
+        locale,
+        &crate::CATALOG,
+    )
+}
+
+/// The 403 an API key gets from a route that is **a person's act**, whatever
+/// its scopes.
+///
+/// Not the same refusal as [`out_of_scope`], and deliberately not a wider scope
+/// away: a key's identity is a machine, so it holds no employee record, no
+/// claim, and nobody's trust. Two routes answer with it — the personal audit
+/// trail and `reset_member_second_factor` — and both are routes where the
+/// caller's *role* is not the question being asked.
+pub fn not_a_person(locale: Locale) -> Problem {
+    Problem::new(
+        StatusCode::FORBIDDEN,
+        &erp_i18n::Message::new(erp_control::messages::NOT_A_PERSON),
+        locale,
+        &crate::CATALOG,
+    )
+}
+
+/// The 403 an API key whose scopes do not cover this gets, naming the scope
+/// it would need.
+fn out_of_scope(
+    module: Option<&ModuleId>,
+    capability: erp_control::Capability,
+    locale: Locale,
+) -> Problem {
+    Problem::new(
+        StatusCode::FORBIDDEN,
+        &erp_i18n::Message::new(erp_control::messages::OUT_OF_SCOPE).with(
+            "scope",
+            erp_i18n::MessageArg::text(format!(
+                "{}:{}",
+                module.map_or("*", ModuleId::as_str),
+                capability.as_str()
+            )),
+        ),
+        locale,
+        &crate::CATALOG,
+    )
+}
+
+/// **Somebody who may manage this tenant, whatever state it is in** — for
+/// what the control plane keeps *about* a tenant, which never needed its
+/// database. Its audit trail is the one route.
+///
+/// [`Allowed<ManageTenant>`] goes through [`Tenant`] and `ControlPlane::enter`,
+/// which answers a tenant that is not active 503. That is right for the
+/// tenant's data and wrong for its trail: a suspended tenant's owner reads why
+/// there (decision 12 of 2026-09-11), and through `enter` never could. So this
+/// asks `ControlPlane::admit` — `enter`'s checks bar the status, and the same
+/// second-factor rule — and then `Allowed`'s two gates in `Allowed`'s order: a
+/// key's scopes, then the role. It hands out no `TenantDb`, so nothing *in*
+/// the tenant is reachable through it.
+///
+/// **Limits are not consulted**, and would change nothing if they were:
+/// `ManageTenant` is the one capability a permission limit never narrows (see
+/// `TenantDb::permits`), so the role alone decides here, as it does for
+/// `Allowed<ManageTenant>`. The same 404 covers "no such tenant" and "not
+/// yours".
+#[derive(Debug)]
+pub struct ManagesTenant {
+    pub session: Session,
+    pub tenant: TenantId,
+}
+
+impl FromRequestParts<AppState> for ManagesTenant {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Problem> {
+        const CAPABILITY: erp_control::Capability = erp_control::Capability::ManageTenant;
+
+        let Language(locale) = Language::from_request_parts(parts, state)
+            .await
+            .unwrap_or(Language(Locale::DEFAULT));
+        let auth = Authenticated::from_request_parts(parts, state).await?;
+        let tenant = tenant_of(parts, state, locale).await?;
+
+        let access = state
+            .control
+            .admit(auth.session.identity, tenant.id)
+            .await
+            .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
+        if let Some(key) = &auth.key
+            && !key.permits(CAPABILITY, None)
+        {
+            return Err(out_of_scope(None, CAPABILITY, locale));
+        }
+        if !access.allows(CAPABILITY, None) {
+            return Err(not_permitted(CAPABILITY, locale));
+        }
+
+        Ok(Self {
+            session: auth.session,
+            tenant: tenant.id,
+        })
+    }
+}
+
 /// The header a request names its branch in.
 pub const BRANCH_HEADER: &str = "x-branch";
+
+/// A platform power, as a type — what [`Capability`] is to [`Allowed`], this is
+/// to [`Staff`].
+pub trait Power {
+    const POWER: erp_control::PlatformPower;
+}
+
+/// Grant, change and revoke platform staff.
+#[derive(Debug, Clone, Copy)]
+pub struct ManageStaff;
+
+impl Power for ManageStaff {
+    const POWER: erp_control::PlatformPower = erp_control::PlatformPower::ManageStaff;
+}
+
+/// Suspend and reinstate tenants.
+#[derive(Debug, Clone, Copy)]
+pub struct SuspendTenants;
+
+impl Power for SuspendTenants {
+    const POWER: erp_control::PlatformPower = erp_control::PlatformPower::SuspendTenants;
+}
+
+/// List, requeue and dismiss the control plane's dead letters.
+#[derive(Debug, Clone, Copy)]
+pub struct HandleDeadLetters;
+
+impl Power for HandleDeadLetters {
+    const POWER: erp_control::PlatformPower = erp_control::PlatformPower::HandleDeadLetters;
+}
+
+/// Read the whole audit trail, every tenant's and the platform's own.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadAuditTrail;
+
+impl Power for ReadAuditTrail {
+    const POWER: erp_control::PlatformPower = erp_control::PlatformPower::ReadAuditTrail;
+}
+
+/// Reset anybody's second factor, with a reason. Resetting platform staff's
+/// needs [`ManageStaff`] on top, which `reset_any_second_factor` asks for.
+#[derive(Debug, Clone, Copy)]
+pub struct ResetSecondFactors;
+
+impl Power for ResetSecondFactors {
+    const POWER: erp_control::PlatformPower = erp_control::PlatformPower::ResetSecondFactors;
+}
+
+/// **Platform staff permitted `P`**, on a route that is about no tenant.
+///
+/// The platform's [`Allowed`]: taking one is the check, for the same reason.
+/// It asks `ControlPlane::staff_may`, which is also what support access asks,
+/// so there is one answer to "may this person do this to the platform" and the
+/// HTTP surface cannot drift from it. That refuses unless the identity is
+/// active, holds a platform role that may `P`, **and has a second factor** —
+/// see `staff_may` for why enrolled is enough.
+///
+/// **An API key never gets in.** A key is one tenant's integration and acts as
+/// a machine identity inside that tenant; nothing about it is staff, and no
+/// grant can make it so (staff are granted by login handle, which a key has
+/// none of). Refused here anyway, so that stays true without depending on it.
+///
+/// Like the tenant's own member routes, a session gets no rate limit here and
+/// there is no `Idempotency-Key`: none of these writes can happen twice — a
+/// repeated grant is a 409 and a repeated revocation a 404.
+#[derive(Debug)]
+pub struct Staff<P: Power> {
+    pub session: Session,
+    pub role: erp_control::PlatformRole,
+    power: std::marker::PhantomData<P>,
+}
+
+impl<P: Power> FromRequestParts<AppState> for Staff<P> {
+    type Rejection = Problem;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Problem> {
+        let Language(locale) = Language::from_request_parts(parts, state)
+            .await
+            .unwrap_or(Language(Locale::DEFAULT));
+        let auth = Authenticated::from_request_parts(parts, state).await?;
+        let refused = |e| ApiError::Access(e).into_problem(locale, &crate::CATALOG);
+
+        if auth.key.is_some() {
+            return Err(refused(erp_control::AccessError::StaffOnly(P::POWER)));
+        }
+        let role = state
+            .control
+            .staff_may(auth.session.identity, P::POWER)
+            .await
+            .map_err(refused)?;
+
+        Ok(Self {
+            session: auth.session,
+            role,
+            power: std::marker::PhantomData,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {

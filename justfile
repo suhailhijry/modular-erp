@@ -44,8 +44,9 @@ test:
 # The port matters. `compose.yaml` publishes Redis on 56379 so a full stack does
 # not collide with a Redis someone already runs, but the tests default to
 # `redis://127.0.0.1/`, which is 6379. `docker compose up -d redis` therefore
-# leaves four tests failing, which is a confusing way to learn about a port
-# number. This recipe is the one that matches.
+# leaves six tests failing (five in `shared.rs`, one in `bin/operator.rs`), which
+# is a confusing way to learn about a port number. This recipe is the one that
+# matches.
 redis:
     REDIS_PORT=6379 docker compose up -d redis
 
@@ -105,20 +106,28 @@ demo password:
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
       DEMO_PASSWORD="{{password}}" cargo run --quiet --bin demo
 
-# Bring every tenant database up to the migrations this build expects.
+# Bring every tenant database up to the migrations this build expects, and
+# rebuild every read model an older build made.
 #
 # Two gates, and a deploy runs both before the pods go up:
-#   `just migrate-fleet check`    is the fleet's *schema* where this build expects?
+#   `just migrate-fleet check`    are the fleet's *schema* and read models where this build expects?
 #   `just migrate-fleet versions` can this build *read* what is already in the logs?
 # Both look without touching and exit non-zero when the answer is no.
 migrate-fleet mode="" module="":
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
       cargo run --quiet --bin migrator -- {{mode}} {{module}}
 
-# Destroy demo tenants whose time is up. Schedule it; it exits when done.
+# Destroy expired demos, abandon signups whose build died, sweep stale links.
+# Schedule it at least hourly; it exits when done.
 reap:
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
       cargo run --quiet --bin reaper
+
+# Make or unmake platform staff: `just operator grant-staff <email> <role>`,
+# `just operator revoke-staff <email>`. For the first superadmin, and for the
+# last one when that account is the problem; see docs/RUNNING.md.
+operator *args:
+    CONTROL_DATABASE_URL="{{base_url}}" cargo run --quiet --bin operator -- {{args}}
 
 
 # Regenerate the OpenAPI document from the router that serves the requests.

@@ -14,7 +14,8 @@
 
 use erp_eventlog::{DomainEvent, Envelope, Metadata, NewEvent, Upcasters, append, read_since};
 use erp_projection::{
-    Projection, ProjectionCtx, ProjectionError, ProjectionGroup, ensure_group_schema, run_to_head,
+    Progress, Projection, ProjectionCtx, ProjectionError, ProjectionGroup, RunError,
+    ensure_group_schema, run_once, run_to_head,
 };
 use erp_testkit::{Schema, Template, TestDb};
 use erp_types::{AggregateId, DomainName, EventName, SchemaVersion, Sequence, StreamId};
@@ -86,6 +87,35 @@ impl Projection for Totals {
             .execute(&mut *conn)
             .await?;
         Ok(())
+    }
+}
+
+/// The same group, in a build whose read model is one version on.
+struct LedgerV2;
+impl ProjectionGroup for LedgerV2 {
+    const NAME: &'static str = "ledger";
+    const SCHEMA: &'static str = "proj_ledger";
+    const VERSION: i16 = 2;
+}
+
+/// [`Totals`], as that build projects it.
+struct TotalsV2;
+
+#[async_trait::async_trait]
+impl Projection for TotalsV2 {
+    type Group = LedgerV2;
+
+    fn name(&self) -> &'static str {
+        "totals"
+    }
+
+    async fn apply(
+        &self,
+        ctx: &ProjectionCtx<'_>,
+        envelope: &Envelope,
+        conn: &mut PgConnection,
+    ) -> Result<(), ProjectionError> {
+        Totals.apply(ctx, envelope, conn).await
     }
 }
 
@@ -323,4 +353,107 @@ async fn schema_exists(db: &TestDb, schema: &str) -> bool {
     .await
     .expect("reads")
         > 0
+}
+
+// ---------------------------------------------------------------------------
+// Read-model versions
+// ---------------------------------------------------------------------------
+
+/// **A build does not project into tables built for an older read model.**
+/// New rows in an old shape would be a table that agrees with neither build,
+/// and the rebuild that fixes it is the deploy step's — so the runner refuses,
+/// and the checkpoint and the tables stay exactly where they were.
+#[tokio::test]
+async fn a_group_built_for_an_older_read_model_is_not_projected_into() {
+    let db = fixture().await;
+    seed(&db, 5).await;
+
+    let newer: Vec<&dyn Projection<Group = LedgerV2>> = vec![&TotalsV2];
+    let refused = run_once::<LedgerV2>(db.pool(), &newer, &upcasters(), 100).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(RunError::OtherReadModel {
+                group: "ledger",
+                installed: 1,
+                expected: 2
+            })
+        ),
+        "a newer build projected into the old shape: {refused:?}"
+    );
+    assert_eq!(rows(&db).await, 0, "and wrote rows into it");
+    let mut conn = db.pool().acquire().await.expect("connection");
+    let checkpoint = erp_projection::checkpoint::<Ledger>(&mut conn)
+        .await
+        .expect("reads");
+    assert_eq!(checkpoint.get(), 0, "and moved the checkpoint");
+}
+
+/// **The build still draining does not project into the newer shape** the
+/// migrator swapped in under it. It would write rows by its old rules into
+/// tables stamped new, the stamp would then say "current" to the migrator and
+/// the request path alike, and those rows would keep the old rules for good.
+/// The new build's workers project the group; until they are up it lags.
+#[tokio::test]
+async fn an_older_build_does_not_project_into_a_newer_shape() {
+    let db = fixture().await;
+    let newer: Vec<&dyn Projection<Group = LedgerV2>> = vec![&TotalsV2];
+    erp_projection::rebuild_swap::<LedgerV2>(db.pool(), V2, &newer, &upcasters(), 100)
+        .await
+        .expect("the new build's migrator rebuilds");
+    seed(&db, 3).await;
+
+    let older: Vec<&dyn Projection<Group = Ledger>> = vec![&Totals];
+    let refused = run_once::<Ledger>(db.pool(), &older, &upcasters(), 100).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(RunError::OtherReadModel {
+                group: "ledger",
+                installed: 2,
+                expected: 1
+            })
+        ),
+        "the draining build projected into the newer shape: {refused:?}"
+    );
+    assert_eq!(rows(&db).await, 0, "and wrote rows into it");
+
+    // And the build the tables are stamped for takes the same events.
+    let progress = run_once::<LedgerV2>(db.pool(), &newer, &upcasters(), 100)
+        .await
+        .expect("the new build projects");
+    assert!(
+        matches!(progress, Progress::Advanced { events: 3, .. }),
+        "{progress:?}"
+    );
+}
+
+/// **A rebuild brings the group up to the build that ran it**, stamped in the
+/// swap: that build's worker projects on from it rather than refusing the
+/// tables it just built.
+#[tokio::test]
+async fn a_rebuild_brings_a_group_up_to_this_builds_read_model() {
+    let db = fixture().await;
+    seed(&db, 4).await;
+    let older: Vec<&dyn Projection<Group = Ledger>> = vec![&Totals];
+    run_to_head::<Ledger>(db.pool(), &older, &upcasters(), 100)
+        .await
+        .expect("the old build projects");
+
+    let newer: Vec<&dyn Projection<Group = LedgerV2>> = vec![&TotalsV2];
+    erp_projection::rebuild_swap::<LedgerV2>(db.pool(), V2, &newer, &upcasters(), 100)
+        .await
+        .expect("rebuilds");
+    seed(&db, 2).await;
+
+    let progress = run_once::<LedgerV2>(db.pool(), &newer, &upcasters(), 100)
+        .await
+        .expect("the rebuilt group is this build's");
+    assert!(
+        matches!(progress, Progress::Advanced { events: 2, .. }),
+        "{progress:?}"
+    );
+    assert_eq!(rows(&db).await, 6);
 }

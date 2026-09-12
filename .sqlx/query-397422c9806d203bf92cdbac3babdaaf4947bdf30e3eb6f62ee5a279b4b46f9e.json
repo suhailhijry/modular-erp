@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT group_name, read_model_version FROM projection_checkpoint\n              WHERE group_name = ANY($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "projection_checkpoint",
+            "name": "group_name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "read_model_version",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "projection_checkpoint",
+            "name": "read_model_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "397422c9806d203bf92cdbac3babdaaf4947bdf30e3eb6f62ee5a279b4b46f9e"
+}

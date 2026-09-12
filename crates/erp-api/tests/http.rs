@@ -280,6 +280,102 @@ impl Fixture {
             .unwrap_or_else(|| panic!("no confirmation link in the message to {email}: {body}"))
     }
 
+    /// The enrolment token from the last second-factor-reset email to an
+    /// address. **The mailbox again**, and the only place the token exists:
+    /// neither reset route answers with it, so nobody who cannot read the
+    /// person's mail can enrol for them.
+    async fn enrolment_link(&self, email: &str) -> String {
+        let body: String = sqlx::query_scalar(
+            "SELECT payload ->> 'body' FROM outbox
+              WHERE kind = 'email.send' AND payload ->> 'to' = $1
+                AND idempotency_key LIKE 'enrolment:%'
+              ORDER BY id DESC LIMIT 1",
+        )
+        .bind(email)
+        .fetch_one(self.control.pool())
+        .await
+        .unwrap_or_else(|e| panic!("an enrolment link was promised to {email}: {e}"));
+
+        body.split_once("/second-factor/")
+            .map(|(_, rest)| {
+                rest.split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .filter(|token| !token.is_empty())
+            .unwrap_or_else(|| panic!("no enrolment link in the message to {email}: {body}"))
+    }
+
+    /// Puts somebody on the org chart and links their login, so a claim can
+    /// reach them. `above` is who they report to.
+    async fn hire(
+        &self,
+        tenant: TenantId,
+        employee: &str,
+        email: &str,
+        identity: IdentityId,
+        above: Option<&str>,
+    ) {
+        let db = self
+            .control
+            .enter_for_maintenance(tenant)
+            .await
+            .expect("maintenance entry");
+        let id = erp_types::AggregateId::new(employee).expect("an id");
+        hr::hire(
+            &db,
+            &id,
+            &hr::Hire {
+                details: hr::Details {
+                    name: email.to_owned(),
+                    name_latin: None,
+                    national_id: None,
+                    email: Some(email.to_owned()),
+                    phone: None,
+                },
+                reports_to: above.map(|a| erp_types::AggregateId::new(a).expect("an id")),
+                branch: None,
+                at: chrono::Utc::now(),
+            },
+            &erp_eventlog::Metadata::default(),
+        )
+        .await
+        .expect("hired");
+        hr::link_login(
+            &db,
+            &id,
+            &identity.to_string(),
+            chrono::Utc::now(),
+            &erp_eventlog::Metadata::default(),
+        )
+        .await
+        .expect("links");
+        self.project::<hr::Hr>(tenant, &hr::projections(), hr::upcasters())
+            .await;
+    }
+
+    /// Grants a claim company-wide, propagating, the way the granting screen
+    /// does.
+    async fn grant_claim(&self, tenant: TenantId, employee: &str, claim: &str) {
+        let db = self
+            .control
+            .enter_for_maintenance(tenant)
+            .await
+            .expect("maintenance entry");
+        hr::grant_claim(
+            &db,
+            &erp_types::AggregateId::new(employee).expect("an id"),
+            &hr::Claim {
+                name: claim.to_owned(),
+                branch: None,
+            },
+            true,
+        )
+        .await
+        .expect("granted");
+    }
+
     /// Signs up and confirms, the way a person with a mailbox does.
     ///
     /// Returns the confirmation's body, which is what the old one-shot signup
@@ -429,6 +525,101 @@ impl Fixture {
             .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         body["token"].as_str().expect("a token").to_owned()
+    }
+
+    /// Enrols an authenticator app for somebody with the password
+    /// `hunter2hunter2`, and signs them in with its code. Returns the token and
+    /// the recovery codes.
+    async fn enrolled_token(&self, identity: IdentityId, email: &str) -> (String, Vec<String>) {
+        // The app's own key — see `Fixture::with_hub`.
+        let sealing = erp_eventlog::SealingKey::new("test", &[5u8; 32]).expect("32 bytes");
+        let enrolment = self
+            .control
+            .begin_second_factor(identity, "ERP", email, &sealing, None)
+            .await
+            .expect("enrolment begins");
+        let secret = erp_control::totp::unbase32(&enrolment.secret).expect("base32");
+        let now = chrono::Utc::now();
+        let seconds = u64::try_from(now.timestamp()).expect("after 1970");
+        let code = erp_control::totp::code_at(&secret, seconds, erp_control::totp::DIGITS)
+            .expect("a code");
+        let recovery = self
+            .control
+            .confirm_second_factor(identity, &code, None, now, &sealing, None, None)
+            .await
+            .expect("enrolment confirms")
+            .recovery_codes;
+
+        let (status, body, _) = self
+            .send(
+                Request::post("/v1/sessions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "handle": email, "password": "hunter2hunter2", "code": code
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        (
+            body["token"].as_str().expect("a token").to_owned(),
+            recovery,
+        )
+    }
+
+    /// Somebody on platform staff, signed in with both factors — made the way
+    /// `operator grant-staff` makes one. Returns their identity, token and
+    /// recovery codes.
+    async fn staff(
+        &self,
+        email: &str,
+        role: erp_control::PlatformRole,
+    ) -> (IdentityId, String, Vec<String>) {
+        let identity = self.user(email, "hunter2hunter2").await;
+        let (token, recovery) = self.enrolled_token(identity, email).await;
+        self.control
+            .grant_staff(email, role, Actor::system())
+            .await
+            .expect("staff are granted");
+        (identity, token, recovery)
+    }
+
+    /// Every connection the control pool will give — four, `erp-testkit`'s
+    /// size — open and idle.
+    ///
+    /// For the tests that race two calls: without it one side spends its turn
+    /// opening a connection while the other runs to the end, and a race that
+    /// only sometimes happens proves nothing.
+    async fn warm(&self) {
+        let pool = self.control.pool();
+        let open = tokio::join!(pool.begin(), pool.begin(), pool.begin(), pool.begin());
+        for tx in [open.0, open.1, open.2, open.3] {
+            tx.expect("a connection")
+                .rollback()
+                .await
+                .expect("rolls back");
+        }
+    }
+
+    /// A request as whoever holds `token`: `(status, body)`.
+    async fn as_caller(
+        &self,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        let body = body.map_or_else(Body::empty, |b| Body::from(b.to_string()));
+        let (status, answer, _) = self.send(request.body(body).unwrap()).await;
+        (status, answer)
     }
 
     /// Turns a module on the way the product does.
@@ -1901,13 +2092,43 @@ async fn an_unknown_chart_is_refused() {
 /// `/v1/catalogue` differ in what they need, not in how they read.
 ///
 /// So the property is the real one: an operation is role-scoped unless it is
-/// **public** (`security: []`) or one of the handful that need a session and no
-/// tenant. That list is written out, because a route that quietly joined it
-/// would be a route this matrix stopped checking.
+/// **public** (`security: []`), one of the handful that need a session and no
+/// tenant, or on the **platform** surface — which answers to a platform role
+/// and has its own matrix, [`every_platform_role_against_every_platform_endpoint`].
+/// The first two are written out, because a route that quietly joined them
+/// would be a route this matrix stopped checking; the third cannot be joined
+/// quietly, because that matrix refuses an untabled route the same way.
 fn role_scoped_operations() -> Vec<(String, String, bool)> {
     /// Authenticated, and about the caller rather than a company.
     const NO_TENANT: &[&str] = &["log_out", "change_password"];
 
+    operations()
+        .into_iter()
+        .filter(|(id, route, _, public)| {
+            !public && !NO_TENANT.contains(&id.as_str()) && !is_platform(route)
+        })
+        .map(|(id, route, body, _)| (id, route, body))
+        .collect()
+}
+
+/// Every operation on the platform surface, public or not — a public one is
+/// exactly what the platform matrix is there to catch.
+fn platform_operations() -> Vec<(String, String, bool)> {
+    operations()
+        .into_iter()
+        .filter(|(_, route, _, _)| is_platform(route))
+        .map(|(id, route, body, _)| (id, route, body))
+        .collect()
+}
+
+fn is_platform(route: &str) -> bool {
+    route
+        .split_once(' ')
+        .is_some_and(|(_, path)| path.starts_with("/v1/platform/"))
+}
+
+/// `(operationId, "METHOD /path", takes a body, is public)`, from the document.
+fn operations() -> Vec<(String, String, bool, bool)> {
     let document = serde_json::to_value(erp_api::openapi()).expect("the document serializes");
     let mut found = Vec::new();
 
@@ -1919,13 +2140,11 @@ fn role_scoped_operations() -> Vec<(String, String, bool)> {
             let public = operation["security"]
                 .as_array()
                 .is_some_and(std::vec::Vec::is_empty);
-            if public || NO_TENANT.contains(&id) {
-                continue;
-            }
             found.push((
                 id.to_owned(),
                 format!("{} {path}", method.to_uppercase()),
                 operation["requestBody"].is_object(),
+                public,
             ));
         }
     }
@@ -1944,6 +2163,10 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Reading the policy is reading; setting it is ManageTenant, like every
     // other decision about who may be here.
     ("second_factor_policy", ALL_ROLES),
+    // **Resetting somebody *else's* is not.** It is the owner's, or a member's
+    // through `hr:reset_second_factor` — which this fixture grants nobody, so
+    // every non-owner here is the 403 that names `manage_tenant`.
+    ("reset_member_second_factor", OWNER),
     ("begin_second_factor", ALL_ROLES),
     ("confirm_second_factor", ALL_ROLES),
     ("disable_second_factor", ALL_ROLES),
@@ -2324,6 +2547,19 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("list_invitations", OWNER),
     ("invite", OWNER),
     ("revoke_invitation", OWNER),
+    // Not through `Allowed`, and so answering while the tenant is suspended —
+    // but the same role decides, and the same 403 names it.
+    ("audit_trail", OWNER),
+    // About the caller, like the second factor: every role reads their own.
+    ("my_audit_trail", ALL_ROLES),
+    // Owner-only to read as well as to write (decision 9 of 2026-09-11). No
+    // limit narrows either — see `no_limit_locks_the_owner_out_of_its_limits`.
+    ("permission_limits", OWNER),
+    ("set_permission_limits", OWNER),
+    // The same decision for the same kind of setting: how far anybody else
+    // may go is the owner's to read and to write.
+    ("document_limit", OWNER),
+    ("set_document_limit", OWNER),
 ];
 const ALL_ROLES: &[&str] = &["owner", "accountant", "clerk", "viewer"];
 const OWNER: &[&str] = &["owner"];
@@ -2389,8 +2625,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        240,
-        "expected two hundred and forty role-scoped operations"
+        247,
+        "expected two hundred and forty-seven role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -2461,6 +2697,2402 @@ async fn every_role_against_every_endpoint() {
             }
         }
     }
+
+    fixture.cleanup().await;
+}
+
+/// `(operationId, the platform power it needs)`. The platform surface's
+/// `PERMISSIONS`: every operation under `/v1/platform/` is named here.
+const PLATFORM: &[(&str, &str)] = &[
+    ("list_staff", "manage_staff"),
+    ("grant_staff", "manage_staff"),
+    ("change_staff_role", "manage_staff"),
+    ("revoke_staff", "manage_staff"),
+    ("suspend_tenant", "suspend_tenants"),
+    ("reinstate_tenant", "suspend_tenants"),
+    ("list_control_dead_letters", "handle_dead_letters"),
+    ("requeue_control_dead_letter", "handle_dead_letters"),
+    ("dismiss_control_dead_letter", "handle_dead_letters"),
+    ("platform_audit_trail", "read_audit_trail"),
+    ("reset_any_second_factor", "reset_second_factors"),
+];
+
+/// `(platform role, the powers it holds)` — the product owner's matrix of
+/// 2026-09-11, typed out rather than read from `PlatformRole::may`, so the
+/// doors are checked against what was meant and not against themselves.
+const STAFF_POWERS: &[(&str, &[&str])] = &[
+    (
+        "superadmin",
+        &[
+            "suspend_tenants",
+            "handle_dead_letters",
+            "read_audit_trail",
+            "enter_for_support",
+            "manage_staff",
+            "reset_second_factors",
+        ],
+    ),
+    ("billing", &["suspend_tenants"]),
+    (
+        "support",
+        &[
+            "read_audit_trail",
+            "handle_dead_letters",
+            "enter_for_support",
+            "reset_second_factors",
+        ],
+    ),
+];
+
+/// **The platform matrix, over HTTP: every staff role against every platform
+/// route** — and the two callers who must never get in: a tenant's owner who is
+/// not staff, and a superadmin with no second factor.
+///
+/// The routes come from the document, as the tenant matrix's do, so a platform
+/// route added without a row in `PLATFORM` fails here rather than going
+/// unchecked. The expected answer comes from `STAFF_POWERS`, which is what makes
+/// this the test that the doors honour the matrix.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one matrix, and the two callers outside it, against the same routes"
+)]
+#[tokio::test]
+async fn every_platform_role_against_every_platform_endpoint() {
+    use erp_control::{PlatformPower, PlatformRole};
+    use std::collections::BTreeSet;
+
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let endpoints = platform_operations();
+
+    let served: BTreeSet<&str> = endpoints.iter().map(|(id, _, _)| id.as_str()).collect();
+    let tabled: BTreeSet<&str> = PLATFORM.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        served,
+        tabled,
+        "the platform table and the routes disagree. Served and untabled: {:?}. \
+         Tabled and unserved: {:?}.",
+        served.difference(&tabled).collect::<Vec<_>>(),
+        tabled.difference(&served).collect::<Vec<_>>(),
+    );
+    assert_eq!(served.len(), 11, "expected eleven platform operations");
+    // The two tables speak the product's vocabulary, all of it.
+    let powers: BTreeSet<&str> = PlatformPower::ALL.map(PlatformPower::as_str).into();
+    let roles: BTreeSet<&str> = PlatformRole::ALL.map(PlatformRole::as_str).into();
+    assert_eq!(
+        STAFF_POWERS
+            .iter()
+            .map(|(role, _)| *role)
+            .collect::<BTreeSet<_>>(),
+        roles
+    );
+    for power in PLATFORM.iter().map(|(_, p)| *p).chain(
+        STAFF_POWERS
+            .iter()
+            .flat_map(|(_, held)| held.iter().copied()),
+    ) {
+        assert!(powers.contains(power), "{power} is not a platform power");
+    }
+
+    // Real and not staff, so `{identity}` reaches the handler's own answer — a
+    // 404 — rather than the uuid parser, and nothing is changed. `{id}` is the
+    // active tenant: an empty suspension is refused for its missing reason,
+    // reinstating one that is not suspended is a 409, and as a dead letter's id
+    // it is a 400.
+    let subject = fixture.user("subject@erp.test", "hunter2hunter2").await;
+
+    let mut callers: Vec<(String, String, &[&str])> = Vec::new();
+    for (role, held) in STAFF_POWERS {
+        let email = format!("{role}@erp.test");
+        let (_, token, _) = fixture
+            .staff(&email, role.parse().expect("a platform role"))
+            .await;
+        callers.push(((*role).to_owned(), token, held));
+    }
+    // Signed in with both factors, and owner of a tenant: still nobody here.
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, tenant).await;
+    let (owner_token, _) = fixture.enrolled_token(owner, "owner@acme.test").await;
+    callers.push(("a tenant's owner".to_owned(), owner_token, &[]));
+
+    let request = |route: &str| {
+        let (method, template) = route.split_once(' ').expect("method and path");
+        (
+            method.to_owned(),
+            template
+                .replace("{identity}", &subject.to_string())
+                .replace("{id}", &tenant.to_string()),
+        )
+    };
+
+    for (who, token, held) in &callers {
+        for (id, route, takes_a_body) in &endpoints {
+            let (method, path) = request(route);
+            let power = PLATFORM
+                .iter()
+                .find(|(operation, _)| operation == id)
+                .map(|(_, power)| *power)
+                .expect("every operation is in the table; checked above");
+            let may = held.contains(&power);
+
+            let (status, answer) = fixture
+                .as_caller(
+                    token,
+                    &method,
+                    &path,
+                    takes_a_body.then(|| serde_json::json!({})),
+                )
+                .await;
+            assert_eq!(
+                status != StatusCode::FORBIDDEN,
+                may,
+                "{who} → {method} {path} ({id}) answered {status}, and the table says \
+                 {}. Body: {answer}",
+                if may { "allowed" } else { "refused" }
+            );
+            if !may {
+                assert_eq!(answer["code"], "access.not_permitted", "{who} → {id}");
+                assert_eq!(
+                    answer["args"]["capability"]["value"], power,
+                    "{who} → {id}: the 403 does not name the power"
+                );
+            }
+        }
+    }
+
+    // **Staff cannot turn their factor off**, even proving it: a staff account
+    // with no factor takes its next one from whoever enrols first.
+    let (_, keeper, recovery) = fixture
+        .staff("keeper@erp.test", PlatformRole::Superadmin)
+        .await;
+    let (status, body) = fixture
+        .as_caller(
+            &keeper,
+            "DELETE",
+            "/v1/sessions/second-factor",
+            Some(serde_json::json!({ "code": recovery[0] })),
+        )
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (
+            StatusCode::FORBIDDEN,
+            Some("auth.staff_keeps_second_factor")
+        ),
+        "{body}"
+    );
+    let (status, _) = fixture
+        .as_caller(&keeper, "GET", "/v1/platform/staff", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "the refusal took the factor anyway");
+
+    // **A superadmin without a second factor is refused everywhere**, with the
+    // one code that tells them what to do. `grant_staff` and the refusal above
+    // leave one way to be that: `grant_membership` called directly.
+    let lapsed_id = fixture.user("lapsed@erp.test", "hunter2hunter2").await;
+    fixture
+        .control
+        .grant_membership(lapsed_id, Scope::Platform, "superadmin", Actor::system())
+        .await
+        .expect("grants");
+    let lapsed = fixture.token("lapsed@erp.test", "hunter2hunter2").await;
+    for (id, route, takes_a_body) in &endpoints {
+        let (method, path) = request(route);
+        let (status, answer) = fixture
+            .as_caller(
+                &lapsed,
+                &method,
+                &path,
+                takes_a_body.then(|| serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "lapsed → {id}: {answer}");
+        assert_eq!(
+            answer["code"], "access.staff_second_factor_required",
+            "lapsed → {id}"
+        );
+    }
+
+    fixture.cleanup().await;
+}
+
+/// **A session from before the factor does not outlive it.** The door asks
+/// whether a factor is enrolled, not whether this session went through it, so
+/// a password-only session from before enrolment — somebody who phished the
+/// password at nine, before the owner enrolled at ten — would pass it once the
+/// owner is made staff. Confirming an enrolment ends it; the session that
+/// confirmed, which just proved the factor, stays.
+#[tokio::test]
+async fn a_session_from_before_the_factor_does_not_reach_a_platform_door() {
+    let fixture = Fixture::new().await;
+    fixture
+        .staff("admin@erp.test", erp_control::PlatformRole::Superadmin)
+        .await;
+    fixture.user("pre@erp.test", "hunter2hunter2").await;
+    let phished = fixture.token("pre@erp.test", "hunter2hunter2").await;
+    let own = fixture.token("pre@erp.test", "hunter2hunter2").await;
+
+    let (status, started) = fixture
+        .as_caller(&own, "POST", "/v1/sessions/second-factor", None)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{started}");
+    let secret =
+        erp_control::totp::unbase32(started["secret"].as_str().expect("a secret")).expect("base32");
+    let seconds = u64::try_from(chrono::Utc::now().timestamp()).expect("after 1970");
+    let code =
+        erp_control::totp::code_at(&secret, seconds, erp_control::totp::DIGITS).expect("a code");
+    let (status, body) = fixture
+        .as_caller(
+            &own,
+            "POST",
+            "/v1/sessions/second-factor/confirmation",
+            Some(serde_json::json!({ "code": code })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    fixture
+        .control
+        .grant_staff(
+            "pre@erp.test",
+            erp_control::PlatformRole::Superadmin,
+            Actor::system(),
+        )
+        .await
+        .expect("granted, factor and all");
+
+    let (status, body) = fixture
+        .as_caller(&phished, "GET", "/v1/platform/staff", None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a session that never met the factor reached a platform door: {body}"
+    );
+    let (status, body) = fixture
+        .as_caller(&own, "GET", "/v1/platform/staff", None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the confirming session was ended: {body}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A second factor a company requires can be replaced, never removed.** An
+/// account with a password and no factor takes its next factor from whoever
+/// enrols first, so a member who could drop theirs would reopen the gap the
+/// owner turned the requirement on to close. The owner removing the member, or
+/// switching it off, gives removal back; a company that requires nothing never
+/// took it.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one account through every state the rule has: required, replaced, removed from the company, and switched off"
+)]
+async fn a_second_factor_a_company_requires_is_replaced_never_removed() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    let globex = fixture.provision("globex").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, acme).await;
+    let (owner_token, owner_paper) = fixture.enrolled_token(owner, "owner@acme.test").await;
+    let clerk = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    fixture.join_as(clerk, acme, "clerk").await;
+    fixture.join_as(clerk, globex, "viewer").await;
+    let (clerk_token, paper) = fixture.enrolled_token(clerk, "clerk@acme.test").await;
+    let off = |code: &str| Some(serde_json::json!({ "code": code }));
+    let policy = |required: bool| Some(serde_json::json!({ "required": required }));
+
+    let (status, body) = fixture
+        .as_caller(
+            &owner_token,
+            "PUT",
+            "/v1/members/second-factor-policy",
+            policy(true),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // Refused with a code that is right, and the code is not spent on it.
+    let (status, body) = fixture
+        .as_caller(
+            &clerk_token,
+            "DELETE",
+            "/v1/sessions/second-factor",
+            off(&paper[0]),
+        )
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (
+            StatusCode::FORBIDDEN,
+            Some("auth.tenant_keeps_second_factor")
+        ),
+        "{body}"
+    );
+    let (_, view) = fixture
+        .as_caller(&clerk_token, "GET", "/v1/sessions/second-factor", None)
+        .await;
+    assert_eq!(
+        (
+            view["enrolled"].as_bool(),
+            view["recovery_codes_left"].as_i64()
+        ),
+        (Some(true), Some(10)),
+        "the refusal took the factor or spent the code: {view}"
+    );
+
+    // Replacing it is open — proved by the code the refusal left unspent.
+    let (status, started) = fixture
+        .as_caller(&clerk_token, "POST", "/v1/sessions/second-factor", None)
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{started}");
+    let secret =
+        erp_control::totp::unbase32(started["secret"].as_str().expect("a secret")).expect("base32");
+    let seconds = u64::try_from(chrono::Utc::now().timestamp()).expect("after 1970");
+    let code =
+        erp_control::totp::code_at(&secret, seconds, erp_control::totp::DIGITS).expect("a code");
+    let (status, replaced) = fixture
+        .as_caller(
+            &clerk_token,
+            "POST",
+            "/v1/sessions/second-factor/confirmation",
+            Some(serde_json::json!({ "code": code, "previous": paper[0] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{replaced}");
+    let new_paper = replaced["recovery_codes"][0]
+        .as_str()
+        .expect("new recovery codes")
+        .to_owned();
+
+    // The owner is a member too, and holds to their own rule.
+    let (status, body) = fixture
+        .as_caller(
+            &owner_token,
+            "DELETE",
+            "/v1/sessions/second-factor",
+            off(&owner_paper[0]),
+        )
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (
+            StatusCode::FORBIDDEN,
+            Some("auth.tenant_keeps_second_factor")
+        ),
+        "{body}"
+    );
+
+    // Out of acme, the clerk is left in globex, which requires nothing.
+    let (status, body) = fixture
+        .as_caller(
+            &owner_token,
+            "DELETE",
+            &format!("/v1/members/{clerk}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = fixture
+        .as_caller(
+            &clerk_token,
+            "DELETE",
+            "/v1/sessions/second-factor",
+            off(&new_paper),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "out of acme, left only in globex, which requires nothing, and still refused: {body}"
+    );
+
+    // The owner stops requiring it, and may drop their own.
+    let (status, body) = fixture
+        .as_caller(
+            &owner_token,
+            "PUT",
+            "/v1/members/second-factor-policy",
+            policy(false),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = fixture
+        .as_caller(
+            &owner_token,
+            "DELETE",
+            "/v1/sessions/second-factor",
+            off(&owner_paper[0]),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "a requirement switched off still binds: {body}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The owner resets a member who lost both phone and paper, and the emailed
+/// link is the only way back.**
+///
+/// Everything the reset promises, in one account's life: the factor and the
+/// recovery codes go, every session ends, the tenant that requires a factor
+/// refuses them until they enrol again, and **the password alone cannot enrol**
+/// — not at `begin`, not at `confirm`. The link works once; a second reset
+/// mints another, and the first one is dead.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one account from lost phone to enrolled again, and every door it meets on the way"
+)]
+async fn an_owner_resets_a_members_factor_and_the_link_is_the_only_way_back() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, acme).await;
+    let (owner_token, _) = fixture.enrolled_token(owner, "owner@acme.test").await;
+    let clerk = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    fixture.join_as(clerk, acme, "clerk").await;
+    let (lost, _paper) = fixture.enrolled_token(clerk, "clerk@acme.test").await;
+
+    // The company requires two-step sign-in, which is the case this is for: a
+    // member who cannot present a factor cannot work until they have one.
+    let (status, body) = fixture
+        .as_caller(
+            &owner_token,
+            "PUT",
+            "/v1/members/second-factor-policy",
+            Some(serde_json::json!({ "required": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, _) = fixture.as_caller(&lost, "GET", "/v1/members", None).await;
+    assert_eq!(status, StatusCode::OK, "the clerk was working before this");
+
+    let reset = format!("/v1/members/{clerk}/second-factor-reset");
+    let (status, body) = fixture.as_caller(&owner_token, "POST", &reset, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // **The session really ended**, here and on every other node — there is one
+    // node in a test, so this is the database and the cache agreeing.
+    let (status, body) = fixture.as_caller(&lost, "GET", "/v1/members", None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the reset left a session alive: {body}"
+    );
+
+    // The password still signs in — this is not a password reset — and the
+    // factor is gone.
+    let token = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+    let (_, view) = fixture
+        .as_caller(&token, "GET", "/v1/sessions/second-factor", None)
+        .await;
+    assert_eq!(
+        (
+            view["enrolled"].as_bool(),
+            view["recovery_codes_left"].as_i64()
+        ),
+        (Some(false), Some(0)),
+        "the factor or its recovery codes survived the reset: {view}"
+    );
+
+    // **And the company will not have them until they enrol again** — the same
+    // answer a member who never enrolled gets, which is what it now is.
+    let (status, body) = fixture.as_caller(&token, "GET", "/v1/members", None).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (
+            StatusCode::FORBIDDEN,
+            Some("auth.tenant_requires_second_factor")
+        ),
+        "{body}"
+    );
+
+    // **The password alone enrols nothing**, at either half.
+    for (method, path, body) in [
+        ("POST", "/v1/sessions/second-factor", serde_json::json!({})),
+        (
+            "POST",
+            "/v1/sessions/second-factor/confirmation",
+            serde_json::json!({ "code": "000000" }),
+        ),
+    ] {
+        let (status, answer) = fixture.as_caller(&token, method, path, Some(body)).await;
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (StatusCode::FORBIDDEN, Some("auth.enrolment_link_required")),
+            "{method} {path}: {answer}"
+        );
+    }
+
+    // The mail is the mailbox's, and the token is in it.
+    let link = fixture.enrolment_link("clerk@acme.test").await;
+    let (status, started) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/sessions/second-factor",
+            Some(serde_json::json!({ "link": link })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{started}");
+    let secret =
+        erp_control::totp::unbase32(started["secret"].as_str().expect("a secret")).expect("base32");
+    let seconds = u64::try_from(chrono::Utc::now().timestamp()).expect("after 1970");
+    let code =
+        erp_control::totp::code_at(&secret, seconds, erp_control::totp::DIGITS).expect("a code");
+
+    // Confirming without the link is still refused, even holding the code.
+    let (status, answer) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/sessions/second-factor/confirmation",
+            Some(serde_json::json!({ "code": code })),
+        )
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("auth.enrolment_link_required")),
+        "{answer}"
+    );
+
+    let (status, enrolled) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/sessions/second-factor/confirmation",
+            Some(serde_json::json!({ "code": code, "link": link })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{enrolled}");
+    assert_eq!(
+        enrolled["recovery_codes"].as_array().map(Vec::len),
+        Some(10),
+        "a fresh sheet of recovery codes: {enrolled}"
+    );
+
+    // Back at work, with both factors.
+    let code =
+        erp_control::totp::code_at(&secret, seconds, erp_control::totp::DIGITS).expect("a code");
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/sessions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "handle": "clerk@acme.test",
+                        "password": "hunter2hunter2",
+                        "code": code
+                    })
+                    .to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let back = body["token"].as_str().expect("a token").to_owned();
+    let (status, body) = fixture.as_caller(&back, "GET", "/v1/members", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // **And the account is on ordinary rules again.** Enrolling cleared the
+    // link-only state, so starting a replacement needs no link — only the old
+    // code, at the confirmation, as it always did.
+    let (status, started) = fixture
+        .as_caller(&back, "POST", "/v1/sessions/second-factor", None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the link-only state outlived the enrolment that was supposed to clear it: {started}"
+    );
+
+    // **A link is good once.** A second reset mints another; the first is dead
+    // whichever way round the two are tried.
+    let (status, body) = fixture.as_caller(&owner_token, "POST", &reset, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let again = fixture.enrolment_link("clerk@acme.test").await;
+    assert_ne!(again, link, "the same token was mailed twice");
+    let token = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+    let (status, answer) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/sessions/second-factor",
+            Some(serde_json::json!({ "link": link })),
+        )
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("auth.enrolment_link_required")),
+        "a spent link enrolled again: {answer}"
+    );
+    let (status, started) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/sessions/second-factor",
+            Some(serde_json::json!({ "link": again })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "the fresh link: {started}");
+
+    // **The trail names the resetter and the person**, in the tenant's own.
+    let (status, trail) = fixture
+        .as_caller(&owner_token, "GET", "/v1/audit", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{trail}");
+    let entries: Vec<&serde_json::Value> = trail["items"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter(|e| e["action"] == "second_factor.reset")
+        .collect();
+    assert_eq!(entries.len(), 2, "two resets: {trail}");
+    assert_eq!(entries[0]["actor"], owner.to_string(), "{trail}");
+    assert_eq!(entries[0]["subject_id"], clerk.to_string(), "{trail}");
+    assert_eq!(entries[0]["detail"]["by"], "member", "{trail}");
+
+    fixture.cleanup().await;
+}
+
+/// **Waiting the link out does not give the password its old power back.**
+///
+/// The whole reason the link-only state is a fact about the account rather than
+/// the life of a row: if it lapsed with the link, the move for somebody holding
+/// a stolen password would be to wait an hour and then enrol. It does not, and
+/// the sweep that deletes the expired row does not change that — it only means
+/// asking for another.
+#[tokio::test]
+async fn waiting_out_an_enrolment_link_does_not_reopen_password_only_enrolment() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, acme).await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let clerk = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    fixture.join_as(clerk, acme, "clerk").await;
+    fixture.enrolled_token(clerk, "clerk@acme.test").await;
+
+    let reset = format!("/v1/members/{clerk}/second-factor-reset");
+    let (status, body) = fixture.as_caller(&owner_token, "POST", &reset, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let stale = fixture.enrolment_link("clerk@acme.test").await;
+
+    // An hour later. The clock is wound back rather than waited out, the way
+    // `an_expired_session_is_swept` does it.
+    sqlx::query("UPDATE second_factor_reset SET expires_at = now() - interval '1 minute'")
+        .execute(fixture.control.pool())
+        .await
+        .expect("winds the link back");
+    assert_eq!(
+        fixture
+            .control
+            .sweep_enrolment_links()
+            .await
+            .expect("sweeps"),
+        1,
+        "the expired link"
+    );
+
+    let token = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+    for body in [serde_json::json!({}), serde_json::json!({ "link": stale })] {
+        let (status, answer) = fixture
+            .as_caller(&token, "POST", "/v1/sessions/second-factor", Some(body))
+            .await;
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (StatusCode::FORBIDDEN, Some("auth.enrolment_link_required")),
+            "expiring the link reopened enrolment: {answer}"
+        );
+    }
+
+    // A fresh one is the owner running the same route again. There is no
+    // second route, because a fresh link is the same act.
+    let (status, body) = fixture.as_caller(&owner_token, "POST", &reset, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let fresh = fixture.enrolment_link("clerk@acme.test").await;
+    // Signed in again, because the second reset ended this session too.
+    let token = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+    let (status, started) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/sessions/second-factor",
+            Some(serde_json::json!({ "link": fresh })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{started}");
+
+    fixture.cleanup().await;
+}
+
+/// **The claim lets somebody other than the owner reset a colleague's factor,
+/// and it travels up the chart.**
+///
+/// Boss ← supervisor ← clerk, as §68's claim test has it: a grant to the
+/// supervisor reaches the boss and not the clerk. A member with no employee
+/// record holds nothing and is refused, and neither the owner's factor nor
+/// your own can be reset here whoever you are.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "three places on one org chart, and the four refusals, against one route"
+)]
+async fn the_claim_lets_somebody_other_than_the_owner_reset_a_factor() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    fixture.enable_module(acme, hr::setup()).await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, acme).await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let mut people = std::collections::BTreeMap::new();
+    for (who, employee, above) in [
+        ("boss", "EMP-1", None),
+        ("supervisor", "EMP-2", Some("EMP-1")),
+        ("clerk", "EMP-3", Some("EMP-2")),
+    ] {
+        let email = format!("{who}@acme.test");
+        let identity = fixture.user(&email, "hunter2hunter2").await;
+        fixture.join_as(identity, acme, "clerk").await;
+        fixture.hire(acme, employee, &email, identity, above).await;
+        let token = fixture.token(&email, "hunter2hunter2").await;
+        people.insert(who, (identity, token));
+    }
+    // The person who lost their phone. Not on the chart: this is a control
+    // about who may *do* the reset, not about who may be reset.
+    let victim = fixture.user("victim@acme.test", "hunter2hunter2").await;
+    fixture.join_as(victim, acme, "clerk").await;
+    let (victim_session, _) = fixture.enrolled_token(victim, "victim@acme.test").await;
+    let reset = format!("/v1/members/{victim}/second-factor-reset");
+
+    // **A key is not a person, whatever it is scoped for** — and the dangerous
+    // scope is the *narrow* one. The scope gate asks for the door's capability,
+    // and this door is `Allowed<Read>`, so a reporting credential issued
+    // `*:read` with the owner's role walks through the gate that answers
+    // `keys.out_of_scope` at `DELETE /v1/members/…`, and the owner's role its
+    // machine identity holds is all the handler would otherwise ask for. It is
+    // stopped here instead. A key scoped `*:manage_tenant` never reaches that
+    // far: `Read` is not its capability, so the gate refuses it first. No scope
+    // is the way in, because this is not a scope question.
+    for (scopes, code) in [
+        (["*:read"], "keys.not_a_person"),
+        (["*:manage_tenant"], "keys.out_of_scope"),
+    ] {
+        let (status, key) = fixture
+            .as_caller(
+                &owner_token,
+                "POST",
+                "/v1/keys",
+                Some(serde_json::json!({
+                    "name": format!("Reporting {}", scopes[0]),
+                    "scopes": scopes,
+                    "role": "owner"
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{key}");
+        let secret = key["secret"].as_str().expect("a secret").to_owned();
+        let (status, answer) = fixture.as_caller(&secret, "POST", &reset, None).await;
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (StatusCode::FORBIDDEN, Some(code)),
+            "a key scoped {scopes:?} reset a colleague's factor: {answer}"
+        );
+    }
+    // And nothing happened to them on the way: the session a reset would have
+    // ended is still working.
+    let (status, body) = fixture
+        .as_caller(&victim_session, "GET", "/v1/members", None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a key's refused reset still ended the target's session: {body}"
+    );
+
+    // Nobody has granted anything, so nobody but the owner may.
+    for who in ["boss", "supervisor", "clerk"] {
+        let (status, answer) = fixture
+            .as_caller(&people[who].1, "POST", &reset, None)
+            .await;
+        assert_eq!(
+            (
+                status,
+                answer["code"].as_str(),
+                answer["args"]["capability"]["value"].as_str()
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                Some("access.not_permitted"),
+                Some("manage_tenant")
+            ),
+            "{who} reset a factor with no claim: {answer}"
+        );
+    }
+
+    // Granted to the supervisor. It reaches the boss above them and stops
+    // above the clerk beneath.
+    fixture
+        .grant_claim(acme, "EMP-2", hr::RESET_SECOND_FACTOR)
+        .await;
+    for who in ["supervisor", "boss"] {
+        let (status, body) = fixture
+            .as_caller(&people[who].1, "POST", &reset, None)
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{who} was refused: {body}");
+        fixture.enrolment_link("victim@acme.test").await;
+    }
+    let (status, answer) = fixture
+        .as_caller(&people["clerk"].1, "POST", &reset, None)
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("access.not_permitted")),
+        "a claim travelled down the chart: {answer}"
+    );
+
+    // A member with no employee record can hold no claim, whatever else they
+    // are — and the owner is exempt from needing one.
+    let outsider = fixture.user("outsider@acme.test", "hunter2hunter2").await;
+    fixture.join_as(outsider, acme, "accountant").await;
+    let outsider_token = fixture.token("outsider@acme.test", "hunter2hunter2").await;
+    let (status, answer) = fixture
+        .as_caller(&outsider_token, "POST", &reset, None)
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("access.not_permitted")),
+        "somebody off the org chart held a claim: {answer}"
+    );
+
+    // **The owner's factor is not a member's to reset**, claim or not.
+    let (status, answer) = fixture
+        .as_caller(
+            &people["supervisor"].1,
+            "POST",
+            &format!("/v1/members/{owner}/second-factor-reset"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("second_factor.reset_the_owner")
+        ),
+        "{answer}"
+    );
+
+    // **Nor your own**, which would be a way round the rule that removing a
+    // factor costs a code.
+    for (who, token) in [
+        ("the supervisor", &people["supervisor"].1),
+        ("the owner", &owner_token),
+    ] {
+        let subject = if who == "the owner" {
+            owner
+        } else {
+            people["supervisor"].0
+        };
+        let (status, answer) = fixture
+            .as_caller(
+                token,
+                "POST",
+                &format!("/v1/members/{subject}/second-factor-reset"),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Some("second_factor.reset_yourself")
+            ),
+            "{who} reset their own: {answer}"
+        );
+    }
+
+    // Somebody who is not here at all is the 404 every member route gives.
+    let stranger = fixture
+        .user("stranger@nowhere.test", "hunter2hunter2")
+        .await;
+    let (status, answer) = fixture
+        .as_caller(
+            &owner_token,
+            "POST",
+            &format!("/v1/members/{stranger}/second-factor-reset"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (StatusCode::NOT_FOUND, Some("members.not_a_member")),
+        "{answer}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Somebody who works for two companies is platform support's to reset**, and
+/// neither company's — two-step sign-in is their account's everywhere, and one
+/// company weakening it would weaken it at the other.
+///
+/// The platform route also holds the line inside the staff: support may reset
+/// anybody but staff, and staff takes `manage_staff`, which only a superadmin
+/// has. Otherwise the narrower role would be the way to the wider one.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the cross-tenant refusal and the platform route that answers it, including its own escalation"
+)]
+async fn somebody_who_works_for_two_companies_is_platform_supports_to_reset() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    let globex = fixture.provision("globex").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, acme).await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    // Two jobs, one account.
+    let both = fixture.user("both@acme.test", "hunter2hunter2").await;
+    fixture.join_as(both, acme, "clerk").await;
+    fixture.join_as(both, globex, "viewer").await;
+    fixture.enrolled_token(both, "both@acme.test").await;
+
+    let (status, answer) = fixture
+        .as_caller(
+            &owner_token,
+            "POST",
+            &format!("/v1/members/{both}/second-factor-reset"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("second_factor.reset_another_company")
+        ),
+        "{answer}"
+    );
+    assert!(
+        answer["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("support"),
+        "the refusal does not send them to support: {answer}"
+    );
+
+    let (support_id, support, _) = fixture
+        .staff("support@erp.test", erp_control::PlatformRole::Support)
+        .await;
+    let (admin_id, admin, _) = fixture
+        .staff("admin@erp.test", erp_control::PlatformRole::Superadmin)
+        .await;
+    let platform =
+        |identity: IdentityId| format!("/v1/platform/identities/{identity}/second-factor-reset");
+
+    // The reason is not optional, and it is not blank either. Missing is the
+    // body layer's 422; blank is this route's own 400, which is the one that
+    // says what a reason is for.
+    let (status, answer) = fixture
+        .as_caller(
+            &support,
+            "POST",
+            &platform(both),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    let (status, answer) = fixture
+        .as_caller(
+            &support,
+            "POST",
+            &platform(both),
+            Some(serde_json::json!({ "reason": "   " })),
+        )
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("second_factor.reset_reason")),
+        "{answer}"
+    );
+
+    let (status, body) = fixture
+        .as_caller(
+            &support,
+            "POST",
+            &platform(both),
+            Some(serde_json::json!({ "reason": "Ticket 4471: lost phone, identity checked by video call." })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let link = fixture.enrolment_link("both@acme.test").await;
+    let token = fixture.token("both@acme.test", "hunter2hunter2").await;
+    let (status, started) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/sessions/second-factor",
+            Some(serde_json::json!({ "link": link })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{started}");
+
+    // **The reason is on the record, under the staff member's name**, and the
+    // entry belongs to no tenant.
+    let (status, trail) = fixture
+        .as_caller(&admin, "GET", "/v1/platform/audit", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{trail}");
+    let entry = trail["items"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["action"] == "second_factor.reset")
+        .unwrap_or_else(|| panic!("no reset in the platform trail: {trail}"));
+    assert_eq!(entry["actor"], support_id.to_string(), "{entry}");
+    assert_eq!(entry["subject_id"], both.to_string(), "{entry}");
+    assert_eq!(entry["tenant"], serde_json::Value::Null, "{entry}");
+    assert_eq!(
+        entry["detail"]["reason"], "Ticket 4471: lost phone, identity checked by video call.",
+        "{entry}"
+    );
+
+    // **Support cannot reset a superadmin's**, which is the escalation this
+    // power would otherwise be.
+    let (status, answer) = fixture
+        .as_caller(
+            &support,
+            "POST",
+            &platform(admin_id),
+            Some(serde_json::json!({ "reason": "Ticket 4472." })),
+        )
+        .await;
+    assert_eq!(
+        (
+            status,
+            answer["code"].as_str(),
+            answer["args"]["capability"]["value"].as_str()
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            Some("access.not_permitted"),
+            Some("manage_staff")
+        ),
+        "{answer}"
+    );
+    // A superadmin can, which is what makes the refusal about the power and
+    // not about staff being untouchable.
+    let (status, body) = fixture
+        .as_caller(
+            &admin,
+            "POST",
+            &platform(support_id),
+            Some(serde_json::json!({ "reason": "Ticket 4473: support's own phone." })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // **Nobody resets their own here either**, or staff would have the way
+    // round `auth.staff_keeps_second_factor` that route refuses them.
+    let (status, answer) = fixture
+        .as_caller(
+            &admin,
+            "POST",
+            &platform(admin_id),
+            Some(serde_json::json!({ "reason": "Ticket 4474." })),
+        )
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("second_factor.reset_yourself")
+        ),
+        "{answer}"
+    );
+
+    // **An account with no email login is refused, not reset.** There would be
+    // nowhere to send the link, and a reset with no link is a lockout (L6).
+    let voiceless = fixture
+        .control
+        .create_identity(Actor::system())
+        .await
+        .expect("an identity")
+        .id;
+    let (status, answer) = fixture
+        .as_caller(
+            &admin,
+            "POST",
+            &platform(voiceless),
+            Some(serde_json::json!({ "reason": "Ticket 4475." })),
+        )
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("second_factor.reset_no_login")
+        ),
+        "{answer}"
+    );
+
+    // And a tenant cannot reach staff through its own route, even for
+    // somebody who is one of its members.
+    let staffer = fixture.user("staffer@acme.test", "hunter2hunter2").await;
+    fixture.join_as(staffer, acme, "clerk").await;
+    fixture.enrolled_token(staffer, "staffer@acme.test").await;
+    fixture
+        .control
+        .grant_staff(
+            "staffer@acme.test",
+            erp_control::PlatformRole::Support,
+            Actor::system(),
+        )
+        .await
+        .expect("staff are granted");
+    let (status, answer) = fixture
+        .as_caller(
+            &owner_token,
+            "POST",
+            &format!("/v1/members/{staffer}/second-factor-reset"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, answer["code"].as_str()),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("second_factor.reset_platform_staff")
+        ),
+        "{answer}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Billing suspends a tenant over HTTP, and its owner is shut out on the next
+/// request** — the same `access.tenant_unavailable` anybody gets — until it is
+/// reinstated. The suspension is on the record under the staff member's name,
+/// with the reason; a repeat is a 409 naming the status, not a quiet success.
+#[tokio::test]
+async fn billing_suspends_and_reinstates_a_tenant_under_their_own_name() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, tenant).await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let (billing, token, _) = fixture
+        .staff("billing@erp.test", erp_control::PlatformRole::Billing)
+        .await;
+    let suspend = format!("/v1/platform/tenants/{tenant}/suspend");
+    let reinstate = format!("/v1/platform/tenants/{tenant}/reinstate");
+    let reason = |text: &str| Some(serde_json::json!({ "reason": text }));
+
+    let (status, _) = fixture
+        .as_caller(&owner_token, "GET", "/v1/tenant", None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owner is in, and acme is cached"
+    );
+
+    let (status, body) = fixture
+        .as_caller(&token, "POST", &suspend, reason("  "))
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("tenants.suspension_reason")),
+        "{body}"
+    );
+
+    let (status, body) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            &suspend,
+            reason("The August invoice is unpaid."),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = fixture
+        .as_caller(&owner_token, "GET", "/v1/tenant", None)
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("access.tenant_unavailable")
+        ),
+        "{body}"
+    );
+
+    let (status, body) = fixture
+        .as_caller(&token, "POST", &suspend, reason("again"))
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("tenants.wrong_status")),
+        "{body}"
+    );
+    assert_eq!(body["args"]["status"]["value"], "suspended", "{body}");
+
+    let (actor, detail): (Option<uuid::Uuid>, serde_json::Value) = sqlx::query_as(
+        "SELECT actor_identity_id, detail FROM audit_entry
+          WHERE action = 'tenant.suspended' AND subject_id = $1",
+    )
+    .bind(tenant.to_string())
+    .fetch_one(fixture.control.pool())
+    .await
+    .expect("the suspension is on the record");
+    assert_eq!(actor, Some(billing.into_uuid()));
+    assert_eq!(detail["reason"], "The August invoice is unpaid.");
+
+    let (status, body) = fixture.as_caller(&token, "POST", &reinstate, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = fixture
+        .as_caller(&owner_token, "GET", "/v1/tenant", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "reinstated, and still shut: {body}");
+    let (status, body) = fixture.as_caller(&token, "POST", &reinstate, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    let (status, body) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            &format!("/v1/platform/tenants/{}/reinstate", TenantId::new()),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    fixture.cleanup().await;
+}
+
+/// A relay that refuses every email, so one dispatch makes real dead letters.
+struct RefusingRelay;
+
+#[async_trait::async_trait]
+impl erp_eventlog::EffectHandler for RefusingRelay {
+    fn kind(&self) -> erp_types::EffectKind {
+        erp_control::mail::email_kind()
+    }
+
+    async fn deliver(
+        &self,
+        _effect: &erp_eventlog::PendingEffect,
+    ) -> Result<(), erp_eventlog::DeliveryError> {
+        Err(erp_eventlog::DeliveryError::Permanent(
+            "550 no such mailbox".to_owned(),
+        ))
+    }
+}
+
+/// **Support deals with the control plane's dead letters over HTTP**, under
+/// their own name. A requeue puts one back and a dismissal deletes one; neither
+/// touches an effect that is not dead; and each is on the record by kind and
+/// key, never by what the message said — a reset email's body is the link.
+#[expect(
+    clippy::too_many_lines,
+    reason = "two dead letters and a live one, through every answer the routes give"
+)]
+#[tokio::test]
+async fn support_requeues_and_dismisses_the_control_planes_dead_letters_under_their_own_name() {
+    let fixture = Fixture::new().await;
+    let (support, token, _) = fixture
+        .staff("support@erp.test", erp_control::PlatformRole::Support)
+        .await;
+    let forget = |email: &'static str| {
+        let fixture = &fixture;
+        async move {
+            fixture.user(email, "hunter2hunter2").await;
+            let (status, body, _) = fixture
+                .send(
+                    Request::post("/v1/password-resets")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "email": email }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        }
+    };
+    forget("requeued@erp.test").await;
+    forget("dismissed@erp.test").await;
+    let run = erp_eventlog::Dispatcher::new(erp_eventlog::RetryPolicy::default())
+        .register(Arc::new(RefusingRelay))
+        .dispatch_once(fixture.control.pool(), 10)
+        .await
+        .expect("dispatches");
+    assert_eq!(run.dead, 2);
+    forget("pending@erp.test").await;
+
+    let (status, listed) = fixture
+        .as_caller(&token, "GET", "/v1/platform/effects/dead", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let mut dead: Vec<(i64, String)> = listed
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|d| {
+            assert_eq!(d["kind"], "email.send");
+            (
+                d["id"].as_i64().expect("an id"),
+                d["idempotency_key"].as_str().expect("a key").to_owned(),
+            )
+        })
+        .collect();
+    dead.sort();
+    let [(requeued, requeued_key), (dismissed, dismissed_key)] = &dead[..] else {
+        panic!("two dead letters, not {listed}");
+    };
+    assert!(requeued_key.starts_with("reset:"), "{requeued_key}");
+    let pending: i64 =
+        sqlx::query_scalar("SELECT id FROM outbox WHERE dead_at IS NULL AND delivered_at IS NULL")
+            .fetch_one(fixture.control.pool())
+            .await
+            .expect("the third is pending");
+
+    let at = |method: &'static str, path: String| {
+        let (fixture, token) = (&fixture, &token);
+        async move { fixture.as_caller(token, method, &path, None).await }
+    };
+    let requeue = |id: i64| at("POST", format!("/v1/platform/effects/dead/{id}/requeue"));
+    let dismiss = |id: i64| at("DELETE", format!("/v1/platform/effects/dead/{id}"));
+    let not_dead = |(status, body): (StatusCode, serde_json::Value)| {
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (StatusCode::NOT_FOUND, Some("request.no_such_dead_letter")),
+            "{body}"
+        );
+    };
+
+    // Nothing that is not dead is touched, by either.
+    not_dead(requeue(pending).await);
+    not_dead(dismiss(pending).await);
+
+    assert_eq!(requeue(*requeued).await.0, StatusCode::NO_CONTENT);
+    not_dead(requeue(*requeued).await);
+    not_dead(dismiss(*requeued).await);
+    assert_eq!(dismiss(*dismissed).await.0, StatusCode::NO_CONTENT);
+    not_dead(dismiss(*dismissed).await);
+    let (status, body) = requeue(*dismissed).await;
+    // The reason a second click reads must cover the click that was made.
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("dismissed")),
+        "{body}"
+    );
+    not_dead((status, body));
+    let (_, body, _) = fixture
+        .send(
+            Request::delete(format!("/v1/platform/effects/dead/{dismissed}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::ACCEPT_LANGUAGE, "ar")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert!(
+        body["detail"].as_str().is_some_and(|d| d.contains("حُذفت")),
+        "{body}"
+    );
+
+    let (status, body) = fixture
+        .as_caller(&token, "POST", "/v1/platform/effects/dead/x/requeue", None)
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("request.invalid_id"))
+    );
+
+    let (_, listed) = fixture
+        .as_caller(&token, "GET", "/v1/platform/effects/dead", None)
+        .await;
+    assert_eq!(listed, serde_json::json!([]));
+    let left: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM outbox WHERE dead_at IS NULL AND delivered_at IS NULL ORDER BY id",
+    )
+    .fetch_all(fixture.control.pool())
+    .await
+    .expect("reads");
+    assert_eq!(
+        left,
+        [*requeued, pending],
+        "the requeued one waits to be sent, the dismissed one is gone"
+    );
+
+    let record: Vec<(String, Option<uuid::Uuid>, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT action, actor_identity_id, subject_id, detail FROM audit_entry
+          WHERE subject_type = 'effect' ORDER BY id",
+    )
+    .fetch_all(fixture.control.pool())
+    .await
+    .expect("reads");
+    assert_eq!(
+        record,
+        [
+            (
+                "effect.requeued".to_owned(),
+                Some(support.into_uuid()),
+                requeued.to_string(),
+                serde_json::json!({ "kind": "email.send", "idempotency_key": requeued_key }),
+            ),
+            (
+                "effect.dismissed".to_owned(),
+                Some(support.into_uuid()),
+                dismissed.to_string(),
+                serde_json::json!({ "kind": "email.send", "idempotency_key": dismissed_key }),
+            ),
+        ]
+    );
+    // No tenant's business: the insert trigger leaves this build's `None` be.
+    let filed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_entry WHERE subject_type = 'effect' AND tenant_id IS NOT NULL",
+    )
+    .fetch_one(fixture.control.pool())
+    .await
+    .expect("reads");
+    assert_eq!(filed, 0, "a dead letter was filed under a tenant");
+
+    fixture.cleanup().await;
+}
+
+/// A page of the audit trail, as whoever holds `token`, on `host`: the
+/// entries, and the cursor to the next page if there is one.
+async fn trail(
+    fixture: &Fixture,
+    token: &str,
+    host: &'static str,
+    path: &str,
+) -> (Vec<serde_json::Value>, Option<String>) {
+    let (status, body, _) = fixture
+        .send(
+            Request::get(path)
+                .header(header::HOST, host)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    (
+        body["items"].as_array().expect("a page").clone(),
+        body["next"].as_str().map(str::to_owned),
+    )
+}
+
+/// The first entry with this action, or a failure that shows what was there.
+fn entry<'a>(entries: &'a [serde_json::Value], action: &str) -> &'a serde_json::Value {
+    entries
+        .iter()
+        .find(|e| e["action"] == action)
+        .unwrap_or_else(|| panic!("no {action} in {entries:#?}"))
+}
+
+/// **An owner reads their tenant's audit trail, and only theirs** — what they
+/// and their colleagues changed, named by login; what support did there, by id
+/// alone; and nothing of the tenant next door.
+///
+/// `api_key.revoked` names only the key, in its subject and its detail. Before
+/// the tenant was a column, no query could have put it in this list.
+#[expect(
+    clippy::too_many_lines,
+    reason = "two tenants, a key at each scope, and support, before one read"
+)]
+#[tokio::test]
+async fn an_owner_reads_their_tenants_trail_and_nobody_elses() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    let globex = fixture.provision("globex").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, acme).await;
+    let member = fixture.user("member@acme.test", "hunter2hunter2").await;
+    fixture.join_as(member, acme, "viewer").await;
+    let rival = fixture.user("owner@globex.test", "hunter2hunter2").await;
+    fixture.join(rival, globex).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let rival_token = fixture.token("owner@globex.test", "hunter2hunter2").await;
+
+    let (status, body) = fixture
+        .as_caller(
+            &token,
+            "PATCH",
+            &format!("/v1/members/{member}"),
+            Some(serde_json::json!({ "role": "clerk" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, key) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/keys",
+            Some(serde_json::json!({ "name": "Till", "scopes": ["*:read"], "role": "viewer" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{key}");
+    let key = key["id"].as_str().expect("an id").to_owned();
+    let (status, body) = fixture
+        .as_caller(
+            &token,
+            "DELETE",
+            &format!("/v1/keys/{key}"),
+            Some(serde_json::json!({ "why": "left on a till receipt" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // The same next door, where acme's owner has no business.
+    let (status, body, _) = fixture
+        .send(
+            Request::post("/v1/keys")
+                .header(header::HOST, "globex.localhost")
+                .header(header::AUTHORIZATION, format!("Bearer {rival_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "name": "Till", "scopes": ["*:read"], "role": "viewer" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // A key with the owner's role reads it only with the scope for it: the
+    // route skips `Allowed`, and not its gate on a key.
+    for (scope, answer) in [
+        ("*:read", StatusCode::FORBIDDEN),
+        ("*:manage_tenant", StatusCode::OK),
+    ] {
+        let (status, key) = fixture
+            .as_caller(
+                &token,
+                "POST",
+                "/v1/keys",
+                Some(serde_json::json!({ "name": scope, "scopes": [scope], "role": "owner" })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{key}");
+        let secret = key["secret"].as_str().expect("a secret");
+        let (status, body) = fixture.as_caller(secret, "GET", "/v1/audit", None).await;
+        assert_eq!(status, answer, "{scope}: {body}");
+        if status == StatusCode::FORBIDDEN {
+            assert_eq!(body["code"], "keys.out_of_scope", "{body}");
+        }
+    }
+
+    let (support, _, _) = fixture
+        .staff("support@erp.test", erp_control::PlatformRole::Support)
+        .await;
+    fixture
+        .control
+        .enter_for_support(support, acme, "ticket #42")
+        .await
+        .expect("support gets in");
+
+    let (entries, next) = trail(&fixture, &token, "acme.localhost", "/v1/audit?limit=200").await;
+    assert_eq!(next, None, "{entries:#?}");
+    for e in &entries {
+        assert_eq!(e["tenant"], acme.to_string(), "not acme's: {e}");
+    }
+    assert_eq!(
+        entries[0]["action"], "tenant.support_access",
+        "newest first: {entries:#?}"
+    );
+    for action in [
+        "membership.role_changed",
+        "api_key.issued",
+        "api_key.revoked",
+    ] {
+        assert_eq!(entry(&entries, action)["actor_handle"], "owner@acme.test");
+    }
+    assert_eq!(entry(&entries, "api_key.revoked")["subject_id"], key);
+    let access = entry(&entries, "tenant.support_access");
+    assert_eq!(access["actor"], support.to_string());
+    assert_eq!(access["detail"]["reason"], "ticket #42");
+    assert_eq!(
+        access["actor_handle"],
+        serde_json::Value::Null,
+        "a customer was shown a staff member's address"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The owner of a suspended tenant reads why** (decision 12). Every other
+/// route on the tenant's host answers the `503` everybody gets; this one is
+/// the trail, which is the control plane's, and so needs no tenant to be
+/// serving. A colleague who is not the owner is still refused.
+#[tokio::test]
+async fn the_owner_of_a_suspended_tenant_reads_why() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, tenant).await;
+    let clerk = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    fixture.join_as(clerk, tenant, "clerk").await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let clerk_token = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+    let (billing, token, _) = fixture
+        .staff("billing@erp.test", erp_control::PlatformRole::Billing)
+        .await;
+
+    let (status, body) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            &format!("/v1/platform/tenants/{tenant}/suspend"),
+            Some(serde_json::json!({ "reason": "The August invoice is unpaid." })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = fixture
+        .as_caller(&owner_token, "GET", "/v1/tenant", None)
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    let (entries, _) = trail(&fixture, &owner_token, "acme.localhost", "/v1/audit").await;
+    let suspended = &entries[0];
+    assert_eq!(suspended["action"], "tenant.suspended", "{entries:#?}");
+    assert_eq!(
+        suspended["detail"]["reason"],
+        "The August invoice is unpaid."
+    );
+    assert_eq!(suspended["actor"], billing.to_string());
+    assert_eq!(suspended["actor_handle"], serde_json::Value::Null);
+
+    let (status, body) = fixture
+        .as_caller(&clerk_token, "GET", "/v1/audit", None)
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("access.not_permitted")),
+        "{body}"
+    );
+    assert_eq!(body["args"]["capability"]["value"], "manage_tenant");
+
+    fixture.cleanup().await;
+}
+
+/// **A pod still on the build before `0019` files its entries under their
+/// tenant.** During a deploy it inserts in the shape it knows, with no
+/// `tenant_id`. The raw `INSERT` below is that build's `record()` word for word,
+/// and the only SQL write here: it simulates the old build's write, which this
+/// build cannot make. The insert trigger fills the tenant by the backfill's
+/// rules — the subject, `detail`'s `tenant`, and for `api_key.revoked`, which
+/// names only the key, the key's tenant. An entry about a person stays out.
+#[tokio::test]
+async fn a_pod_on_the_build_before_0019_files_its_entries_under_their_tenant() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, acme).await;
+    let member = fixture.user("member@acme.test", "hunter2hunter2").await;
+    fixture.join_as(member, acme, "viewer").await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let (status, key) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/keys",
+            Some(serde_json::json!({ "name": "Till", "scopes": ["*:read"], "role": "viewer" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{key}");
+    let key = key["id"].as_str().expect("an id").to_owned();
+
+    for (action, subject_type, subject_id, detail) in [
+        (
+            "tenant.origin_revoked",
+            "tenant",
+            acme.to_string(),
+            serde_json::json!({ "origin": "https://shop.acme.test" }),
+        ),
+        (
+            "membership.role_changed",
+            "identity",
+            member.to_string(),
+            serde_json::json!({ "tenant": acme.to_string(), "role": "clerk" }),
+        ),
+        (
+            "api_key.revoked",
+            "api_key",
+            key.clone(),
+            serde_json::json!({ "why": "left on a till receipt" }),
+        ),
+        (
+            "identity.suspended",
+            "identity",
+            member.to_string(),
+            serde_json::json!({ "reason": "policy violation" }),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO audit_entry
+                (actor_identity_id, on_behalf_of_identity_id, action, subject_type, subject_id, detail)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(Some(owner.into_uuid()))
+        .bind(None::<uuid::Uuid>)
+        .bind(action)
+        .bind(subject_type)
+        .bind(subject_id)
+        .bind(detail)
+        .execute(fixture.control.pool())
+        .await
+        .expect("the old build's insert");
+    }
+
+    let (entries, _) = trail(&fixture, &token, "acme.localhost", "/v1/audit?limit=200").await;
+    for action in [
+        "tenant.origin_revoked",
+        "membership.role_changed",
+        "api_key.revoked",
+    ] {
+        let found = entry(&entries, action);
+        assert_eq!(found["tenant"], acme.to_string(), "{found}");
+        assert_eq!(found["actor_handle"], "owner@acme.test", "{found}");
+    }
+    assert_eq!(entry(&entries, "api_key.revoked")["subject_id"], key);
+    assert!(
+        entries.iter().all(|e| e["action"] != "identity.suspended"),
+        "an entry about a person was filed under a tenant: {entries:#?}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The trigger fills only what the writer left empty,** and this build's
+/// `None` is one it leaves empty. A tenant `record()` is given is kept, even
+/// where the subject and detail name another. A staff change about a person who
+/// is a member of a tenant stays in no tenant's trail: an account's platform
+/// role is not the company's business (§62).
+#[tokio::test]
+async fn the_database_keeps_the_tenant_its_writer_gave_and_the_none() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    let globex = fixture.provision("globex").await;
+    let sara = fixture.user("sara@acme.test", "hunter2hunter2").await;
+    fixture.join_as(sara, acme, "clerk").await;
+    fixture.enrolled_token(sara, "sara@acme.test").await;
+    let (_, admin, _) = fixture
+        .staff("admin@erp.test", erp_control::PlatformRole::Superadmin)
+        .await;
+    let (status, body) = fixture
+        .as_caller(
+            &admin,
+            "POST",
+            "/v1/platform/staff",
+            Some(serde_json::json!({ "email": "sara@acme.test", "platform_role": "support" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = fixture
+        .as_caller(
+            &admin,
+            "PATCH",
+            &format!("/v1/platform/staff/{sara}"),
+            Some(serde_json::json!({ "platform_role": "billing" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    fixture
+        .control
+        .record(
+            Actor::system(),
+            Some(acme),
+            "test.filed",
+            "tenant",
+            &globex.to_string(),
+            serde_json::json!({ "tenant": globex.to_string() }),
+        )
+        .await
+        .expect("records");
+
+    let filed: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT action, tenant_id FROM audit_entry
+          WHERE action = 'test.filed' OR (subject_id = $1 AND detail ->> 'scope' = 'platform')
+          ORDER BY id",
+    )
+    .bind(sara.to_string())
+    .fetch_all(fixture.control.pool())
+    .await
+    .expect("reads");
+    assert_eq!(
+        filed,
+        [
+            ("membership.granted".to_owned(), None),
+            ("membership.role_changed".to_owned(), None),
+            ("test.filed".to_owned(), Some(acme.into_uuid())),
+        ]
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A person reads what was done to them and what they did** (decision 6),
+/// and nothing about the colleague beside them. Somebody else in an entry is
+/// named only as a member of the tenant it concerns: the owner who changed
+/// their role is, the superadmin who made them staff is not — and the
+/// platform's own reader names that superadmin.
+#[tokio::test]
+async fn a_person_reads_what_was_done_to_them_and_by_them() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, tenant).await;
+    let sara = fixture.user("sara@acme.test", "hunter2hunter2").await;
+    fixture.join_as(sara, tenant, "clerk").await;
+    let omar = fixture.user("omar@acme.test", "hunter2hunter2").await;
+    fixture.join_as(omar, tenant, "clerk").await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    for (who, role) in [(sara, "accountant"), (omar, "viewer")] {
+        let (status, body) = fixture
+            .as_caller(
+                &owner_token,
+                "PATCH",
+                &format!("/v1/members/{who}"),
+                Some(serde_json::json!({ "role": role })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+    let (admin, admin_token, _) = fixture
+        .staff("admin@erp.test", erp_control::PlatformRole::Superadmin)
+        .await;
+    let (sara_token, _) = fixture.enrolled_token(sara, "sara@acme.test").await;
+    let (status, body) = fixture
+        .as_caller(
+            &admin_token,
+            "POST",
+            "/v1/platform/staff",
+            Some(serde_json::json!({ "email": "sara@acme.test", "platform_role": "support" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (mine, _) = trail(
+        &fixture,
+        &sara_token,
+        "acme.localhost",
+        "/v1/sessions/current/audit",
+    )
+    .await;
+    for e in &mine {
+        assert!(
+            e["subject_id"] == sara.to_string() || e["actor"] == sara.to_string(),
+            "not about sara, nor by her: {e}"
+        );
+    }
+    let changed = entry(&mine, "membership.role_changed");
+    assert_eq!(changed["detail"]["role"], "accountant");
+    assert_eq!(changed["actor_handle"], "owner@acme.test");
+    entry(&mine, "identity.created");
+    let made_staff = mine
+        .iter()
+        .find(|e| e["action"] == "membership.granted" && e["detail"]["scope"] == "platform")
+        .unwrap_or_else(|| panic!("not made staff: {mine:#?}"));
+    assert_eq!(made_staff["actor"], admin.to_string());
+    assert_eq!(
+        made_staff["actor_handle"],
+        serde_json::Value::Null,
+        "a staff member's address was shown to a customer"
+    );
+
+    // The owner made both changes, so both are theirs.
+    let (theirs, _) = trail(
+        &fixture,
+        &owner_token,
+        "acme.localhost",
+        "/v1/sessions/current/audit",
+    )
+    .await;
+    let subjects: Vec<&str> = theirs
+        .iter()
+        .filter(|e| e["action"] == "membership.role_changed")
+        .filter_map(|e| e["subject_id"].as_str())
+        .collect();
+    assert_eq!(subjects, [omar.to_string(), sara.to_string()]);
+
+    // Staff read the same entry with the superadmin named.
+    let (all, _) = trail(
+        &fixture,
+        &admin_token,
+        "acme.localhost",
+        &format!("/v1/platform/audit?identity={sara}&limit=200"),
+    )
+    .await;
+    let made_staff = all
+        .iter()
+        .find(|e| e["action"] == "membership.granted" && e["detail"]["scope"] == "platform")
+        .unwrap_or_else(|| panic!("not made staff: {all:#?}"));
+    assert_eq!(made_staff["actor_handle"], "admin@erp.test");
+
+    fixture.cleanup().await;
+}
+
+/// **An API key is not a person**, so it reads no personal trail, whatever its
+/// scopes. Its own would be its issuing, which names the owner who issued it —
+/// an address those scopes deny it everywhere else.
+#[tokio::test]
+async fn a_key_reads_no_personal_trail() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, tenant).await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let (status, key) = fixture
+        .as_caller(
+            &owner_token,
+            "POST",
+            "/v1/keys",
+            Some(serde_json::json!({ "name": "Widget", "scopes": ["*:read"], "role": "viewer" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{key}");
+    let secret = key["secret"].as_str().expect("a secret");
+    let (status, body) = fixture
+        .as_caller(secret, "GET", "/v1/sessions/current/audit", None)
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("keys.not_a_person")),
+        "a key read a person's trail: {body}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Staff read the whole trail**, narrowed by tenant, by person, or both,
+/// with every actor named — and without a filter, what concerns no tenant at
+/// all is there too.
+#[tokio::test]
+async fn support_reads_the_whole_trail_narrowed_by_tenant_or_person() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    let globex = fixture.provision("globex").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, acme).await;
+    let (_, billing, _) = fixture
+        .staff("billing@erp.test", erp_control::PlatformRole::Billing)
+        .await;
+    let (status, body) = fixture
+        .as_caller(
+            &billing,
+            "POST",
+            &format!("/v1/platform/tenants/{globex}/suspend"),
+            Some(serde_json::json!({ "reason": "Unpaid." })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (_, token, _) = fixture
+        .staff("support@erp.test", erp_control::PlatformRole::Support)
+        .await;
+    let read = |query: String| {
+        let (fixture, token) = (&fixture, &token);
+        async move {
+            trail(
+                fixture,
+                token,
+                "acme.localhost",
+                &format!("/v1/platform/audit?limit=200{query}"),
+            )
+            .await
+            .0
+        }
+    };
+
+    let everything = read(String::new()).await;
+    let tenants: std::collections::BTreeSet<String> = everything
+        .iter()
+        .map(|e| e["tenant"].as_str().unwrap_or("none").to_owned())
+        .collect();
+    assert_eq!(
+        tenants,
+        [acme.to_string(), globex.to_string(), "none".to_owned()].into(),
+        "{everything:#?}"
+    );
+
+    let globex_only = read(format!("&tenant={globex}")).await;
+    for e in &globex_only {
+        assert_eq!(e["tenant"], globex.to_string(), "{e}");
+    }
+    let suspended = entry(&globex_only, "tenant.suspended");
+    assert_eq!(suspended["actor_handle"], "billing@erp.test");
+
+    let owners = read(format!("&tenant={acme}&identity={owner}")).await;
+    assert_eq!(
+        owners
+            .iter()
+            .map(|e| (e["action"].as_str(), e["subject_id"].as_str()))
+            .collect::<Vec<_>>(),
+        [(Some("membership.granted"), Some(owner.to_string().as_str()))],
+        "{owners:#?}"
+    );
+
+    let (status, body) = fixture
+        .as_caller(&token, "GET", "/v1/platform/audit?tenant=acme", None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    fixture.cleanup().await;
+}
+
+/// **The trail pages without losing or repeating an entry**, and a cursor it
+/// did not hand out is a `400` — never the first page again, which would look
+/// like the trail starting over.
+#[tokio::test]
+async fn the_audit_trail_pages_without_losing_or_repeating_entries() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, tenant).await;
+    let member = fixture.user("member@acme.test", "hunter2hunter2").await;
+    fixture.join_as(member, tenant, "viewer").await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    for role in ["clerk", "viewer", "clerk", "viewer"] {
+        let (status, body) = fixture
+            .as_caller(
+                &token,
+                "PATCH",
+                &format!("/v1/members/{member}"),
+                Some(serde_json::json!({ "role": role })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    }
+
+    let (whole, next) = trail(&fixture, &token, "acme.localhost", "/v1/audit?limit=200").await;
+    assert_eq!(next, None);
+    assert!(whole.len() > 5, "too few entries to page: {whole:#?}");
+
+    let mut walked = Vec::new();
+    let mut path = "/v1/audit?limit=2".to_owned();
+    for _ in 0..whole.len() {
+        let (page, next) = trail(&fixture, &token, "acme.localhost", &path).await;
+        walked.extend(page);
+        let Some(next) = next else { break };
+        path = format!("/v1/audit?limit=2&after={next}");
+    }
+    assert_eq!(walked, whole, "paging lost, repeated or reordered an entry");
+
+    for (what, cursor) in [
+        ("not a number", erp_types::Cursor::over(&["x"]).to_string()),
+        (
+            "another list's",
+            erp_types::Cursor::over(&["1", "2"]).to_string(),
+        ),
+        ("not a cursor", "zz".to_owned()),
+    ] {
+        let (status, body) = fixture
+            .as_caller(&token, "GET", &format!("/v1/audit?after={cursor}"), None)
+            .await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("request.invalid_cursor")),
+            "{what}: {body}"
+        );
+    }
+
+    fixture.cleanup().await;
+}
+
+/// **Staff are managed over HTTP**, a change reaches the door at once, and every
+/// grant, change and revocation is on the record under the superadmin who
+/// made it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one staff member's life, from grant to revocation, and the record it leaves"
+)]
+#[tokio::test]
+async fn staff_are_managed_over_http_and_every_change_names_who_made_it() {
+    let fixture = Fixture::new().await;
+    let (admin, admin_token, _) = fixture
+        .staff("admin@erp.test", erp_control::PlatformRole::Superadmin)
+        .await;
+    let noura = fixture.user("noura@erp.test", "hunter2hunter2").await;
+    let (noura_token, _) = fixture.enrolled_token(noura, "noura@erp.test").await;
+    fixture.user("nofactor@erp.test", "hunter2hunter2").await;
+
+    let grant = |email: &str, role: &str| {
+        fixture.as_caller(
+            &admin_token,
+            "POST",
+            "/v1/platform/staff",
+            Some(serde_json::json!({ "email": email, "platform_role": role })),
+        )
+    };
+    for (email, role, status, code) in [
+        (
+            "nofactor@erp.test",
+            "support",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "staff.no_second_factor",
+        ),
+        (
+            "nobody@erp.test",
+            "support",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "staff.no_such_account",
+        ),
+        (
+            "noura@erp.test",
+            "owner",
+            StatusCode::BAD_REQUEST,
+            "request.unknown_staff_role",
+        ),
+    ] {
+        let (answered, body) = grant(email, role).await;
+        assert_eq!(
+            (answered, body["code"].as_str()),
+            (status, Some(code)),
+            "{body}"
+        );
+    }
+
+    let (status, body) = grant("Noura@erp.test ", "support").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["identity"], noura.to_string());
+    let (status, body) = grant("noura@erp.test", "support").await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("staff.already_staff"))
+    );
+
+    // Support may not manage staff — and asking puts her role in the cache.
+    let list = || fixture.as_caller(&noura_token, "GET", "/v1/platform/staff", None);
+    assert_eq!(list().await.0, StatusCode::FORBIDDEN);
+
+    // **At once, not after the cache's five seconds.**
+    let staff_path = format!("/v1/platform/staff/{noura}");
+    let change = |role: &str| {
+        fixture.as_caller(
+            &admin_token,
+            "PATCH",
+            &staff_path,
+            Some(serde_json::json!({ "platform_role": role })),
+        )
+    };
+    assert_eq!(change("superadmin").await.0, StatusCode::NO_CONTENT);
+    let (status, listed) = list().await;
+    assert_eq!(status, StatusCode::OK, "a promotion waited for the cache");
+    let noura_row = listed
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|row| row["identity"] == noura.to_string())
+        .expect("she is listed");
+    assert_eq!(noura_row["platform_role"], "superadmin");
+    assert_eq!(noura_row["second_factor"], true);
+
+    let (status, _) = fixture
+        .as_caller(&admin_token, "DELETE", &staff_path, None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        list().await.0,
+        StatusCode::FORBIDDEN,
+        "a revocation waited for the cache"
+    );
+    for (status, body) in [
+        change("support").await,
+        fixture
+            .as_caller(&admin_token, "DELETE", &staff_path, None)
+            .await,
+    ] {
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (StatusCode::NOT_FOUND, Some("staff.not_staff"))
+        );
+    }
+
+    // On the record, under the superadmin's name.
+    let rows: Vec<(String, Option<uuid::Uuid>, serde_json::Value)> = sqlx::query_as(
+        "SELECT action, actor_identity_id, detail FROM audit_entry
+          WHERE subject_type = 'identity' AND subject_id = $1
+            AND action LIKE 'membership.%'
+          ORDER BY id",
+    )
+    .bind(noura.to_string())
+    .fetch_all(fixture.control.pool())
+    .await
+    .expect("reads the trail");
+    let admin = Some(*admin.as_uuid());
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "membership.granted".to_owned(),
+                admin,
+                serde_json::json!({ "scope": "platform", "tenant": null, "role": "support" })
+            ),
+            (
+                "membership.role_changed".to_owned(),
+                admin,
+                serde_json::json!({ "scope": "platform", "role": "superadmin" })
+            ),
+            (
+                "membership.revoked".to_owned(),
+                admin,
+                serde_json::json!({ "scope": "platform", "tenant": null })
+            ),
+        ]
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **The last live superadmin cannot leave over HTTP** — neither removed nor
+/// demoted, by themselves or anybody — and a suspended superadmin does not count
+/// as one. `operator revoke-staff` can, which is what it is for.
+#[tokio::test]
+async fn the_last_superadmin_cannot_leave_over_http_and_the_operator_can() {
+    use erp_control::PlatformRole::Superadmin;
+
+    let fixture = Fixture::new().await;
+    let (a, a_token, _) = fixture.staff("a@erp.test", Superadmin).await;
+    let refused = |token: String, method: &'static str, who: IdentityId| {
+        let fixture = &fixture;
+        async move {
+            let (status, body) = fixture
+                .as_caller(
+                    &token,
+                    method,
+                    &format!("/v1/platform/staff/{who}"),
+                    (method == "PATCH").then(|| serde_json::json!({ "platform_role": "support" })),
+                )
+                .await;
+            assert_eq!(
+                (status, body["code"].as_str()),
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Some("staff.last_superadmin")
+                ),
+                "{method} {who}"
+            );
+        }
+    };
+    refused(a_token.clone(), "PATCH", a).await;
+    refused(a_token.clone(), "DELETE", a).await;
+
+    // Another superadmin, suspended: not live, so `a` is still the last.
+    let (b, _, _) = fixture.staff("b@erp.test", Superadmin).await;
+    fixture
+        .control
+        .suspend_identity(b, "left", Actor::system())
+        .await
+        .expect("suspends");
+    refused(a_token.clone(), "DELETE", a).await;
+
+    // A live one, and `a` may go.
+    let (c, c_token, _) = fixture.staff("c@erp.test", Superadmin).await;
+    let (status, body) = fixture
+        .as_caller(&a_token, "DELETE", &format!("/v1/platform/staff/{a}"), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    refused(c_token.clone(), "PATCH", c).await;
+
+    // Break glass: `operator revoke-staff`, which is `revoke_membership` with
+    // the platform scope and no guard. The door closes on the next request.
+    assert!(
+        fixture
+            .control
+            .revoke_membership(c, Scope::Platform, Actor::system())
+            .await
+            .expect("revokes")
+    );
+    let (status, _) = fixture
+        .as_caller(&c_token, "GET", "/v1/platform/staff", None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    fixture.cleanup().await;
+}
+
+/// Two superadmins removing each other at the same moment leave one, not
+/// none: each sees the other still standing unless the guard locks first.
+///
+/// Below the door, on purpose. Over HTTP one request usually finishes before
+/// the other passes its door, and a test that races only sometimes proves
+/// nothing; here both transactions are open at once every time.
+#[tokio::test]
+async fn two_superadmins_removing_each_other_at_once_leave_one() {
+    use erp_control::PlatformRole::Superadmin;
+
+    let fixture = Fixture::new().await;
+    let (a, _, _) = fixture.staff("a@erp.test", Superadmin).await;
+    let (b, _, _) = fixture.staff("b@erp.test", Superadmin).await;
+
+    fixture.warm().await;
+
+    let (one, other) = tokio::join!(
+        fixture.control.revoke_staff(b, Actor::identity(a)),
+        fixture.control.revoke_staff(a, Actor::identity(b)),
+    );
+    assert!(
+        matches!(
+            (&one, &other),
+            (Ok(()), Err(erp_control::StaffError::LastSuperadmin))
+                | (Err(erp_control::StaffError::LastSuperadmin), Ok(()))
+        ),
+        "{one:?} / {other:?}"
+    );
+    let left = fixture.control.staff().await.expect("lists");
+    assert_eq!(left.len(), 1, "{left:?}");
+
+    fixture.cleanup().await;
+}
+
+/// Two superadmins granting one person two different roles at once: one is
+/// told it worked, the other that it was too late — never both told "created"
+/// while one of them set nothing.
+#[tokio::test]
+async fn two_grants_of_one_person_at_once_tell_the_loser() {
+    use erp_control::PlatformRole::{Billing, Support};
+
+    let fixture = Fixture::new().await;
+    let noura = fixture.user("noura@erp.test", "hunter2hunter2").await;
+    fixture.enrolled_token(noura, "noura@erp.test").await;
+
+    fixture.warm().await;
+
+    let (support, billing) = tokio::join!(
+        fixture
+            .control
+            .grant_staff("noura@erp.test", Support, Actor::system()),
+        fixture
+            .control
+            .grant_staff("noura@erp.test", Billing, Actor::system()),
+    );
+    let won = match (&support, &billing) {
+        (Ok(_), Err(erp_control::StaffError::AlreadyStaff(_))) => Support,
+        (Err(erp_control::StaffError::AlreadyStaff(_)), Ok(_)) => Billing,
+        _ => panic!("both told the same thing: {support:?} / {billing:?}"),
+    };
+    let staff = fixture.control.staff().await.expect("lists");
+    assert_eq!(staff.len(), 1);
+    assert_eq!(
+        staff[0].role, won,
+        "the one told it worked is the one that did"
+    );
 
     fixture.cleanup().await;
 }
@@ -7940,6 +10572,7 @@ async fn a_completed_booking_is_billed_with_its_deposit_deducted() {
             },
             at("2026-04-20"),
             &erp_eventlog::Metadata::default(),
+            sales::Authority::System,
         )
         .await
         .expect("starts");
@@ -10710,6 +13343,404 @@ async fn the_tenant_calendar_is_a_named_zone() {
     fixture.cleanup().await;
 }
 
+/// A permission-limit rule as `PUT /v1/tenant/permission-limits` takes it:
+/// refused when every one of `conditions` holds.
+fn refuse_when(name: &str, conditions: &[serde_json::Value]) -> serde_json::Value {
+    serde_json::json!({ "name": name, "when": { "when": "all", "of": conditions }, "then": "refuse" })
+}
+
+/// `fact == value`, for a text fact.
+fn fact_is(fact: &str, value: &str) -> serde_json::Value {
+    serde_json::json!({ "when": "is", "fact": fact, "op": "eq", "value": { "type": "text", "of": value } })
+}
+
+/// Sets this tenant's permission limits as whoever holds `token`.
+async fn set_limits(
+    fixture: &Fixture,
+    token: &str,
+    rules: serde_json::Value,
+    if_match: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut request = Request::put("/v1/tenant/permission-limits")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(version) = if_match {
+        request = request.header(header::IF_MATCH, version);
+    }
+    let (status, body, _) = fixture
+        .send(
+            request
+                .body(Body::from(
+                    serde_json::json!({ "rules": rules }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    (status, body)
+}
+
+/// Reads them: status, `ETag`, body.
+async fn limits(fixture: &Fixture, token: &str) -> (StatusCode, String, serde_json::Value) {
+    let response = fixture
+        .raw(
+            Request::get("/v1/tenant/permission-limits")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let status = response.status();
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let body = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("reads"),
+    )
+    .unwrap_or(serde_json::Value::Null);
+    (status, etag, body)
+}
+
+/// **Permission limits are a versioned setting, and a rule that could never be
+/// true is refused when it is written** — by name, with a code a screen can
+/// branch on — rather than stored to never fire.
+#[tokio::test]
+async fn permission_limits_are_a_versioned_setting_that_refuses_impossible_rules() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, etag, body) = limits(&fixture, &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rules"], serde_json::json!([]), "roles decide alone");
+    assert_eq!(etag, "\"0\"", "nothing set, and known to be");
+
+    for (rule, code) in [
+        (
+            fact_is("phase_of_the_moon", "waxing"),
+            "request.no_such_fact",
+        ),
+        (
+            fact_is("capability", "post_entires"),
+            "request.no_such_fact_value",
+        ),
+        (
+            fact_is("capability", "manage_tenant"),
+            "request.no_such_fact_value",
+        ),
+        (fact_is("amount", "lots"), "request.rule_cannot_compare"),
+    ] {
+        let (status, body) = set_limits(
+            &fixture,
+            &token,
+            serde_json::json!([refuse_when("Never true", std::slice::from_ref(&rule))]),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rule}: {body}");
+        assert_eq!(body["code"], code, "{rule}: {body}");
+        assert_eq!(body["args"]["rule"]["value"], "Never true", "named: {body}");
+    }
+    let (_, etag, _) = limits(&fixture, &token).await;
+    assert_eq!(etag, "\"0\"", "nothing refused was stored");
+
+    let rules = serde_json::json!([refuse_when(
+        "Clerks do not post",
+        &[
+            fact_is("role", "clerk"),
+            fact_is("capability", "post_entries")
+        ]
+    )]);
+    let (status, body) = set_limits(&fixture, &token, rules.clone(), Some("\"0\"")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) = set_limits(&fixture, &token, rules.clone(), Some("\"0\"")).await;
+    assert_eq!(
+        status,
+        StatusCode::PRECONDITION_FAILED,
+        "a stale If-Match: {body}"
+    );
+
+    let (status, etag, body) = limits(&fixture, &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(etag, "\"0\"");
+    assert_eq!(body["rules"], rules, "reads back as written");
+
+    fixture.cleanup().await;
+}
+
+/// A request to post `body`, keyed by who sends what.
+fn posting(token: &str, path: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::post(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("idempotency-key", idem(&format!("{token}{body}")))
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// `minor` debited to `debit` and credited to `credit`.
+fn an_entry(debit: &str, credit: &str, minor: i64, currency: &str) -> serde_json::Value {
+    serde_json::json!({
+        "occurred_on": "2026-01-15T00:00:00Z",
+        "memo": format!("{minor} {currency}"),
+        "lines": [
+            { "account": debit, "amount": { "minor": minor, "currency": currency } },
+            { "account": credit, "amount": { "minor": -minor, "currency": currency } }
+        ]
+    })
+}
+
+fn riyal_entry(riyals: i64) -> serde_json::Value {
+    an_entry("1000", "4000", riyals * 100, "SAR")
+}
+
+/// An owner, a bookkeeper (the `accountant` role), riyal accounts `1000` and
+/// `4000`, and the limit `roles.rs` names, written by the owner through the
+/// product. Answers the fixture and both tokens.
+async fn a_bookkeeper_limited_to_ten_thousand() -> (Fixture, String, String) {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let bookkeeper = fixture.user("books@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.join_as(bookkeeper, tenant, "accountant").await;
+    fixture.enable_ledger(tenant).await;
+    let owner = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let bookkeeper = fixture.token("books@acme.test", "hunter2hunter2").await;
+
+    for (code, kind) in [("1000", "asset"), ("4000", "revenue")] {
+        let (status, body, _) = fixture
+            .send(posting(
+                &owner,
+                "/v1/ledger/accounts",
+                &serde_json::json!({ "code": code, "name": code, "kind": kind, "currency": "SAR" }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, body) = set_limits(
+        &fixture,
+        &owner,
+        serde_json::json!([refuse_when(
+            "A bookkeeper posts under ten thousand",
+            &[
+                fact_is("role", "accountant"),
+                fact_is("capability", "post_entries"),
+                serde_json::json!({ "when": "is", "fact": "amount", "op": "gte",
+                  "value": { "type": "money", "of": { "minor": 1_000_000, "currency": "SAR" } } })
+            ]
+        )]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    (fixture, owner, bookkeeper)
+}
+
+/// **"A bookkeeper may post entries under ten thousand riyals"**, written by
+/// the owner through the product and enforced on the ledger — the example
+/// `erp_tenant::roles` named in Phase 1. The bookkeeper is the `accountant`
+/// role. The owner's entry of the same size is the contrast: without the role
+/// fact the rule refuses everybody.
+#[tokio::test]
+async fn a_bookkeeper_is_refused_an_entry_over_the_limit_the_owner_wrote() {
+    let (fixture, owner, bookkeeper) = a_bookkeeper_limited_to_ten_thousand().await;
+    let entries = "/v1/ledger/entries";
+
+    let (status, body, _) = fixture
+        .send(posting(&bookkeeper, entries, &riyal_entry(20_000)))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "over the limit: {body}");
+    assert_eq!(body["code"], "access.not_permitted");
+    assert_eq!(
+        body["args"]["capability"]["value"], "post_entries",
+        "{body}"
+    );
+
+    let (status, body, _) = fixture
+        .send(posting(&bookkeeper, entries, &riyal_entry(5_000)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "under it: {body}");
+
+    let (status, body, _) = fixture
+        .send(posting(&owner, entries, &riyal_entry(20_000)))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the rule is about the bookkeeper: {body}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Nor can the bookkeeper walk around it**, the two ways review found.
+///
+/// A reversal is an entry the size of the one it undoes, so the owner's 20,000
+/// cannot be posted backwards; the bookkeeper undoing their own 4,000 is the
+/// contrast. And the bookkeeper may open accounts, but 5,000,000 dollars is
+/// not *under* 10,000 riyals: a limit that cannot judge an amount refuses it.
+#[tokio::test]
+async fn a_bookkeeper_cannot_walk_around_the_limit_by_reversal_or_currency() {
+    let (fixture, owner, bookkeeper) = a_bookkeeper_limited_to_ten_thousand().await;
+    let entries = "/v1/ledger/entries";
+    let reverse = |token: &str, id: &serde_json::Value| {
+        let id = id.as_str().expect("an id");
+        posting(
+            token,
+            &format!("/v1/ledger/entries/{id}/reversal"),
+            &serde_json::json!({ "occurred_on": "2026-01-16T00:00:00Z", "memo": id }),
+        )
+    };
+
+    let (status, owners, _) = fixture
+        .send(posting(&owner, entries, &riyal_entry(20_000)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{owners}");
+    let (status, body, _) = fixture.send(reverse(&bookkeeper, &owners["id"])).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "20,000 backwards: {body}");
+    let (status, theirs, _) = fixture
+        .send(posting(&bookkeeper, entries, &riyal_entry(4_000)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{theirs}");
+    let (status, body, _) = fixture.send(reverse(&bookkeeper, &theirs["id"])).await;
+    assert_eq!(status, StatusCode::OK, "their own 4,000: {body}");
+
+    for (code, kind) in [("1100", "asset"), ("4100", "revenue")] {
+        let (status, body, _) = fixture
+            .send(posting(
+                &bookkeeper,
+                "/v1/ledger/accounts",
+                &serde_json::json!({ "code": code, "name": code, "kind": kind, "currency": "USD" }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let (status, body, _) = fixture
+        .send(posting(
+            &bookkeeper,
+            entries,
+            &an_entry("1100", "4100", 500_000_000, "USD"),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "in another currency: {body}");
+
+    fixture.cleanup().await;
+}
+
+/// **No limit locks the owner out of its limits.** A rule that refuses
+/// everything refuses the owner's reads — the check that it really bites, so
+/// the rest cannot pass vacuously — and still leaves them able to read and
+/// remove it, because `ManageTenant` is never narrowed.
+#[tokio::test]
+async fn no_limit_locks_the_owner_out_of_its_limits() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let calendar = || {
+        Request::get("/v1/tenant/calendar")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (status, body) = set_limits(
+        &fixture,
+        &token,
+        serde_json::json!([{ "name": "Everything", "when": { "when": "always" }, "then": "refuse" }]),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = fixture.send(calendar()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the limit bites: {body}");
+
+    let (status, etag, body) = limits(&fixture, &token).await;
+    assert_eq!(status, StatusCode::OK, "the owner still reads it: {body}");
+    let (status, body) = set_limits(&fixture, &token, serde_json::json!([]), Some(&etag)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "and removes it: {body}");
+
+    let (status, body, _) = fixture.send(calendar()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    fixture.cleanup().await;
+}
+
+/// **Nor do limits this build can no longer read.** Every check they would
+/// narrow is refused — a 503, not the unlimited answer (L6) — and the owner
+/// can still replace them.
+///
+/// The row is written with the configuration store's own `set`, bypassing
+/// `Limits::new`: it **simulates** limits a build with a larger registry saved,
+/// which is what removing a fact from `limits::registry()` leaves behind. This
+/// build cannot produce it, which is the point.
+#[tokio::test]
+async fn limits_this_build_cannot_read_lock_nobody_out_of_repairing_them() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let calendar = || {
+        Request::get("/v1/tenant/calendar")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance access");
+    let mut conn = db.acquire().await.expect("a connection");
+    erp_eventlog::configuration::set(
+        &mut conn,
+        "tenant.permission_limits",
+        &serde_json::json!([refuse_when(
+            "Saved by an older build",
+            &[fact_is("phase_of_the_moon", "waxing")]
+        )]),
+        Some("an-older-build"),
+        None,
+    )
+    .await
+    .expect("stored");
+    drop(conn);
+
+    let (status, body, _) = fixture.send(calendar()).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "refused, not unlimited: {body}"
+    );
+    let (status, _, body) = limits(&fixture, &token).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the owner is told the stored rules are unusable: {body}"
+    );
+
+    let (status, body) = set_limits(&fixture, &token, serde_json::json!([]), None).await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "and can replace them: {body}"
+    );
+    let (status, body, _) = fixture.send(calendar()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    fixture.cleanup().await;
+}
+
 // ---------------------------------------------------------------------------
 // Real time: the signal stream
 // ---------------------------------------------------------------------------
@@ -11609,6 +14640,369 @@ async fn a_conversation_holds_both_kinds_and_reaches_an_open_screen() {
         serde_json::from_str::<serde_json::Value>(&data).expect("json"),
         serde_json::json!({ "group": "conversations", "position": 12 })
     );
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Read-model versions
+// ---------------------------------------------------------------------------
+
+/// Marks one of `tenant`'s projection groups as built before read-model
+/// versions were recorded.
+///
+/// **Raw SQL, and it has to be.** This build stamps only its own version, so
+/// nothing in it can make a tenant's tables older than itself. What this
+/// simulates is what the tenant chain's `0016` leaves on every tenant built
+/// before it, and what a restore of an older backup brings back: a checkpoint
+/// at 0.
+async fn built_before_versions(fixture: &Fixture, tenant: TenantId, group: &str) {
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let mut conn = db.acquire().await.expect("connection");
+    sqlx::query("UPDATE projection_checkpoint SET read_model_version = 0 WHERE group_name = $1")
+        .bind(group)
+        .execute(&mut *conn)
+        .await
+        .expect("stamps");
+}
+
+/// **A module whose read model is older than the build answers 503, and
+/// nothing else does** — decision 7 of 2026-09-11. Numbers from tables worked
+/// out by rules this build no longer uses are refused, not served; another
+/// module's routes are untouched, and the public surface asks the same
+/// question the tenant's own does. Once the group is rebuilt the very next
+/// request is served: a stale answer is never cached, so the swap needs no
+/// invalidation to reach this process.
+#[tokio::test]
+async fn a_module_whose_read_model_is_older_than_the_build_answers_503_until_it_is_rebuilt() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    fixture.enable_module(tenant, files::setup()).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    open_the_diary(&fixture, tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let files = "/v1/files?owner_kind=tenant&owner_id=SELF";
+    let (status, body) = fixture.as_caller(&token, "GET", files, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    built_before_versions(&fixture, tenant, files::GROUP_NAME).await;
+    built_before_versions(&fixture, tenant, booking::GROUP_NAME).await;
+    // The first read above was cached as current; an out-of-band change is
+    // what `clear_caches` is for.
+    fixture.control.clear_caches();
+
+    let (status, body) = fixture.as_caller(&token, "GET", files, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "request.read_model_rebuilding", "{body}");
+    assert_eq!(body["args"]["module"]["value"], "files", "{body}");
+
+    // And again: a refusal is not remembered as anything a later request
+    // could be served on.
+    let (status, body) = fixture.as_caller(&token, "GET", files, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+    // Another module's route, on the same tenant, in the same moment.
+    let (status, body) = fixture
+        .as_caller(&token, "GET", "/v1/ledger/accounts", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A stranger on the booking site, with no account: the same refusal.
+    let (status, body, _) = fixture
+        .send(
+            get("/v1/booking/public/services")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "request.read_model_rebuilding", "{body}");
+
+    // The deploy step's rebuild, as `bin/migrator` runs it.
+    let pool = fixture
+        .control
+        .maintenance_pool(tenant)
+        .await
+        .expect("a maintenance pool");
+    let owned = files::projections();
+    let refs: Vec<&dyn erp_projection::Projection<Group = files::Files>> =
+        owned.iter().map(AsRef::as_ref).collect();
+    erp_projection::rebuild_swap::<files::Files>(
+        &pool,
+        files::setup().install_sql,
+        &refs,
+        files::upcasters(),
+        500,
+    )
+    .await
+    .expect("rebuilds");
+    pool.close().await;
+
+    let (status, body) = fixture.as_caller(&token, "GET", files, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    fixture.cleanup().await;
+}
+
+/// Reads the document limit: status, `ETag`, body.
+async fn document_limit(fixture: &Fixture, token: &str) -> (StatusCode, String, serde_json::Value) {
+    let response = fixture
+        .raw(
+            Request::get("/v1/sales/document-limit")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let status = response.status();
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let body = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("reads"),
+    )
+    .unwrap_or(serde_json::Value::Null);
+    (status, etag, body)
+}
+
+async fn set_document_limit(
+    fixture: &Fixture,
+    token: &str,
+    body: serde_json::Value,
+    if_match: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut request = Request::put("/v1/sales/document-limit")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(version) = if_match {
+        request = request.header(header::IF_MATCH, version);
+    }
+    let (status, body, _) = fixture
+        .send(request.body(Body::from(body.to_string())).unwrap())
+        .await;
+    (status, body)
+}
+
+/// **The document limit is the owner's versioned setting**, typed: nothing
+/// until it is set, refused when it is not more than nothing or names no
+/// currency, `If-Match` on the write, and `null` to take it away again.
+#[tokio::test]
+async fn the_document_limit_is_the_owners_versioned_setting() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.enable_sales(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let (status, etag, body) = document_limit(&fixture, &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        serde_json::json!({ "limit": null }),
+        "no limit to start"
+    );
+    assert_eq!(etag, "\"0\"");
+
+    let limit = |minor: i64, currency: &str| {
+        serde_json::json!({ "limit": {
+            "amount": { "minor": minor, "currency": currency }, "basis": "before_vat"
+        } })
+    };
+    let (status, body) = set_document_limit(&fixture, &token, limit(0, "SAR"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "sales.document_limit_not_positive", "{body}");
+    let (status, body) = set_document_limit(&fixture, &token, limit(100, "riyals"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "request.unknown_currency", "{body}");
+    let (_, etag, _) = document_limit(&fixture, &token).await;
+    assert_eq!(etag, "\"0\"", "nothing refused was stored");
+
+    let (status, body) =
+        set_document_limit(&fixture, &token, limit(1_000_000, "SAR"), Some("\"0\"")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body) =
+        set_document_limit(&fixture, &token, limit(2_000_000, "SAR"), Some("\"0\"")).await;
+    assert_eq!(
+        status,
+        StatusCode::PRECONDITION_FAILED,
+        "a stale If-Match: {body}"
+    );
+
+    let (status, etag, body) = document_limit(&fixture, &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, limit(1_000_000, "SAR"), "reads back as written");
+
+    let (status, body) = set_document_limit(
+        &fixture,
+        &token,
+        serde_json::json!({ "limit": null }),
+        Some(&etag),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (_, _, body) = document_limit(&fixture, &token).await;
+    assert_eq!(
+        body,
+        serde_json::json!({ "limit": null }),
+        "taken away again"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Over HTTP: a clerk over the limit is a 403 that names it, at the sales
+/// route and at the booking desk, and the worker's pass is not limited.**
+///
+/// The owner writes the limit through the product. The clerk has no employee
+/// record, so no claim can reach them.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one booking from the desk to the worker's pass, beside the sales route"
+)]
+#[tokio::test]
+async fn a_clerk_over_the_document_limit_is_refused_and_the_worker_is_not() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let clerk = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.join_as(clerk, tenant, "clerk").await;
+    fixture.enable_sales(tenant).await;
+    fixture.enable_module(tenant, crm::setup()).await;
+    fixture.enable_module(tenant, booking::setup()).await;
+    let owner = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let clerk = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+    fixture.install_chart(&owner, "acme", "services").await;
+
+    let (status, body) = set_document_limit(
+        &fixture,
+        &owner,
+        serde_json::json!({ "limit": {
+            "amount": { "minor": 10_000, "currency": "SAR" }, "basis": "after_vat"
+        } }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // 100 net is 115 after VAT: over the 100 limit.
+    let invoice = serde_json::json!({
+        "customer": { "name": "Rawabi" },
+        "issued_on": "2026-03-01T00:00:00Z",
+        "currency": "SAR",
+        "lines": [{ "description": "Consulting", "net": 10_000, "vat": "standard" }]
+    });
+    let (status, body, _) = fixture
+        .send(posting(&clerk, "/v1/sales/invoices", &invoice))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "sales.over_document_limit", "{body}");
+    assert_eq!(body["args"]["amount"]["value"], "115.00 SAR", "{body}");
+    let (status, body, _) = fixture
+        .send(posting(&owner, "/v1/sales/invoices", &invoice))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the owner is never limited: {body}"
+    );
+
+    // A booking priced at 200, completed.
+    let (status, body, _) = fixture
+        .send(posting(
+            &owner,
+            "/v1/booking/resources",
+            &serde_json::json!({ "id": "CHAIR-1", "name": "كرسي", "kind": "person", "capacity": 1 }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, booked, _) = fixture
+        .send(posting(
+            &owner,
+            "/v1/booking/reservations",
+            &serde_json::json!({
+                "customer_name": "سارة", "customer_phone": "+966500000000",
+                "lines": [{
+                    "what": "صبغة", "from": "2026-05-01T09:00:00Z", "until": "2026-05-01T10:00:00Z",
+                    "takes": [{ "resource": "CHAIR-1" }],
+                    "charge": { "rate": 20_000, "currency": "SAR", "quantity": 1 }
+                }]
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{booked}");
+    let reservation = booked["id"].as_str().expect("an id").to_owned();
+    for stage in ["confirmed", "arrived", "in_service", "completed"] {
+        let (status, body, _) = fixture
+            .send(
+                Request::post(format!("/v1/booking/reservations/{reservation}/stage"))
+                    .header(header::AUTHORIZATION, format!("Bearer {owner}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "stage": stage }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{stage}: {body}");
+    }
+    fixture
+        .project::<booking::Booking>(tenant, &booking::projections(), booking::upcasters())
+        .await;
+
+    // **The desk**: the clerk asks for the invoice, and 230 is over the limit.
+    let (status, body, _) = fixture
+        .send(
+            Request::post(format!("/v1/booking/reservations/{reservation}/invoice"))
+                .header(header::AUTHORIZATION, format!("Bearer {clerk}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "sales.over_document_limit", "{body}");
+
+    // **The worker**, once the business asked for billing on completion.
+    let (status, body, _) = fixture
+        .send(
+            Request::put("/v1/booking/billing")
+                .header(header::AUTHORIZATION, format!("Bearer {owner}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "on_completion": true }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let billed = erp_api::billing::bill_completions(
+        &db,
+        "2026-05-02T09:00:00Z".parse().expect("an instant"),
+        &erp_eventlog::Metadata::default(),
+    )
+    .await
+    .expect("the pass runs");
+    assert_eq!(billed, 1, "nobody at the desk, so nobody limited");
 
     fixture.cleanup().await;
 }

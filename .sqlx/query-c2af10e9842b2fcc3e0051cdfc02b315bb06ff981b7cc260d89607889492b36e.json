@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE membership SET revoked_at = now()\n                  WHERE identity_id = $1 AND scope_kind = 'platform' AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c2af10e9842b2fcc3e0051cdfc02b315bb06ff981b7cc260d89607889492b36e"
+}

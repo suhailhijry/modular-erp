@@ -1,0 +1,135 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT e.id, e.at,\n                      e.actor_identity_id as \"actor: IdentityId\",\n                      e.on_behalf_of_identity_id as \"on_behalf_of: IdentityId\",\n                      e.tenant_id as \"tenant: TenantId\",\n                      e.action, e.subject_type, e.subject_id, e.detail,\n                      (SELECT a.handle FROM authenticator a\n                        WHERE a.identity_id = e.actor_identity_id AND a.kind = 'password'\n                          AND ($3 OR EXISTS (SELECT 1 FROM membership m\n                                              WHERE m.identity_id = e.actor_identity_id\n                                                AND m.tenant_id = e.tenant_id))\n                        LIMIT 1) as actor_handle\n                 FROM audit_entry e\n                WHERE ($1::uuid IS NULL OR e.tenant_id = $1)\n                  AND ($2::uuid IS NULL\n                       OR (e.subject_type = 'identity' AND e.subject_id = $2::text)\n                       OR e.actor_identity_id = $2\n                       OR e.on_behalf_of_identity_id = $2)\n                  AND ($4::bigint IS NULL OR e.id < $4)\n                ORDER BY e.id DESC\n                LIMIT $5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "audit_entry",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "audit_entry",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "actor: IdentityId",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "audit_entry",
+            "name": "actor_identity_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "on_behalf_of: IdentityId",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "audit_entry",
+            "name": "on_behalf_of_identity_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "tenant: TenantId",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "audit_entry",
+            "name": "tenant_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "action",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "audit_entry",
+            "name": "action"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "subject_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "audit_entry",
+            "name": "subject_type"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "subject_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "audit_entry",
+            "name": "subject_id"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "detail",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "audit_entry",
+            "name": "detail"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "actor_handle",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "a291f55de0975c8a08acf350ff9bc27ef3eb75dc9e637ade37c9747d9c5fc6c5"
+}

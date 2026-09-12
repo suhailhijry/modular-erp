@@ -28,6 +28,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(change_role, remove_member))
         .routes(routes!(set_module_role, clear_module_role))
         .routes(routes!(second_factor_policy, set_second_factor_policy))
+        .routes(routes!(reset_member_second_factor))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -132,10 +133,11 @@ async fn list_members(
 struct SecondFactorPolicy {
     /// **When true, a member with no authenticator app is refused at entry.**
     ///
-    /// It refuses entry *to this tenant* and nothing else: their session stays
-    /// valid and their other organisations stay reachable. Somebody already
-    /// signed in is not thrown out mid-action — they are stopped the next time
-    /// they come through the door, and told to enrol.
+    /// It refuses entry *to this tenant*: their session stays valid and their
+    /// other organisations stay reachable. Somebody already signed in is not
+    /// thrown out mid-action — they are stopped the next time they come
+    /// through the door, and told to enrol. And while it holds, a member who
+    /// has an authenticator app can replace it but not turn it off.
     required: bool,
 }
 
@@ -202,6 +204,126 @@ async fn set_second_factor_policy(
         .await
         .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// **Reset a colleague's two-step sign-in**, for somebody who has lost both
+/// their authenticator app and their recovery codes.
+///
+/// Their authenticator app and every recovery code stop working, every session
+/// they have anywhere ends, and they are emailed a one-time link. **Until they
+/// open it, their password alone cannot set up a new app** — which holds after
+/// the link expires, so running one out changes nothing. Send another by
+/// calling this again; there is no second route, because a fresh link is the
+/// same act.
+///
+/// **Who may.** This tenant's owner, always; or a member who holds
+/// `hr:reset_second_factor` in the branch they are asking in, which needs an
+/// employee record and travels up the org chart like every claim outside
+/// `hr::SEGREGATED`. Nobody else, whatever else their role allows — and **no
+/// API key**, whatever its scopes and whatever role it was issued
+/// (`keys.not_a_person`): a machine has no employee record, so it can hold no
+/// claim, and taking a colleague's sign-in away is a person's act.
+///
+/// **Who cannot be reset here**, each with its own code: yourself
+/// (`second_factor.reset_yourself` — replace your app instead), this tenant's
+/// owner (`second_factor.reset_the_owner`), platform staff
+/// (`second_factor.reset_platform_staff`), and **anybody who also belongs to
+/// another organisation** (`second_factor.reset_another_company`): two-step
+/// sign-in is their account's everywhere, not this company's, so support resets
+/// those.
+///
+/// Recorded in this tenant's audit trail under your name.
+#[utoipa::path(
+    post,
+    path = "/v1/members/{identity}/second-factor-reset",
+    tag = "members",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/members`."),
+        ("X-Branch" = Option<String>, Header, description = "The branch the claim is judged in. The owner needs none."),
+    ),
+    responses(
+        (status = NO_CONTENT, description = "Reset. A link is on its way to them; nothing here shows it."),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, description = "Not the owner and not holding `hr:reset_second_factor` — `access.not_permitted` naming `manage_tenant`; or an API key, which may never do this — `keys.not_a_person`", body = Problem),
+        (status = NOT_FOUND, description = "Not a member here", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "Refused on who they are: `second_factor.reset_yourself`, `second_factor.reset_the_owner`, `second_factor.reset_platform_staff`, `second_factor.reset_another_company` (contact support), or `second_factor.reset_no_login` when the account has no email login to send to", body = Problem),
+    ),
+)]
+async fn reset_member_second_factor(
+    tenant: Allowed<Read>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(identity): Path<IdentityId>,
+) -> Result<StatusCode, Problem> {
+    // **A key is not a person, and this is a person's act.** The scope gate is
+    // the door's capability, and the door here is `Allowed<Read>` — so a
+    // reporting credential issued `*:read` clears a gate that shuts on it at
+    // every sibling member route, and the owner's role its machine identity
+    // holds is all the check below would ask for. A wider scope is not the
+    // answer: no key can hold the claim that is the other way in, because
+    // `claimant` finds no employee record for a machine. Same refusal
+    // `GET /v1/sessions/current/audit` gives one, for the same reason.
+    if tenant.key.is_some() {
+        return Err(erp_web::not_a_person(locale));
+    }
+
+    // **`Allowed<Read>` at the door, and the real check here**, because the
+    // claim that lifts it lives in the tenant's own database and the extractor
+    // is above it. `manage_tenant` is what the 403 names: it is what lets the
+    // owner through without a claim, so it is what somebody refused should ask
+    // for — or ask to be granted the claim.
+    if tenant.db.role() != Some(erp_tenant::Role::Owner)
+        && !holds_the_claim(&tenant, locale).await?
+    {
+        return Err(erp_web::not_permitted(
+            erp_control::Capability::ManageTenant,
+            locale,
+        ));
+    }
+
+    // Where the link points is decided here, because only this layer knows the
+    // deployment's public domain — as `request_password_reset` does.
+    let link_base = format!("https://{}/second-factor/", state.domain);
+    state
+        .control
+        .reset_member_second_factor(
+            tenant.db.tenant(),
+            tenant.session.identity,
+            identity,
+            locale,
+            &link_base,
+        )
+        .await
+        .map_err(|e| reset_problem(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether the person behind this request holds `hr:reset_second_factor` here.
+///
+/// `hr::actor_holds` and not `hr::may`: "nobody has granted a claim in this
+/// tenant" must read as *not held* rather than as a pass, or a tenant that uses
+/// no claims would let every clerk reset every colleague. It asks the grants,
+/// which live in the tenant's own migration chain, before it asks `hr`'s read
+/// model, so a tenant that has granted nothing never looks for `proj_hr` at all
+/// (§68). A tenant that *has* granted has had `hr` on — that is the only way a
+/// grant is written — and switching a module off never drops its read models,
+/// so the second query has a table to read either way.
+async fn holds_the_claim(tenant: &Allowed<Read>, locale: Locale) -> Result<bool, Problem> {
+    let mut conn = tenant.db.acquire().await.map_err(|e| {
+        ApiError::Access(erp_control::AccessError::Pool(e)).into_problem(locale, &crate::CATALOG)
+    })?;
+    hr::actor_holds(
+        &mut conn,
+        hr::RESET_SECOND_FACTOR,
+        &erp_web::metadata(tenant),
+    )
+    .await
+    .map_err(|e| {
+        ApiError::Access(erp_control::AccessError::Database(e))
+            .into_problem(locale, &crate::CATALOG)
+    })
 }
 
 /// Add somebody, choosing their password for them.
@@ -437,6 +559,43 @@ fn too_short(locale: Locale) -> Problem {
         ),
     )
     .into_problem(locale, &crate::CATALOG)
+}
+
+/// What each reset refusal answers. Shared with the platform route, which is
+/// why it lives beside the error rather than inside either handler.
+pub(crate) fn reset_problem(error: &erp_control::ResetError, locale: Locale) -> Problem {
+    use erp_control::ResetError;
+    let status = match error {
+        // The same 404 `remove_member` gives somebody who is not here, so this
+        // route is no oracle for identities the caller cannot already list.
+        ResetError::NotAMember => StatusCode::NOT_FOUND,
+        // Well formed, and refused on the state of whoever it names.
+        ResetError::Yourself
+        | ResetError::TheOwner
+        | ResetError::PlatformStaff
+        | ResetError::AnotherCompany
+        | ResetError::NoLogin => StatusCode::UNPROCESSABLE_ENTITY,
+        ResetError::Reason => StatusCode::BAD_REQUEST,
+        // Support asking to reset a superadmin: 403 naming `manage_staff`, the
+        // same answer every other platform door gives.
+        ResetError::Access(
+            erp_control::AccessError::StaffOnly(_)
+            | erp_control::AccessError::StaffSecondFactorRequired,
+        ) => StatusCode::FORBIDDEN,
+        ResetError::Access(
+            erp_control::AccessError::NoSuchIdentity | erp_control::AccessError::IdentitySuspended,
+        ) => StatusCode::UNAUTHORIZED,
+        ResetError::Access(_) | ResetError::Auth(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    if status.is_server_error() {
+        tracing::error!(error = %error, "a second-factor reset failed");
+    }
+    let message = if status.is_server_error() {
+        erp_i18n::Message::new(erp_control::messages::INTERNAL)
+    } else {
+        error.message()
+    };
+    Problem::new(status, &message, locale, &crate::catalog::CATALOG)
 }
 
 fn member_problem(error: &MemberError, locale: Locale) -> Problem {
