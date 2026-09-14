@@ -896,17 +896,20 @@ async fn list_bookables(
         .await?;
 
     let after = query.page.cursor(locale)?;
+    // **"Book at Olaya."** The caller's branch narrows the list by default
+    // and `?branch=` overrides it, because a manager at one counter looking
+    // at another's rota is a normal thing to want and refusing it would make
+    // the header a wall rather than a default — for a manager who belongs to
+    // both. A member confined to one is refused the other, the same way the
+    // header would have refused it.
+    let branch = match query.branch.as_deref() {
+        Some(named) => tenant.branch_scope(Some(named), locale)?,
+        None => tenant.branch.as_ref().map(|b| b.as_str().to_owned()),
+    };
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
     let page = crate::resources(
         &mut conn,
-        // **"Book at Olaya."** The caller's branch narrows the list by default
-        // and `?branch=` overrides it, because a manager at one counter looking
-        // at another's rota is a normal thing to want and refusing it would
-        // make the header a wall rather than a default.
-        query
-            .branch
-            .as_deref()
-            .or(tenant.branch.as_ref().map(erp_types::AggregateId::as_str)),
+        branch.as_deref(),
         query.withdrawn,
         query.page.limit(50, 200),
         after.as_ref(),

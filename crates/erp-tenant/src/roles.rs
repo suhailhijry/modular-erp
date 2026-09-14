@@ -18,8 +18,8 @@
 //! sale reaches this check before it has a total, so an amount rule cannot
 //! judge one; how large one sales document may be is a different control,
 //! `sales`' document limit, judged inside the command where the total exists.
-//! "Their own branch" waits on something that records which branch is a
-//! member's own.
+//! "Their own branch" is [`Access::branches`], recorded per membership since
+//! 2026-09-14 and judged by [`Access::branch_for`] before any limit is read.
 //!
 //! # Why the check is a type, not a call
 //!
@@ -28,7 +28,7 @@
 //! is silent, security-relevant, and invisible in review — the same argument
 //! that gave `TenantDb` no public constructor.
 
-use erp_types::ModuleId;
+use erp_types::{AggregateId, ModuleId};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -154,6 +154,24 @@ pub struct Access {
     /// — a key is issued one on purpose — but nothing that exempts *the owner*
     /// exempts a key issued the owner's role: see [`Self::is_owner`].
     pub machine: bool,
+    /// **The branches this member belongs to**, or `None` for every branch.
+    ///
+    /// Decided 2026-09-14: `X-Branch` was a header the caller wrote, and this
+    /// is what makes it a claim the tenant can refuse. A request from a
+    /// confined member is judged by [`Self::branch_for`]; a key is bound like a
+    /// person, because it is a membership like a person's.
+    pub branches: Option<Vec<AggregateId>>,
+}
+
+/// Why a confined member's request was refused the branch it named, or
+/// refused for naming none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchRefusal {
+    /// A branch the member does not belong to.
+    NotTheirs(AggregateId),
+    /// No branch named, and the member belongs to several — one has to be
+    /// chosen, and choosing for them would pick a place they did not mean.
+    NameOne(Vec<AggregateId>),
 }
 
 impl Access {
@@ -163,7 +181,43 @@ impl Access {
             role,
             overrides: Vec::new(),
             machine: false,
+            branches: None,
         }
+    }
+
+    /// **The branch this request is in**, given the one it named.
+    ///
+    /// An unconfined member gets what they asked for, named or not — every
+    /// branch is theirs, and a request naming none is one at no branch, which
+    /// is what every request was before confinement existed. A confined
+    /// member may name one of theirs; naming none is answered with their one
+    /// branch when they have exactly one, and refused when they have several.
+    /// Naming one that is not theirs is refused whatever else they hold.
+    ///
+    /// # Errors
+    /// [`BranchRefusal`], which the request layer renders as a 403.
+    pub fn branch_for(
+        &self,
+        asked: Option<&AggregateId>,
+    ) -> Result<Option<AggregateId>, BranchRefusal> {
+        let Some(theirs) = &self.branches else {
+            return Ok(asked.cloned());
+        };
+        match asked {
+            Some(branch) if theirs.contains(branch) => Ok(Some(branch.clone())),
+            Some(branch) => Err(BranchRefusal::NotTheirs(branch.clone())),
+            None => match theirs.as_slice() {
+                [only] => Ok(Some(only.clone())),
+                several => Err(BranchRefusal::NameOne(several.to_vec())),
+            },
+        }
+    }
+
+    /// Whether this member may look across every branch at once — an
+    /// unconfined one may; a confined one is answered from their list.
+    #[must_use]
+    pub const fn spans_branches(&self) -> bool {
+        self.branches.is_none()
     }
 
     /// The same access, held by a machine.
@@ -351,5 +405,50 @@ mod access_tests {
 
         assert!(access.allows(Capability::ManageAccounts, Some(&module("ledger"))));
         assert!(!access.allows(Capability::PostEntries, Some(&module("sales"))));
+    }
+
+    fn branch(id: &str) -> AggregateId {
+        AggregateId::new(id).unwrap_or_else(|_| unreachable!())
+    }
+
+    /// **The branch rule, as a table.** Unconfined: what was asked. One
+    /// branch: theirs when none is named, refused when another is. Several:
+    /// one of theirs, or a refusal to choose for them.
+    #[test]
+    fn a_confined_member_acts_in_their_branches_and_nowhere_else() {
+        let olaya = branch("BR-OLAYA");
+        let malaz = branch("BR-MALAZ");
+
+        let free = Access::new(Role::Clerk);
+        assert_eq!(free.branch_for(None), Ok(None));
+        assert_eq!(free.branch_for(Some(&malaz)), Ok(Some(malaz.clone())));
+        assert!(free.spans_branches());
+
+        let mut one = Access::new(Role::Clerk);
+        one.branches = Some(vec![olaya.clone()]);
+        assert_eq!(
+            one.branch_for(None),
+            Ok(Some(olaya.clone())),
+            "one branch needs no header"
+        );
+        assert_eq!(one.branch_for(Some(&olaya)), Ok(Some(olaya.clone())));
+        assert_eq!(
+            one.branch_for(Some(&malaz)),
+            Err(BranchRefusal::NotTheirs(malaz.clone()))
+        );
+        assert!(!one.spans_branches());
+
+        let mut two = Access::new(Role::Clerk);
+        two.branches = Some(vec![olaya.clone(), malaz.clone()]);
+        assert_eq!(
+            two.branch_for(None),
+            Err(BranchRefusal::NameOne(vec![olaya.clone(), malaz.clone()])),
+            "several branches: the request has to say which"
+        );
+        assert_eq!(two.branch_for(Some(&malaz)), Ok(Some(malaz)));
+        assert_eq!(
+            two.branch_for(Some(&branch("BR-JEDDAH"))),
+            Err(BranchRefusal::NotTheirs(branch("BR-JEDDAH")))
+        );
     }
 }

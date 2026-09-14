@@ -24,6 +24,11 @@ pub const API_VERSION_TOO_OLD: MessageCode = MessageCode::new("request.api_versi
 /// yet. The same message shape, and the same actionable number.
 pub const API_VERSION_TOO_NEW: MessageCode = MessageCode::new("request.api_version_too_new");
 pub const PASSWORD_TOO_SHORT: MessageCode = MessageCode::new("request.password_too_short");
+/// This deployment does not take signups from the public; staff set a company
+/// up once it has paid.
+pub const SIGNUP_CLOSED: MessageCode = MessageCode::new("signups.closed");
+/// A member was confined to a branch the tenant has not opened, or has closed.
+pub const NO_SUCH_BRANCH: MessageCode = MessageCode::new("request.no_such_branch");
 pub const UNKNOWN_MODULE: MessageCode = MessageCode::new("request.unknown_module");
 pub const UNKNOWN_CHART: MessageCode = MessageCode::new("request.unknown_chart");
 pub const UNKNOWN_ROLE: MessageCode = MessageCode::new("request.unknown_role");
@@ -114,6 +119,8 @@ pub static CODES: &[MessageCode] = &[
     UNKNOWN_ACCOUNT_KIND,
     INVALID_ID,
     PASSWORD_TOO_SHORT,
+    SIGNUP_CLOSED,
+    NO_SUCH_BRANCH,
     UNKNOWN_MODULE,
     UNKNOWN_CHART,
     UNKNOWN_ROLE,
@@ -335,6 +342,29 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
             many: Some("تحتاج كلمة المرور إلى {n} حرفًا على الأقل."),
             other: "تحتاج كلمة المرور إلى {n} حرف على الأقل.",
         },
+    ),
+    (
+        SIGNUP_CLOSED,
+        Locale::English,
+        Template::Simple(
+            "Signup is by arrangement here. Contact sales, and your company will be set up \
+             for you once it is agreed.",
+        ),
+    ),
+    (
+        SIGNUP_CLOSED,
+        Locale::Arabic,
+        Template::Simple("التسجيل هنا بالاتفاق. تواصل مع المبيعات، وستُعدُّ شركتك لك بعد الاتفاق."),
+    ),
+    (
+        NO_SUCH_BRANCH,
+        Locale::English,
+        Template::Simple("{branch} is not an open branch of this business."),
+    ),
+    (
+        NO_SUCH_BRANCH,
+        Locale::Arabic,
+        Template::Simple("{branch} ليس فرعًا مفتوحًا لهذه المنشأة."),
     ),
     (
         UNKNOWN_MODULE,

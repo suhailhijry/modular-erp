@@ -1413,7 +1413,7 @@ impl Fixture {
     async fn confirm_and_cut_off(&self, token: &str, module: ModuleSetup, slug: &str) {
         let finished = tokio::select! {
             biased;
-            _ = self.control.confirm_signup(token, vec![module]) => true,
+            _ = self.control.confirm_signup(token, vec![module], None) => true,
             () = until("a tenant row", || async { self.status(slug).await.is_some() }) => false,
         };
         assert!(
@@ -1557,7 +1557,7 @@ async fn a_confirmation_cut_off_mid_build_that_fails_is_still_compensated() {
 
     let done = fixture
         .control
-        .confirm_signup(&token, vec![toy_module()])
+        .confirm_signup(&token, vec![toy_module()], None)
         .await
         .expect("the same link builds the company");
     assert_eq!(done.tenant.status, TenantStatus::Active);

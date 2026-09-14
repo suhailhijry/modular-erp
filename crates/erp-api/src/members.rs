@@ -27,6 +27,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list_members, add_member))
         .routes(routes!(change_role, remove_member))
         .routes(routes!(set_module_role, clear_module_role))
+        .routes(routes!(set_member_branches))
         .routes(routes!(second_factor_policy, set_second_factor_policy))
         .routes(routes!(reset_member_second_factor))
 }
@@ -46,9 +47,21 @@ struct MemberView {
     role: &'static str,
     /// Where the tenant said something different. Usually empty.
     module_roles: Vec<ModuleRoleView>,
+    /// The branches they belong to. **Empty means every branch**, which is
+    /// what every member starts with; set at `PUT /v1/members/{identity}/branches`.
+    branches: Vec<String>,
     #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     since: Timestamp,
     suspended: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({ "branches": ["BR-OLAYA"] }))]
+struct BranchList {
+    /// The branches this member may act in and read. Each must be an open
+    /// branch (`GET /v1/branches`). **Empty lifts the confinement**: they
+    /// belong to every branch again.
+    branches: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -121,6 +134,7 @@ async fn list_members(
                         role: role.as_str(),
                     })
                     .collect(),
+                branches: m.branches,
                 since: m.since,
                 suspended: m.suspended,
             })
@@ -532,6 +546,91 @@ async fn clear_module_role(
     state
         .control
         .set_module_role(tenant.db.tenant(), identity, &module, None, actor(&tenant))
+        .await
+        .map_err(|e| member_problem(&e, locale))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Confines somebody to branches, or lifts it.
+///
+/// **Decided 2026-09-14.** `X-Branch` used to be a header the caller wrote:
+/// nothing recorded which branches a person belonged to, so nothing could
+/// refuse one they did not, and branch-scoped claims and inventory shelves
+/// both trusted it. This is the record. From the next request a confined
+/// member is refused any other branch (`access.wrong_branch`), gets their one
+/// branch filled in when they name none, is asked to name one when they
+/// belong to several (`access.name_a_branch`), and reads only their own
+/// shelves and people. A key is bound the same way through its own
+/// membership. Nobody is confined until their owner says so; an empty list
+/// puts them back on every branch.
+///
+/// Each branch must be open in the tenant's `branches` module, which is where
+/// branches live; the control plane holds none and cannot check.
+#[utoipa::path(
+    put,
+    path = "/v1/members/{identity}/branches",
+    tag = "members",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("identity" = uuid::Uuid, Path, description = "From `GET /v1/members`."),
+    ),
+    request_body = BranchList,
+    responses(
+        (status = NO_CONTENT, description = "Set. Applies from their next request, on every node within seconds."),
+        (status = BAD_REQUEST, description = "A branch that is not open here — `request.no_such_branch` — or not an identifier", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "Not a member here, or the `branches` module is not enabled", body = Problem),
+    ),
+)]
+async fn set_member_branches(
+    tenant: Allowed<ManageTenant>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Path(identity): Path<IdentityId>,
+    Json(body): Json<BranchList>,
+) -> Result<StatusCode, Problem> {
+    // The branches themselves are the module's; a business with no branches
+    // has nothing to confine anybody to.
+    if !body.branches.is_empty() {
+        erp_web::require_module(&tenant.db, &branches::module_id(), locale)?;
+    }
+    // Against the log, as `ledger::post_entry_in` checks it, so a branch opened
+    // a moment ago can be assigned at once rather than after the worker's next
+    // pass over `proj_branches`.
+    let mut checked = Vec::with_capacity(body.branches.len());
+    for raw in &body.branches {
+        let id = erp_web::parse_id(raw, locale)?;
+        let mut conn = tenant.db.acquire().await.map_err(|e| {
+            ApiError::Access(erp_control::AccessError::Pool(e))
+                .into_problem(locale, &crate::CATALOG)
+        })?;
+        let open = branches::accepts_documents(&mut conn, &id)
+            .await
+            .map_err(|e| {
+                ApiError::Access(erp_control::AccessError::Corrupt(format!(
+                    "branch {raw}: {e}"
+                )))
+                .into_problem(locale, &crate::CATALOG)
+            })?;
+        drop(conn);
+        if !open {
+            return Err(erp_web::bad_request(
+                erp_web::messages::NO_SUCH_BRANCH,
+                "branch",
+                raw,
+                locale,
+            ));
+        }
+        checked.push(id.as_str().to_owned());
+    }
+    checked.sort();
+    checked.dedup();
+
+    state
+        .control
+        .set_member_branches(tenant.db.tenant(), identity, &checked, actor(&tenant))
         .await
         .map_err(|e| member_problem(&e, locale))?;
 

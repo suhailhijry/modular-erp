@@ -743,11 +743,13 @@ async fn list_stock(
         .await?;
 
     let after = query.page.cursor(locale)?;
+    // A confined member reads their own shelves and no other's.
+    let branch = tenant.branch_scope(query.branch.as_deref(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
     let found = crate::stock(
         &mut conn,
         query.product.as_deref(),
-        query.branch.as_deref(),
+        branch.as_deref(),
         query.page.limit(PAGE, MAX_PAGE),
         after.as_ref(),
     )
@@ -805,11 +807,12 @@ async fn list_lots(
         .await?;
 
     let after = query.page.cursor(locale)?;
+    let branch = tenant.branch_scope(query.branch.as_deref(), locale)?;
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;
     let found = crate::lots(
         &mut conn,
         query.product.as_deref(),
-        query.branch.as_deref(),
+        branch.as_deref(),
         query.expiring_before,
         query.page.limit(PAGE, MAX_PAGE),
         after.as_ref(),
@@ -894,7 +897,8 @@ async fn stock_summary(
         .map_err(|e| config_problem(&e, locale, &CATALOG))?
         .day(chrono::Utc::now());
     let expiring_through = window.warns_until(today);
-    let found = crate::summary(&mut conn, query.branch.as_deref(), today, expiring_through)
+    let branch = tenant.branch_scope(query.branch.as_deref(), locale)?;
+    let found = crate::summary(&mut conn, branch.as_deref(), today, expiring_through)
         .await
         .map_err(|e| database(&e, locale))?;
     drop(conn);

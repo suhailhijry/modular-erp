@@ -157,6 +157,106 @@ impl Fixture {
     }
 }
 
+/// **A member's branches are the membership's: loaded with it, replaced as
+/// one list, lifted by an empty one, and gone with it.** Decided 2026-09-14.
+/// A re-added member starts unconfined, as a re-added member starts on their
+/// new role; a stranger is `NotAMember`; every change is on the record.
+#[tokio::test]
+async fn a_members_branches_are_loaded_with_the_membership_and_gone_with_it() {
+    let mut fixture = Fixture::new().await;
+    let tenant = fixture.provision("acme").await;
+    let clerk = fixture
+        .control
+        .create_identity(Actor::system())
+        .await
+        .expect("creates")
+        .id;
+    fixture
+        .control
+        .grant_membership(clerk, Scope::Tenant(tenant), "clerk", Actor::system())
+        .await
+        .expect("grants");
+    let control = &fixture.control;
+    let branches = |id| async move { control.admit(id, tenant).await.expect("admits").branches };
+    let list = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    let id = |raw: &str| erp_types::AggregateId::new(raw).expect("an id");
+
+    assert_eq!(
+        branches(clerk).await,
+        None,
+        "every branch, until the owner says otherwise"
+    );
+
+    control
+        .set_member_branches(
+            tenant,
+            clerk,
+            &list(&["BR-OLAYA", "BR-MALAZ"]),
+            Actor::system(),
+        )
+        .await
+        .expect("confines");
+    assert_eq!(
+        branches(clerk).await,
+        Some(vec![id("BR-MALAZ"), id("BR-OLAYA")]),
+        "the list is what was set, alphabetically, and the entry cache forgot the old one"
+    );
+
+    // Replaced, not added to.
+    control
+        .set_member_branches(tenant, clerk, &list(&["BR-MALAZ"]), Actor::system())
+        .await
+        .expect("narrows");
+    assert_eq!(branches(clerk).await, Some(vec![id("BR-MALAZ")]));
+
+    // Lifted.
+    control
+        .set_member_branches(tenant, clerk, &[], Actor::system())
+        .await
+        .expect("lifts");
+    assert_eq!(branches(clerk).await, None);
+
+    // Gone with the membership.
+    control
+        .set_member_branches(tenant, clerk, &list(&["BR-OLAYA"]), Actor::system())
+        .await
+        .expect("confines again");
+    control
+        .revoke_membership(clerk, Scope::Tenant(tenant), Actor::system())
+        .await
+        .expect("revokes");
+    control
+        .grant_membership(clerk, Scope::Tenant(tenant), "clerk", Actor::system())
+        .await
+        .expect("re-adds");
+    assert_eq!(
+        branches(clerk).await,
+        None,
+        "a re-added member starts unconfined"
+    );
+
+    // A stranger.
+    let stranger = erp_types::IdentityId::new();
+    assert!(matches!(
+        control
+            .set_member_branches(tenant, stranger, &list(&["BR-OLAYA"]), Actor::system())
+            .await,
+        Err(erp_control::MemberError::NotAMember)
+    ));
+
+    let changes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_entry
+          WHERE action = 'membership.branches_changed' AND subject_id = $1",
+    )
+    .bind(clerk.to_string())
+    .fetch_one(control.pool())
+    .await
+    .expect("counts");
+    assert_eq!(changes, 4, "every change to the list is on the record");
+
+    fixture.cleanup().await;
+}
+
 /// The property everything else rests on.
 #[tokio::test]
 async fn entering_one_tenant_cannot_reach_another() {

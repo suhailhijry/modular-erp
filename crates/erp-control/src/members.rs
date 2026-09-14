@@ -26,6 +26,8 @@ pub struct Member {
     pub identity: IdentityId,
     /// Where this person's role differs from their tenant-wide one.
     pub module_roles: Vec<(erp_types::ModuleId, Role)>,
+    /// The branches they belong to. Empty means every branch.
+    pub branches: Vec<String>,
     /// The login handle. `None` for an identity with no password authenticator
     /// — which today means one created some other way, and later an invitation
     /// nobody has accepted.
@@ -90,7 +92,13 @@ impl ControlPlane {
                              FROM membership_module_role r
                             WHERE r.membership_id = m.id),
                           '{}'
-                      ) as "module_roles!: Vec<String>"
+                      ) as "module_roles!: Vec<String>",
+                      COALESCE(
+                          (SELECT array_agg(b.branch ORDER BY b.branch)
+                             FROM membership_branch b
+                            WHERE b.membership_id = m.id),
+                          '{}'
+                      ) as "branches!: Vec<String>"
                  FROM membership m
                  JOIN identity i ON i.id = m.identity_id
                 WHERE m.tenant_id = $1 AND m.revoked_at IS NULL
@@ -110,6 +118,7 @@ impl ControlPlane {
                         .iter()
                         .map(|pair| parse_module_role(pair))
                         .collect::<Result<_, _>>()?,
+                    branches: row.branches,
                     // A role this build cannot read is an error, not a guess.
                     role: row
                         .role
@@ -314,6 +323,76 @@ impl ControlPlane {
         // Now, not after the TTL — same reason a demotion is invalidated at
         // once: the seconds in between are seconds of somebody doing what they
         // have just been told they cannot.
+        self.forget(crate::shared::Invalidate::Membership {
+            identity,
+            tenant: tenant_id,
+        })
+        .await;
+        Ok(())
+    }
+
+    /// **Confines somebody to branches**, or lifts it with an empty list.
+    ///
+    /// Replaces the whole list in one transaction with its entry, so a member
+    /// is never between two lists. The ids are the tenant's own branch
+    /// identifiers; the route that calls this checks them against the
+    /// tenant's `branches` module first, because the control plane holds no
+    /// domain and cannot. Takes effect on this node at once, for the reason a
+    /// demotion does.
+    ///
+    /// # Errors
+    /// [`MemberError::NotAMember`], or the database.
+    pub async fn set_member_branches(
+        &self,
+        tenant_id: TenantId,
+        identity: IdentityId,
+        branches: &[String],
+        actor: Actor,
+    ) -> Result<(), MemberError> {
+        let mut tx = self.pool.begin().await.map_err(AccessError::Database)?;
+        let membership = sqlx::query_scalar!(
+            "SELECT id FROM membership
+              WHERE tenant_id = $1 AND identity_id = $2 AND revoked_at IS NULL
+                FOR UPDATE",
+            tenant_id.as_uuid(),
+            identity.as_uuid(),
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(AccessError::Database)?
+        .ok_or(MemberError::NotAMember)?;
+
+        sqlx::query!(
+            "DELETE FROM membership_branch WHERE membership_id = $1",
+            membership,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(AccessError::Database)?;
+        for branch in branches {
+            sqlx::query!(
+                "INSERT INTO membership_branch (membership_id, branch) VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING",
+                membership,
+                branch,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(AccessError::Database)?;
+        }
+
+        self.record(
+            &mut tx,
+            actor,
+            Some(tenant_id),
+            "membership.branches_changed",
+            "identity",
+            &identity.to_string(),
+            serde_json::json!({ "tenant": tenant_id.to_string(), "branches": branches }),
+        )
+        .await?;
+        tx.commit().await.map_err(AccessError::Database)?;
+
         self.forget(crate::shared::Invalidate::Membership {
             identity,
             tenant: tenant_id,

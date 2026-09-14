@@ -508,12 +508,16 @@ async fn list_employees(
 
     let after = query.page.cursor(locale)?;
     let branch = if query.scope.as_deref() == Some("all") {
+        // Company-wide is for a member who belongs to the whole company.
+        tenant.may_span_branches(locale)?;
         None
     } else {
-        query
-            .branch
-            .clone()
-            .or_else(|| tenant.branch.as_ref().map(|b| b.as_str().to_owned()))
+        // The header's branch was judged when the request was let in; a
+        // branch named here is judged the same way.
+        match query.branch.as_deref() {
+            Some(named) => tenant.branch_scope(Some(named), locale)?,
+            None => tenant.branch.as_ref().map(|b| b.as_str().to_owned()),
+        }
     };
 
     let mut conn = tenant.db.read().await.map_err(|e| pool(&e, locale))?;

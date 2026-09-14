@@ -147,6 +147,18 @@ it ends every session that account holds. Reach for it when that account is
 compromised and grant a replacement right after. Anything else it is given
 prints the usage and exits 2.
 
+**Setting a company up** is billing's or a superadmin's, over
+`POST /v1/platform/tenants` with the slug, the company name, the owner's email
+and the modules it asked for. Signup is closed to the public unless the
+deployment sets `SIGNUP=open` — a production deployment does not, because a
+tenant gets what it asked for after it has paid and there is no trial; the
+public demo is the trial. The owner is mailed a link saying the company is
+ready; nothing exists until they open it, choose a password (or give the
+password of the account the address already has), and are signed in with the
+modules installed. Modules are not what a company pays for — seats are — so the
+owner may switch them on and off afterwards at `POST /v1/modules`. The request
+is on the platform audit trail as `signup.requested` under your name.
+
 **Suspending a tenant** is billing's or a superadmin's, over
 `POST /v1/platform/tenants/{id}/suspend` with a `reason`, and
 `POST /v1/platform/tenants/{id}/reinstate` lifts it. There is no command for it.
@@ -215,6 +227,8 @@ BIND                   # the API's address; defaults to 0.0.0.0:8080
 TRUST_X_FORWARDED_FOR  # `true` only behind a proxy you run that appends the
                        #   caller to X-Forwarded-For; otherwise every caller
                        #   behind it shares one rate-limit bucket — see below
+SIGNUP                 # `open` lets anybody create a tenant at POST /v1/signups;
+                       #   unset or `closed`, staff set companies up — see below
 SEALING_KEY            # <id>:<64 hex>[,<id>:<64 hex>…]; the first seals — see below
 PRIMARY_REPLICA_URL    # reads that tolerate lag; blank or unset means no replica
 PRIMARY_DIRECT_URL     # the route that bypasses a connection pooler — see below
@@ -732,6 +746,30 @@ cannot restate a filed return.
 
 Standard-rated businesses need none of this — a taxed line has nothing to
 explain.
+
+## Which branches somebody belongs to
+
+Until 2026-09-14 `X-Branch` was a header the caller wrote: nothing recorded
+which branches a person belonged to, so nothing could refuse one they did not.
+The owner records it now, per member:
+
+```bash
+# Sara works at Olaya, and nowhere else.
+curl -X PUT "$API/v1/members/$SARA/branches" -H "$AUTH" \
+  -H 'Content-Type: application/json' -d '{ "branches": ["BR-OLAYA"] }'
+```
+
+Each branch must be open (`GET /v1/branches`). From Sara's next request:
+`X-Branch: BR-MALAZ` is refused with `403 access.wrong_branch`; a request naming
+no branch is one at Olaya; her shelves, lots and the stock summary show Olaya
+alone, and `?branch=BR-MALAZ` on any of them is refused the same way; the org
+chart cannot be read company-wide (`?scope=all` is `403 access.name_a_branch`).
+Give her two branches and a request has to name one of them — the same
+`access.name_a_branch`, listing hers. An API key is bound the same way through
+its own membership: `GET /v1/members` lists the key's identity, and the same
+route confines it. Nobody is confined until you say so; `{ "branches": [] }`
+puts them back on every branch. Every change is on the audit trail as
+`membership.branches_changed`.
 
 ## Who may issue a credit note
 

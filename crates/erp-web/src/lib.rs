@@ -49,10 +49,11 @@ use erp_i18n::{Composite, StaticCatalog};
 pub use consistency::{Consistency, nudge};
 pub use error::ApiError;
 pub use extract::{
-    Allowed, Anonymous, Authenticated, BRANCH_HEADER, Capability, FORWARDED_FOR, HandleDeadLetters,
-    IdempotencyKey, IfMatch, Language, ManageAccounts, ManageStaff, ManageTenant, ManagesTenant,
-    PostEntries, Power, Public, Read, ReadAuditTrail, ResetSecondFactors, Staff, SuspendTenants,
-    Tenant, charge_for_a_reset, not_a_person, not_permitted, tenant_of_host,
+    Allowed, Anonymous, Authenticated, BRANCH_HEADER, Capability, CreateTenants, FORWARDED_FOR,
+    HandleDeadLetters, IdempotencyKey, IfMatch, Language, ManageAccounts, ManageStaff,
+    ManageTenant, ManagesTenant, PostEntries, Power, Public, Read, ReadAuditTrail,
+    ResetSecondFactors, Staff, SuspendTenants, Tenant, charge_for_a_reset, not_a_person,
+    not_permitted, tenant_of_host,
 };
 pub use problem::Problem;
 pub use state::AppState;

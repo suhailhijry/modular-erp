@@ -1183,6 +1183,26 @@
         ],
         "type": "object"
       },
+      "BranchList": {
+        "example": {
+          "branches": [
+            "BR-OLAYA"
+          ]
+        },
+        "properties": {
+          "branches": {
+            "description": "The branches this member may act in and read. Each must be an open\nbranch (`GET /v1/branches`). **Empty lifts the confinement**: they\nbelong to every branch again.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "branches"
+        ],
+        "type": "object"
+      },
       "BranchRecord": {
         "properties": {
           "address": {
@@ -1807,6 +1827,19 @@
             "type": "object"
           }
         ]
+      },
+      "Confirm": {
+        "description": "What a confirmation may carry.",
+        "properties": {
+          "password": {
+            "description": "**For a company staff set up**: the password the owner chooses, or, if\nthe address already has an account, that account's password. A\nself-signup carries its password already and refuses one here.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "ContributionView": {
         "properties": {
@@ -4175,6 +4208,13 @@
       },
       "MemberView": {
         "properties": {
+          "branches": {
+            "description": "The branches they belong to. **Empty means every branch**, which is\nwhat every member starts with; set at `PUT /v1/members/{identity}/branches`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "handle": {
             "type": [
               "string",
@@ -4208,6 +4248,7 @@
           "identity",
           "role",
           "module_roles",
+          "branches",
           "since",
           "suspended"
         ],
@@ -7101,6 +7142,45 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "NewTenant": {
+        "description": "A company to set up, once it has paid.",
+        "example": {
+          "company": "Bassat Media Productions",
+          "modules": [
+            "ledger",
+            "sales"
+          ],
+          "owner_email": "owner@bassat.sa",
+          "slug": "bassat"
+        },
+        "properties": {
+          "company": {
+            "description": "What the business is called.",
+            "type": "string"
+          },
+          "modules": {
+            "description": "What they asked for. Unknown names are refused rather than ignored.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "owner_email": {
+            "description": "The owner's login. The link goes here, and nothing exists until they\nopen it.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "The tenant's name in URLs. 2–50 characters.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "company",
+          "owner_email"
         ],
         "type": "object"
       },
@@ -31954,6 +32034,146 @@
         ]
       }
     },
+    "/v1/members/{identity}/branches": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "**Decided 2026-09-14.** `X-Branch` used to be a header the caller wrote:\nnothing recorded which branches a person belonged to, so nothing could\nrefuse one they did not, and branch-scoped claims and inventory shelves\nboth trusted it. This is the record. From the next request a confined\nmember is refused any other branch (`access.wrong_branch`), gets their one\nbranch filled in when they name none, is asked to name one when they\nbelong to several (`access.name_a_branch`), and reads only their own\nshelves and people. A key is bound the same way through its own\nmembership. Nobody is confined until their owner says so; an empty list\nputs them back on every branch.\n\nEach branch must be open in the tenant's `branches` module, which is where\nbranches live; the control plane holds none and cannot check.",
+        "operationId": "set_member_branches",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From `GET /v1/members`.",
+            "in": "path",
+            "name": "identity",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BranchList"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Set. Applies from their next request, on every node within seconds."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A branch that is not open here — `request.no_such_branch` — or not an identifier"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a member here, or the `branches` module is not enabled"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Confines somebody to branches, or lifts it.",
+        "tags": [
+          "members"
+        ]
+      }
+    },
     "/v1/members/{identity}/modules/{module}": {
       "delete": {
         "description": "Different from setting them to `viewer` there: the exception is gone, so a\nlater change to their tenant-wide role reaches this module too.",
@@ -38878,6 +39098,142 @@
           }
         },
         "summary": "Change what a staff member may do.",
+        "tags": [
+          "platform"
+        ]
+      }
+    },
+    "/v1/platform/tenants": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Signup is closed to the public on a production deployment; this is how a\ncustomer gets in (decided 2026-09-14). It files the same request\n`POST /v1/signups` would, with no password on file and your name on it, and\nmails the owner a link that says their company is ready. **Nothing exists\nuntil they open it**: the link asks them to choose a password — or, when the\naddress already has an account, to give that account's password — and then\nbuilds the company and signs them in.\n\nModules are what the customer asked for; they are not what it pays for —\nseats are — and the owner may switch them on and off afterwards.\n\nRecorded in the platform audit trail as `signup.requested` under your name.",
+        "operationId": "create_tenant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewTenant"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupRequested"
+                }
+              }
+            },
+            "description": "The owner has been mailed the link. Nothing exists yet."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A module that does not exist, or one whose dependencies were not asked for"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not billing or superadmin — `access.not_permitted` naming `create_tenants` — or without a second factor"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The slug is taken"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A link went to this address moments ago. `args.seconds` says when to try again."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          }
+        },
+        "summary": "Set up a company that has paid.",
         "tags": [
           "platform"
         ]
@@ -47988,7 +48344,7 @@
         }
       ],
       "post": {
-        "description": "Sends a confirmation to the address and **creates nothing**. No account, no\ncompany, no database: those are what `POST /v1/signups/{token}` builds, and\nthis endpoint is unauthenticated, so anything it built would be built for\nanybody who could reach it.\n\nAn address that already has an account has to give that account's password.\nWithout it, naming somebody else's address would be a way to post mail\nthrough us.",
+        "description": "**Only where the deployment opens signup** (`SIGNUP=open`). A production\ndeployment does not: a company is set up by platform staff once it has\npaid, and its owner receives the same confirmation link — so this route\nanswers `403 signups.closed` there, and `POST /v1/signups/{token}` still\nworks.\n\nSends a confirmation to the address and **creates nothing**. No account, no\ncompany, no database: those are what `POST /v1/signups/{token}` builds, and\nthis endpoint is unauthenticated, so anything it built would be built for\nanybody who could reach it.\n\nAn address that already has an account has to give that account's password.\nWithout it, naming somebody else's address would be a way to post mail\nthrough us.",
         "operationId": "sign_up",
         "requestBody": {
           "content": {
@@ -48030,6 +48386,16 @@
               }
             },
             "description": "The address already has an account and the password did not match it"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Signup is closed on this deployment; a company is set up by staff once it has paid — `signups.closed`"
           },
           "409": {
             "content": {
@@ -48115,7 +48481,7 @@
         }
       ],
       "post": {
-        "description": "Creates the company, its database, its first owner, and a session — in one\noperation that compensates if any part of it fails. The response is a\nworking bearer token: confirming logs you in.\n\nThe build finishes even if this request does not: a timeout or a closed\nconnection ends in the company, which the password logs into, or in a\nfailure undone and the link working again.\n\nThere is deliberately no `GET` beside this. `/v1/join/{token}` has one\nbecause whoever opens an invitation did not write it and has to be told what\nthey are joining; whoever opens this one filled the form in themselves, and\nconfirming does the thing they asked for.",
+        "description": "Creates the company, its database, its first owner, and a session — in one\noperation that compensates if any part of it fails. The response is a\nworking bearer token: confirming logs you in.\n\n**A company staff set up has no password on file**, so the link takes one\nin the body: the owner's choice, or — when the address already has an\naccount — that account's password, the way an invitation is accepted. A\nself-signup carries its password already and refuses one here, rather than\nquietly ignoring what somebody typed as theirs.\n\nThe build finishes even if this request does not: a timeout or a closed\nconnection ends in the company, which the password logs into, or in a\nfailure undone and the link working again.\n\nThere is deliberately no `GET` beside this. `/v1/join/{token}` has one\nbecause whoever opens an invitation did not write it and has to be told what\nthey are joining; whoever opens this one filled the form in themselves, and\nconfirming does the thing they asked for.",
         "operationId": "confirm_signup",
         "parameters": [
           {
@@ -48128,6 +48494,17 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Confirm"
+              }
+            }
+          },
+          "description": "Optional. A `password` only for a company staff set up.",
+          "required": true
+        },
         "responses": {
           "201": {
             "content": {
@@ -48147,7 +48524,17 @@
                 }
               }
             },
-            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+            "description": "A company staff set up and no password (`signups.password_required`), a password under 12 characters, or a password on a self-signup that already has one (`signups.password_not_needed`)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The address already has an account and the password did not match it"
           },
           "404": {
             "content": {
@@ -48168,6 +48555,36 @@
               }
             },
             "description": "The slug was taken while the link sat in a mailbox. The link still works; ask for another name."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
           },
           "429": {
             "content": {

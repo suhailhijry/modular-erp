@@ -806,16 +806,23 @@ capability! {
 #[derive(Debug)]
 pub struct Allowed<C: Capability> {
     tenant: Tenant,
-    /// Which branch this request is for, from `X-Branch`.
+    /// Which branch this request is for: `X-Branch`, **judged against the
+    /// member's own branches** (decided 2026-09-14).
     ///
     /// **On the authorization extractor and not on each handler**, so every
     /// write in the system carries it without forty handlers remembering to.
-    /// It is not validated here — `erp-web` is core and knows nothing of
-    /// modules — but `ledger::post_entry_in` refuses one that names no open
-    /// branch, and every posting in the system arrives there.
+    /// Whether it names an open branch is not checked here — `erp-web` is core
+    /// and knows nothing of modules — but `ledger::post_entry_in` refuses one
+    /// that does not, and every posting in the system arrives there.
     ///
-    /// It is also where a person scoped to one branch would be refused another,
-    /// which is why it sits beside the capability check rather than beyond it.
+    /// Whether it is one of the *member's* branches is checked here, through
+    /// [`TenantDb::branch_for`]: a member confined to some branches is refused
+    /// another with `access.wrong_branch`, gets their one branch filled in when
+    /// they name none, and is asked to name one (`access.name_a_branch`) when
+    /// they belong to several. An unconfined member — every membership until
+    /// its owner says otherwise — gets what they sent, which is what every
+    /// request got before. That is why it sits beside the capability check
+    /// rather than beyond it.
     pub branch: Option<AggregateId>,
     capability: std::marker::PhantomData<C>,
 }
@@ -870,6 +877,82 @@ impl<C: Capability> Allowed<C> {
             Err(not_permitted(C::CAPABILITY, locale))
         }
     }
+
+    /// **The branch a list is about**, given the one the query named.
+    ///
+    /// For the routes that take `?branch=` and read across every branch when
+    /// it is absent — stock, lots, the shelf summary. An unconfined member gets
+    /// what they asked for, every branch included; a confined member may name
+    /// one of theirs, gets their one branch when they name none, and is asked
+    /// to name one when they belong to several — the same rule the header is
+    /// judged by, so what a member may read is what they may act in.
+    ///
+    /// # Errors
+    /// `403 access.wrong_branch` or `403 access.name_a_branch`.
+    pub fn branch_scope(
+        &self,
+        asked: Option<&str>,
+        locale: Locale,
+    ) -> Result<Option<String>, Problem> {
+        let asked = asked
+            .map(|raw| {
+                AggregateId::new(raw).map_err(|_| {
+                    crate::wire::bad_request(crate::messages::INVALID_ID, "branch", raw, locale)
+                })
+            })
+            .transpose()?;
+        self.tenant
+            .db
+            .branch_for(asked.as_ref())
+            .map(|branch| branch.map(|b| b.as_str().to_owned()))
+            .map_err(|refusal| branch_refusal(&refusal, locale))
+    }
+
+    /// **Whether this member may look across every branch at once** — an
+    /// org chart, a payroll run, `?scope=all`. A confined member may not, and
+    /// is told which branches are theirs.
+    ///
+    /// # Errors
+    /// `403 access.name_a_branch`.
+    pub fn may_span_branches(&self, locale: Locale) -> Result<(), Problem> {
+        if self.tenant.db.spans_branches() {
+            return Ok(());
+        }
+        let theirs = self
+            .tenant
+            .db
+            .access()
+            .and_then(|access| access.branches.clone())
+            .unwrap_or_default();
+        Err(branch_refusal(
+            &erp_control::BranchRefusal::NameOne(theirs),
+            locale,
+        ))
+    }
+}
+
+/// The 403 a confined member gets for a branch that is not theirs, or for
+/// naming none when they have several.
+fn branch_refusal(refusal: &erp_control::BranchRefusal, locale: Locale) -> Problem {
+    let message = match refusal {
+        erp_control::BranchRefusal::NotTheirs(branch) => {
+            erp_i18n::Message::new(erp_control::messages::WRONG_BRANCH)
+                .with("branch", erp_i18n::MessageArg::text(branch.as_str()))
+        }
+        erp_control::BranchRefusal::NameOne(theirs) => {
+            erp_i18n::Message::new(erp_control::messages::NAME_A_BRANCH).with(
+                "branches",
+                erp_i18n::MessageArg::text(
+                    theirs
+                        .iter()
+                        .map(AggregateId::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            )
+        }
+    };
+    Problem::new(StatusCode::FORBIDDEN, &message, locale, &crate::CATALOG)
 }
 
 impl<C: Capability> std::ops::Deref for Allowed<C> {
@@ -949,7 +1032,7 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
         // **Parsed before the check, because it is one of the facts.** A limit
         // like "only their own branch" cannot be evaluated by a check that has
         // not yet read `X-Branch`.
-        let branch = parts
+        let named = parts
             .headers
             .get(BRANCH_HEADER)
             .and_then(|value| value.to_str().ok())
@@ -961,6 +1044,13 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
                 })
             })
             .transpose()?;
+        // **Judged against the member's own branches**, before the capability
+        // check reads it as a fact: the header is what the caller wrote, and
+        // this is what makes it a claim the tenant can refuse.
+        let branch = tenant
+            .db
+            .branch_for(named.as_ref())
+            .map_err(|refusal| branch_refusal(&refusal, locale))?;
 
         // **What the edge knows.** An amount is in a body this extractor has
         // not read, so a limit about one is narrowed later by the handler that
@@ -1137,6 +1227,14 @@ pub struct SuspendTenants;
 
 impl Power for SuspendTenants {
     const POWER: erp_control::PlatformPower = erp_control::PlatformPower::SuspendTenants;
+}
+
+/// Set up a tenant for a company that has paid, mailing its owner the link.
+#[derive(Debug, Clone, Copy)]
+pub struct CreateTenants;
+
+impl Power for CreateTenants {
+    const POWER: erp_control::PlatformPower = erp_control::PlatformPower::CreateTenants;
 }
 
 /// List, requeue and dismiss the control plane's dead letters.

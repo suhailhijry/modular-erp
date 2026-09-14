@@ -104,6 +104,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
     state = state.trusting_forwarded_for(trust_forwarded);
+    // **Closed unless this deployment says otherwise.** A production
+    // deployment sets up a company through staff once it has paid; the public
+    // signup form is for a development stack and the demo. Anything but the
+    // two words is refused, so a typo cannot open it.
+    let signup_open = match std::env::var("SIGNUP").as_deref().map(str::trim) {
+        Ok("open") => true,
+        Ok("closed") | Err(_) => false,
+        Ok(other) => return Err(format!("SIGNUP is {other:?}; it is `open` or `closed`").into()),
+    };
+    if signup_open {
+        tracing::warn!("SIGNUP=open: anybody may create a tenant through POST /v1/signups");
+    } else {
+        tracing::info!("signup is closed; staff set companies up over POST /v1/platform/tenants");
+    }
+    state = state.opening_signup(signup_open);
     if let Ok(configured) = std::env::var("SEALING_KEY") {
         let key = erp_eventlog::SealingKey::parse(&configured)?;
         tracing::info!(key = ?key, "sealing key loaded");

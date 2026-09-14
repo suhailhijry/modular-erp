@@ -27,6 +27,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_staff, grant_staff))
         .routes(routes!(change_staff_role, revoke_staff))
+        .routes(routes!(create_tenant))
         .routes(routes!(suspend_tenant))
         .routes(routes!(reinstate_tenant))
         .routes(routes!(list_control_dead_letters))
@@ -227,6 +228,86 @@ async fn revoke_staff(
         .await
         .map_err(|e| staff_problem(&e, locale))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A company to set up, once it has paid.
+#[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "slug": "bassat",
+    "company": "Bassat Media Productions",
+    "owner_email": "owner@bassat.sa",
+    "modules": ["ledger", "sales"]
+}))]
+struct NewTenant {
+    /// The tenant's name in URLs. 2–50 characters.
+    slug: String,
+    /// What the business is called.
+    company: String,
+    /// The owner's login. The link goes here, and nothing exists until they
+    /// open it.
+    owner_email: String,
+    /// What they asked for. Unknown names are refused rather than ignored.
+    #[serde(default)]
+    modules: Vec<String>,
+}
+
+/// Set up a company that has paid.
+///
+/// Signup is closed to the public on a production deployment; this is how a
+/// customer gets in (decided 2026-09-14). It files the same request
+/// `POST /v1/signups` would, with no password on file and your name on it, and
+/// mails the owner a link that says their company is ready. **Nothing exists
+/// until they open it**: the link asks them to choose a password — or, when the
+/// address already has an account, to give that account's password — and then
+/// builds the company and signs them in.
+///
+/// Modules are what the customer asked for; they are not what it pays for —
+/// seats are — and the owner may switch them on and off afterwards.
+///
+/// Recorded in the platform audit trail as `signup.requested` under your name.
+#[utoipa::path(
+    post,
+    path = "/v1/platform/tenants",
+    tag = "platform",
+    request_body = NewTenant,
+    responses(
+        (status = ACCEPTED, description = "The owner has been mailed the link. Nothing exists yet.", body = crate::signup::SignupRequested),
+        (status = BAD_REQUEST, description = "A module that does not exist, or one whose dependencies were not asked for", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, description = "Not billing or superadmin — `access.not_permitted` naming `create_tenants` — or without a second factor", body = Problem),
+        (status = CONFLICT, description = "The slug is taken", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "A link went to this address moments ago. `args.seconds` says when to try again.", body = Problem),
+    ),
+)]
+async fn create_tenant(
+    staff: Staff<erp_web::CreateTenants>,
+    State(state): State<AppState>,
+    Language(locale): Language,
+    Json(body): Json<NewTenant>,
+) -> Result<(StatusCode, Json<crate::signup::SignupRequested>), Problem> {
+    let modules = crate::signup::parse_modules(&body.modules, locale)?;
+    // The same link a self-signup gets, on the apex: the tenant does not exist
+    // yet, so there is no subdomain to hang it on.
+    let confirm_base = format!("https://{}/v1/signups/", state.domain);
+    let pending = state
+        .control
+        .request_signup_for(
+            erp_control::TenantOrder {
+                owner_email: body.owner_email,
+                slug: body.slug,
+                company: body.company,
+                modules,
+            },
+            staff.session.identity,
+            &confirm_base,
+            locale,
+        )
+        .await
+        .map_err(|e| crate::signup::signup_problem(&e, locale))?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(crate::signup::SignupRequested::from(pending)),
+    ))
 }
 
 /// Suspend a tenant: its doors shut now, its issued documents are still

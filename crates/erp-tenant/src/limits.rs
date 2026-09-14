@@ -12,8 +12,10 @@
 //! attach — beside the capability check, exactly where that module's own
 //! comment says a fact-based override belongs. The first half is one rule now,
 //! naming the `accountant` role — on the entries the ledger posts by hand and
-//! their reversals, the only checks that supply an amount; the second needs a
-//! member's own branch, which nothing records yet. The size of an invoice,
+//! their reversals, the only checks that supply an amount; the second is not a
+//! limit at all any more: since 2026-09-14 a member's own branches are a list
+//! on the membership (`Access::branches`), and `Access::branch_for` refuses
+//! any other at the door, before the facts here are read. The size of an invoice,
 //! credit note or refund is not judged here: `sales`' document limit does that
 //! inside the command, where the total exists.
 //!

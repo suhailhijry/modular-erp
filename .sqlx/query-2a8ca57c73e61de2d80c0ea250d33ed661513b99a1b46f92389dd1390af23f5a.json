@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM membership_branch WHERE membership_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2a8ca57c73e61de2d80c0ea250d33ed661513b99a1b46f92389dd1390af23f5a"
+}

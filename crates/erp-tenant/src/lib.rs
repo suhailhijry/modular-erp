@@ -28,7 +28,7 @@ pub use budget::{Budget, Conn, Lane, PoolError, Tx};
 pub use db::{CommandError, TenantDb};
 pub use limits::{Limits, Verdict};
 pub use modules::{EnabledModules, ModuleSetup};
-pub use roles::{Access, Capability, Role, UnknownRole};
+pub use roles::{Access, BranchRefusal, Capability, Role, UnknownRole};
 
 /// This crate's own codes and their translations, composed at the edge with the
 /// control plane's and each module's.

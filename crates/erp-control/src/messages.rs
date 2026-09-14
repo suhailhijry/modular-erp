@@ -48,6 +48,11 @@ pub const SESSION_EXPIRED: MessageCode = MessageCode::new("auth.session_expired"
 /// 403, naming the capability. "Ask someone with permission" is only actionable
 /// when you know which permission.
 pub const NOT_PERMITTED: MessageCode = MessageCode::new("access.not_permitted");
+/// A confined member named a branch that is not one of theirs. 403.
+pub const WRONG_BRANCH: MessageCode = MessageCode::new("access.wrong_branch");
+/// A confined member of several branches named none, or asked to look across
+/// every branch. 403, listing theirs.
+pub const NAME_A_BRANCH: MessageCode = MessageCode::new("access.name_a_branch");
 pub const ALREADY_A_MEMBER: MessageCode = MessageCode::new("members.already_a_member");
 pub const NOT_A_MEMBER: MessageCode = MessageCode::new("members.not_a_member");
 pub const INVITATION_NOT_VALID: MessageCode = MessageCode::new("invitations.not_valid");
@@ -61,6 +66,13 @@ pub const SIGNUP_NOT_VALID: MessageCode = MessageCode::new("signups.not_valid");
 ///
 /// Carries the seconds. "Too soon" with no number is a page people reload.
 pub const SIGNUP_TOO_SOON: MessageCode = MessageCode::new("signups.too_soon");
+/// A company staff set up: the owner must choose a password at the link.
+pub const SIGNUP_PASSWORD_REQUIRED: MessageCode = MessageCode::new("signups.password_required");
+/// A self-signup already carries its password; one given at the link is refused.
+pub const SIGNUP_PASSWORD_NOT_NEEDED: MessageCode = MessageCode::new("signups.password_not_needed");
+/// The mail to the owner of a company staff set up.
+pub const INVITED_SIGNUP_SUBJECT: MessageCode = MessageCode::new("mail.invited_signup_subject");
+pub const INVITED_SIGNUP_BODY: MessageCode = MessageCode::new("mail.invited_signup_body");
 /// The subject line of a signup confirmation.
 pub const SIGNUP_SUBJECT: MessageCode = MessageCode::new("mail.signup_subject");
 /// The body of a signup confirmation.
@@ -172,6 +184,8 @@ pub static CODES: &[MessageCode] = &[
     HANDLE_TAKEN,
     SESSION_EXPIRED,
     NOT_PERMITTED,
+    WRONG_BRANCH,
+    NAME_A_BRANCH,
     ALREADY_A_MEMBER,
     NOT_A_MEMBER,
     INVITATION_NOT_VALID,
@@ -197,8 +211,12 @@ pub static CODES: &[MessageCode] = &[
     SUSPENSION_REASON,
     SIGNUP_NOT_VALID,
     SIGNUP_TOO_SOON,
+    SIGNUP_PASSWORD_REQUIRED,
+    SIGNUP_PASSWORD_NOT_NEEDED,
     SIGNUP_SUBJECT,
     SIGNUP_BODY,
+    INVITED_SIGNUP_SUBJECT,
+    INVITED_SIGNUP_BODY,
     RESET_SUBJECT,
     RESET_BODY,
     RESET_NOT_VALID,
@@ -557,6 +575,32 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NOT_PERMITTED,
         Locale::Arabic,
         Template::Simple("دورك لا يسمح بهذا الإجراء ({capability}). يُرجى طلبه ممن لديه الصلاحية."),
+    ),
+    (
+        WRONG_BRANCH,
+        Locale::English,
+        Template::Simple("{branch} is not one of your branches."),
+    ),
+    (
+        WRONG_BRANCH,
+        Locale::Arabic,
+        Template::Simple("{branch} ليس من فروعك."),
+    ),
+    (
+        NAME_A_BRANCH,
+        Locale::English,
+        Template::Simple(
+            "Name one of your branches in X-Branch, or in `branch`: {branches}. You belong \
+             to these and no others.",
+        ),
+    ),
+    (
+        NAME_A_BRANCH,
+        Locale::Arabic,
+        Template::Simple(
+            "حدِّد أحد فروعك في X-Branch أو في `branch`: {branches}. أنت تنتمي إلى هذه \
+             الفروع دون غيرها.",
+        ),
     ),
     // -- members -----------------------------------------------------------
     (
@@ -1040,5 +1084,63 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
              يعمل الرابط مرة واحدة وتنتهي صلاحيته خلال يوم. لم يُنشأ شيء بعد، \
              فإن لم تكن أنت من طلب ذلك فتجاهل الرسالة ولن يُنشأ شيء.",
         ),
+    ),
+    (
+        INVITED_SIGNUP_SUBJECT,
+        Locale::English,
+        Template::Simple("{company} is ready to set up"),
+    ),
+    (
+        INVITED_SIGNUP_SUBJECT,
+        Locale::Arabic,
+        Template::Simple("{company} جاهزة للإعداد"),
+    ),
+    (
+        INVITED_SIGNUP_BODY,
+        Locale::English,
+        Template::Simple(
+            "{company} has been set up for you, with this address as its owner.\n\n\
+             Open this link to choose your password and sign in:\n{link}\n\n\
+             If this address already has an account, the link asks for that \
+             account's password instead. The link works once and expires within \
+             a day; if it has, ask for another and a fresh one will be sent.",
+        ),
+    ),
+    (
+        INVITED_SIGNUP_BODY,
+        Locale::Arabic,
+        Template::Simple(
+            "أُعدَّت {company} لك، وهذا البريد هو مالكها.\n\n\
+             افتح هذا الرابط لاختيار كلمة مرورك وتسجيل الدخول:\n{link}\n\n\
+             إن كان لهذا البريد حساب من قبل فسيطلب الرابط كلمة مرور ذلك الحساب. \
+             يعمل الرابط مرة واحدة وتنتهي صلاحيته خلال يوم؛ فإن انتهت فاطلب رابطًا \
+             آخر وسيُرسل إليك.",
+        ),
+    ),
+    (
+        SIGNUP_PASSWORD_REQUIRED,
+        Locale::English,
+        Template::Simple(
+            "This company was set up for you, so this link needs a password: choose one, \
+             or give the password of the account this address already has.",
+        ),
+    ),
+    (
+        SIGNUP_PASSWORD_REQUIRED,
+        Locale::Arabic,
+        Template::Simple(
+            "أُعدَّت هذه الشركة لك، لذا يحتاج هذا الرابط إلى كلمة مرور: اختر واحدة، \
+             أو أدخل كلمة مرور الحساب الذي يملكه هذا البريد من قبل.",
+        ),
+    ),
+    (
+        SIGNUP_PASSWORD_NOT_NEEDED,
+        Locale::English,
+        Template::Simple("This signup already has its password; confirm the link without one."),
+    ),
+    (
+        SIGNUP_PASSWORD_NOT_NEEDED,
+        Locale::Arabic,
+        Template::Simple("لهذا التسجيل كلمة مرور من قبل؛ أكِّد الرابط بدونها."),
     ),
 ];

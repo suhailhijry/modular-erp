@@ -229,11 +229,19 @@ router(state)
 The timeout answers 504 and not 408, because the request was fine and the server
 was slow.
 
-**There is no rate limit here**, and signup is unauthenticated by design. That is
-still a gap, but a smaller one than it was: `POST /v1/signups` builds nothing
-until the address answers, so a call that gets past validation costs one row and
-one email instead of a database. `REQUEST_INTERVAL` caps that per address. The
-per-caller limiter is Phase 12c's, and the roadmap chapter says where it sits.
+**Signup is closed unless the deployment says `SIGNUP=open`** (decided
+2026-09-14). A production deployment leaves it closed: `POST /v1/signups` answers
+`403 signups.closed`, and a company is set up by platform staff over
+`POST /v1/platform/tenants` once it has paid — the same pending request, with no
+password on file and the staff member's name on it. The owner is mailed a link
+that says the company is ready, and `POST /v1/signups/{token}` then takes a
+`password` in its body: the one they choose, or the password of the account the
+address already has. A self-signup, which carries its password from the form,
+refuses one at the link. Where signup is open — a development stack, the demo's
+own router — `POST /v1/signups` builds nothing until the address answers, so a
+call that gets past validation costs one row and one email instead of a
+database, and `REQUEST_INTERVAL` caps that per address; the per-caller limiter
+bounds the rest.
 
 Generate a sealing key with:
 

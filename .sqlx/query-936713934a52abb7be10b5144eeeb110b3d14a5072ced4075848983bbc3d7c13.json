@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO pending_signup\n                 (id, token_hash, handle, slug, company, modules,\n                  identity_id, password_hash, expires_at)\n             VALUES ($1, $2, $3, $4, $5, $6, $7, $8,\n                     now() + ($9::BIGINT * INTERVAL '1 second'))\n             RETURNING expires_at, created_at",
+  "query": "INSERT INTO pending_signup\n                 (id, token_hash, handle, slug, company, modules,\n                  identity_id, password_hash, created_by, expires_at)\n             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,\n                     now() + ($10::BIGINT * INTERVAL '1 second'))\n             RETURNING expires_at, created_at",
   "describe": {
     "columns": [
       {
@@ -36,6 +36,7 @@
         "TextArray",
         "Uuid",
         "Text",
+        "Uuid",
         "Int8"
       ]
     },
@@ -44,5 +45,5 @@
       false
     ]
   },
-  "hash": "b4a526f3d7b5c720f6f1bf49bac159e393f7baffd9b51ff0045938c1867a3ef3"
+  "hash": "936713934a52abb7be10b5144eeeb110b3d14a5072ced4075848983bbc3d7c13"
 }

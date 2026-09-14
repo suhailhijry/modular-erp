@@ -26,7 +26,8 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,761 tests green as of 2026-09-14, clippy, fmt and `cargo deny` clean. The per-phase test
+**Where this stands:** 1,767 tests green as of 2026-09-14, clippy, fmt and `cargo deny` clean.
+**Priority 1 of [Road to selling](#road-to-selling) is complete** (§79–§83). The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end, and what blocks selling
@@ -122,11 +123,12 @@ drift with every change.
 
 ### Priority 1 · Stop-ship
 
-- [ ] **The branch comes from a header the caller writes.** `X-Branch` is checked for
+- [x] **The branch comes from a header the caller writes.** `X-Branch` is checked for
       shape only, and branch-scoped claims and inventory shelves both trust it; §68
       even says "the claim is branch-scoped already". Needs a record of which
       branches each person belongs to. 1–2 weeks, and more urgent because branches
-      are sold at launch
+      are sold at launch. **Done 2026-09-14** (§83): a list per membership, judged
+      at the door and on every branch-filtered read
 - [x] **An owner-role API key counts as the owner.** `sales::Authority::of` reads the
       handle's role, so an integration key walks past the document limit and the
       credit-note claim. Half a day. **Done 2026-09-14** (§79): `Access::is_owner`
@@ -159,11 +161,11 @@ drift with every change.
 - [x] **The second-factor reset has no rate limit.** Each call ends the target's
       sessions and sends mail. Under an hour. **Done 2026-09-14** (§79): three per
       target an hour, both routes on one budget
-- [ ] **Anyone can sign up and run the system for free.** `SIGNUP=open|closed`,
+- [x] **Anyone can sign up and run the system for free.** `SIGNUP=open|closed`,
       closed when unset; a staff route that creates a tenant after payment and mails
       the owner the confirmation link, which then asks for a password; and a source
       scan that every module route calls `require_module`. Modules stay the owner's
-      to switch on — seats are what is paid for. 3–5 days
+      to switch on — seats are what is paid for. 3–5 days. **Done 2026-09-14** (§82)
 - [x] **Two documents promise what the code does not do.** ARCHITECTURE.md says the
       migrator enforces a backup before upgrade, and it has no backup code;
       `docs/book/src/deployment.md` says a customer-hosted tenant keeps running
@@ -287,6 +289,9 @@ drift with every change.
       route; a tenant switcher for accountants
 - [ ] Amount limits only reach the ledger's routes: supplier bills, payroll runs and
       pay-outs have none. Say so in the interface until they do
+- [ ] Lists that take no branch — invoices, entries, bookings — still span every
+      branch for a member confined to one (§83 bounds the header, `?branch=` and
+      `?scope=all`). Bounding them row by row is a change to every list query
 - [ ] Actions the code defines with nothing to perform them: suspending and
       reinstating a person, deleting a tenant after its retention period, changing a
       cluster's status, sweeping webhooks from unknown providers, and dismissing a
@@ -296,6 +301,13 @@ drift with every change.
       matched to bills line by line; supplier bill lines do not keep their product
 - [ ] Housekeeping: code and the book still cite the retired `docs/ERRORS.md`, and
       nothing checks that this plan's `file:line` references still resolve
+- [ ] Two tests flaked once each under a full parallel run on 2026-09-14 and pass
+      alone and in their own binaries: `support_requeues_and_dismisses…` (the
+      dispatcher dead-lettered one email of two) and `leases::a_claim_is_bounded…`
+      (a claim found one due tenant of three). Both compare a stored `now()` with a
+      later one, and both failed in the direction a backwards clock step produces;
+      the machine is WSL2. Suspect the clock before the code, and pin `now()` in
+      the tests if it recurs
 
 ### Priority 6 · Later phases
 
@@ -1199,6 +1211,149 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       `sales/commands.rs:46` (from both credit paths, as they stood then; §70
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
+
+### 83 · A branch is something a member belongs to
+
+**Built 2026-09-14**, the last Priority 1 item, from four decisions taken the
+same day: the record is a list on the membership, a member with one branch need
+not name it, reads are bounded as well as writes, and a key is bound like a
+person. `X-Branch` was a header the caller wrote: `Allowed` parsed it for shape
+and handed it to the capability check as a fact, `ledger::post_entry_in` checked
+it named an open branch, and branch-scoped claims, inventory shelves and every
+posting trusted it. Nothing recorded which branches a person belonged to, so
+nothing could refuse one they did not.
+
+#### The record
+
+`membership_branch` (`0024_membership_branches.sql`) sits beside
+`membership_module_role` and is shaped like it: the tenant's own branch
+identifier as text, no foreign key, cascading with the membership. No rows is
+every branch, which is what every membership had before the table existed.
+`ControlPlane::set_member_branches` (`crates/erp-control/src/members.rs`)
+replaces the list in one transaction with its `membership.branches_changed`
+entry; `revoke_membership` drops it with the per-module roles, so a re-added
+member starts unconfined. `live_access` loads it in the same round trip as the
+roles — an `array_agg` subquery, not a second join, which would multiply
+modules by branches — into `Access::branches`, and `members()` lists it.
+
+**Self-hosting.** The product owner asked that the design carry to a customer
+who hosts it themselves. It does: a self-hosted deployment runs its own control
+plane beside its tenant, so the list lives where the membership it bounds
+lives; and the whole-tenant export (Priority 3) must take the membership tables
+with it, which this adds one to.
+
+#### The rule, in one place
+
+`Access::branch_for` (`crates/erp-tenant/src/roles.rs`) is the whole of it,
+pure and unit-tested as a table: an unconfined member gets what they asked for,
+named or not; a confined member may name one of theirs, gets their one branch
+when they name none, and is refused `BranchRefusal::NameOne` when they belong
+to several — choosing for them would pick a place they did not mean. Naming a
+branch that is not theirs is `NotTheirs`, whatever else they hold.
+`TenantDb::branch_for` answers it for a handle, and a handle with nobody behind
+it — the public, maintenance — gets what it asked for.
+
+`Allowed::from_request_parts` (`crates/erp-web/src/extract.rs`) asks it for the
+header before the capability check reads the branch as a fact, so every write in
+the system is judged without forty handlers remembering to. The refusals are
+`403 access.wrong_branch`, naming the branch, and `403 access.name_a_branch`,
+listing theirs. A key comes through the same extractor with its own membership,
+and is bound by it.
+
+#### Reads
+
+`Allowed::branch_scope` applies the same rule to `?branch=`: stock, lots and the
+shelf summary (`modules/inventory/src/http.rs`) narrow to a confined member's
+branch when they name none and refuse another; the bookable list and the
+employee list, whose default is the header's branch, judge a named branch the
+same way; and `Allowed::may_span_branches` refuses `?scope=all` on the org
+chart to a confined member. Lists that take no branch at all — invoices,
+entries — still span branches; bounding them row by row is a wider change and
+is listed under growth.
+
+#### The route
+
+`PUT /v1/members/{identity}/branches` (`crates/erp-api/src/members.rs`), the
+owner's like every membership change, checks each id is an open branch through
+the `branches` module's read model — the control plane holds no domain and
+cannot — refusing `400 request.no_such_branch`, and an empty list lifts the
+confinement. `GET /v1/members` shows each member's list. The tenant route matrix
+names the route as owner-only.
+
+#### Proved
+
+`a_confined_member_acts_in_their_branches_and_nowhere_else` pins the rule as a
+table. `a_members_branches_are_loaded_with_the_membership_and_gone_with_it`
+(`crates/erp-control/tests/control_plane.rs`) proves the list is loaded,
+replaced, lifted, dropped with the membership, refused for a stranger and on
+the record. `a_member_confined_to_a_branch_acts_and_reads_there_and_nowhere_else`
+(`crates/erp-api/tests/http.rs`) runs a clerk through every door: Malaz
+refused, no header is Olaya, shelves and summary Olaya alone where the owner sees
+both, the org chart refused company-wide, two branches needing a name, a key
+bound through its membership, an unknown branch refused, and the list lifted.
+
+### 82 · Signup is closed, and staff set a company up once it has paid
+
+**Built 2026-09-14**, from the product owner's answers: signup closed unless
+the deployment opens it, a staff route after payment, no trial (the public demo
+is the trial), and modules staying the owner's to switch on because seats — not
+modules — are what a company pays for. Five sub-decisions were put and taken
+the same day: billing and superadmin create tenants; a closed form answers
+`403 signups.closed`; an owner whose address already has an account proves its
+password at the link; the link refuses a surplus password rather than ignoring
+it; and the scan exempts handlers that take `Anonymous`.
+
+#### The door
+
+`AppState::signup_open` (`crates/erp-web/src/state.rs`) is `false` unless
+`bin/api.rs` reads `SIGNUP=open`; `closed` and unset are the same, and any other
+word refuses to start, so a typo cannot open it. `POST /v1/signups` checks it
+before it charges a budget or reads a handle. The confirmation route is not
+what is closed — it is token-gated, and a staff-created owner arrives through
+it. `compose.yaml` opens the development stack; the HTTP fixture opens its
+router; and `erp_demo::with_deployment` opens the demo's own in-process
+router, which never listens on a socket, so a demo builds wherever it runs.
+
+#### The order
+
+`POST /v1/platform/tenants` (`crates/erp-api/src/platform.rs`), under the new
+`PlatformPower::CreateTenants`, files the same `pending_signup` row a
+self-signup does through one private `file_request`
+(`crates/erp-control/src/signup.rs`), with two differences the row records:
+no password on file, and `created_by` naming the staff member. `0023` adds the
+column and widens `pending_signup_names_one_owner` to allow a row with neither
+identity nor hash when staff filed it. The owner is mailed
+`invited_signup_messages` — "your company is ready", not "somebody asked" —
+and `POST /v1/signups/{token}` now takes an optional `password`:
+`claim_and_build` reads the live row **before** claiming it and decides what
+the link needs — required for a staff order, refused for a self-signup, and
+for an address that already has an account, proved with `authenticate` the
+way an invitation is accepted — so a refusal leaves the link live and only a
+failed build unclaims. The request is on the platform record as
+`signup.requested` under the staff member's name.
+
+#### The scan
+
+`every_module_route_requires_its_module` (`crates/erp-api/tests/entitlement.rs`)
+reads every `modules/*/src/http.rs`, finds each handler under a
+`#[utoipa::path]`, and refuses one whose body never calls `require_module`
+unless its signature takes `Anonymous` — today exactly the two catalogue routes
+a signup form reads before a company exists. It counts over two hundred
+handlers, so a moved file cannot pass it vacuously.
+
+#### Proved
+
+`signup_is_closed_unless_the_deployment_opens_it` builds a router without the
+switch and watches the form refused and the link route still answer; leaving
+the door open fails it. `billing_sets_a_company_up_and_the_owner_chooses_a_password_at_the_link`
+runs the order from support's refusal to the owner signed in — no password,
+short password, the right one, then an existing account with the wrong and the
+right password, and the audit entry under billing's name; changing the
+required-password arm fails it. Commenting one `require_module` out of
+`purchases` fails the scan. The platform matrix test names the twelfth
+operation and billing's second power. Control plane 41/41 (provisioning,
+migrations, audit, staff), demo 9/9, clippy clean; `just prepare` regenerated
+`.sqlx`, and `just openapi` the document.
 
 ### 81 · A suspension drains before it stops
 

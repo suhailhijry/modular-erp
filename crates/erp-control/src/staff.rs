@@ -47,6 +47,11 @@ pub enum PlatformRole {
 pub enum PlatformPower {
     /// Suspend a tenant, and reinstate one.
     SuspendTenants,
+    /// Set up a tenant for a company that has paid —
+    /// [`ControlPlane::request_signup_for`]. Billing's, like suspending, because
+    /// both follow the money; signup is closed to the public on a production
+    /// deployment (decided 2026-09-14).
+    CreateTenants,
     /// List, requeue and dismiss the control plane's dead letters.
     HandleDeadLetters,
     /// Read the platform's audit trail.
@@ -65,8 +70,9 @@ pub enum PlatformPower {
 
 impl PlatformPower {
     /// Every power, for tests.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::SuspendTenants,
+        Self::CreateTenants,
         Self::HandleDeadLetters,
         Self::ReadAuditTrail,
         Self::EnterForSupport,
@@ -79,6 +85,7 @@ impl PlatformPower {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SuspendTenants => "suspend_tenants",
+            Self::CreateTenants => "create_tenants",
             Self::HandleDeadLetters => "handle_dead_letters",
             Self::ReadAuditTrail => "read_audit_trail",
             Self::EnterForSupport => "enter_for_support",
@@ -101,7 +108,10 @@ impl PlatformRole {
     pub const fn may(self, power: PlatformPower) -> bool {
         match self {
             Self::Superadmin => true,
-            Self::Billing => matches!(power, PlatformPower::SuspendTenants),
+            Self::Billing => matches!(
+                power,
+                PlatformPower::SuspendTenants | PlatformPower::CreateTenants
+            ),
             Self::Support => matches!(
                 power,
                 PlatformPower::ReadAuditTrail
@@ -474,8 +484,8 @@ mod tests {
     #[test]
     fn every_role_may_exactly_what_it_should() {
         use PlatformPower::{
-            EnterForSupport, HandleDeadLetters, ManageStaff, ReadAuditTrail, ResetSecondFactors,
-            SuspendTenants,
+            CreateTenants, EnterForSupport, HandleDeadLetters, ManageStaff, ReadAuditTrail,
+            ResetSecondFactors, SuspendTenants,
         };
 
         let expected = [
@@ -483,6 +493,7 @@ mod tests {
                 PlatformRole::Superadmin,
                 vec![
                     SuspendTenants,
+                    CreateTenants,
                     HandleDeadLetters,
                     ReadAuditTrail,
                     EnterForSupport,
@@ -490,7 +501,7 @@ mod tests {
                     ResetSecondFactors,
                 ],
             ),
-            (PlatformRole::Billing, vec![SuspendTenants]),
+            (PlatformRole::Billing, vec![SuspendTenants, CreateTenants]),
             (
                 PlatformRole::Support,
                 vec![

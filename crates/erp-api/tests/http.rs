@@ -212,6 +212,9 @@ impl Fixture {
                     // and no peer address; the tests that need a caller to be
                     // somebody send `X-Forwarded-For`, the way a proxy would.
                     .trusting_forwarded_for(true)
+                    // Open, as a development stack is; the one test about a
+                    // closed deployment builds its own router.
+                    .opening_signup(true)
                     .streaming_through(Arc::clone(&hub))
                     .sealing_with(
                         erp_eventlog::SealingKey::new("test", &[5u8; 32]).expect("32 bytes"),
@@ -1771,6 +1774,543 @@ async fn a_confirmation_link_works_once() {
     fixture.cleanup().await;
 }
 
+/// **Signup is closed unless the deployment opens it** (decided 2026-09-14).
+/// A router built without `opening_signup` refuses the form with a message
+/// that says who to call, before any budget is charged; the confirmation link
+/// still answers, because a company staff set up is confirmed through it.
+#[tokio::test]
+async fn signup_is_closed_unless_the_deployment_opens_it() {
+    let fixture = Fixture::new().await;
+    let closed = router(AppState::new(Arc::clone(&fixture.control)));
+    let send = |request: Request<Body>| {
+        let closed = closed.clone();
+        async move {
+            let response = closed.oneshot(request).await.expect("answers");
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .expect("a body");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+            (status, body)
+        }
+    };
+
+    let (status, body) = send(
+        Request::post("/v1/signups")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "slug": "acme", "company": "Acme Trading",
+                    "email": "owner@acme.test",
+                    "password": "correct horse battery staple",
+                    "modules": ["ledger"]
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("signups.closed")),
+        "{body}"
+    );
+
+    // The link's route is not what is closed: a bad token is the usual 404.
+    let (status, body) = send(
+        Request::post("/v1/signups/not-a-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::NOT_FOUND, Some("signups.not_valid")),
+        "{body}"
+    );
+
+    // And a self-signup that carries its password refuses a second one at the
+    // link rather than ignoring what somebody typed as theirs.
+    let (status, _, _) = fixture
+        .send(
+            Request::post("/v1/signups")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "slug": "acme", "company": "Acme Trading",
+                        "email": "owner@acme.test",
+                        "password": "correct horse battery staple",
+                        "modules": ["ledger"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let link = fixture.confirmation("owner@acme.test").await;
+    let (status, body, _) = fixture
+        .send(
+            Request::post(format!("/v1/signups/{link}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "password": "another password entirely" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("signups.password_not_needed")),
+        "{body}"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A member confined to a branch acts there and reads there, and nowhere
+/// else** — decided 2026-09-14, and the first time `X-Branch` is anything but
+/// a header the caller wrote. The owner confines a clerk to Olaya: Malaz is
+/// refused, no header means Olaya, the shelves and the summary show Olaya
+/// alone, and the org chart cannot be read company-wide. With two branches
+/// the request has to name one. A key is bound through its own membership like
+/// a person. An empty list lifts it. A branch that is not open cannot be
+/// confined to.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one clerk through every door a branch list closes and opens, plus a key"
+)]
+async fn a_member_confined_to_a_branch_acts_and_reads_there_and_nowhere_else() {
+    let mut fixture = Fixture::new().await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let clerk = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(owner, tenant).await;
+    fixture.join_as(clerk, tenant, "clerk").await;
+    fixture.enable_ledger(tenant).await;
+    fixture.enable_module(tenant, branches::setup()).await;
+    fixture.enable_module(tenant, inventory::setup()).await;
+    fixture.enable_module(tenant, hr::setup()).await;
+    let owner_token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+    let clerk_token = fixture.token("clerk@acme.test", "hunter2hunter2").await;
+    fixture
+        .install_chart(&owner_token, "acme", "services")
+        .await;
+
+    let post =
+        |token: &str, path: String, key: &str, branch: Option<&str>, body: serde_json::Value| {
+            let mut request = Request::post(path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", idem(key));
+            if let Some(branch) = branch {
+                request = request.header("x-branch", branch);
+            }
+            request.body(Body::from(body.to_string())).unwrap()
+        };
+    let address =
+        serde_json::json!({ "street": "King Fahd Road", "city": "Riyadh", "country": "SA" });
+    for (key, name) in [("BRANCH-OLAYA", "العليا"), ("BRANCH-MALAZ", "الملز")] {
+        let (status, body, _) = fixture
+            .send(post(
+                &owner_token,
+                "/v1/branches".to_owned(),
+                key,
+                None,
+                serde_json::json!({ "name": name, "address": address }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    let olaya = idem("BRANCH-OLAYA");
+    let malaz = idem("BRANCH-MALAZ");
+    let (status, body, _) = fixture
+        .send(post(
+            &owner_token,
+            "/v1/inventory/products".to_owned(),
+            "PROD-MILK",
+            None,
+            serde_json::json!({ "name": "حليب", "unit": "bottle", "tracking": "none" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let milk = idem("PROD-MILK");
+    let receipt = |token: &str, key: &str, branch: Option<&str>| {
+        post(
+            token,
+            format!("/v1/inventory/stock/{milk}/receipts"),
+            key,
+            branch,
+            serde_json::json!({ "quantity": 6, "value": { "minor": 3_000, "currency": "SAR" } }),
+        )
+    };
+    let confine = |branches: serde_json::Value| {
+        Request::put(format!("/v1/members/{clerk}/branches"))
+            .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({ "branches": branches }).to_string(),
+            ))
+            .unwrap()
+    };
+    let member_branches = |identity: IdentityId| {
+        let fixture = &fixture;
+        let owner_token = &owner_token;
+        async move {
+            let (status, members) = fixture
+                .as_caller(owner_token, "GET", "/v1/members", None)
+                .await;
+            assert_eq!(status, StatusCode::OK, "{members}");
+            members
+                .as_array()
+                .expect("a list")
+                .iter()
+                .find(|m| m["identity"] == identity.to_string())
+                .expect("listed")["branches"]
+                .clone()
+        }
+    };
+
+    // Every branch, until the owner says otherwise — and only an open branch
+    // can be said.
+    assert_eq!(member_branches(clerk).await, serde_json::json!([]));
+    let (status, body, _) = fixture
+        .send(confine(serde_json::json!(["BR-JEDDAH"])))
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("request.no_such_branch")),
+        "{body}"
+    );
+    let (status, body, _) = fixture.send(confine(serde_json::json!([olaya]))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(member_branches(clerk).await, serde_json::json!([olaya]));
+
+    // **Acting.** Malaz is refused; no header is Olaya.
+    let (status, body, _) = fixture
+        .send(receipt(&clerk_token, "RCV-MALAZ", Some(malaz.as_str())))
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("access.wrong_branch")),
+        "{body}"
+    );
+    assert_eq!(body["args"]["branch"]["value"], malaz, "{body}");
+    let (status, body, _) = fixture.send(receipt(&clerk_token, "RCV-OLAYA", None)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // The owner, unconfined, stocks Malaz.
+    let (status, body, _) = fixture
+        .send(receipt(&owner_token, "RCV-OWNER", Some(malaz.as_str())))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    fixture
+        .project::<inventory::Inventory>(tenant, &inventory::projections(), inventory::upcasters())
+        .await;
+
+    // **Reading.** The clerk's shelves are Olaya's; asking for Malaz is refused;
+    // the summary shows Olaya alone, where the owner sees both.
+    let (status, shelves) = fixture
+        .as_caller(&clerk_token, "GET", "/v1/inventory/stock", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{shelves}");
+    let shelf_branches: Vec<&str> = shelves["items"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|s| s["branch"].as_str().expect("a branch"))
+        .collect();
+    assert_eq!(shelf_branches, [olaya.as_str()], "{shelves}");
+    let (status, body) = fixture
+        .as_caller(
+            &clerk_token,
+            "GET",
+            &format!("/v1/inventory/stock?branch={malaz}"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("access.wrong_branch")),
+        "{body}"
+    );
+    let summary = |token: String| {
+        let fixture = &fixture;
+        async move {
+            let (status, body) = fixture
+                .as_caller(&token, "GET", "/v1/inventory/summary", None)
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["branches"]
+                .as_array()
+                .expect("branches")
+                .iter()
+                .map(|b| b["branch"].as_str().expect("a branch").to_owned())
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(summary(clerk_token.clone()).await, vec![olaya.clone()]);
+    assert_eq!(
+        summary(owner_token.clone()).await.len(),
+        2,
+        "the owner sees every branch"
+    );
+    // The org chart, company-wide, is for somebody who belongs to the company.
+    let (status, body) = fixture
+        .as_caller(&clerk_token, "GET", "/v1/hr/employees?scope=all", None)
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("access.name_a_branch")),
+        "{body}"
+    );
+    let (status, body) = fixture
+        .as_caller(&owner_token, "GET", "/v1/hr/employees?scope=all", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // **Two branches: the request has to say which.**
+    let (status, body, _) = fixture
+        .send(confine(serde_json::json!([olaya, malaz])))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = fixture.send(receipt(&clerk_token, "RCV-WHICH", None)).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("access.name_a_branch")),
+        "{body}"
+    );
+    let (status, body, _) = fixture
+        .send(receipt(&clerk_token, "RCV-MALAZ-2", Some(malaz.as_str())))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // **A key is bound like a person**, through its own membership.
+    let (status, key) = fixture
+        .as_caller(
+            &owner_token,
+            "POST",
+            "/v1/keys",
+            Some(serde_json::json!({ "name": "Till", "scopes": ["*:post_entries"], "role": "clerk" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{key}");
+    let secret = key["secret"].as_str().expect("a secret").to_owned();
+    let (status, body, _) = fixture
+        .send(receipt(&secret, "RCV-KEY-FREE", Some(malaz.as_str())))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an unconfined key acts anywhere: {body}"
+    );
+    let (_, members) = fixture
+        .as_caller(&owner_token, "GET", "/v1/members", None)
+        .await;
+    let machine: IdentityId = members
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|m| m["handle"].is_null())
+        .expect("the key's membership is listed")["identity"]
+        .as_str()
+        .expect("an id")
+        .parse()
+        .expect("an identity");
+    let (status, body, _) = fixture
+        .send(
+            Request::put(format!("/v1/members/{machine}/branches"))
+                .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "branches": [olaya] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = fixture
+        .send(receipt(&secret, "RCV-KEY-MALAZ", Some(malaz.as_str())))
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("access.wrong_branch")),
+        "a confined key acted outside its branch: {body}"
+    );
+
+    // **Lifted.**
+    let (status, body, _) = fixture.send(confine(serde_json::json!([]))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(member_branches(clerk).await, serde_json::json!([]));
+    let (status, body, _) = fixture
+        .send(receipt(&clerk_token, "RCV-FREE", Some(malaz.as_str())))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    fixture.cleanup().await;
+}
+
+/// **Billing sets a company up once it has paid, and the owner chooses a
+/// password at the link** — the closed-signup path (decided 2026-09-14).
+/// Support may not; the link with no password is refused and stays live; a
+/// short password is refused; the right one builds the company with the
+/// modules asked for and signs the owner in. An owner whose address already
+/// has an account proves that account's password instead, as at an
+/// invitation. The request is on the platform record under the staff
+/// member's name.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one company from the order to the owner signed in, and every refusal on the way"
+)]
+async fn billing_sets_a_company_up_and_the_owner_chooses_a_password_at_the_link() {
+    let fixture = Fixture::new().await;
+    let (billing, token, _) = fixture
+        .staff("billing@erp.test", erp_control::PlatformRole::Billing)
+        .await;
+    let (_, support, _) = fixture
+        .staff("support@erp.test", erp_control::PlatformRole::Support)
+        .await;
+    let order = |slug: &str, email: &str| {
+        Some(serde_json::json!({
+            "slug": slug, "company": "Bassat Media Productions",
+            "owner_email": email, "modules": ["ledger"]
+        }))
+    };
+
+    let (status, body) = fixture
+        .as_caller(
+            &support,
+            "POST",
+            "/v1/platform/tenants",
+            order("bassat", "owner@bassat.sa"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        body["args"]["capability"]["value"], "create_tenants",
+        "{body}"
+    );
+
+    let (status, body) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/platform/tenants",
+            order("bassat", "Owner@Bassat.sa"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["email"], "owner@bassat.sa", "lowercased, as stored");
+    assert_eq!(body["slug"], "bassat");
+
+    let link = fixture.confirmation("owner@bassat.sa").await;
+    let confirm = |body: serde_json::Value| {
+        Request::post(format!("/v1/signups/{link}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+
+    // No password: refused, and the link is not spent.
+    let (status, body, _) = fixture.send(confirm(serde_json::json!({}))).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("signups.password_required")),
+        "{body}"
+    );
+    let (status, body, _) = fixture
+        .send(confirm(serde_json::json!({ "password": "short" })))
+        .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("request.password_too_short")),
+        "{body}"
+    );
+
+    let (status, body, _) = fixture
+        .send(confirm(
+            serde_json::json!({ "password": "correct horse battery staple" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["slug"], "bassat");
+    assert_eq!(body["modules"][0], "ledger");
+    let owner_token = body["token"].as_str().expect("a token").to_owned();
+    let (status, tenant, _) = fixture
+        .send(
+            Request::get("/v1/tenant")
+                .header(header::HOST, "bassat.localhost")
+                .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{tenant}");
+    // The password is theirs: it signs in on its own.
+    fixture
+        .token("owner@bassat.sa", "correct horse battery staple")
+        .await;
+
+    // On the platform record, under billing's name.
+    let (actor, detail): (Option<uuid::Uuid>, serde_json::Value) = sqlx::query_as(
+        "SELECT actor_identity_id, detail FROM audit_entry
+          WHERE action = 'signup.requested' AND subject_id = 'owner@bassat.sa'",
+    )
+    .fetch_one(fixture.control.pool())
+    .await
+    .expect("the order is on the record");
+    assert_eq!(actor, Some(billing.into_uuid()));
+    assert_eq!(detail["slug"], "bassat");
+
+    // **An owner whose address already has an account.** Staff cannot prove
+    // it for them, so the link asks for that account's password.
+    fixture.user("boss@najd.test", "hunter2hunter2").await;
+    let (status, body) = fixture
+        .as_caller(
+            &token,
+            "POST",
+            "/v1/platform/tenants",
+            order("najd", "boss@najd.test"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let link = fixture.confirmation("boss@najd.test").await;
+    let confirm = |body: serde_json::Value| {
+        Request::post(format!("/v1/signups/{link}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let (status, body, _) = fixture.send(confirm(serde_json::json!({}))).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("signups.password_required")),
+        "{body}"
+    );
+    let (status, body, _) = fixture
+        .send(confirm(
+            serde_json::json!({ "password": "not their password" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, body, _) = fixture
+        .send(confirm(serde_json::json!({ "password": "hunter2hunter2" })))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["slug"], "najd");
+    let accounts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM authenticator WHERE kind = 'password' AND handle = 'boss@najd.test'",
+    )
+    .fetch_one(fixture.control.pool())
+    .await
+    .expect("counts");
+    assert_eq!(accounts, 1, "the existing account was reused, not doubled");
+
+    fixture.cleanup().await;
+}
+
 /// A token nobody issued is the same answer as one already spent.
 #[tokio::test]
 async fn an_unissued_confirmation_token_is_not_found() {
@@ -2521,6 +3061,9 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("remove_member", OWNER),
     ("set_module_role", OWNER),
     ("clear_module_role", OWNER),
+    // Which branches somebody belongs to is who may be where, which is the
+    // same authority as who may be here at all.
+    ("set_member_branches", OWNER),
     // A customer record is tenant data about who the business deals with, so
     // it sits with members and modules and not with the books.
     // Who works here, what rooms there are and when they are open is the shape
@@ -2658,8 +3201,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        260,
-        "expected two hundred and sixty role-scoped operations"
+        261,
+        "expected two hundred and sixty-one role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -2743,6 +3286,7 @@ const PLATFORM: &[(&str, &str)] = &[
     ("revoke_staff", "manage_staff"),
     ("suspend_tenant", "suspend_tenants"),
     ("reinstate_tenant", "suspend_tenants"),
+    ("create_tenant", "create_tenants"),
     ("list_control_dead_letters", "handle_dead_letters"),
     ("requeue_control_dead_letter", "handle_dead_letters"),
     ("dismiss_control_dead_letter", "handle_dead_letters"),
@@ -2758,6 +3302,7 @@ const STAFF_POWERS: &[(&str, &[&str])] = &[
         "superadmin",
         &[
             "suspend_tenants",
+            "create_tenants",
             "handle_dead_letters",
             "read_audit_trail",
             "enter_for_support",
@@ -2765,7 +3310,7 @@ const STAFF_POWERS: &[(&str, &[&str])] = &[
             "reset_second_factors",
         ],
     ),
-    ("billing", &["suspend_tenants"]),
+    ("billing", &["suspend_tenants", "create_tenants"]),
     (
         "support",
         &[
@@ -2808,7 +3353,7 @@ async fn every_platform_role_against_every_platform_endpoint() {
         served.difference(&tabled).collect::<Vec<_>>(),
         tabled.difference(&served).collect::<Vec<_>>(),
     );
-    assert_eq!(served.len(), 11, "expected eleven platform operations");
+    assert_eq!(served.len(), 12, "expected twelve platform operations");
     // The two tables speak the product's vocabulary, all of it.
     let powers: BTreeSet<&str> = PlatformPower::ALL.map(PlatformPower::as_str).into();
     let roles: BTreeSet<&str> = PlatformRole::ALL.map(PlatformRole::as_str).into();

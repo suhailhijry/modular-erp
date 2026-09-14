@@ -73,13 +73,33 @@ struct Signup {
 /// to require. What comes back is what a page needs to say "check your email"
 /// and to know when the link stops working.
 #[derive(Debug, Serialize, ToSchema)]
-struct SignupRequested {
+pub(crate) struct SignupRequested {
     /// Where the confirmation went. Echoed back lowercased and trimmed, which
     /// is the form it was stored in.
     email: String,
     slug: String,
     #[schema(value_type = chrono::DateTime<chrono::Utc>)]
     expires_at: Timestamp,
+}
+
+impl From<erp_control::PendingSignup> for SignupRequested {
+    fn from(pending: erp_control::PendingSignup) -> Self {
+        Self {
+            email: pending.handle,
+            slug: pending.slug,
+            expires_at: pending.expires_at,
+        }
+    }
+}
+
+/// What a confirmation may carry.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub(crate) struct Confirm {
+    /// **For a company staff set up**: the password the owner chooses, or, if
+    /// the address already has an account, that account's password. A
+    /// self-signup carries its password already and refuses one here.
+    #[serde(default)]
+    password: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -95,6 +115,12 @@ struct SignedUp {
 }
 
 /// Register a new tenant.
+///
+/// **Only where the deployment opens signup** (`SIGNUP=open`). A production
+/// deployment does not: a company is set up by platform staff once it has
+/// paid, and its owner receives the same confirmation link — so this route
+/// answers `403 signups.closed` there, and `POST /v1/signups/{token}` still
+/// works.
 ///
 /// Sends a confirmation to the address and **creates nothing**. No account, no
 /// company, no database: those are what `POST /v1/signups/{token}` builds, and
@@ -115,6 +141,7 @@ struct SignedUp {
         (status = ACCEPTED, description = "A confirmation is on its way. Nothing exists yet.", body = SignupRequested),
         (status = BAD_REQUEST, description = "A password under 12 characters, or a module that does not exist", body = Problem),
         (status = UNAUTHORIZED, description = "The address already has an account and the password did not match it", body = Problem),
+        (status = FORBIDDEN, description = "Signup is closed on this deployment; a company is set up by staff once it has paid — `signups.closed`", body = Problem),
         (status = CONFLICT, description = "The slug is taken", body = Problem),
         (status = TOO_MANY_REQUESTS, description = "A confirmation went to this address moments ago, or too many attempts came from this address. Retryable, and the message says when.", body = Problem),
     ),
@@ -125,6 +152,17 @@ async fn sign_up(
     Language(locale): Language,
     Json(body): Json<Signup>,
 ) -> Result<(StatusCode, Json<SignupRequested>), Problem> {
+    // Before anything is charged or checked: a closed door costs nobody a
+    // budget, and says why it is shut.
+    if !state.signup_open {
+        return Err(Problem::new(
+            StatusCode::FORBIDDEN,
+            &erp_i18n::Message::new(erp_web::messages::SIGNUP_CLOSED),
+            locale,
+            &crate::CATALOG,
+        ));
+    }
+
     // An address that already has an account is asked for its password below,
     // which makes this route a login in disguise. Same per-account bound as
     // the real one, for the same reason.
@@ -161,14 +199,7 @@ async fn sign_up(
         .await
         .map_err(|e| signup_problem(&e, locale))?;
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(SignupRequested {
-            email: pending.handle,
-            slug: pending.slug,
-            expires_at: pending.expires_at,
-        }),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(SignupRequested::from(pending))))
 }
 
 /// Confirm an address, and get the system that was asked for.
@@ -176,6 +207,12 @@ async fn sign_up(
 /// Creates the company, its database, its first owner, and a session — in one
 /// operation that compensates if any part of it fails. The response is a
 /// working bearer token: confirming logs you in.
+///
+/// **A company staff set up has no password on file**, so the link takes one
+/// in the body: the owner's choice, or — when the address already has an
+/// account — that account's password, the way an invitation is accepted. A
+/// self-signup carries its password already and refuses one here, rather than
+/// quietly ignoring what somebody typed as theirs.
 ///
 /// The build finishes even if this request does not: a timeout or a closed
 /// connection ends in the company, which the password logs into, or in a
@@ -191,8 +228,11 @@ async fn sign_up(
     tag = "signup",
     security(),
     params(("token" = String, Path, description = "From the confirmation link.")),
+    request_body(content = Confirm, description = "Optional. A `password` only for a company staff set up."),
     responses(
         (status = CREATED, body = SignedUp),
+        (status = BAD_REQUEST, description = "A company staff set up and no password (`signups.password_required`), a password under 12 characters, or a password on a self-signup that already has one (`signups.password_not_needed`)", body = Problem),
+        (status = UNAUTHORIZED, description = "The address already has an account and the password did not match it", body = Problem),
         (status = NOT_FOUND, description = "No such token, or a spent or expired one — the same answer for all three", body = Problem),
         (status = CONFLICT, description = "The slug was taken while the link sat in a mailbox. The link still works; ask for another name.", body = Problem),
         (status = TOO_MANY_REQUESTS, description = "Too many attempts from this address, or against this account. `args.seconds` says how long to wait.", body = Problem),
@@ -203,7 +243,16 @@ async fn confirm_signup(
     State(state): State<AppState>,
     Language(locale): Language,
     Path(token): Path<String>,
+    body: Option<Json<Confirm>>,
 ) -> Result<(StatusCode, Json<SignedUp>), Problem> {
+    let password = body.and_then(|Json(confirm)| confirm.password);
+    if password
+        .as_ref()
+        .is_some_and(|p| p.chars().count() < MIN_PASSWORD)
+    {
+        return Err(short_password(locale));
+    }
+
     // **The modules come from the build, not from the stored row.**
     //
     // The row holds the names that were asked for; this turns them back into
@@ -219,7 +268,7 @@ async fn confirm_signup(
 
     let done = state
         .control
-        .confirm_signup(&token, modules)
+        .confirm_signup(&token, modules, password)
         .await
         .map_err(|e| signup_problem(&e, locale))?;
 
@@ -246,11 +295,13 @@ fn short_password(locale: Locale) -> Problem {
 }
 
 /// Which failure is which, over HTTP.
-fn signup_problem(error: &SignupError, locale: Locale) -> Problem {
+pub(crate) fn signup_problem(error: &SignupError, locale: Locale) -> Problem {
     let status = match error {
         // 404, not 400: a bad token and a spent one are the same answer, and
         // that answer is "there is nothing here".
         SignupError::NotValid => StatusCode::NOT_FOUND,
+        // The link is fine; what came with it is not.
+        SignupError::PasswordRequired | SignupError::PasswordNotNeeded => StatusCode::BAD_REQUEST,
         // 429, and the message carries the seconds. The only place in this API
         // that answers it, and it is not a rate limit — it is one address's
         // mail, capped. See the control plane's module docs.
@@ -282,8 +333,12 @@ fn signup_problem(error: &SignupError, locale: Locale) -> Problem {
 /// Turns requested module names into their setup descriptions.
 ///
 /// The list and the dependency rule both live in [`crate::modules`], so signing
-/// up for a module and enabling it later cannot disagree about either.
-fn parse_modules(requested: &[String], locale: Locale) -> Result<Vec<ModuleSetup>, Problem> {
+/// up for a module and enabling it later cannot disagree about either. Staff
+/// setting a company up (`POST /v1/platform/tenants`) name modules the same way.
+pub(crate) fn parse_modules(
+    requested: &[String],
+    locale: Locale,
+) -> Result<Vec<ModuleSetup>, Problem> {
     let setups: Vec<ModuleSetup> = requested
         .iter()
         .map(|name| crate::modules::find(name, locale))

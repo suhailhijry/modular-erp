@@ -190,6 +190,24 @@ pub fn signup_messages(company: &str, link: &str) -> (Message, Message) {
     )
 }
 
+/// Subject and body for the link mailed to the owner of a company **staff set
+/// up** for a customer that has paid.
+///
+/// Not [`signup_messages`]: that one says "somebody asked to create…", and
+/// this owner asked nobody — their company is ready and the link is where they
+/// choose a password, or prove the account the address already has. Same
+/// shape otherwise, for the same reason.
+#[must_use]
+pub fn invited_signup_messages(company: &str, link: &str) -> (Message, Message) {
+    (
+        Message::new(crate::messages::INVITED_SIGNUP_SUBJECT)
+            .with("company", MessageArg::text(company.to_owned())),
+        Message::new(crate::messages::INVITED_SIGNUP_BODY)
+            .with("company", MessageArg::text(company.to_owned()))
+            .with("link", MessageArg::text(link.to_owned())),
+    )
+}
+
 /// Subject and body for a password-reset link.
 ///
 /// **No company name and no person's name**, unlike a signup or an invitation:

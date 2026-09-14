@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM membership_branch b\n              USING membership m\n              WHERE b.membership_id = m.id\n                AND m.identity_id = $1\n                AND m.tenant_id IS NOT DISTINCT FROM $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d0da0436d195bb1eb2903768163ef211e81826035322a392323bea122fc6a8d0"
+}

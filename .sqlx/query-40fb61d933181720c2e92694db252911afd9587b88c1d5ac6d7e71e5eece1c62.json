@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.role as \"role!\", r.module_id, r.role as \"module_role?\"\n                 FROM membership m\n                 LEFT JOIN membership_module_role r ON r.membership_id = m.id\n                WHERE m.identity_id = $1 AND m.tenant_id = $2 AND m.revoked_at IS NULL",
+  "query": "SELECT m.role as \"role!\", r.module_id, r.role as \"module_role?\",\n                      (SELECT array_agg(b.branch ORDER BY b.branch)\n                         FROM membership_branch b\n                        WHERE b.membership_id = m.id) as \"branches: Vec<String>\"\n                 FROM membership m\n                 LEFT JOIN membership_module_role r ON r.membership_id = m.id\n                WHERE m.identity_id = $1 AND m.tenant_id = $2 AND m.revoked_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -35,6 +35,12 @@
             "name": "role"
           }
         }
+      },
+      {
+        "ordinal": 3,
+        "name": "branches: Vec<String>",
+        "type_info": "TextArray",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -46,8 +52,9 @@
     "nullable": [
       false,
       true,
-      true
+      true,
+      null
     ]
   },
-  "hash": "b070e041cf405e84451c426d4647a12ab118a84d502ab25d1584b02d20f592eb"
+  "hash": "40fb61d933181720c2e92694db252911afd9587b88c1d5ac6d7e71e5eece1c62"
 }

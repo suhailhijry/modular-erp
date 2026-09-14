@@ -92,6 +92,31 @@ impl TenantDb {
         self.access.as_ref().is_some_and(crate::Access::is_owner)
     }
 
+    /// **The branch a request is in**, given the one it named — see
+    /// [`crate::Access::branch_for`]. A handle with nobody behind it is
+    /// confined to nothing and gets what it asked for.
+    ///
+    /// # Errors
+    /// [`crate::BranchRefusal`] for a confined member naming a branch that is
+    /// not theirs, or naming none while belonging to several.
+    pub fn branch_for(
+        &self,
+        asked: Option<&erp_types::AggregateId>,
+    ) -> Result<Option<erp_types::AggregateId>, crate::BranchRefusal> {
+        match &self.access {
+            Some(access) => access.branch_for(asked),
+            None => Ok(asked.cloned()),
+        }
+    }
+
+    /// Whether the caller may look across every branch at once.
+    #[must_use]
+    pub fn spans_branches(&self) -> bool {
+        self.access
+            .as_ref()
+            .is_none_or(crate::Access::spans_branches)
+    }
+
     /// The caller's role, if a person is behind this handle.
     ///
     /// `None` for maintenance and provisioning, which act on the system's

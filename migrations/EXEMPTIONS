@@ -59,3 +59,10 @@ control/0022_tenant_suspending.sql  add-constraint  Both constraints are
     ones, so nothing this refuses was previously accepted. Drop-and-add is the
     only way to widen a CHECK, which is why the scan sees a `drop constraint` it
     cannot tell from a narrowing.
+control/0023_staff_signups.sql  add-constraint  Widened, like `0022` before it:
+    the one-owner rule gains a third shape, a row with neither an identity nor
+    a hash when `created_by` names the staff member who filed it. The previous
+    build never sets `created_by`, so every row it writes names exactly one
+    owner as before and satisfies the new rule; nothing this refuses was
+    previously accepted. Drop-and-add because a CHECK cannot be altered in
+    place.

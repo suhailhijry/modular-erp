@@ -35,6 +35,13 @@ pub struct AppState {
     /// is ignored, because a header the caller can write is not an identity.
     /// See [`crate::extract::caller_address`].
     pub trust_forwarded: bool,
+    /// **Whether the public may sign up.** `false` unless the deployment says
+    /// `SIGNUP=open` (decided 2026-09-14): a tenant gets what it asked for after
+    /// it has paid, set up by platform staff over `POST /v1/platform/tenants`,
+    /// and there is no trial — the public demo is the trial. `POST /v1/signups`
+    /// answers `403 signups.closed` while this is off; the confirmation link a
+    /// staff-created owner receives works either way.
+    pub signup_open: bool,
     /// Where files are kept.
     ///
     /// `None` when the deployment has configured no storage, and then anything
@@ -84,8 +91,18 @@ impl AppState {
             storage: None,
             realtime: None,
             trust_forwarded: false,
+            signup_open: false,
             read_models: Arc::default(),
         }
+    }
+
+    /// Lets the public sign up. Off by default, for the reason
+    /// [`AppState::signup_open`] gives; a test, the demo, and a deployment that
+    /// means it turn it on.
+    #[must_use]
+    pub const fn opening_signup(mut self, open: bool) -> Self {
+        self.signup_open = open;
+        self
     }
 
     /// Reads the client address from the last hop of `X-Forwarded-For`.

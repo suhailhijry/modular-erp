@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE pending_signup SET confirmed_at = now()\n                WHERE token_hash = $1\n                  AND confirmed_at IS NULL AND cancelled_at IS NULL\n                  AND expires_at > now()\n            RETURNING id, handle, slug, company,\n                      identity_id as \"identity_id: IdentityId\",\n                      password_hash",
+  "query": "UPDATE pending_signup SET confirmed_at = now()\n                WHERE token_hash = $1\n                  AND confirmed_at IS NULL AND cancelled_at IS NULL\n                  AND expires_at > now()\n            RETURNING id, handle, slug, company",
   "describe": {
     "columns": [
       {
@@ -46,28 +46,6 @@
             "name": "company"
           }
         }
-      },
-      {
-        "ordinal": 4,
-        "name": "identity_id: IdentityId",
-        "type_info": "Uuid",
-        "origin": {
-          "Table": {
-            "table": "pending_signup",
-            "name": "identity_id"
-          }
-        }
-      },
-      {
-        "ordinal": 5,
-        "name": "password_hash",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "pending_signup",
-            "name": "password_hash"
-          }
-        }
       }
     ],
     "parameters": {
@@ -79,10 +57,8 @@
       false,
       false,
       false,
-      false,
-      true,
-      true
+      false
     ]
   },
-  "hash": "6bfe66a4f492a9f33d4135bba6b84b09615f0a58902b38996e1aab514abedb77"
+  "hash": "b75d445e9a80603f99add7390a536eaa2c83c0e4866c057ec26141b401ad358b"
 }

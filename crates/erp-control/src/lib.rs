@@ -61,8 +61,8 @@ pub use auth::{
 /// directly, which is what stops it linking the fleet (D15). `tests/boundary.rs`
 /// is what enforces that.
 pub use erp_tenant::{
-    Access, Budget, Capability, CommandError, Conn, EnabledModules, Lane, ModuleSetup, PoolError,
-    Role, TenantDb, Tx, UnknownRole,
+    Access, BranchRefusal, Budget, Capability, CommandError, Conn, EnabledModules, Lane,
+    ModuleSetup, PoolError, Role, TenantDb, Tx, UnknownRole,
 };
 pub use fleet::{
     EventVersions, FleetPlan, MIGRATION_FLOOR, ReadModelVersions, SealingPlan, TenantSchema,
@@ -97,6 +97,7 @@ pub use provision::{
 };
 pub use signup::{
     Confirmed, PendingSignup, REQUEST_INTERVAL, SIGNUP_LIFETIME, SignupError, SignupRequest,
+    TenantOrder,
 };
 
 use erp_i18n::{Composite, Localize, Message, MessageArg, StaticCatalog};
@@ -2190,13 +2191,25 @@ impl ControlPlane {
         .await?
         .rows_affected();
 
-        // Per-module exceptions go with the membership. Removing somebody takes
-        // away everything about their access, so re-adding them later starts
-        // from their new role rather than from a rule nobody remembers setting.
+        // Per-module exceptions and the branch list go with the membership.
+        // Removing somebody takes away everything about their access, so
+        // re-adding them later starts from their new role rather than from a
+        // rule nobody remembers setting.
         sqlx::query!(
             "DELETE FROM membership_module_role r
               USING membership m
               WHERE r.membership_id = m.id
+                AND m.identity_id = $1
+                AND m.tenant_id IS NOT DISTINCT FROM $2",
+            identity_id.as_uuid(),
+            scope.tenant().map(TenantId::into_uuid),
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "DELETE FROM membership_branch b
+              USING membership m
+              WHERE b.membership_id = m.id
                 AND m.identity_id = $1
                 AND m.tenant_id IS NOT DISTINCT FROM $2",
             identity_id.as_uuid(),
@@ -2249,8 +2262,13 @@ impl ControlPlane {
         identity_id: IdentityId,
         tenant_id: TenantId,
     ) -> Result<Option<Access>, AccessError> {
+        // The branches ride along as one array on every row, so this stays
+        // one round trip — a second join would multiply modules by branches.
         let rows = sqlx::query!(
-            r#"SELECT m.role as "role!", r.module_id, r.role as "module_role?"
+            r#"SELECT m.role as "role!", r.module_id, r.role as "module_role?",
+                      (SELECT array_agg(b.branch ORDER BY b.branch)
+                         FROM membership_branch b
+                        WHERE b.membership_id = m.id) as "branches: Vec<String>"
                  FROM membership m
                  LEFT JOIN membership_module_role r ON r.membership_id = m.id
                 WHERE m.identity_id = $1 AND m.tenant_id = $2 AND m.revoked_at IS NULL"#,
@@ -2268,6 +2286,22 @@ impl ControlPlane {
         // Defaulting down locks someone out silently; defaulting up lets them
         // in silently.
         let mut access = Access::new(parse_role(&first.role)?);
+        // A branch id this build cannot read is the same kind of error: the
+        // member would otherwise be confined to nowhere, or to everywhere.
+        access.branches = first
+            .branches
+            .as_ref()
+            .filter(|list| !list.is_empty())
+            .map(|list| {
+                list.iter()
+                    .map(|raw| {
+                        erp_types::AggregateId::new(raw.clone()).map_err(|e| {
+                            AccessError::Corrupt(format!("membership_branch.branch: {e}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
 
         for row in &rows {
             let (Some(module), Some(role)) = (row.module_id.as_ref(), row.module_role.as_ref())

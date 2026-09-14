@@ -546,6 +546,7 @@ fn who_may_write_off(
                     role: member.role,
                     overrides: member.module_roles.clone(),
                     machine: false,
+                    branches: None,
                 },
                 inventory::http::WRITE_OFF,
                 Some(&module),
@@ -2813,6 +2814,7 @@ mod tests {
                 .collect(),
             handle: None,
             role,
+            branches: Vec::new(),
             since: chrono::DateTime::UNIX_EPOCH,
             suspended,
         }

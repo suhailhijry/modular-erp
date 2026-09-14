@@ -344,6 +344,10 @@ services:
       # a process reachable without that proxy — the header is then whatever
       # the caller writes.
       TRUST_X_FORWARDED_FOR: "true"
+      # **A development stack, so the form is open.** A production deployment
+      # leaves this unset — closed — and staff set a company up over
+      # `POST /v1/platform/tenants` once it has paid.
+      SIGNUP: open
     # **Two of them.** One API process never disagrees with itself, so a single
     # replica would test none of what `REDIS_URL` is for.
     deploy:

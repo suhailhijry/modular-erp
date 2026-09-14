@@ -435,7 +435,23 @@ pub async fn remove_member(&self, tenant_id: TenantId, identity: IdentityId,
     actor: Actor) -> Result<(), MemberError>;
 pub async fn set_module_role(&self, tenant_id: TenantId, identity: IdentityId,
     module: &ModuleId, role: Option<Role>, actor: Actor) -> Result<(), MemberError>;
+pub async fn set_member_branches(&self, tenant_id: TenantId, identity: IdentityId,
+    branches: &[String], actor: Actor) -> Result<(), MemberError>;
 ```
+
+`set_member_branches` records **which branches a member belongs to** (decided
+2026-09-14), in `membership_branch` beside the per-module roles. It replaces the
+whole list in one transaction with its `membership.branches_changed` entry, and
+an empty list lifts the confinement. The list is loaded with the membership into
+`Access::branches` — `None` for every branch, which is what every membership
+starts with — and `Access::branch_for` is the one rule the request layer asks:
+an unconfined member gets the branch they named, or none; a confined member may
+name one of theirs, gets their one branch filled in when they name none, and is
+refused (`BranchRefusal::NameOne`) when they belong to several. A key is bound
+through its own membership like a person. The ids are the tenant's own branch
+identifiers, not foreign keys — branches live in the tenant's database, and the
+route that calls this checks them against the `branches` module first. Revoking
+the membership drops the list, so a re-added member starts unconfined.
 
 `add_member` is idempotent in the direction that matters. An existing identity is
 reused, so adding `owner@acme.test` to a second tenant does not make a second

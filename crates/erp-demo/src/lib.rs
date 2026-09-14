@@ -221,7 +221,10 @@ pub fn with_deployment(state: AppState) -> Result<AppState, DemoError> {
         );
         erp_eventlog::SealingKey::generate("demo")?
     };
-    Ok(state.sealing_with(sealing))
+    // The demo signs up through the public API, against a router of its own
+    // that never listens on a socket — so the door is open here and only here,
+    // whatever the deployment beside it says.
+    Ok(state.sealing_with(sealing).opening_signup(true))
 }
 
 pub async fn seed(
