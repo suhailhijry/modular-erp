@@ -26,10 +26,251 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,287 tests green, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,753 tests green as of 2026-09-14, clippy and fmt clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
-[What needs work now](#what-needs-work-now) at the end.
+[What needs work now](#what-needs-work-now) at the end, and what blocks selling
+the system, in order, under [Road to selling](#road-to-selling).
+
+---
+
+## Road to selling
+
+**What blocks selling the system, in order of importance.** Written 2026-09-14
+from three audits — the "what is left" audits of 2026-09-12 and 2026-09-14, and a
+six-lens sales-readiness audit checked by a completeness critic — and the product
+owner's answers the same day. It sets the order of near-term work;
+[Build order](#build-order) records how the product was sequenced before it.
+
+The tiers, most important first:
+
+1. **Stop-ship** — a security hole, lost data, or a way to put a customer in breach. Mostly hours.
+2. **Needed to sell** — a demo that converts, and a contract to sign.
+3. **Needed to go live** — what a paying customer needs to run on it safely.
+4. **Self-hosting** — only when a customer hosts it themselves.
+5. **Growth** — after the first few customers.
+6. **Later phases.**
+
+Sizes are estimates, not measurements. References name files and functions rather
+than line numbers, because nothing checks line numbers in this document and they
+drift with every change.
+
+### Decided 2026-09-14
+
+- **The generic data-driven `Document`/`StateMachine` is not needed.** Phase 6 and
+  ARCHITECTURE §8 record it.
+- **The interface is a separate project** built against these APIs. Screens are not
+  this repository's work; what the APIs lack is.
+- **Segments:** appointment businesses (salons, clinics, gyms) and counter
+  businesses (cafés, retail, restaurants), both from the start.
+- **Hosting:** Hetzner first, outside the Kingdom. Move to Riyadh when a local
+  provider or an AWS Riyadh region is cheaper. Customers may also self-host.
+- **Branches and payroll** are sold at launch.
+- **Pricing:** a fixed price per user, with an annual discount. POS users, service
+  providers such as masseurs, and other workers who do not need every feature are
+  cheaper seats than main users.
+- **Payment gateways:** each customer signs its own Moyasar, Tabby or Tamara
+  agreement and only enters its credentials; the platform collects nothing on its
+  behalf. `PUT /v1/payments/gateways/{provider}` already takes them, sealed.
+- **Claims switch on per claim.** Granting one claim must not arm the others.
+- **Charts for launch:** a food & beverage chart and a healthcare chart, beside
+  services, retail and real estate.
+- **Reports refuse when their figures disagree with the books.**
+- **Retention:** a tenant's books are kept as long as the retention law of the
+  tenant's country requires, with a compressed copy of its data kept so it can be
+  handed over after a suspension or before deletion.
+- **Erasure:** deleting a customer or a staff member keeps only legally binding
+  records (invoices, contracts and the like) and erases the rest.
+- **Recurring invoicing lives in `sales`**, beside the other invoices. **A rental
+  unit is a booking unit** (a `booking::Resource`).
+
+### Waiting on the product owner
+
+- **The legal entity** — being registered. It fills `LICENSE` and signs the terms.
+- **BSL or AGPL.** `LICENSE` says Business Source License 1.1, and the API document
+  declares `AGPL-3.0-or-later` (`crates/erp-api/src/routes.rs`). This can be decided
+  before the entity exists.
+- **Seat types:** which features a POS seat, a service-provider seat and a worker
+  seat each get.
+- **Retention periods per country.** Counsel confirms Saudi Arabia's.
+- **ZATCA registration details and the simulation OTP.** Onboarding to simulation,
+  then production, runs when they arrive.
+- **Party roles for property** (later). Recommended: roles every module shares, such
+  as owner or supplier, in `crm`; lease-only roles, such as tenant or guarantor, on
+  the lease.
+
+### Priority 1 · Stop-ship
+
+- [ ] **The branch comes from a header the caller writes.** `X-Branch` is checked for
+      shape only, and branch-scoped claims and inventory shelves both trust it; §68
+      even says "the claim is branch-scoped already". Needs a record of which
+      branches each person belongs to. 1–2 weeks, and more urgent because branches
+      are sold at launch
+- [ ] **An owner-role API key counts as the owner.** `sales::Authority::of` reads the
+      handle's role, so an integration key walks past the document limit and the
+      credit-note claim. Half a day
+- [ ] **Suspending a tenant stops its ZATCA reporting**, so a suspension of more than
+      a day can push the customer past the 24-hour reporting window. 1–2 days
+- [ ] **Claims switch on per claim** (decided above). Today the first grant of any
+      claim arms all of them, so till staff with no employee record lose returns.
+      Hours
+- [ ] **Behind the proxy, every anonymous rate limit is one bucket for the whole
+      internet.** `TRUST_X_FORWARDED_FOR` is off and compose does not set it, so
+      sign-in, signup, one-time codes and public booking all key on the proxy's
+      address. Document `PRIMARY_CLUSTER_CAPACITY`, `FLEET_CONCURRENCY` and `DEMO_*`
+      at the same time. Hours
+- [ ] **Cluster capacity silently defaults to 10,000** when it is not set, so
+      placement overfills the cluster. Refuse a missing value. Hours
+- [ ] **The API ignores SIGTERM**: it waits on Ctrl-C only, so every deploy cuts
+      requests in flight. Hours
+- [ ] **The request path accepts a read model newer than the build** (`<` where the
+      projection runner uses `!=`), so old pods serve new-shaped tables during a
+      rolling deploy. 1 hour
+- [ ] **Audit entries are written after the commit**, so a crash between the two
+      loses the record. 1 day at the root
+- [ ] **The second-factor reset has no rate limit.** Each call ends the target's
+      sessions and sends mail. Under an hour
+- [ ] **Anyone can sign up and enable every module for free.** A switch to close
+      signup, modules granted by staff, and a source scan that every module route
+      calls `require_module`. 3–5 days
+- [ ] **Two documents promise what the code does not do.** ARCHITECTURE.md says the
+      migrator enforces a backup before upgrade, and it has no backup code;
+      `docs/book/src/deployment.md` says a customer-hosted tenant keeps running
+      without our control plane, and every request checks sessions against it.
+      Correct both. Minutes
+- [ ] **No dependency vulnerability scanning in CI** (`cargo audit` or `cargo deny`).
+      Hours
+
+### Priority 2 · Needed to sell
+
+- [ ] **Legal**, once the entity exists: settle BSL or AGPL and fill `LICENSE`; terms
+      of service, privacy notice, data processing agreement, sub-processor list,
+      records of processing, a breach procedure, and an exit clause promising the
+      compressed export. Record terms acceptance at signup (half a day of
+      engineering)
+- [ ] **Financial statements:** profit and loss, balance sheet, balances at a date,
+      and a journal listing. Today the trial balance is per-currency totals and
+      account balances are all-time. 1–2 weeks
+- [ ] **Receipts and invoices a customer can hold.** A till sale's response carries
+      no QR, and the full nine-field QR exists only after the worker signs; a B2B
+      invoice is not held back until ZATCA clears it, and handing one over uncleared
+      is a breach. Rendering (QR image, Arabic, PDF) can live in the interface or
+      the server. Backend days; server rendering 1 week; PDF/A-3 1–2 weeks more
+- [ ] **Food & beverage and healthcare charts** (decided above), each installing into
+      a fresh tenant and carrying every account the modules' conventional postings
+      name. Days
+- [ ] **Products a till can use:** price, barcode, VAT category, editing, and an
+      Arabic name. 1–2 weeks
+- [ ] **A demo a salesperson can use:** a small hosted environment, staff routes to
+      create, reset and convert demo tenants, a clinic booking template, and salon,
+      clinic and café seeds with two branches each. 2–3 weeks
+- [ ] **Settle error status codes before the interface depends on them.** `purchases`
+      and `hr` refusals answer 400 where `sales` answers 403, and credit refusals
+      answer 400 at `/v1/sales` but 422 at the till. 1–2 hours
+- [ ] **Consent and a privacy notice captured on public booking**, where clinics
+      collect health data. A few days
+- [ ] *Dependency outside this repository:* the interface project calling these APIs
+
+### Priority 3 · Needed to go live
+
+- [ ] **Payroll correctness**, because payroll is sold at launch. GOSI rates verified
+      against the official schedule; a schedule for people hired after the 2024
+      pension reform, whose deductions are wrong today; part-month pay, since a
+      mid-month joiner stops the month's run; payslips the interface can render.
+      About 1 week once the rules are confirmed. The WPS salary file still needs a
+      real bank or Mudad specification. **Do not switch payroll on for a customer
+      before this lands**
+- [ ] **Seat types for per-user pricing.** Each user is a full, POS, service-provider
+      or worker seat; a cheaper seat is held to its features and counted for
+      billing. Waits on which features each seat gets. 1–2 weeks
+- [ ] **A legal basis for keeping personal data on Hetzner outside the Kingdom**, with
+      extra care for clinics' health data. Business and legal
+- [ ] **Production environment on Hetzner:** TLS, including to Postgres; security
+      headers; encryption at rest; point-in-time backups that include uploaded files
+      and keep control-plane and tenant data consistent; backup before upgrade,
+      enforced by the migrator; failover; readiness checks and metrics; alerts for a
+      stalled worker and overdue ZATCA reports; the reaper and migrator scheduled;
+      mail with SPF, DKIM and DMARC; playbooks for database loss, provider outages,
+      a ZATCA outage and a data breach. 3–5 weeks or more
+- [ ] **Reports refuse when their figures disagree with the books** (decided above).
+      The message `DOES_NOT_RECONCILE` exists in English and Arabic, and nothing
+      raises it. Days
+- [ ] **Refuse invoices until the tenant is onboarded with ZATCA.** An invoice issued
+      before onboarding can never be reported. Days
+- [ ] **First live calls** with a pilot's own Moyasar, Tabby or Tamara account, and
+      the Taqnyat SMS sender name. Days once the accounts exist
+- [ ] **Importing a customer's data:** products, opening stock, opening balances, and
+      a path for open receivables that does not create ZATCA documents. 2–3 weeks
+- [ ] **Stock transfers between branches**, because branches are sold at launch.
+      1–2 weeks
+- [ ] **Posting-accounts routes for `purchases` and `payments`.** A tenant with its
+      own chart cannot record a supplier bill or a gateway payment at all. About 6
+      hours
+- [ ] **Booking:** confirmation and cancellation messages (days); customers cancel or
+      reschedule their own bookings (days); WhatsApp with approved templates
+      (2–4 weeks)
+- [ ] **Packages and memberships:** redeem a package from a booking (1–2 weeks);
+      renew and charge memberships automatically (2–3 weeks); gym check-in (not
+      sized)
+- [ ] **Erasure under the policy above:** customers, whose name and phone sit in
+      append-only events (2–4 weeks); a route to erase staff (1–2 days); audit-trail
+      retention (days)
+- [ ] **A compressed whole-tenant export**, kept for a suspended or departing tenant
+      until deletion. Days
+- [ ] **Staff can find a tenant by slug and a person by email.** Every staff action
+      takes a UUID today. Half a day
+- [ ] **Sign-in, password and second-factor events in the audit trail.** Payment
+      gateways' security questionnaires ask for it. 1–3 days
+- [ ] **A VAT return that matches the form:** zero-rated boxes split, reverse charge,
+      credit notes shown as adjustments, credit carried forward, prior-period
+      corrections (1–2 weeks); and a test for cancelling and reissuing a B2B invoice
+      ZATCA refuses (2–3 days)
+
+### Priority 4 · Self-hosting
+
+- [ ] A self-hosting agreement — none exists — once the licence is settled
+- [ ] A tenant's install that keeps running without our control plane
+- [ ] An install and upgrade a stranger can run, and compose refusing its all-zero
+      `SEALING_KEY` default
+
+### Priority 5 · Growth
+
+- [ ] SaaS billing on the pricing above: per-user seats by type, monthly and annual
+      periods, trials, and suspension for non-payment
+- [ ] More than one database cluster (the cluster registry only knows `PRIMARY_*`),
+      which is also the path from Hetzner to Riyadh; a database login per tenant
+- [ ] ZATCA registration per branch or per till. **Confirm during the simulation
+      run**: if ZATCA expects a unit per branch, this moves to Priority 3
+- [ ] Purchasing: suppliers, purchase orders, reorder points, stock valuation
+- [ ] Payables ageing, customer statements, bank reconciliation, sales by item,
+      quotations and sales orders, debit notes, and recurring invoices in `sales`
+- [ ] Offline till; card-terminal integration
+- [ ] Restaurants: tables, kitchen orders, modifiers, recipes. 6–10 weeks
+- [ ] Security polish: rate limits and lockout for signed-in users; API key expiry;
+      session idle timeout and a list of active sessions; virus scanning of uploads;
+      keys scoped `*:manage_tenant` must not rewrite permission limits; the remaining
+      second-factor gaps (a failed enrolment mail is invisible, a suspended tenant's
+      member cannot be freed, a pending factor is renamed by kind); internal cluster
+      names in the owner's audit trail; a reused sealing-key id; a support-entry
+      route; a tenant switcher for accountants
+- [ ] Amount limits only reach the ledger's routes: supplier bills, payroll runs and
+      pay-outs have none. Say so in the interface until they do
+- [ ] Actions the code defines with nothing to perform them: suspending and
+      reinstating a person, deleting a tenant after its retention period, changing a
+      cluster's status, sweeping webhooks from unknown providers, and dismissing a
+      tenant's dead letters
+- [ ] Inventory leftovers: a one-unit delivery naming its serial twice is accepted;
+      the lot a line named is not shown on the invoice; goods received are not
+      matched to bills line by line; supplier bill lines do not keep their product
+- [ ] Housekeeping: code and the book still cite the retired `docs/ERRORS.md`, and
+      nothing checks that this plan's `file:line` references still resolve
+
+### Priority 6 · Later phases
+
+- [ ] Property (Phase 20). The party-model plan must be updated for read-model
+      versions (§65) before it is followed
+- [ ] Marketing (Phase 18)
+- [ ] OIDC and single sign-on
 
 ---
 
@@ -8420,8 +8661,10 @@ The second module: invoicing with Saudi VAT, posting to the ledger.
       **"Generic IFRS"** is what `services` is — a chart with no industry
       accounts in it. A second one under a standards-body name would be the same
       accounts and a stronger claim
-- [ ] A chart for whichever industry the next customer is in *(the real
-      remaining work, and it needs a customer rather than a guess)*
+- [ ] **A food & beverage chart and a healthcare chart.** *Decided 2026-09-14:*
+      cafés and clinics are sold from launch, so these are the next industries
+      rather than a guess. Tracked under [Road to selling](#road-to-selling),
+      Priority 2
 - [ ] Self-service signup as a durable workflow. *(**Already two-phase and
       compensating** — `pending_signup` plus an outbox email in one transaction,
       `confirm_signup` unclaims on `Err`, `provision` drops the database and
@@ -8780,7 +9023,10 @@ and let two working cases describe the engine.
       not imagine.** Every module that touches the ledger carries a typed,
       versioned `PostingAccounts` configuration with its own key and route:
       `sales` (`modules/sales/src/posting.rs:23`), `pos`, `payroll`, `prepaid`,
-      `purchases`, `payments`. The box was phrased as a *mechanism* — a rules
+      `purchases`, `payments`. *(**Corrected 2026-09-14:** `purchases` and
+      `payments` carry the typed configuration but have no route, so a tenant with
+      its own chart cannot use either; see [Road to selling](#road-to-selling),
+      Priority 3.)* The box was phrased as a *mechanism* — a rules
       engine — and the outcome arrived as per-module typed configuration
       instead, which is simpler and refuses at compile time what a rules engine
       would refuse at runtime
@@ -8788,13 +9034,20 @@ and let two working cases describe the engine.
       same evidence: **there is no module left to migrate.** All six that post
       already resolve their accounts this way, inside the command's own
       transaction so a configuration change cannot land mid-write (L5)
-- [ ] `StateMachine` as data driving document workflows and approval routing
-- [ ] `DocumentType` as versioned data; generic `Document` aggregate
-- [ ] One document type ported end to end
-- [ ] Remaining modules, each landing with its own blueprint and demo participation
+- [x] ~~`StateMachine` as data driving document workflows and approval routing~~
+      **Declined 2026-09-14 by the product owner**, with the two boxes below: the
+      generic `Document` is not needed. Documents stay compiled types, and
+      tenants shape them through settings, claims and custom fields
+- [x] ~~`DocumentType` as versioned data; generic `Document` aggregate~~ Declined,
+      as above
+- [x] ~~One document type ported end to end~~ Declined, as above
+- [x] ~~Remaining modules, each landing with its own blueprint and demo
+      participation~~ **Stale: it named nothing.** Nineteen modules ship, and the
+      demo test requires every registered module to replay and answer
 
 **Before starting:** resolve the open question in architecture §8 about whether
-the generic `Document` aggregate is right for the real document mix.
+the generic `Document` aggregate is right for the real document mix. *Resolved
+2026-09-14: it is not needed, so this phase has nothing left to start.*
 
 **Audited 2026-09-09, and two things came out of it.**
 
@@ -8830,6 +9083,9 @@ deploy.
 ---
 
 ## Build order
+
+*For near-term work, [Road to selling](#road-to-selling) sets the order now; this
+section records how the product was sequenced before it.*
 
 **Phase numbers below are historical.** They record the order things were
 designed in, and the cross-references in this document depend on them, so they
@@ -10839,14 +11095,15 @@ opposite direction from every module so far.
       the identical problem, so it is the template rather than a new pattern.
       And **not `erp-recurrence`**, which is 432 lines of weekly booking
       patterns that the crate name flatters
-- [ ] Where it lives is a decision: `sales` owns invoices, but `prepaid`
-      subscriptions want it too, which is the second consumer that justifies it
+- [x] ~~Where it lives is a decision: `sales` owns invoices, but `prepaid`
+      subscriptions want it too~~ **Decided 2026-09-14: in `sales`**, beside the
+      other invoices
 
 ### 20e · `modules/property` — units, leases, rent
 
-- [ ] A **unit**, and whether it is a `booking::Resource` of kind `Place` or its
-      own aggregate. §49 found the engine does not care what it holds
-      (`modules/booking/src/resource.rs:29`), so this is a choice, not a constraint
+- [x] A **unit** is a `booking::Resource` of kind `Place`, not its own aggregate —
+      **decided 2026-09-14**. §49 found the engine does not care what it holds
+      (`modules/booking/src/resource.rs:29`), so this was a choice, not a constraint
 - [ ] A **lease**: parties, term, rent, escalation, break clause, renewal,
       termination
 - [ ] A **security deposit as a liability** — money held and not earned, returned

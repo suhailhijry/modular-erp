@@ -1240,6 +1240,9 @@ state machine compiled and gets most of the benefit. If they need genuinely
 different *workflows*, the generic aggregate earns its cost. **Decide from
 customer conversations before Phase 6, not from this document.**
 
+*Decided 2026-09-14 by the product owner: not needed. Documents stay compiled
+aggregates; what a tenant configures is fields, settings and rules over them.*
+
 **Module count.** Designed for ~15. If the real number turns out to be 30+,
 revisit whether the registry should be macro-generated and whether third-party
 extension needs to arrive earlier.
