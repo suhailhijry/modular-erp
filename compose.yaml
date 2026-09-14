@@ -228,7 +228,7 @@ services:
   # MinIO and not a mock: the whole risk in `erp_storage::s3` is SigV4 and the
   # wire format, and neither is testable against something that agrees with you.
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -248,7 +248,7 @@ services:
 
   # The bucket, once. `mb --ignore-existing` so a restart is not a failure.
   createbucket:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     restart: "no"
     depends_on:
       minio:

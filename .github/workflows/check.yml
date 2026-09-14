@@ -131,7 +131,7 @@ jobs:
         run: |
           docker run --detach --name minio --publish 9000:9000 \
             --env MINIO_ROOT_USER=minioadmin --env MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
           for _ in $(seq 60); do
             curl --silent --fail http://localhost:9000/minio/health/live && break
             sleep 2
@@ -144,7 +144,7 @@ jobs:
           # only exists inside a container we throw away.
           docker run --rm --network host \
             --env MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
-            minio/mc:latest mb --ignore-existing local/documents
+            quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z mb --ignore-existing local/documents
 
       # fmt, then clippy, then the suite — the order that fails fastest.
       # Ignored tests stay ignored: the soak test, the rebuild benchmark, and
