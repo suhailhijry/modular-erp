@@ -26,6 +26,10 @@ pub enum LedgerError {
     NoSuchBranch(String),
     #[error("entry {entry} was already reversed by {by}")]
     AlreadyReversed { entry: String, by: String },
+    /// A year's closing entry is undone by reopening the year, which reverses
+    /// it and records that the year is open again — not by hand.
+    #[error("entry {0} is a closing entry; reopen its year instead")]
+    ClosingEntry(String),
     /// The books were closed before this date. A correction goes into the
     /// period that is open, not into one somebody has already declared.
     #[error("the books are closed before {closed_before}; this entry is dated {occurred_on}")]
@@ -80,6 +84,9 @@ impl erp_i18n::Localize for LedgerError {
             }
             Self::AlreadyReversed { by, .. } => {
                 Message::new(messages::ALREADY_REVERSED).with("by", MessageArg::text(by.clone()))
+            }
+            Self::ClosingEntry(id) => {
+                Message::new(messages::CLOSING_ENTRY).with("entry", MessageArg::text(id.clone()))
             }
             Self::Unbalanced(e) => e.message(),
             Self::BadAccountCode(_) => Message::new(erp_tenant::messages::INTERNAL),
@@ -264,11 +271,43 @@ pub async fn post_entry_in(
     lines: &BalancedLines,
     metadata: &Metadata,
 ) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
+    post_in(conn, id, occurred_on, memo, lines, metadata, false).await
+}
+
+/// [`post_entry_in`] for a year's closing entry, or its reversal.
+///
+/// **The one posting allowed into closed time.** A year is booked once every
+/// period in it is closed, and the entry that books it is dated inside the
+/// year — so it must pass the watermark that refuses everything else. It goes
+/// through the same function as every other posting, flagged, so there is still
+/// one place a posting is checked; only [`crate::period`] calls this, and the
+/// flag is what the profit and loss reads to leave the entry out.
+pub(crate) async fn post_closing_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    occurred_on: Timestamp,
+    memo: &str,
+    lines: &BalancedLines,
+    metadata: &Metadata,
+) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
+    post_in(conn, id, occurred_on, memo, lines, metadata, true).await
+}
+
+async fn post_in(
+    conn: &mut sqlx::PgConnection,
+    id: &AggregateId,
+    occurred_on: Timestamp,
+    memo: &str,
+    lines: &BalancedLines,
+    metadata: &Metadata,
+    closing: bool,
+) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
     // **The one place a closed period is enforced.** Every posting in the system
     // arrives here — hand-written entries, reversals, and everything sales does,
     // because an invoice and its journal entry commit together. Read inside this
     // transaction, so a period closed a moment ago refuses the next entry rather
-    // than the one after that.
+    // than the one after that. A closing entry is the one exception, and it
+    // says so.
     // **And the one place a branch is checked**, for exactly the same reason:
     // every posting arrives here, so one check covers `sales`, `purchases`,
     // `prepaid` and `pos` without any of them repeating it. Against the log
@@ -288,14 +327,16 @@ pub async fn post_entry_in(
         }
     }
 
-    let books = crate::period::books(&mut *conn)
-        .await
-        .map_err(|e| ExecuteError::Rejected(LedgerError::Config(e)))?;
-    if !books.accepts(occurred_on) {
-        return Err(ExecuteError::Rejected(LedgerError::PeriodClosed {
-            occurred_on,
-            closed_before: books.closed_before.unwrap_or(occurred_on),
-        }));
+    if !closing {
+        let books = crate::period::books(&mut *conn)
+            .await
+            .map_err(|e| ExecuteError::Rejected(LedgerError::Config(e)))?;
+        if !books.accepts(occurred_on) {
+            return Err(ExecuteError::Rejected(LedgerError::PeriodClosed {
+                occurred_on,
+                closed_before: books.closed_before.unwrap_or(occurred_on),
+            }));
+        }
     }
 
     for line in lines.as_slice() {
@@ -337,6 +378,7 @@ pub async fn post_entry_in(
                 occurred_on,
                 memo: memo.clone(),
                 lines: lines.clone(),
+                closing,
             }))
         },
     )
@@ -432,11 +474,44 @@ pub async fn reverse_in(
     memo: &str,
     metadata: &Metadata,
 ) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
+    reverse_as(conn, original, reversal, occurred_on, memo, metadata, false).await
+}
+
+/// [`reverse_in`] for a year's closing entry, which [`reverse_in`] refuses:
+/// reopening the year is the only thing that undoes one, and it records that
+/// the year is open again alongside. The reversal is a closing entry too, so it
+/// passes the watermark and stays out of the profit and loss.
+pub(crate) async fn reverse_closing_in(
+    conn: &mut sqlx::PgConnection,
+    original: &AggregateId,
+    reversal: &AggregateId,
+    occurred_on: Timestamp,
+    memo: &str,
+    metadata: &Metadata,
+) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
+    reverse_as(conn, original, reversal, occurred_on, memo, metadata, true).await
+}
+
+async fn reverse_as(
+    conn: &mut sqlx::PgConnection,
+    original: &AggregateId,
+    reversal: &AggregateId,
+    occurred_on: Timestamp,
+    memo: &str,
+    metadata: &Metadata,
+    closing_allowed: bool,
+) -> Result<Committed<JournalEntryEvent>, ExecuteError<LedgerError>> {
     let loaded =
         erp_eventlog::load::<JournalEntry>(&mut *conn, original, crate::upcasters()).await?;
 
     if !loaded.aggregate.posted {
         return Err(ExecuteError::Rejected(LedgerError::NoSuchEntry(
+            original.as_str().to_owned(),
+        )));
+    }
+    let closing = loaded.aggregate.closing;
+    if closing && !closing_allowed {
+        return Err(ExecuteError::Rejected(LedgerError::ClosingEntry(
             original.as_str().to_owned(),
         )));
     }
@@ -482,7 +557,16 @@ pub async fn reverse_in(
     let flipped = BalancedLines::new(flipped)
         .map_err(|e| ExecuteError::Rejected(LedgerError::Unbalanced(e)))?;
 
-    post_entry_in(&mut *conn, reversal, occurred_on, memo, &flipped, metadata).await?;
+    post_in(
+        &mut *conn,
+        reversal,
+        occurred_on,
+        memo,
+        &flipped,
+        metadata,
+        closing,
+    )
+    .await?;
 
     let by = reversal.as_str().to_owned();
     erp_eventlog::try_execute::<JournalEntry, _, LedgerError>(

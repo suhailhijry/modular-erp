@@ -1691,3 +1691,294 @@ async fn a_preview_over_an_installed_chart_says_everything_is_already_there() {
 
     fixture.cleanup().await;
 }
+
+// ---------------------------------------------------------------------------
+// The period close, and the year-end close
+// ---------------------------------------------------------------------------
+
+/// **Periods close in order and a year books into retained earnings.** One
+/// year of trade in two currencies; the periods close in order (and refuse out
+/// of it), the year refuses to book while a period is open and while a
+/// currency has nowhere to close into, then books one entry per currency dated
+/// the year's last day, flagged so the profit and loss ignores it and every
+/// balance counts it. Reopening runs in reverse and a second booking gets
+/// fresh entry ids.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one year, closed, reopened and closed again"
+)]
+async fn a_year_books_into_retained_earnings_and_reopens_in_reverse() {
+    use ledger::period::{
+        CloseError, ClosingAccounts, close_period_in, close_year_in, reopen_period_in,
+        reopen_year_in,
+    };
+
+    let fixture = Fixture::new().await;
+    for (account, kind, currency) in [
+        ("1000", AccountKind::Asset, sar()),
+        ("3000", AccountKind::Equity, sar()),
+        ("3100", AccountKind::Equity, sar()),
+        ("4000", AccountKind::Revenue, sar()),
+        ("5000", AccountKind::Expense, sar()),
+        ("1100", AccountKind::Asset, usd()),
+        ("4100", AccountKind::Revenue, usd()),
+        ("3900", AccountKind::Equity, usd()),
+    ] {
+        fixture.account(account, kind, currency).await;
+    }
+    let post = |id: &str, day: &str, debit: &str, credit: &str, amount: Money| {
+        let lines = BalancedLines::new(vec![
+            Line::new(code(debit), amount),
+            Line::new(code(credit), amount.checked_neg().expect("negates")),
+        ])
+        .expect("balances");
+        let id = code(id);
+        let at = on(day);
+        let db = &fixture.db;
+        async move {
+            post_entry(db, &id, at, "trade", lines, &Metadata::default())
+                .await
+                .expect("posts");
+        }
+    };
+    post("capital", "2025-03-01", "1000", "3000", riyals(1_000)).await;
+    post("sale", "2025-06-15", "1000", "4000", riyals(500)).await;
+    post("rent", "2025-09-01", "5000", "1000", riyals(100)).await;
+    post(
+        "usd-sale",
+        "2025-07-01",
+        "1100",
+        "4100",
+        Money::from_minor(20_000, usd()),
+    )
+    .await;
+    post("jan-sale", "2026-01-15", "1000", "4000", riyals(50)).await;
+    fixture.project().await;
+
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let clock = erp_eventlog::configuration::calendar(&mut conn)
+        .await
+        .expect("the tenant's clock");
+    let metadata = Metadata::default();
+
+    // A year books only once every period of it is closed.
+    assert!(matches!(
+        close_year_in(&mut conn, 2025, "close", &metadata, None).await,
+        Err(CloseError::YearOpen { year: 2025, period }) if period == "2025-P01"
+    ));
+    // The first close may be any period; after it, order.
+    let books = close_period_in(&mut conn, "2025-P11", None)
+        .await
+        .expect("the first close");
+    assert_eq!(books.closed_before, Some(clock.start_of(day("2025-12-01"))));
+    assert!(matches!(
+        close_period_in(&mut conn, "2026-P01", None).await,
+        Err(CloseError::OutOfOrder { period, next }) if period == "2026-P01" && next == "2025-P12"
+    ));
+    assert!(matches!(
+        close_period_in(&mut conn, "2025-P13", None).await,
+        Err(CloseError::NoSuchPeriod(_))
+    ));
+    let books = close_period_in(&mut conn, "2025-P12", None)
+        .await
+        .expect("closes December");
+    assert_eq!(books.closed_before, Some(clock.start_of(day("2026-01-01"))));
+    let again = close_period_in(&mut conn, "2025-P12", None)
+        .await
+        .expect("a retry is a no-op");
+    assert_eq!(again, books);
+
+    // Dollars have nowhere to go until an account is named.
+    assert!(matches!(
+        close_year_in(&mut conn, 2025, "close", &metadata, None).await,
+        Err(CloseError::NeedsAccount { year: 2025, currency }) if currency == usd()
+    ));
+    erp_eventlog::configuration::set(
+        &mut conn,
+        ClosingAccounts::KEY,
+        &ClosingAccounts {
+            by_currency: [(usd(), code("3900"))].into_iter().collect(),
+        },
+        None,
+        None,
+    )
+    .await
+    .expect("names the dollar account");
+    let books = close_year_in(&mut conn, 2025, "Closing 2025", &metadata, None)
+        .await
+        .expect("books 2025");
+    assert!(books.is_booked(2025));
+    assert_eq!(
+        books.years[&2025].entries,
+        ["closing-2025-SAR-1", "closing-2025-USD-1"]
+    );
+    drop(conn);
+    fixture.project().await;
+
+    // Every balance counts the close; the profit and loss does not.
+    assert_eq!(
+        fixture.balance("4000").await,
+        riyals(-50),
+        "January's sale remains"
+    );
+    assert_eq!(fixture.balance("5000").await, riyals(0));
+    assert_eq!(
+        fixture.balance("3100").await,
+        riyals(-400),
+        "the year's profit"
+    );
+    assert_eq!(
+        fixture.balance("3900").await,
+        Money::from_minor(-20_000, usd())
+    );
+    assert_eq!(fixture.balance("1000").await, riyals(1_450));
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let pnl = profit_and_loss(&mut conn, on("2025-01-01"), on("2026-01-01"), None)
+        .await
+        .expect("reads");
+    let line = |code: &str| pnl.iter().find(|l| l.code == code).expect("shown").balance;
+    assert_eq!(line("4000"), riyals(-500));
+    assert_eq!(line("5000"), riyals(100));
+    let sheet = balance_sheet(&mut conn, on("2026-01-01"), on("2026-01-01"))
+        .await
+        .expect("reads");
+    let sar_result = sheet
+        .results
+        .iter()
+        .find(|r| r.currency == sar())
+        .expect("a riyal result");
+    assert_eq!(sar_result.prior_years, riyals(0), "2025 is in 3100 now");
+    assert_eq!(sar_result.difference, riyals(0));
+    let closing = journal_entry(&mut conn, "closing-2025-SAR-1")
+        .await
+        .expect("reads")
+        .expect("posted");
+    assert!(closing.closing);
+    assert_eq!(closing.occurred_on, clock.start_of(day("2025-12-31")));
+    let amounts: Vec<(String, Money)> = closing
+        .lines
+        .iter()
+        .map(|l| (l.account.clone(), l.amount))
+        .collect();
+    assert_eq!(
+        amounts,
+        [
+            ("4000".to_owned(), riyals(500)),
+            ("5000".to_owned(), riyals(-100)),
+            ("3100".to_owned(), riyals(-400)),
+        ]
+    );
+
+    // A closing entry is not reversed by hand, and a booked year's period
+    // does not reopen before the year.
+    let by_hand = ledger::reverse_entry(
+        &fixture.db,
+        &code("closing-2025-SAR-1"),
+        &code("by-hand"),
+        on("2025-12-31"),
+        "undo",
+        &metadata,
+    )
+    .await
+    .expect_err("refused");
+    assert!(
+        matches!(rejection(&by_hand), Some(LedgerError::ClosingEntry(_))),
+        "{by_hand:?}"
+    );
+    assert!(matches!(
+        reopen_period_in(&mut conn, "2025-P12", None).await,
+        Err(CloseError::YearBooked { year: 2025, .. })
+    ));
+
+    // Reopen the year: the entries reverse, the periods stay closed.
+    let books = reopen_year_in(&mut conn, 2025, "Reopening 2025", &metadata, None)
+        .await
+        .expect("reopens");
+    assert!(!books.is_booked(2025));
+    assert_eq!(books.closed_before, Some(clock.start_of(day("2026-01-01"))));
+    drop(conn);
+    fixture.project().await;
+    assert_eq!(fixture.balance("4000").await, riyals(-550));
+    assert_eq!(fixture.balance("3100").await, riyals(0));
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let reversal = journal_entry(&mut conn, "closing-2025-SAR-1-reversal")
+        .await
+        .expect("reads")
+        .expect("posted");
+    assert!(reversal.closing, "the reversal is a closing entry too");
+
+    // Only the latest closed period reopens.
+    assert!(matches!(
+        reopen_period_in(&mut conn, "2025-P10", None).await,
+        Err(CloseError::NotLatest { period, latest }) if period == "2025-P10" && latest == "2025-P12"
+    ));
+    let books = reopen_period_in(&mut conn, "2025-P12", None)
+        .await
+        .expect("reopens December");
+    assert_eq!(books.closed_before, Some(clock.start_of(day("2025-12-01"))));
+    let open = reopen_period_in(&mut conn, "2026-P03", None)
+        .await
+        .expect("an open period is a no-op");
+    assert_eq!(open, books);
+
+    // Closed and booked again: fresh entries, not a silent repeat.
+    close_period_in(&mut conn, "2025-P12", None)
+        .await
+        .expect("closes December again");
+    let books = close_year_in(&mut conn, 2025, "Closing 2025", &metadata, None)
+        .await
+        .expect("books 2025 again");
+    assert_eq!(
+        books.years[&2025].entries,
+        ["closing-2025-SAR-2", "closing-2025-USD-2"]
+    );
+
+    // A later booked year holds an earlier one closed.
+    for index in 1..=12 {
+        close_period_in(&mut conn, &format!("2026-P{index:02}"), None)
+            .await
+            .expect("closes a month of 2026");
+    }
+    drop(conn);
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    close_year_in(&mut conn, 2026, "Closing 2026", &metadata, None)
+        .await
+        .expect("books 2026");
+    assert!(matches!(
+        reopen_year_in(&mut conn, 2025, "reopen", &metadata, None).await,
+        Err(CloseError::LaterYearBooked {
+            year: 2025,
+            later: 2026
+        })
+    ));
+
+    // The figures come from the read model, which must be at the head.
+    drop(conn);
+    post("sale-2027", "2027-02-01", "1000", "4000", riyals(70)).await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    for index in 1..=12 {
+        close_period_in(&mut conn, &format!("2027-P{index:02}"), None)
+            .await
+            .expect("closes a month of 2027");
+    }
+    assert!(matches!(
+        close_year_in(&mut conn, 2027, "close", &metadata, None).await,
+        Err(CloseError::ReadModelBehind { behind }) if behind > 0
+    ));
+    drop(conn);
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let books = close_year_in(&mut conn, 2027, "Closing 2027", &metadata, None)
+        .await
+        .expect("books 2027 once the read model has caught up");
+    assert_eq!(books.years[&2027].entries, ["closing-2027-SAR-1"]);
+    drop(conn);
+
+    fixture.cleanup().await;
+}
+
+fn day(text: &str) -> chrono::NaiveDate {
+    text.parse().expect("a date")
+}

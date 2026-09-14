@@ -44,9 +44,9 @@ pub use commands::{
     rename_account, reverse_entry, reverse_in,
 };
 pub use entry::{JournalEntry, JournalEntryEvent};
-pub use fiscal::{CalendarError, FiscalCalendar, NotAPattern, Pattern, Period};
+pub use fiscal::{CalendarError, FiscalCalendar, FiscalCalendars, NotAPattern, Pattern, Period};
 pub use lines::{BalancedLines, Line, Unbalanced};
-pub use period::Books;
+pub use period::{BookedYear, Books, CloseError, ClosingAccounts};
 pub use projections::{
     AccountBalance, Accounts, BranchBalance, JournalEntryView, JournalFilter, JournalLine, Ledger,
     Postings, SheetParts, StatementLine, TradingResult, TrialBalance, account_balances,

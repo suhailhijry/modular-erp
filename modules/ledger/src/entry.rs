@@ -17,6 +17,13 @@ pub enum JournalEntryEvent {
         /// Carries its own proof — see [`BalancedLines`]. An unbalanced entry
         /// cannot be constructed here and cannot be decoded from storage.
         lines: BalancedLines,
+        /// **A year's closing entry, or its reversal** — the one kind of entry
+        /// posted into closed time, and the one the profit and loss leaves out,
+        /// because it moves a year's result into retained earnings rather than
+        /// recording trade. Absent on every entry written before year closes
+        /// existed, which is what the default is for.
+        #[serde(default)]
+        closing: bool,
     },
     /// Accounting does not delete. Reversing writes the opposite entry; this
     /// records that it happened and which entry did it.
@@ -62,6 +69,8 @@ pub struct JournalEntry {
     /// What was posted, for whatever needs to undo it.
     pub lines: Option<BalancedLines>,
     pub occurred_on: Option<Timestamp>,
+    /// A closing entry is reversed by reopening its year, never by hand.
+    pub closing: bool,
 }
 
 impl Aggregate for JournalEntry {
@@ -74,11 +83,15 @@ impl Aggregate for JournalEntry {
     fn apply(&mut self, event: &Self::Event) {
         match event {
             JournalEntryEvent::Posted {
-                lines, occurred_on, ..
+                lines,
+                occurred_on,
+                closing,
+                ..
             } => {
                 self.posted = true;
                 self.lines = Some(lines.clone());
                 self.occurred_on = Some(*occurred_on);
+                self.closing = *closing;
             }
             JournalEntryEvent::Reversed { by, .. } => self.reversed_by = Some(by.clone()),
         }

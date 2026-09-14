@@ -326,15 +326,22 @@ that was never current.
 ## Closing the books
 
 ```rust
-pub struct Books { … }
+pub struct Books { pub closed_before: Option<Timestamp>, pub years: BTreeMap<i32, BookedYear> }
+pub struct BookedYear { pub booked: bool, pub closes: u32, pub entries: Vec<String> }
 impl Books {
     pub const KEY: &'static str = "ledger.books";
     pub fn accepts(&self, occurred_on: Timestamp) -> bool;
+    pub fn is_booked(&self, year: i32) -> bool;
 }
 
 pub async fn books(conn: &mut PgConnection) -> Result<Books, ConfigError>;
-pub async fn close(conn: &mut PgConnection, closed_before: Option<Timestamp>,
-                   by: Option<&str>) -> Result<Books, ConfigError>;
+pub async fn close_period_in(conn, id: &str, by) -> Result<Books, CloseError>;
+pub async fn reopen_period_in(conn, id: &str, by) -> Result<Books, CloseError>;
+pub async fn close_year_in(conn, year: i32, memo, metadata, by) -> Result<Books, CloseError>;
+pub async fn reopen_year_in(conn, year: i32, memo, metadata, by) -> Result<Books, CloseError>;
+pub async fn close_through(conn, until: Timestamp, by) -> Result<Books, ConfigError>;
+
+pub struct ClosingAccounts { pub by_currency: BTreeMap<CurrencyCode, AggregateId> }
 ```
 
 A VAT return is filed for a period and the tax on it is paid. A journal entry
@@ -351,10 +358,31 @@ January is `2026-02-01T00:00:00Z`. The same convention as the VAT return's
 `until`, and for the same reason: "closed through 31 January" is a comparison
 somebody gets wrong once a month, and gets wrong by exactly one day.
 
-**Reopening is allowed on purpose.** An accountant who closes the wrong month has
-to be able to put it right, and a system that refuses is one they route around by
-editing the database. What it must not be is quiet, which is what `set_by` and
-`set_at` are for.
+**Two acts** (decided 2026-09-14). *Closing a period* moves the watermark to the
+period's end, in order: the one to close is the one the watermark is in, and any
+period may be the first ever closed — what lies before it closes with it.
+*Booking a year* is the year-end close: once every period of a fiscal year is
+closed, its result is moved into retained earnings by one closing entry per
+currency, dated the year's last day, so the trading accounts start the next year
+at zero. Where it goes is `ClosingAccounts` — `3100` serves any currency it
+holds without being configured, and a currency with nowhere to go refuses the
+close before anything is posted. The figures come from the read model, which
+must have caught up with the log, or the close says so and asks for a retry.
+
+**Closing entries are the one posting allowed into closed time**, through
+`post_entry_in` still, flagged — the flag is what the profit and loss reads to
+leave them out, while every balance counts them. A closing entry is not
+reversed by hand: reopening the year reverses it and records that the year is
+open again. Ids are `closing-2025-SAR-1`, the count making a year booked,
+reopened and booked again post fresh entries rather than a silent no-op.
+
+**Reopening is allowed on purpose, in reverse.** An accountant who closes the
+wrong month has to be able to put it right, and a system that refuses is one
+they route around by editing the database. Only the latest closed period
+reopens, not while its year is booked; a year reopens only while no later one
+is booked; and `close_through` — what a filed VAT return calls — still moves
+the watermark forward and never books anything. What none of it must be is
+quiet, which is what `set_by` and `set_at` are for.
 
 **Where the check is:** one place, `post_entry_in`. Every posting in the system
 routes through it, including everything sales does, because an invoice and its
@@ -409,7 +437,9 @@ Statements and the calendar: `GET`/`PUT /v1/ledger/fiscal-calendar`,
 `GET /v1/ledger/statements/profit-and-loss` and `…/balance-sheet` (a `period`,
 or `from`/`until` and `as_at`), and the journal at `GET /v1/ledger/entries` and
 `GET /v1/ledger/entries/{entry}`. All reads; the calendar's `PUT` is
-`ManageAccounts`, like closing the books.
+`ManageAccounts`, like closing a period. The close: `POST
+/v1/ledger/periods/{period}/close` and `…/reopen`, `GET /v1/ledger/years/{year}`
+with `POST …/close` and `…/reopen`, and `GET`/`PUT /v1/ledger/closing-accounts`.
 
 | Method | Path | Capability |
 |---|---|---|
@@ -419,7 +449,11 @@ or `from`/`until` and `as_at`), and the journal at `GET /v1/ledger/entries` and
 | `POST` | `/v1/ledger/entries/{entry}/reversal` | PostEntries |
 | `GET` | `/v1/ledger/charts` | Read |
 | `POST` | `/v1/ledger/chart` | ManageAccounts |
-| `GET` `PUT` | `/v1/ledger/books` | Read / ManageAccounts |
+| `GET` | `/v1/ledger/books` | Read |
+| `POST` | `/v1/ledger/periods/{period}/close`, `…/reopen` | ManageAccounts |
+| `GET` | `/v1/ledger/years/{year}` | Read |
+| `POST` | `/v1/ledger/years/{year}/close`, `…/reopen` | ManageAccounts |
+| `GET` `PUT` | `/v1/ledger/closing-accounts` | Read / ManageAccounts |
 | `GET` `PUT` | `/v1/ledger/vat-rates` | Read / ManageAccounts |
 
 ### VAT rates carry more than a rate
@@ -479,9 +513,15 @@ fiscal year is named by the calendar year it starts in; periods read `2026-P03`.
 A tenant that never chose gets calendar months from 1 January.
 
 Periods are computed, not stored, so nothing here says which are closed: that is
-still the watermark above, which the formal period close will move period by
-period. Until then a calendar change is refused while the books are closed at all
-— stricter than the decided rule, and deliberately so.
+the watermark above, moved by the period close. **A change is a segment.** A
+calendar that changed under a closed year would change what its closed periods
+*were*, so `FiscalCalendars` keeps a list: a new calendar takes effect from its
+start date, which must be in open time and on a fiscal-year boundary of the
+calendar before it (400 `ledger.not_a_year_start` otherwise, 409
+`ledger.calendar_locked` inside closed time). Every year is generated by the
+segment in force for it; the first segment reads all history before the second,
+whatever its own anchor; while nothing is closed a change simply replaces. A
+short transition year is not supported.
 
 ## Statements
 

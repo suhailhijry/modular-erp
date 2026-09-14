@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS posting (
     -- branch's *name* reads that group and these numbers separately.
     branch      TEXT,
 
+    -- A year's closing entry or its reversal: kept out of the profit and loss,
+    -- counted everywhere else. See `period::close_year`.
+    closing     BOOLEAN NOT NULL DEFAULT false,
+
     occurred_on TIMESTAMPTZ NOT NULL,
     -- The event's own timestamp, never `now()` — see architecture L2.
     recorded_at TIMESTAMPTZ NOT NULL,

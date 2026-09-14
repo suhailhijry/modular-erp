@@ -26,9 +26,11 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,777 tests green as of 2026-09-14, clippy, fmt and `cargo deny` clean.
-**Priority 1 of [Road to selling](#road-to-selling) is complete** (§79–§83), and Priority 2 has
-begun with the statements on the fiscal calendar (§84). The per-phase test
+**Where this stands:** 1,780 tests as of 2026-09-14 — 1,779 green, clippy, fmt and `cargo deny`
+clean; the one red is the `/v1` compatibility guard on the decided removal of
+`PUT /v1/ledger/books`, waiting on `just baseline`. **Priority 1 of
+[Road to selling](#road-to-selling) is complete** (§79–§83), and Priority 2 has begun with the
+statements on the fiscal calendar and the period close (§84–§85). The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end, and what blocks selling
@@ -129,6 +131,21 @@ drift with every change.
   count is refused. A staff order may grant a type **without limit** where the
   deal says so. Module-by-capability is the grain for now; widen if a deal needs
   finer.
+- **The period close is two acts** (decided 2026-09-14, night). A *period* close
+  moves the watermark, in order; a *year* close **books** the year — one closing
+  entry per currency, every trading account with a balance to the
+  retained-earnings account for that currency (`ledger.closing_accounts`, `3100`
+  by default), dated the year's last day and flagged so the profit and loss
+  leaves it out while balances, the sheet and the journal keep it. Any period may
+  be the first ever closed; the history before it closes with it and is never
+  booked. Reopening runs in reverse: only the latest closed period, a year only
+  while no later one is booked, and a booked year's periods only after the year.
+  A year close is refused while a trading currency has no closing account, and
+  years need not be booked in order. The VAT return still moves the watermark
+  and never books. `PUT /v1/ledger/books` goes — one way to close, by period.
+  The calendar becomes **segments**: a new one starts on a fiscal-year boundary
+  of the last, in open time; closed years keep the periods they were closed
+  under; no short transition years yet.
 
 ### Waiting on the product owner
 
@@ -226,7 +243,8 @@ drift with every change.
       one automatically, P&L by cost center and the balance sheet company-wide.
       **Order:** statements on the calendar (~2 weeks) → formal closure (~1) →
       FX levels i and ii (~2–3) → cost centers (~1–2) → revaluation (~1).
-      **Statements on the calendar built 2026-09-14 (§84)**; the closure is next
+      **Statements on the calendar built 2026-09-14 (§84), the formal closure
+      the same night (§85)**; FX levels i and ii are next
 - [ ] **Receipts and invoices a customer can hold.** A till sale's response carries
       no QR, and the full nine-field QR exists only after the worker signs; a B2B
       invoice is not held back until ZATCA clears it, and handing one over uncleared
@@ -1264,6 +1282,81 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       `sales/commands.rs:46` (from both credit paths, as they stood then; §70
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
+
+### 85 · A period closes in order, and a year books into retained earnings
+
+**Built 2026-09-14**, the second Priority 2 item, from eight decisions taken
+that night and recorded above — all as recommended.
+
+**What exists now.** Two acts in `ledger::period`. `close_period_in` moves the
+watermark to a period's end, in order (the period to close is the one the
+watermark is in; the first ever may be any, and swallows the history before it);
+`reopen_period_in` moves it back, only for the latest closed period and never
+while its year is booked. `close_year_in` **books** a year once every period of
+it is closed: per currency, every trading account's balance over the year is
+posted away and the result to the retained-earnings account for that currency —
+`ClosingAccounts` under `ledger.closing_accounts`, `3100` serving any currency
+it holds unconfigured — dated the year's last day on the tenant's clock, id
+`closing-{year}-{CUR}-{n}`. `reopen_year_in` reverses those entries and is
+refused while a later year is booked. `Books` gained `years`, a map of
+`BookedYear { booked, closes, entries }`, written with the version it was read
+at so two accountants closing at once conflict. The VAT return's
+`close_through` is unchanged and never books.
+
+**The flag.** `JournalEntryEvent::Posted` carries `closing: bool` (serde default,
+so no upcaster), `proj_ledger.posting` a `closing` column — read-model
+**version 2**, so the migrator rebuilds the ledger group on deploy — and the
+profit and loss is the one query that leaves closing postings out; balances,
+the sheet and the journal count them, which is what keeps `3100` and the
+computed prior-years line from both holding the result. Closing entries are the
+one posting allowed into closed time, through the same `post_in` every posting
+uses, and `reverse_in` refuses one by hand (409 `ledger.closing_entry`).
+
+**The calendar is segments.** `FiscalCalendars { segments }` under the old key,
+reading a single stored calendar as a list of one. `with` appends a calendar
+whose start is in open time and on a fiscal-year boundary of the previous
+segment (400 `ledger.not_a_year_start`, 409 `ledger.calendar_locked`), dropping
+later pending segments and always keeping the first — the closed history was
+closed under it, even when its anchor is on or after the new start, which is
+why `on`/`for_year` give the first segment everything before the second
+regardless of its own anchor. Nothing closed: replace, as before.
+
+**Routes.** `PUT /v1/ledger/books` is gone. `POST /v1/ledger/periods/{p}/close`
+and `…/reopen` (204), `GET /v1/ledger/years/{y}` and `POST …/close` and
+`…/reopen` (200 with the year and its closing entries), `GET`/`PUT
+/v1/ledger/closing-accounts` (`{ "USD": "3900" }`), `GET /v1/ledger/books` now
+lists the booked years, the journal shows `closing`. Every change is
+`ManageAccounts`. Refusals: 409 `period_out_of_order` (naming the next),
+`period_not_latest`, `year_booked`, `year_open`, `later_year_booked`,
+`closing_needs_account`; 503 `read_model_behind` when the ledger group has not
+projected to the head, because the figures a close posts come from it.
+
+**A bug the test found.** The first version posted each currency's entry as it
+went and refused on the second currency — on a bare connection in the module
+test, the riyal entry had already landed. Every currency's entry is now built
+and every refusal found before anything is posted, so a refusal never depends
+on the caller's rollback.
+
+**Three standing guards fired on the full run, each rightly.** The read-model
+pin in the migrator (`ledger` re-pinned at 2 with its new install hash); the
+role matrix, which found `GET /v1/ledger/years/{year}` answering axum's
+plain-text 400 for a non-numeric year — the year is parsed in the handler now,
+400 `ledger.not_a_year` as problem+json, the `effects.rs` precedent; and the
+`/v1` compatibility guard on the removal of `PUT /v1/ledger/books`, which is
+the decided removal and **stays red until `just baseline` accepts it** — the
+product owner's action, not mine.
+
+**Guards, all falsified** (revert → the named test fails → restore): the closing
+flag dropped by the projection; a closing entry reversible by hand; an
+out-of-order close accepted; a stale read model accepted; an off-boundary
+segment accepted; posting before every currency is checked. The module test
+runs one year through every rule — order, no-ops on retry, the dollar refusal,
+the entry's lines and date, reopen order, a second booking's fresh ids, the
+later-year hold, the read-model check; the HTTP test drives the routes and the
+calendar's new segment on a 4-4-5 → monthly switch.
+
+**Not done here, by the decided order:** FX (levels i and ii), cost centers,
+revaluation with the close.
 
 ### 84 · Statements are read by the tenant's fiscal calendar
 

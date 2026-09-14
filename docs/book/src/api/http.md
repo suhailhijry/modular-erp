@@ -1232,8 +1232,13 @@ now on* and *this week*.
 | `POST /v1/ledger/entries` | Post a journal entry | PostEntries |
 | `POST /v1/ledger/entries/{entry}/reversal` | Post its opposite | PostEntries |
 | `GET /v1/ledger/trial-balance` | Debits and credits per currency | Read |
-| `GET /v1/ledger/books` | How far the books are closed | Read |
-| `PUT /v1/ledger/books` | Close them, or reopen them | ManageAccounts |
+| `GET /v1/ledger/books` | How far the books are closed, and which years are booked | Read |
+| `POST /v1/ledger/periods/{period}/close` | Close a period, in order | ManageAccounts |
+| `POST /v1/ledger/periods/{period}/reopen` | Reopen the latest closed one | ManageAccounts |
+| `GET /v1/ledger/years/{year}` | A fiscal year: closed, booked, its closing entries | Read |
+| `POST /v1/ledger/years/{year}/close` | Book it into retained earnings | ManageAccounts |
+| `POST /v1/ledger/years/{year}/reopen` | Reverse its closing entries | ManageAccounts |
+| `GET` / `PUT /v1/ledger/closing-accounts` | Where each currency's result goes | Read / ManageAccounts |
 | `GET /v1/ledger/vat-rates` | What this business charges | Read |
 | `PUT /v1/ledger/vat-rates` | Set it | ManageAccounts |
 
@@ -1282,16 +1287,28 @@ curl -sX POST "${AUTH[@]}" -H 'Content-Type: application/json' \
   -d '{"occurred_on":"2026-04-01T00:00:00Z","memo":"Correction"}'
 ```
 
-Close the books. `closed_before` is the first instant that is **still open**, so
-closing January is `2026-02-01T00:00:00Z`. `null` reopens.
+Close a period. Periods are the fiscal calendar's (`GET /v1/ledger/periods`),
+they close in order, and the first one ever closed may be any — everything
+before it closes with it.
 
 ```bash
-curl -sX PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
-  http://localhost:8080/v1/ledger/books -d '{"closed_before":"2026-02-01T00:00:00Z"}'
+curl -sX POST "${AUTH[@]}" http://localhost:8080/v1/ledger/periods/2026-P01/close
 ```
 
-Any entry dated before that is refused with `ledger.period_closed`, including
-invoices, because an invoice and its journal entry commit together.
+Any entry dated into it is refused with `ledger.period_closed`, including
+invoices, because an invoice and its journal entry commit together. `…/reopen`
+reopens the latest closed period. Once every period of a year is closed, book
+the year: one closing entry per currency moves its result into retained
+earnings (`3100`, or what `PUT /v1/ledger/closing-accounts` names per currency),
+flagged `closing` so the profit and loss leaves it out.
+
+```bash
+curl -sX POST "${AUTH[@]}" http://localhost:8080/v1/ledger/years/2025/close
+# {"year":2025,"from":"2025-01-01","until":"2026-01-01","closed":true,"booked":true,
+#  "closing_entries":["closing-2025-SAR-1"]}
+```
+
+`…/reopen` reverses them; a booked year's periods reopen only after the year.
 
 ## Sales
 

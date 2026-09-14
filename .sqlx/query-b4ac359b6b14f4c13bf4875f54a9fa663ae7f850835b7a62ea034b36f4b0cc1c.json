@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT min(occurred_on) as \"occurred_on!\", min(recorded_at) as \"recorded_at!\",\n                  min(branch) as branch\n             FROM proj_ledger.posting\n            WHERE entry_id = $1\n            HAVING count(*) > 0",
+  "query": "SELECT min(occurred_on) as \"occurred_on!\", min(recorded_at) as \"recorded_at!\",\n                  min(branch) as branch, bool_or(closing) as \"closing!\"\n             FROM proj_ledger.posting\n            WHERE entry_id = $1\n            HAVING count(*) > 0",
   "describe": {
     "columns": [
       {
@@ -20,6 +20,12 @@
         "name": "branch",
         "type_info": "Text",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "closing!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -30,8 +36,9 @@
     "nullable": [
       null,
       null,
+      null,
       null
     ]
   },
-  "hash": "3f52ec9f4a9190211d4022b9b23da74875cd0c826f189f90e1fe0078b1a16455"
+  "hash": "b4ac359b6b14f4c13bf4875f54a9fa663ae7f850835b7a62ea034b36f4b0cc1c"
 }

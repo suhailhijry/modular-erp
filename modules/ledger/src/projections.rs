@@ -19,6 +19,8 @@ pub struct Ledger;
 impl ProjectionGroup for Ledger {
     const NAME: &'static str = "ledger";
     const SCHEMA: &'static str = "proj_ledger";
+    /// 2: a posting says whether it is a year's closing entry (§85).
+    const VERSION: i16 = 2;
 }
 
 fn decode<E: serde::de::DeserializeOwned>(
@@ -120,6 +122,7 @@ impl Projection for Postings {
             occurred_on,
             lines,
             memo,
+            closing,
         } = decode::<JournalEntryEvent>(ctx, envelope)?
         else {
             return Ok(());
@@ -132,8 +135,8 @@ impl Projection for Postings {
             sqlx::query(
                 "INSERT INTO posting
                      (id, entry_id, line_index, account, amount, currency,
-                      memo, branch, occurred_on, recorded_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                      memo, branch, occurred_on, recorded_at, closing)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             )
             // Derived from the position, so a rebuild produces the same key.
             // `Uuid::new_v4()` here would make every replayed row differ.
@@ -151,6 +154,7 @@ impl Projection for Postings {
             .bind(envelope.metadata.branch())
             .bind(occurred_on)
             .bind(ctx.event_time())
+            .bind(closing)
             .execute(&mut *conn)
             .await?;
         }
@@ -402,6 +406,11 @@ pub struct StatementLine {
 /// the range. Accounts with nothing in the range come back at zero so a
 /// statement can show the whole chart when asked.
 ///
+/// **Closing entries are left out.** A year's close moves its result into
+/// retained earnings by posting the opposite of every trading balance; counted
+/// here, a closed year would report nothing. They are still postings, and every
+/// balance — the sheet's included — counts them.
+///
 /// # Errors
 /// If the database does.
 pub async fn profit_and_loss(
@@ -420,6 +429,7 @@ pub async fn profit_and_loss(
                ON p.account = a.code
               AND p.occurred_on >= $1 AND p.occurred_on < $2
               AND ($3::text IS NULL OR p.branch = $3)
+              AND NOT p.closing
             WHERE a.kind IN ('revenue', 'expense')
             GROUP BY a.code, a.name, a.kind, a.currency
             ORDER BY a.kind DESC, a.code"#,
@@ -571,6 +581,8 @@ pub struct JournalEntryView {
     pub occurred_on: Timestamp,
     pub recorded_at: Timestamp,
     pub branch: Option<String>,
+    /// A year's closing entry or its reversal.
+    pub closing: bool,
     pub lines: Vec<JournalLine>,
 }
 
@@ -607,7 +619,8 @@ pub async fn journal(
         r#"SELECT p.entry_id as "entry_id!",
                   min(p.occurred_on) as "occurred_on!",
                   min(p.recorded_at) as "recorded_at!",
-                  min(p.branch) as branch
+                  min(p.branch) as branch,
+                  bool_or(p.closing) as "closing!"
              FROM proj_ledger.posting p
             WHERE ($1::timestamptz IS NULL OR p.occurred_on >= $1)
               AND ($2::timestamptz IS NULL OR p.occurred_on < $2)
@@ -639,6 +652,7 @@ pub async fn journal(
             occurred_on: h.occurred_on,
             recorded_at: h.recorded_at,
             branch: h.branch,
+            closing: h.closing,
         })
         .collect();
     Ok(Page::of(items, limit, |e| {
@@ -657,7 +671,7 @@ pub async fn journal_entry(
 ) -> Result<Option<JournalEntryView>, sqlx::Error> {
     let head = sqlx::query!(
         r#"SELECT min(occurred_on) as "occurred_on!", min(recorded_at) as "recorded_at!",
-                  min(branch) as branch
+                  min(branch) as branch, bool_or(closing) as "closing!"
              FROM proj_ledger.posting
             WHERE entry_id = $1
             HAVING count(*) > 0"#,
@@ -675,6 +689,7 @@ pub async fn journal_entry(
         occurred_on: head.occurred_on,
         recorded_at: head.recorded_at,
         branch: head.branch,
+        closing: head.closing,
     }))
 }
 

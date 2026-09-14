@@ -28,6 +28,31 @@ pub const NO_SUCH_PERIOD: MessageCode = MessageCode::new("ledger.no_such_period"
 /// The postings up to the instant asked do not sum to zero, so no balance
 /// sheet is shown. 503 — the pipeline, not the caller.
 pub const SHEET_DOES_NOT_BALANCE: MessageCode = MessageCode::new("ledger.sheet_does_not_balance");
+/// A closing entry reversed by hand rather than by reopening its year. 409.
+pub const CLOSING_ENTRY: MessageCode = MessageCode::new("ledger.closing_entry");
+/// A period closed out of order. 409.
+pub const PERIOD_OUT_OF_ORDER: MessageCode = MessageCode::new("ledger.period_out_of_order");
+/// A period reopened that is not the latest closed. 409.
+pub const PERIOD_NOT_LATEST: MessageCode = MessageCode::new("ledger.period_not_latest");
+/// A booked year's period reopened before the year. 409.
+pub const YEAR_BOOKED: MessageCode = MessageCode::new("ledger.year_booked");
+/// A year booked while one of its periods is open. 409.
+pub const YEAR_OPEN: MessageCode = MessageCode::new("ledger.year_open");
+/// A year reopened while a later one is booked. 409.
+pub const LATER_YEAR_BOOKED: MessageCode = MessageCode::new("ledger.later_year_booked");
+/// A trading balance in a currency with no retained-earnings account. 409.
+pub const CLOSING_NEEDS_ACCOUNT: MessageCode = MessageCode::new("ledger.closing_needs_account");
+/// A new calendar segment starting off a fiscal-year boundary. 400.
+pub const NOT_A_YEAR_START: MessageCode = MessageCode::new("ledger.not_a_year_start");
+/// A path segment that is not a fiscal year. 400.
+pub const NOT_A_YEAR: MessageCode = MessageCode::new("ledger.not_a_year");
+/// The memo on a year's closing entries.
+pub const CLOSING_MEMO: MessageCode = MessageCode::new("ledger.closing_memo");
+/// The memo on the reversal of a year's closing entries.
+pub const REOPENING_MEMO: MessageCode = MessageCode::new("ledger.reopening_memo");
+/// A year close asked while the read model the figures come from is behind
+/// the log. 503; try again.
+pub const LEDGER_BEHIND: MessageCode = MessageCode::new("ledger.read_model_behind");
 
 pub static CODES: &[MessageCode] = &[
     ENTRY_TOO_LARGE,
@@ -49,6 +74,18 @@ pub static CODES: &[MessageCode] = &[
     NOT_A_RANGE,
     NO_SUCH_PERIOD,
     SHEET_DOES_NOT_BALANCE,
+    CLOSING_ENTRY,
+    PERIOD_OUT_OF_ORDER,
+    PERIOD_NOT_LATEST,
+    YEAR_BOOKED,
+    YEAR_OPEN,
+    LATER_YEAR_BOOKED,
+    CLOSING_NEEDS_ACCOUNT,
+    NOT_A_YEAR_START,
+    NOT_A_YEAR,
+    CLOSING_MEMO,
+    REOPENING_MEMO,
+    LEDGER_BEHIND,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
@@ -284,5 +321,151 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         ALREADY_REVERSED,
         Locale::Arabic,
         Template::Simple("تم عكس هذا القيد بالفعل بواسطة {by}."),
+    ),
+    (
+        CLOSING_ENTRY,
+        Locale::English,
+        Template::Simple("Entry {entry} is a year's closing entry. Reopen the year to undo it."),
+    ),
+    (
+        CLOSING_ENTRY,
+        Locale::Arabic,
+        Template::Simple("القيد {entry} قيد إقفال سنة. أعد فتح السنة لإلغائه."),
+    ),
+    (
+        PERIOD_OUT_OF_ORDER,
+        Locale::English,
+        Template::Simple("Periods close in order. Close {next} before {period}."),
+    ),
+    (
+        PERIOD_OUT_OF_ORDER,
+        Locale::Arabic,
+        Template::Simple("تُقفل الفترات بالترتيب. أقفل {next} قبل {period}."),
+    ),
+    (
+        PERIOD_NOT_LATEST,
+        Locale::English,
+        Template::Simple(
+            "Only the latest closed period can be reopened, and that is {latest}, not {period}.",
+        ),
+    ),
+    (
+        PERIOD_NOT_LATEST,
+        Locale::Arabic,
+        Template::Simple("لا يُعاد فتح إلا آخر فترة مقفلة، وهي {latest} لا {period}."),
+    ),
+    (
+        YEAR_BOOKED,
+        Locale::English,
+        Template::Simple(
+            "{period} belongs to {year}, which is booked. Reopen the year before its periods.",
+        ),
+    ),
+    (
+        YEAR_BOOKED,
+        Locale::Arabic,
+        Template::Simple("{period} من السنة {year} المُقفلة دفتريًا. أعد فتح السنة قبل فتراتها."),
+    ),
+    (
+        YEAR_OPEN,
+        Locale::English,
+        Template::Simple("{year} cannot be booked while {period} is still open. Close it first."),
+    ),
+    (
+        YEAR_OPEN,
+        Locale::Arabic,
+        Template::Simple("لا يمكن إقفال السنة {year} دفتريًا و{period} ما زالت مفتوحة. أقفلها أولًا."),
+    ),
+    (
+        LATER_YEAR_BOOKED,
+        Locale::English,
+        Template::Simple(
+            "{year} cannot be reopened while {later} is booked. Reopen {later} first.",
+        ),
+    ),
+    (
+        LATER_YEAR_BOOKED,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يمكن إعادة فتح السنة {year} والسنة {later} مقفلة دفتريًا. أعد فتح {later} أولًا.",
+        ),
+    ),
+    (
+        CLOSING_NEEDS_ACCOUNT,
+        Locale::English,
+        Template::Simple(
+            "No retained-earnings account holds {currency}, so {year} cannot be booked. \
+             Name one under the closing accounts.",
+        ),
+    ),
+    (
+        CLOSING_NEEDS_ACCOUNT,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يوجد حساب أرباح مبقاة بعملة {currency}، فلا يمكن إقفال السنة {year} دفتريًا. \
+             حدّد حسابًا في حسابات الإقفال.",
+        ),
+    ),
+    (
+        NOT_A_YEAR_START,
+        Locale::English,
+        Template::Simple(
+            "A new calendar starts on a fiscal-year boundary of the current one. {starts_on} is \
+             not; the next is {next}.",
+        ),
+    ),
+    (
+        NOT_A_YEAR_START,
+        Locale::Arabic,
+        Template::Simple(
+            "يبدأ التقويم الجديد عند بداية سنة مالية في التقويم الحالي. {starts_on} ليس كذلك؛ \
+             البداية التالية {next}.",
+        ),
+    ),
+    (
+        NOT_A_YEAR,
+        Locale::English,
+        Template::Simple("{year} is not a fiscal year. Years read like 2026."),
+    ),
+    (
+        NOT_A_YEAR,
+        Locale::Arabic,
+        Template::Simple("{year} ليست سنة مالية. تُكتب السنوات هكذا: 2026."),
+    ),
+    (
+        CLOSING_MEMO,
+        Locale::English,
+        Template::Simple("Closing entry for fiscal year {year}"),
+    ),
+    (
+        CLOSING_MEMO,
+        Locale::Arabic,
+        Template::Simple("قيد إقفال السنة المالية {year}"),
+    ),
+    (
+        REOPENING_MEMO,
+        Locale::English,
+        Template::Simple("Reopening fiscal year {year}"),
+    ),
+    (
+        REOPENING_MEMO,
+        Locale::Arabic,
+        Template::Simple("إعادة فتح السنة المالية {year}"),
+    ),
+    (
+        LEDGER_BEHIND,
+        Locale::English,
+        Template::Simple(
+            "The ledger's figures are {behind} events behind the log, so the year cannot be \
+             booked yet. Try again in a moment.",
+        ),
+    ),
+    (
+        LEDGER_BEHIND,
+        Locale::Arabic,
+        Template::Simple(
+            "أرقام دفتر الأستاذ متأخرة عن السجل بـ {behind} حدثًا، فلا يمكن إقفال السنة دفتريًا \
+             بعد. حاول بعد قليل.",
+        ),
     ),
 ];

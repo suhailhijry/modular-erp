@@ -1408,6 +1408,7 @@ async fn statements_are_read_by_the_fiscal_calendar() {
     for (code, kind) in [
         ("1000", "asset"),
         ("3000", "equity"),
+        ("3100", "equity"),
         ("4000", "revenue"),
         ("5000", "expense"),
     ] {
@@ -1561,14 +1562,23 @@ async fn statements_are_read_by_the_fiscal_calendar() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["code"], "ledger.no_such_entry");
 
-    // Close 2025: its periods show closed, and the calendar is locked.
-    let (status, body, _) = fixture
-        .send(put(
-            "/v1/ledger/books",
-            serde_json::json!({ "closed_before": "2026-01-01T00:00:00Z" }),
-        ))
-        .await;
+    // Close 2025 by its last period — the first close ever may be any period,
+    // and everything before it closes with it.
+    let act = |path: &str| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, body, _) = fixture.send(act("/v1/ledger/years/2025/close")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "ledger.year_open");
+    let (status, body, _) = fixture.send(act("/v1/ledger/periods/2025-P12/close")).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, body, _) = fixture.send(act("/v1/ledger/periods/2026-P02/close")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "ledger.period_out_of_order");
+    assert_eq!(body["args"]["next"]["value"], "2026-P01");
     let (status, periods, _) = fixture.send(read("/v1/ledger/periods?year=2025")).await;
     assert_eq!(status, StatusCode::OK, "{periods}");
     assert!(
@@ -1579,14 +1589,100 @@ async fn statements_are_read_by_the_fiscal_calendar() {
             .all(|p| p["closed"] == true),
         "{periods}"
     );
+
+    // Book 2025: one closing entry, into 3100.
+    let (status, year, _) = fixture.send(act("/v1/ledger/years/2025/close")).await;
+    assert_eq!(status, StatusCode::OK, "{year}");
+    assert_eq!(year["booked"], true);
+    assert_eq!(year["closed"], true);
+    assert_eq!(
+        year["closing_entries"],
+        serde_json::json!(["closing-2025-SAR-1"])
+    );
+    let (status, books, _) = fixture.send(read("/v1/ledger/books")).await;
+    assert_eq!(status, StatusCode::OK, "{books}");
+    assert_eq!(books["booked"], serde_json::json!([2025]));
+    fixture.project_ledger(tenant).await;
+    let (status, closing, _) = fixture
+        .send(read("/v1/ledger/entries/closing-2025-SAR-1"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{closing}");
+    assert_eq!(closing["closing"], true);
+    assert_eq!(closing["lines"][0]["account"], "4000");
+    assert_eq!(
+        closing["lines"][0]["debit"], 50_000,
+        "2025's sale posted away"
+    );
+    assert_eq!(closing["lines"][1]["account"], "3100");
+    assert_eq!(closing["lines"][1]["credit"], 50_000, "the year's profit");
+    // The 2026 profit and loss is what it was: the closing entry is not trade.
+    let (status, pnl, _) = fixture
+        .send(read(
+            "/v1/ledger/statements/profit-and-loss?period=2026-P02",
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pnl}");
+    assert_eq!(pnl["currencies"][0]["result"], 20_000);
+    let (status, body, _) = fixture
+        .send(act("/v1/ledger/periods/2025-P12/reopen"))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "ledger.year_booked");
+    let (status, body, _) = fixture
+        .send(put(
+            "/v1/ledger/closing-accounts",
+            serde_json::json!({ "USD": "3900" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, accounts, _) = fixture.send(read("/v1/ledger/closing-accounts")).await;
+    assert_eq!(status, StatusCode::OK, "{accounts}");
+    assert_eq!(accounts, serde_json::json!({ "USD": "3900" }));
+    let (status, body, _) = fixture
+        .send(put(
+            "/v1/ledger/closing-accounts",
+            serde_json::json!({ "DOLLARS": "3900" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // The calendar may change from the next open year — a new segment on the
+    // boundary — and nowhere inside closed time or off a boundary.
     let (status, body, _) = fixture
         .send(put(
             "/v1/ledger/fiscal-calendar",
             serde_json::json!({ "starts_on": "2026-01-01", "pattern": "monthly" }),
         ))
         .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, calendar, _) = fixture.send(read("/v1/ledger/fiscal-calendar")).await;
+    assert_eq!(status, StatusCode::OK, "{calendar}");
+    assert_eq!(calendar["pattern"], "monthly");
+    assert_eq!(calendar["segments"].as_array().unwrap().len(), 2);
+    assert_eq!(calendar["segments"][0]["pattern"], "4-4-5");
+    let (status, periods, _) = fixture.send(read("/v1/ledger/periods?year=2026")).await;
+    assert_eq!(status, StatusCode::OK, "{periods}");
+    assert_eq!(periods[0]["until"], "2026-02-01", "2026 is monthly now");
+    let (status, periods, _) = fixture.send(read("/v1/ledger/periods?year=2025")).await;
+    assert_eq!(status, StatusCode::OK, "{periods}");
+    assert_eq!(periods[0]["until"], "2025-01-30", "2025 stays 4-4-5");
+    let (status, body, _) = fixture
+        .send(put(
+            "/v1/ledger/fiscal-calendar",
+            serde_json::json!({ "starts_on": "2025-06-01", "pattern": "monthly" }),
+        ))
+        .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "ledger.calendar_locked");
+    let (status, body, _) = fixture
+        .send(put(
+            "/v1/ledger/fiscal-calendar",
+            serde_json::json!({ "starts_on": "2026-03-01", "pattern": "quarterly" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "ledger.not_a_year_start");
+    assert_eq!(body["args"]["next"]["value"], "2027-01-01");
 
     // A posting nothing balanced — behind the projection's back — and the
     // sheet is refused rather than shown.
@@ -3012,6 +3108,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Statements are reads of the books, like the trial balance.
     ("fiscal_calendar", ALL_ROLES),
     ("periods", ALL_ROLES),
+    ("year", ALL_ROLES),
+    ("closing_accounts", ALL_ROLES),
     ("balances", ALL_ROLES),
     ("profit_and_loss", ALL_ROLES),
     ("balance_sheet", ALL_ROLES),
@@ -3334,7 +3432,11 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("set_till_accounts", &["owner", "accountant"]),
     // Declaring the numbers final is the accountant's call, and not
     // something a clerk posting entries should be able to do to them.
-    ("close_books", &["owner", "accountant"]),
+    ("close_period", &["owner", "accountant"]),
+    ("reopen_period", &["owner", "accountant"]),
+    ("close_year", &["owner", "accountant"]),
+    ("reopen_year", &["owner", "accountant"]),
+    ("set_closing_accounts", &["owner", "accountant"]),
     // The calendar is the accountant's call, like closing the books.
     ("set_fiscal_calendar", &["owner", "accountant"]),
     ("set_vat_rates", &["owner", "accountant"]),
@@ -3501,7 +3603,7 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        269,
+        275,
         "expected two hundred and sixty-nine role-scoped operations"
     );
 
@@ -3533,6 +3635,9 @@ async fn every_role_against_every_endpoint() {
                 // template is how `assign_unit` was found answering a 400 that
                 // was not `problem+json`.
                 .replace("{line}", "0")
+                // Also parsed — and 2026 has an open period, so the owner's
+                // year close is a 409 rather than a booking mid-matrix.
+                .replace("{year}", "2026")
                 .replace("{invitation}", "01a00000-0000-7000-8000-000000000000");
 
             let request = Request::builder()
