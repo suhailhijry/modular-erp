@@ -14,12 +14,13 @@
 //! `erp-api` still decides what is *mounted*, which is the part that belongs to
 //! the composition root.
 
+use crate::messages;
 use crate::{AccountKind, BalancedLines, Line};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use erp_eventlog::ExecuteError;
-use erp_i18n::{Locale, Localize};
+use erp_i18n::{Locale, Localize, Message, MessageArg};
 use erp_tenant::CommandError;
 use erp_types::{CurrencyCode, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,7 @@ use utoipa_axum::routes;
 use erp_web::ApiError;
 use erp_web::AppState;
 use erp_web::Problem;
+use erp_web::{After, Paged, Query};
 use erp_web::{Allowed, Anonymous, IdempotencyKey, Language, ManageAccounts, PostEntries, Read};
 use erp_web::{Amount, Json, bad_request, creating, metadata, parse_id, require_module};
 use erp_web::{Consistency, nudge};
@@ -38,10 +40,16 @@ use erp_web::{IfMatch, Versioned};
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list_accounts, open_account))
-        .routes(routes!(post_entry))
+        .routes(routes!(post_entry, list_entries))
         .routes(routes!(reverse_entry))
         .routes(routes!(trial_balance))
         .routes(routes!(books, close_books))
+        .routes(routes!(fiscal_calendar, set_fiscal_calendar))
+        .routes(routes!(periods))
+        .routes(routes!(balances))
+        .routes(routes!(profit_and_loss))
+        .routes(routes!(balance_sheet))
+        .routes(routes!(journal_entry))
         .routes(routes!(vat_rates, set_vat_rates))
         // Unauthenticated on purpose: a signup form needs to show the choices
         // before anyone has an account. It is product information, not data.
@@ -488,6 +496,825 @@ async fn trial_balance(
             })
             .collect(),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// The fiscal calendar, and the statements read by it
+// ---------------------------------------------------------------------------
+
+/// The calendar a business keeps its periods by.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({ "starts_on": "2026-01-01", "pattern": "monthly" }))]
+struct FiscalCalendarView {
+    /// The first day of a fiscal year, once. Every other year starts on its
+    /// anniversary — or, for a week pattern, on that weekday nearest to it.
+    #[schema(value_type = String, example = "2026-01-01")]
+    starts_on: chrono::NaiveDate,
+    /// `monthly`, `quarterly`, `4-4-5`, `4-5-4`, `5-4-4` or `yearly`.
+    pattern: String,
+}
+
+/// One period of one fiscal year.
+#[derive(Debug, Serialize, ToSchema)]
+struct PeriodView {
+    /// `2026-P03`: the fiscal year, named by the calendar year it starts in,
+    /// and the period's number in it.
+    id: String,
+    year: i32,
+    index: u32,
+    #[schema(value_type = String)]
+    from: chrono::NaiveDate,
+    /// Exclusive — the first day of the next period.
+    #[schema(value_type = String)]
+    until: chrono::NaiveDate,
+    /// Whether the books are closed through the end of it.
+    closed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeriodsQuery {
+    year: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BalancesQuery {
+    #[serde(default)]
+    until: Option<Timestamp>,
+    #[serde(default)]
+    all: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RangeQuery {
+    #[serde(default)]
+    from: Option<Timestamp>,
+    #[serde(default)]
+    until: Option<Timestamp>,
+    period: Option<String>,
+    branch: Option<String>,
+    #[serde(default)]
+    all: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AsAtQuery {
+    #[serde(default)]
+    as_at: Option<Timestamp>,
+    period: Option<String>,
+    #[serde(default)]
+    all: bool,
+}
+
+/// An account on a statement.
+#[derive(Debug, Serialize, ToSchema)]
+struct StatementLineView {
+    code: String,
+    name: String,
+    /// Minor units, on the kind's natural side: a revenue account's credit
+    /// balance and an asset's debit balance are both positive here.
+    amount: i64,
+    postings: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct ProfitAndLossCurrency {
+    currency: String,
+    revenue: Vec<StatementLineView>,
+    expenses: Vec<StatementLineView>,
+    total_revenue: i64,
+    total_expenses: i64,
+    /// Revenue less expenses. A loss is negative.
+    result: i64,
+}
+
+/// What the trading accounts did in a range: one statement per currency.
+#[derive(Debug, Serialize, ToSchema)]
+struct ProfitAndLossView {
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    from: Timestamp,
+    /// Exclusive.
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    until: Timestamp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    period: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    currencies: Vec<ProfitAndLossCurrency>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct BalanceSheetCurrency {
+    currency: String,
+    assets: Vec<StatementLineView>,
+    liabilities: Vec<StatementLineView>,
+    equity: Vec<StatementLineView>,
+    /// Revenue less expenses since the fiscal year started, shown as equity
+    /// because no closing entry has moved it into retained earnings.
+    current_year_result: i64,
+    /// The same for every year before this one that was never closed.
+    prior_years_result: i64,
+    total_assets: i64,
+    total_liabilities: i64,
+    /// The equity accounts plus the two results. Equals `total_assets` less
+    /// `total_liabilities`, or the sheet would not have been shown.
+    total_equity: i64,
+}
+
+/// What the business holds and owes as at an instant: one sheet per currency.
+#[derive(Debug, Serialize, ToSchema)]
+struct BalanceSheetView {
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    as_at: Timestamp,
+    /// The first day of the fiscal year `as_at` falls in, which is where
+    /// `current_year_result` starts counting.
+    #[schema(value_type = String)]
+    fiscal_year_started: chrono::NaiveDate,
+    currencies: Vec<BalanceSheetCurrency>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct JournalLineView {
+    account: String,
+    name: String,
+    debit: i64,
+    credit: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memo: Option<String>,
+}
+
+/// One entry with its lines, as the journal lists it.
+#[derive(Debug, Serialize, ToSchema)]
+struct JournalEntryRecord {
+    id: String,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    occurred_on: Timestamp,
+    #[schema(value_type = chrono::DateTime<chrono::Utc>)]
+    recorded_at: Timestamp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    currency: String,
+    lines: Vec<JournalLineView>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JournalQuery {
+    #[serde(default)]
+    from: Option<Timestamp>,
+    #[serde(default)]
+    until: Option<Timestamp>,
+    account: Option<String>,
+    branch: Option<String>,
+    #[serde(flatten)]
+    page: After,
+}
+
+/// The fiscal calendar: when this business's periods begin and end.
+///
+/// Calendar months from 1 January unless it was set.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/fiscal-calendar",
+    tag = "ledger",
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
+    responses(
+        (status = OK, body = FiscalCalendarView),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn fiscal_calendar(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+) -> Result<Json<FiscalCalendarView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let calendar = crate::fiscal::fiscal_calendar(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    Ok(Json(FiscalCalendarView {
+        starts_on: calendar.starts_on,
+        pattern: calendar.pattern.as_str().to_owned(),
+    }))
+}
+
+/// Set the fiscal calendar.
+///
+/// A start date and a pattern: `monthly`, `quarterly`, `4-4-5`, `4-5-4`,
+/// `5-4-4` or `yearly`. Every period is generated from the two — `GET
+/// /v1/ledger/periods` shows them — so a period is never typed in by hand. A
+/// week pattern starts each year on the start date's weekday nearest its
+/// anniversary and puts the 53rd week, when it comes, in the last period.
+///
+/// **Refused while the books are closed anywhere**: periods already declared
+/// final must not move under the declaration. Reopen first, or change it in the
+/// next open year. `ManageAccounts`, like closing the books, because it is the
+/// accountant's call.
+#[utoipa::path(
+    put,
+    path = "/v1/ledger/fiscal-calendar",
+    tag = "ledger",
+    params(("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),),
+    request_body = FiscalCalendarView,
+    responses(
+        (status = NO_CONTENT, description = "Set. Periods and statements read by it from now on."),
+        (status = BAD_REQUEST, description = "A pattern this build does not know — `ledger.not_a_pattern`", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = CONFLICT, description = "The books are closed, so the calendar cannot change — `ledger.calendar_locked`", body = Problem),
+    ),
+)]
+async fn set_fiscal_calendar(
+    tenant: Allowed<ManageAccounts>,
+    Language(locale): Language,
+    Json(body): Json<FiscalCalendarView>,
+) -> Result<StatusCode, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let pattern = body
+        .pattern
+        .parse::<crate::Pattern>()
+        .map_err(|_| bad_request(messages::NOT_A_PATTERN, "pattern", &body.pattern, locale))?;
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let calendar = crate::FiscalCalendar {
+        starts_on: body.starts_on,
+        pattern,
+    };
+    match crate::fiscal::set_fiscal_calendar(
+        &mut conn,
+        calendar,
+        Some(&tenant.session.identity.to_string()),
+    )
+    .await
+    {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
+        Err(crate::CalendarError::Locked) => {
+            let books = crate::period::books(&mut conn)
+                .await
+                .map_err(|e| config_problem(&e, locale))?;
+            Err(Problem::new(
+                StatusCode::CONFLICT,
+                &Message::new(messages::CALENDAR_LOCKED).with(
+                    "closed_before",
+                    MessageArg::text(
+                        books
+                            .closed_before
+                            .map(|c| c.to_rfc3339())
+                            .unwrap_or_default(),
+                    ),
+                ),
+                locale,
+                &CATALOG,
+            ))
+        }
+        Err(crate::CalendarError::Config(e)) => Err(config_problem(&e, locale)),
+    }
+}
+
+/// The periods of one fiscal year, and which are closed.
+///
+/// The year is named by the calendar year it starts in; absent, the one today
+/// falls in.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/periods",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("year" = Option<i32>, Query, description = "The fiscal year, by the calendar year it starts in. Defaults to the one today falls in."),
+    ),
+    responses(
+        (status = OK, body = Vec<PeriodView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+    ),
+)]
+async fn periods(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    Query(query): Query<PeriodsQuery>,
+) -> Result<Json<Vec<PeriodView>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    let mut conn = tenant
+        .db
+        .acquire()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let fiscal = crate::fiscal::fiscal_calendar(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    let clock = erp_eventlog::configuration::calendar(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    let books = crate::period::books(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    drop(conn);
+
+    let year = query
+        .year
+        .unwrap_or_else(|| fiscal.fiscal_year_of(clock.day(chrono::Utc::now())));
+    Ok(Json(
+        fiscal
+            .periods(year)
+            .into_iter()
+            .map(|p| PeriodView {
+                closed: books
+                    .closed_before
+                    .is_some_and(|closed| closed >= clock.start_of(p.until)),
+                id: p.id,
+                year: p.year,
+                index: p.index,
+                from: p.from,
+                until: p.until,
+            })
+            .collect(),
+    ))
+}
+
+/// Every account and what it held **as at** an instant.
+///
+/// `GET /v1/ledger/accounts` with a date: every posting before `until` counts
+/// and nothing after it. Absent, all-time. Accounts with nothing to show are
+/// left out unless `all` is asked for.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/balances",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("until" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Exclusive. Postings dated before this count. Absent means all-time."),
+        ("all" = Option<bool>, Query, description = "Include accounts with no balance and no postings."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = Vec<AccountView>),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn balances(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(query): Query<BalancesQuery>,
+) -> Result<Json<Vec<AccountView>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let accounts = crate::balances_at(&mut conn, query.until)
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    Ok(Json(
+        accounts
+            .into_iter()
+            .filter(|a| query.all || a.postings > 0 || a.balance.minor() != 0)
+            .map(|a| AccountView {
+                code: a.code,
+                name: a.name,
+                kind: a.kind.as_str(),
+                balance: a.balance.minor(),
+                currency: a.balance.currency().to_string(),
+                closed: a.closed,
+                postings: a.postings,
+            })
+            .collect(),
+    ))
+}
+
+/// The instants a statement's range means, from a period or a pair of them.
+///
+/// A period is resolved on the tenant's own calendar, so `2026-P03` starts at
+/// local midnight in Riyadh and not in UTC.
+async fn range_of(
+    conn: &mut sqlx::PgConnection,
+    period: Option<&str>,
+    from: Option<Timestamp>,
+    until: Option<Timestamp>,
+    locale: Locale,
+) -> Result<(Timestamp, Timestamp), Problem> {
+    if let Some(id) = period {
+        let fiscal = crate::fiscal::fiscal_calendar(&mut *conn)
+            .await
+            .map_err(|e| config_problem(&e, locale))?;
+        let clock = erp_eventlog::configuration::calendar(&mut *conn)
+            .await
+            .map_err(|e| config_problem(&e, locale))?;
+        let period = fiscal
+            .period(id)
+            .ok_or_else(|| bad_request(messages::NO_SUCH_PERIOD, "period", id, locale))?;
+        return Ok((clock.start_of(period.from), clock.start_of(period.until)));
+    }
+    match (from, until) {
+        (Some(from), Some(until)) if from < until => Ok((from, until)),
+        _ => Err(ApiError::BadRequest(Message::new(messages::NOT_A_RANGE))
+            .into_problem(locale, &CATALOG)),
+    }
+}
+
+/// Presents a line on its kind's natural side.
+fn natural(line: crate::StatementLine) -> StatementLineView {
+    let signed = line.balance.minor();
+    StatementLineView {
+        code: line.code,
+        name: line.name,
+        amount: if line.kind.is_debit_normal() {
+            signed
+        } else {
+            -signed
+        },
+        postings: line.postings,
+    }
+}
+
+/// Profit and loss: what the trading accounts did over a range.
+///
+/// One statement per currency, because postings carry a currency and nothing
+/// here converts. Give a `period` (`2026-P03`) or `from` and `until`, exclusive
+/// at the far end; `branch` narrows it to one branch's postings, and a member
+/// confined to a branch gets theirs. Accounts with nothing in the range are left
+/// out unless `all` is asked for.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/statements/profit-and-loss",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("period" = Option<String>, Query, description = "A period of the fiscal calendar, `2026-P03`. Instead of `from` and `until`."),
+        ("from" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Inclusive."),
+        ("until" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Exclusive."),
+        ("branch" = Option<String>, Query, description = "One branch's postings. Absent means the company; a confined member gets their branch."),
+        ("all" = Option<bool>, Query, description = "Include accounts with nothing in the range."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = ProfitAndLossView),
+        (status = BAD_REQUEST, description = "No range, or a backwards one — `ledger.not_a_range`; a period this calendar does not have — `ledger.no_such_period`", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, description = "Not permitted, or a branch that is not one of yours — `access.wrong_branch`", body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn profit_and_loss(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(query): Query<RangeQuery>,
+) -> Result<Json<ProfitAndLossView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let branch = tenant.branch_scope(query.branch.as_deref(), locale)?;
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let (from, until) = range_of(
+        &mut conn,
+        query.period.as_deref(),
+        query.from,
+        query.until,
+        locale,
+    )
+    .await?;
+    let lines = crate::profit_and_loss(&mut conn, from, until, branch.as_deref())
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    drop(conn);
+
+    let mut by_currency: std::collections::BTreeMap<String, ProfitAndLossCurrency> =
+        std::collections::BTreeMap::new();
+    for line in lines {
+        if !query.all && line.postings == 0 && line.balance.minor() == 0 {
+            continue;
+        }
+        let currency = line.balance.currency().to_string();
+        let statement =
+            by_currency
+                .entry(currency.clone())
+                .or_insert_with(|| ProfitAndLossCurrency {
+                    currency,
+                    revenue: Vec::new(),
+                    expenses: Vec::new(),
+                    total_revenue: 0,
+                    total_expenses: 0,
+                    result: 0,
+                });
+        let kind = line.kind;
+        let shown = natural(line);
+        if kind == AccountKind::Revenue {
+            statement.total_revenue += shown.amount;
+            statement.revenue.push(shown);
+        } else {
+            statement.total_expenses += shown.amount;
+            statement.expenses.push(shown);
+        }
+        statement.result = statement.total_revenue - statement.total_expenses;
+    }
+    Ok(Json(ProfitAndLossView {
+        from,
+        until,
+        period: query.period,
+        branch,
+        currencies: by_currency.into_values().collect(),
+    }))
+}
+
+/// The balance sheet as at an instant.
+///
+/// One sheet per currency. Give `as_at` (exclusive: postings dated before it
+/// count), or a `period`, whose end is the instant; absent, now. The trading
+/// result since the fiscal year started, and every earlier year's, appear as
+/// two equity lines beside the chart's own retained earnings, because no
+/// closing entry has moved them there yet. Company-wide only: a branch's books
+/// do not balance on their own, since a transfer between branches debits one and
+/// credits the other.
+///
+/// **Refused, not rendered, when the postings do not balance** — the ledger's
+/// one invariant, and a sheet that did not balance would be a sheet somebody
+/// acts on.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/statements/balance-sheet",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("as_at" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Exclusive. Postings dated before this count. Absent means now."),
+        ("period" = Option<String>, Query, description = "A period of the fiscal calendar; the sheet is as at its end."),
+        ("all" = Option<bool>, Query, description = "Include accounts with no balance."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = BalanceSheetView),
+        (status = BAD_REQUEST, description = "A period this calendar does not have — `ledger.no_such_period`", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, description = "The postings in some currency do not balance as at this instant — `ledger.sheet_does_not_balance` — or the read model is behind", body = Problem),
+    ),
+)]
+async fn balance_sheet(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(query): Query<AsAtQuery>,
+) -> Result<Json<BalanceSheetView>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let fiscal = crate::fiscal::fiscal_calendar(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    let clock = erp_eventlog::configuration::calendar(&mut conn)
+        .await
+        .map_err(|e| config_problem(&e, locale))?;
+    let as_at = match query.period.as_deref() {
+        Some(id) => {
+            let period = fiscal
+                .period(id)
+                .ok_or_else(|| bad_request(messages::NO_SUCH_PERIOD, "period", id, locale))?;
+            clock.start_of(period.until)
+        }
+        None => query.as_at.unwrap_or_else(chrono::Utc::now),
+    };
+    // The day before `as_at`, on the tenant's clock, is the last day the
+    // sheet covers; its fiscal year is the one the current result counts from.
+    let last_day = clock.day(as_at - chrono::Duration::seconds(1));
+    let fiscal_year_started = fiscal.year_start(fiscal.fiscal_year_of(last_day));
+    let parts = crate::balance_sheet(&mut conn, as_at, clock.start_of(fiscal_year_started))
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    drop(conn);
+
+    let mut by_currency: std::collections::BTreeMap<String, BalanceSheetCurrency> =
+        std::collections::BTreeMap::new();
+    for line in parts.lines {
+        if !query.all && line.postings == 0 && line.balance.minor() == 0 {
+            continue;
+        }
+        let sheet = sheet_for(&mut by_currency, line.balance.currency().to_string());
+        let kind = line.kind;
+        let shown = natural(line);
+        match kind {
+            AccountKind::Asset => {
+                sheet.total_assets += shown.amount;
+                sheet.assets.push(shown);
+            }
+            AccountKind::Liability => {
+                sheet.total_liabilities += shown.amount;
+                sheet.liabilities.push(shown);
+            }
+            _ => {
+                sheet.total_equity += shown.amount;
+                sheet.equity.push(shown);
+            }
+        }
+    }
+    for result in parts.results {
+        if result.difference.minor() != 0 {
+            return Err(Problem::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &Message::new(messages::SHEET_DOES_NOT_BALANCE)
+                    .with("currency", MessageArg::text(result.currency.to_string()))
+                    .with("as_at", MessageArg::text(as_at.to_rfc3339()))
+                    .with(
+                        "difference",
+                        MessageArg::text(result.difference.to_string()),
+                    ),
+                locale,
+                &CATALOG,
+            ));
+        }
+        let sheet = sheet_for(&mut by_currency, result.currency.to_string());
+        // Postings are signed debit-positive, so a profit — net credits on
+        // the trading accounts — is negative; equity shows it positive.
+        sheet.current_year_result = -result.current_year.minor();
+        sheet.prior_years_result = -result.prior_years.minor();
+        sheet.total_equity += sheet.current_year_result + sheet.prior_years_result;
+    }
+    Ok(Json(BalanceSheetView {
+        as_at,
+        fiscal_year_started,
+        currencies: by_currency.into_values().collect(),
+    }))
+}
+
+/// The sheet for one currency, made on first sight.
+fn sheet_for(
+    sheets: &mut std::collections::BTreeMap<String, BalanceSheetCurrency>,
+    currency: String,
+) -> &mut BalanceSheetCurrency {
+    sheets
+        .entry(currency.clone())
+        .or_insert_with(|| BalanceSheetCurrency {
+            currency,
+            assets: Vec::new(),
+            liabilities: Vec::new(),
+            equity: Vec::new(),
+            current_year_result: 0,
+            prior_years_result: 0,
+            total_assets: 0,
+            total_liabilities: 0,
+            total_equity: 0,
+        })
+}
+
+/// One entry as the journal shows it.
+fn journal_record(entry: crate::JournalEntryView) -> JournalEntryRecord {
+    JournalEntryRecord {
+        id: entry.id,
+        occurred_on: entry.occurred_on,
+        recorded_at: entry.recorded_at,
+        branch: entry.branch,
+        currency: entry
+            .lines
+            .first()
+            .map(|l| l.amount.currency().to_string())
+            .unwrap_or_default(),
+        lines: entry
+            .lines
+            .into_iter()
+            .map(|l| JournalLineView {
+                account: l.account,
+                name: l.name,
+                debit: l.amount.minor().max(0),
+                credit: (-l.amount.minor()).max(0),
+                memo: l.memo,
+            })
+            .collect(),
+    }
+}
+
+/// The journal: every entry, newest first, with its lines.
+///
+/// Filter by a range (exclusive at the far end), an account the entry touches,
+/// or a branch; a member confined to a branch reads theirs.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/entries",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("from" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Inclusive."),
+        ("until" = Option<chrono::DateTime<chrono::Utc>>, Query, description = "Exclusive."),
+        ("account" = Option<String>, Query, description = "Entries with a line on this account."),
+        ("branch" = Option<String>, Query, description = "One branch's entries. A confined member gets their branch."),
+        ("after" = Option<String>, Query, description = "From a previous page's `next`."),
+        ("limit" = Option<i64>, Query, description = "Entries per page. Clamped, never refused."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = Paged<JournalEntryRecord>),
+        (status = BAD_REQUEST, description = "An unreadable cursor", body = Problem),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn list_entries(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Query(query): Query<JournalQuery>,
+) -> Result<Json<Paged<JournalEntryRecord>>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let after = query.page.cursor(locale)?;
+    let branch = tenant.branch_scope(query.branch.as_deref(), locale)?;
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let page = crate::journal(
+        &mut conn,
+        &crate::JournalFilter {
+            from: query.from,
+            until: query.until,
+            account: query.account.as_deref(),
+            branch: branch.as_deref(),
+        },
+        query.page.limit(50, 200),
+        after.as_ref(),
+    )
+    .await
+    .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    Ok(Json(Paged::of(page, journal_record)))
+}
+
+/// One entry, with its lines.
+#[utoipa::path(
+    get,
+    path = "/v1/ledger/entries/{entry}",
+    tag = "ledger",
+    params(
+        ("Host" = String, Header, description = "The tenant's subdomain — `bassat.erp.com`. Every path below is about that tenant."),
+        ("entry" = String, Path, description = "The entry's id, as it was posted."),
+        ("consistent_after" = Option<i64>, Query, description = "Wait for the read model to reach this log position."),
+    ),
+    responses(
+        (status = OK, body = JournalEntryRecord),
+        (status = UNAUTHORIZED, body = Problem),
+        (status = FORBIDDEN, body = Problem),
+        (status = NOT_FOUND, description = "No such entry — `ledger.no_such_entry`", body = Problem),
+        (status = SERVICE_UNAVAILABLE, body = Problem),
+    ),
+)]
+async fn journal_entry(
+    tenant: Allowed<Read>,
+    Language(locale): Language,
+    consistency: Consistency,
+    Path(entry): Path<String>,
+) -> Result<Json<JournalEntryRecord>, Problem> {
+    require_module(&tenant.db, &crate::module_id(), locale)?;
+    consistency
+        .wait_for(&tenant.db, crate::GROUP_NAME, locale)
+        .await?;
+    let mut conn = tenant
+        .db
+        .read()
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?;
+    let found = crate::journal_entry(&mut conn, &entry)
+        .await
+        .map_err(|e| ApiError::Access(e.into()).into_problem(locale, &CATALOG))?
+        .ok_or_else(|| {
+            ApiError::NotFound(
+                Message::new(messages::NO_SUCH_ENTRY)
+                    .with("entry", MessageArg::text(entry.clone())),
+            )
+            .into_problem(locale, &CATALOG)
+        })?;
+    Ok(Json(journal_record(found)))
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.code as \"code!\", a.name as \"name!\", a.kind as \"kind!\",\n                  a.currency as \"currency!\",\n                  COALESCE(sum(p.amount), 0)::BIGINT as \"balance!\",\n                  count(p.id) as \"postings!\"\n             FROM proj_ledger.account a\n             LEFT JOIN proj_ledger.posting p\n               ON p.account = a.code\n              AND p.occurred_on >= $1 AND p.occurred_on < $2\n              AND ($3::text IS NULL OR p.branch = $3)\n            WHERE a.kind IN ('revenue', 'expense')\n            GROUP BY a.code, a.name, a.kind, a.currency\n            ORDER BY a.kind DESC, a.code",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "code!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "balance!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "postings!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "7d96cc43eed5426171c71127f585b41f206c8cc039bc78d7a1bba35b744afcfa"
+}

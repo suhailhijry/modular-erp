@@ -17,6 +17,17 @@ pub const ZERO_LINE: MessageCode = MessageCode::new("ledger.zero_line");
 pub const AMOUNT_OUT_OF_RANGE: MessageCode = MessageCode::new("ledger.amount_out_of_range");
 /// An entry dated into a period the books were closed for.
 pub const PERIOD_CLOSED: MessageCode = MessageCode::new("ledger.period_closed");
+/// A period pattern this build does not know. 400.
+pub const NOT_A_PATTERN: MessageCode = MessageCode::new("ledger.not_a_pattern");
+/// The calendar cannot change while the books are closed. 409.
+pub const CALENDAR_LOCKED: MessageCode = MessageCode::new("ledger.calendar_locked");
+/// A statement asked for no range, or a backwards one. 400.
+pub const NOT_A_RANGE: MessageCode = MessageCode::new("ledger.not_a_range");
+/// A period id this calendar does not have. 400.
+pub const NO_SUCH_PERIOD: MessageCode = MessageCode::new("ledger.no_such_period");
+/// The postings up to the instant asked do not sum to zero, so no balance
+/// sheet is shown. 503 — the pipeline, not the caller.
+pub const SHEET_DOES_NOT_BALANCE: MessageCode = MessageCode::new("ledger.sheet_does_not_balance");
 
 pub static CODES: &[MessageCode] = &[
     ENTRY_TOO_LARGE,
@@ -33,9 +44,80 @@ pub static CODES: &[MessageCode] = &[
     ZERO_LINE,
     AMOUNT_OUT_OF_RANGE,
     PERIOD_CLOSED,
+    NOT_A_PATTERN,
+    CALENDAR_LOCKED,
+    NOT_A_RANGE,
+    NO_SUCH_PERIOD,
+    SHEET_DOES_NOT_BALANCE,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NOT_A_PATTERN,
+        Locale::English,
+        Template::Simple(
+            "{pattern} is not a period pattern. One of: monthly, quarterly, 4-4-5, 4-5-4, 5-4-4, yearly.",
+        ),
+    ),
+    (
+        NOT_A_PATTERN,
+        Locale::Arabic,
+        Template::Simple(
+            "{pattern} ليس نمط فترات. الأنماط: monthly، quarterly، 4-4-5، 4-5-4، 5-4-4، yearly.",
+        ),
+    ),
+    (
+        CALENDAR_LOCKED,
+        Locale::English,
+        Template::Simple(
+            "The books are closed before {closed_before}, so the fiscal calendar cannot change. \
+             Reopen them first, or wait for the next open year.",
+        ),
+    ),
+    (
+        CALENDAR_LOCKED,
+        Locale::Arabic,
+        Template::Simple(
+            "الدفاتر مقفلة قبل {closed_before}، فلا يمكن تغيير التقويم المالي. \
+             أعد فتحها أولًا، أو انتظر السنة المفتوحة التالية.",
+        ),
+    ),
+    (
+        NOT_A_RANGE,
+        Locale::English,
+        Template::Simple("Give a period, or `from` and `until` with `from` before `until`."),
+    ),
+    (
+        NOT_A_RANGE,
+        Locale::Arabic,
+        Template::Simple("حدِّد فترة، أو `from` و`until` على أن يسبق `from` قيمة `until`."),
+    ),
+    (
+        NO_SUCH_PERIOD,
+        Locale::English,
+        Template::Simple("{period} is not a period of this calendar. Periods read like 2026-P03."),
+    ),
+    (
+        NO_SUCH_PERIOD,
+        Locale::Arabic,
+        Template::Simple("{period} ليست فترة في هذا التقويم. تُكتب الفترات هكذا: 2026-P03."),
+    ),
+    (
+        SHEET_DOES_NOT_BALANCE,
+        Locale::English,
+        Template::Simple(
+            "The postings in {currency} up to {as_at} do not balance, by {difference}. No balance \
+             sheet is shown until they do; the trial balance says which currency is out.",
+        ),
+    ),
+    (
+        SHEET_DOES_NOT_BALANCE,
+        Locale::Arabic,
+        Template::Simple(
+            "قيود {currency} حتى {as_at} غير متوازنة بفارق {difference}. لن تُعرض الميزانية \
+             حتى تتوازن؛ ميزان المراجعة يبيّن العملة المختلّة.",
+        ),
+    ),
     (
         PERIOD_CLOSED,
         Locale::English,

@@ -17,14 +17,18 @@
 //!
 //! # What is deliberately absent
 //!
-//! Fiscal periods, drafts, reversals-as-a-command, multi-currency entries with
-//! FX, and posting rules driven by configuration. Each is real, and each needs
-//! someone to want it before its shape is decided.
+//! Drafts, and posting rules driven by configuration. Each is real, and each
+//! needs someone to want it before its shape is decided. The fiscal calendar
+//! and the statements read by it are [`fiscal`], [`profit_and_loss`],
+//! [`balance_sheet`] and [`journal`]; a
+//! formal period close, FX and cost centers were wanted on 2026-09-14 and are
+//! being built in that order.
 
 mod account;
 mod charts;
 mod commands;
 mod entry;
+pub mod fiscal;
 pub mod http;
 mod lines;
 pub mod messages;
@@ -40,11 +44,14 @@ pub use commands::{
     rename_account, reverse_entry, reverse_in,
 };
 pub use entry::{JournalEntry, JournalEntryEvent};
+pub use fiscal::{CalendarError, FiscalCalendar, NotAPattern, Pattern, Period};
 pub use lines::{BalancedLines, Line, Unbalanced};
 pub use period::Books;
 pub use projections::{
-    AccountBalance, Accounts, BranchBalance, Ledger, Postings, TrialBalance, account_balances,
-    branch_balances, imbalances, projections, trial_balance,
+    AccountBalance, Accounts, BranchBalance, JournalEntryView, JournalFilter, JournalLine, Ledger,
+    Postings, SheetParts, StatementLine, TradingResult, TrialBalance, account_balances,
+    balance_sheet, balances_at, branch_balances, imbalances, journal, journal_entry,
+    profit_and_loss, projections, trial_balance,
 };
 pub use vat::{Rates, VatCategory};
 

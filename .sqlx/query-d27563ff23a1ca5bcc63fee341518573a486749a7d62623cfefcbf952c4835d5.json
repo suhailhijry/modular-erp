@@ -1,0 +1,78 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.code as \"code!\", a.name as \"name!\", a.kind as \"kind!\",\n                  a.currency as \"currency!\",\n                  COALESCE(sum(p.amount), 0)::BIGINT as \"balance!\",\n                  count(p.id) as \"postings!\"\n             FROM proj_ledger.account a\n             LEFT JOIN proj_ledger.posting p\n               ON p.account = a.code AND p.occurred_on < $1\n            WHERE a.kind IN ('asset', 'liability', 'equity')\n            GROUP BY a.code, a.name, a.kind, a.currency\n            ORDER BY a.kind, a.code",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "code!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "balance!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "postings!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "d27563ff23a1ca5bcc63fee341518573a486749a7d62623cfefcbf952c4835d5"
+}

@@ -18,8 +18,9 @@ use erp_projection::{Projection, ensure_group_schema, replay_shadow, run_to_head
 use erp_testkit::{Schema, TestDb};
 use erp_types::{AggregateId, CurrencyCode, Money, Timestamp};
 use ledger::{
-    AccountKind, BalancedLines, Ledger, LedgerError, Line, account_balances, close_account,
-    imbalances, open_account, post_entry, projections, rename_account, trial_balance,
+    AccountKind, BalancedLines, JournalFilter, Ledger, LedgerError, Line, account_balances,
+    balance_sheet, balances_at, close_account, imbalances, journal, journal_entry, open_account,
+    post_entry, profit_and_loss, projections, rename_account, trial_balance,
 };
 
 static CONTROL: Schema = Schema::migrations("control", &erp_control::MIGRATIONS);
@@ -165,6 +166,39 @@ impl Fixture {
         imbalances(&mut conn).await.expect("reads")
     }
 
+    /// Opens branches a posting may name — `post_entry_in` refuses one that
+    /// names nothing open.
+    async fn branches(&self, ids: &[&str]) {
+        let mut conn = self.db.acquire().await.expect("connection");
+        branches::install(&mut conn).await.expect("branches");
+        ensure_group_schema::<branches::Branches>(&mut conn)
+            .await
+            .expect("the branches' checkpoint");
+        drop(conn);
+        for id in ids {
+            branches::open_branch(
+                &self.db,
+                &code(id),
+                &branches::Details {
+                    name: (*id).to_owned(),
+                    name_latin: None,
+                    address: branches::Address {
+                        street: "طريق الملك فهد".to_owned(),
+                        building: None,
+                        district: None,
+                        city: "الرياض".to_owned(),
+                        postal_code: None,
+                        country: "SA".to_owned(),
+                    },
+                },
+                when(),
+                &Metadata::default(),
+            )
+            .await
+            .expect("the branch opens");
+        }
+    }
+
     async fn cleanup(self) {
         drop(self.db);
         drop(self.control);
@@ -256,6 +290,265 @@ async fn posting_moves_both_balances() {
     let sales = accounts.iter().find(|a| a.code == "4000").expect("sales");
     assert_eq!(cash.balance, riyals(150), "an asset grows by debit");
     assert_eq!(sales.balance, riyals(-150), "revenue grows by credit");
+
+    assert!(fixture.imbalances().await.is_empty());
+    fixture.cleanup().await;
+}
+
+/// **The statements are sums over the postings at the instants asked.** Four
+/// entries across two fiscal years and two branches, and every statement read
+/// from them: the profit and loss over a range and at a branch, balances as at
+/// a date, the balance sheet with the two trading results split at the fiscal
+/// year, and the journal newest first, paged and filtered.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one set of postings, and every statement that reads it"
+)]
+async fn statements_are_sums_over_the_postings_at_the_instants_asked() {
+    let fixture = Fixture::new().await;
+    for (account, kind) in [
+        ("1000", AccountKind::Asset),
+        ("2000", AccountKind::Liability),
+        ("3000", AccountKind::Equity),
+        ("4000", AccountKind::Revenue),
+        ("5000", AccountKind::Expense),
+    ] {
+        fixture.account(account, kind, sar()).await;
+    }
+    fixture.branches(&["olaya", "malaz"]).await;
+    let at = |text: &str| -> Timestamp { text.parse().expect("an instant") };
+    let post =
+        |id: &str, on: &str, debit: &str, credit: &str, amount: i64, branch: Option<&str>| {
+            let lines = BalancedLines::new(vec![
+                Line::new(code(debit), riyals(amount)),
+                Line::new(code(credit), riyals(-amount)).with_memo("the other side"),
+            ])
+            .expect("balances");
+            let metadata = match branch {
+                Some(branch) => Metadata::default().at_branch(branch),
+                None => Metadata::default(),
+            };
+            let id = code(id);
+            let on = at(on);
+            let db = &fixture.db;
+            async move {
+                post_entry(db, &id, on, "statement", lines, &metadata)
+                    .await
+                    .expect("posts");
+            }
+        };
+    // Capital in 2025, a 2025 sale, then a 2026 sale and a 2026 expense.
+    post(
+        "capital",
+        "2025-06-01T00:00:00Z",
+        "1000",
+        "3000",
+        1_000,
+        None,
+    )
+    .await;
+    post(
+        "sale-2025",
+        "2025-12-15T00:00:00Z",
+        "1000",
+        "4000",
+        500,
+        Some("olaya"),
+    )
+    .await;
+    post(
+        "sale-2026",
+        "2026-02-10T00:00:00Z",
+        "1000",
+        "4000",
+        300,
+        Some("malaz"),
+    )
+    .await;
+    post(
+        "rent-2026",
+        "2026-02-20T00:00:00Z",
+        "5000",
+        "1000",
+        100,
+        Some("olaya"),
+    )
+    .await;
+    fixture.project().await;
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    // **Profit and loss over a range**: only what fell in it, signed as posted.
+    let year = profit_and_loss(
+        &mut conn,
+        at("2026-01-01T00:00:00Z"),
+        at("2027-01-01T00:00:00Z"),
+        None,
+    )
+    .await
+    .expect("reads");
+    let line = |lines: &[ledger::StatementLine], code: &str| {
+        lines
+            .iter()
+            .find(|l| l.code == code)
+            .expect("listed")
+            .balance
+    };
+    assert_eq!(
+        line(&year, "4000"),
+        riyals(-300),
+        "the 2025 sale is outside the range"
+    );
+    assert_eq!(line(&year, "5000"), riyals(100));
+    assert!(
+        year.iter()
+            .all(|l| matches!(l.kind, AccountKind::Revenue | AccountKind::Expense)),
+        "a profit and loss carries trading accounts only"
+    );
+    // At one branch: Malaz sold, Olaya paid the rent.
+    let olaya = profit_and_loss(
+        &mut conn,
+        at("2026-01-01T00:00:00Z"),
+        at("2027-01-01T00:00:00Z"),
+        Some("olaya"),
+    )
+    .await
+    .expect("reads");
+    assert_eq!(line(&olaya, "4000"), riyals(0));
+    assert_eq!(line(&olaya, "5000"), riyals(100));
+
+    // **Balances as at a date**: before 2026, cash holds the capital and the
+    // first sale; all-time, everything.
+    let then = balances_at(&mut conn, Some(at("2026-01-01T00:00:00Z")))
+        .await
+        .expect("reads");
+    let cash = |accounts: &[ledger::AccountBalance]| {
+        accounts
+            .iter()
+            .find(|a| a.code == "1000")
+            .expect("cash")
+            .balance
+    };
+    assert_eq!(cash(&then), riyals(1_500));
+    let now = balances_at(&mut conn, None).await.expect("reads");
+    assert_eq!(cash(&now), riyals(1_700));
+    assert_eq!(
+        now,
+        account_balances(&mut conn).await.expect("reads"),
+        "no date is all-time"
+    );
+
+    // **The balance sheet as at 1 March 2026**, with the fiscal year from 1
+    // January: the standing accounts at their balances, this year's result
+    // (300 sold less 100 rent) and last year's (500) as the two equity lines
+    // no account holds, and nothing out of balance.
+    let sheet = balance_sheet(
+        &mut conn,
+        at("2026-03-01T00:00:00Z"),
+        at("2026-01-01T00:00:00Z"),
+    )
+    .await
+    .expect("reads");
+    assert_eq!(line(&sheet.lines, "1000"), riyals(1_700));
+    assert_eq!(line(&sheet.lines, "3000"), riyals(-1_000));
+    assert!(
+        sheet
+            .lines
+            .iter()
+            .all(|l| !matches!(l.kind, AccountKind::Revenue | AccountKind::Expense)),
+        "the trading accounts are the results, not lines"
+    );
+    assert_eq!(sheet.results.len(), 1, "one currency, one result");
+    let result = &sheet.results[0];
+    assert_eq!(result.currency, sar());
+    assert_eq!(
+        result.current_year,
+        riyals(-200),
+        "a profit is net credits, so negative as posted"
+    );
+    assert_eq!(result.prior_years, riyals(-500));
+    assert_eq!(result.difference, riyals(0));
+    // Assets equal liabilities plus equity plus both results: 1700 = 1000 + 200 + 500.
+    assert_eq!(
+        line(&sheet.lines, "1000").minor(),
+        -(line(&sheet.lines, "3000").minor()
+            + result.current_year.minor()
+            + result.prior_years.minor())
+    );
+
+    // **The journal, newest first, in pages**, then filtered by account and by
+    // branch and by range.
+    let first = journal(&mut conn, &JournalFilter::default(), 3, None)
+        .await
+        .expect("reads");
+    let ids = |page: &erp_types::Page<ledger::JournalEntryView>| {
+        page.items.iter().map(|e| e.id.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&first), ["rent-2026", "sale-2026", "sale-2025"]);
+    let cursor = first.next.clone().expect("a fourth entry is left");
+    let second = journal(&mut conn, &JournalFilter::default(), 3, Some(&cursor))
+        .await
+        .expect("reads");
+    assert_eq!(ids(&second), ["capital"]);
+    assert!(second.next.is_none(), "the journal ended");
+    let sales = journal(
+        &mut conn,
+        &JournalFilter {
+            account: Some("4000"),
+            ..JournalFilter::default()
+        },
+        10,
+        None,
+    )
+    .await
+    .expect("reads");
+    assert_eq!(ids(&sales), ["sale-2026", "sale-2025"]);
+    let at_olaya = journal(
+        &mut conn,
+        &JournalFilter {
+            branch: Some("olaya"),
+            ..JournalFilter::default()
+        },
+        10,
+        None,
+    )
+    .await
+    .expect("reads");
+    assert_eq!(ids(&at_olaya), ["rent-2026", "sale-2025"]);
+    let in_2025 = journal(
+        &mut conn,
+        &JournalFilter {
+            from: Some(at("2025-01-01T00:00:00Z")),
+            until: Some(at("2026-01-01T00:00:00Z")),
+            ..JournalFilter::default()
+        },
+        10,
+        None,
+    )
+    .await
+    .expect("reads");
+    assert_eq!(ids(&in_2025), ["sale-2025", "capital"]);
+
+    // One entry, with its lines in order and their memos.
+    let rent = journal_entry(&mut conn, "rent-2026")
+        .await
+        .expect("reads")
+        .expect("exists");
+    assert_eq!(rent.branch.as_deref(), Some("olaya"));
+    assert_eq!(rent.lines.len(), 2);
+    assert_eq!(
+        (rent.lines[0].account.as_str(), rent.lines[0].amount),
+        ("5000", riyals(100))
+    );
+    assert_eq!(rent.lines[0].name, "5000", "the account's name rides along");
+    assert_eq!(rent.lines[1].memo.as_deref(), Some("the other side"));
+    assert!(
+        journal_entry(&mut conn, "nothing")
+            .await
+            .expect("reads")
+            .is_none()
+    );
+    drop(conn);
 
     assert!(fixture.imbalances().await.is_empty());
     fixture.cleanup().await;

@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.entry_id as \"entry_id!\", p.account as \"account!\", a.name as \"name?\",\n                  p.amount as \"amount!\", p.currency as \"currency!\", p.memo\n             FROM proj_ledger.posting p\n             LEFT JOIN proj_ledger.account a ON a.code = p.account\n            WHERE p.entry_id = ANY($1)\n            ORDER BY p.entry_id, p.line_index",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entry_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.posting",
+            "name": "entry_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "account!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.posting",
+            "name": "account"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "amount!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.posting",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.posting",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "memo",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.posting",
+            "name": "memo"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "d42e23c63364cc61f51680e200f20ca5917b52fe7002b56428302acce20693b2"
+}

@@ -11,6 +11,9 @@ description = "Double-entry accounting: accounts, journal entries, and the invar
 workspace = true
 
 [dependencies]
+# The fiscal calendar counts months and weeks; the tenant's own `Calendar`
+# turns its days into instants.
+chrono = { workspace = true }
 # `erp-tenant` is the handle a command needs — `TenantDb`, `CommandError`,
 # `ModuleSetup` — and nothing else. It deliberately does **not** carry
 # `ClusterRegistry`, `FleetPlan`, `PlacementPolicy` or `TenantPools`: a module

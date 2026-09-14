@@ -26,8 +26,9 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,767 tests green as of 2026-09-14, clippy, fmt and `cargo deny` clean.
-**Priority 1 of [Road to selling](#road-to-selling) is complete** (§79–§83). The per-phase test
+**Where this stands:** 1,777 tests green as of 2026-09-14, clippy, fmt and `cargo deny` clean.
+**Priority 1 of [Road to selling](#road-to-selling) is complete** (§79–§83), and Priority 2 has
+begun with the statements on the fiscal calendar (§84). The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end, and what blocks selling
@@ -108,12 +109,30 @@ drift with every change.
   well as what it writes, and API keys are bound like people. Designed so a
   self-hosted deployment, which runs its own control plane, carries it.
 - **Dependency scanning is `cargo-deny`.**
+- **Two ways in, one billing record** (decided 2026-09-14, evening). A bank
+  transfer is what the staff order is for; a smaller tenant pays by card and is
+  provisioned without staff. Both record what was bought — seats by type and a
+  period — and a staff order may carry a negotiated price outside the list, for
+  a large customer. Card checkout is Moyasar's hosted form; renewal charges the
+  saved card token; a failed payment gives 14 days' grace with an email and a
+  bell notification, then suspension. **The platform issues its own tax
+  invoices from this system**, keeping its books as a tenant of itself. Its
+  Moyasar secret is sealed under `SEALING_KEY` and refused if absent, like every
+  other secret. Self-serve billing moves from growth to before the demo.
+- **Seat types are rows platform staff define, not a table in code**: a name,
+  a monthly and an annual price, and what the seat can reach as a scope set in
+  the vocabulary API keys already use (`module:capability`, wildcards), judged
+  at the door where a key's scopes are, before the role. Four ship as defaults
+  — main (`*:*`), POS, service provider, worker — and staff may edit them or add
+  one for a deal. The owner buys counts per type and assigns members to seats;
+  every member holds one, the owner a main seat; assignment beyond the bought
+  count is refused. A staff order may grant a type **without limit** where the
+  deal says so. Module-by-capability is the grain for now; widen if a deal needs
+  finer.
 
 ### Waiting on the product owner
 
 - **The legal entity** — being registered. It fills `LICENSE` and signs the terms.
-- **Seat types:** which features a POS seat, a service-provider seat and a worker
-  seat each get.
 - **Retention periods per country.** Counsel confirms Saudi Arabia's.
 - **ZATCA registration details and the simulation OTP.** Onboarding to simulation,
   then production, runs when they arrive.
@@ -184,7 +203,30 @@ drift with every change.
       engineering)
 - [ ] **Financial statements:** profit and loss, balance sheet, balances at a date,
       and a journal listing. Today the trial balance is per-currency totals and
-      account balances are all-time. 1–2 weeks
+      account balances are all-time. **Decided 2026-09-14 (evening):** exclusive
+      far ends as the VAT return and `closed_before` use; a journal listing at
+      `GET /v1/ledger/entries` with lines, filterable by range, account and
+      branch; the balance sheet refuses (503) when the postings to that instant
+      do not balance; zero rows hidden unless `?all=true`. **Three directions
+      that widen it** (open questions in the same note): fiscal periods are the
+      tenant's — monthly, 4-4-5 and its variants, yearly — with a **formal period
+      closure**; **FX rates** are wanted, with a functional currency; and a
+      business may run branches as **cost centers** on journal lines rather than
+      as metadata on the entry. **Settled the same evening, all as
+      recommended:** a tenant-set fiscal calendar — a start date and a pattern
+      (monthly, quarterly, 4-4-5 and its variants with the 53rd week in the last
+      period, yearly) — with periods closing in order by moving the watermark,
+      the year's last close posting revenue and expense to `3100`, reopening
+      reversing it, and the pattern changeable only from the next open year;
+      FX as tenant-entered daily rates with an import route (fetching later),
+      a functional currency, statements presented in it with a translation
+      difference, multi-currency entries balanced at a stated rate with the
+      difference to an FX account, and revaluation with the period close;
+      cost centers on each line, defaulting to the entry's branch, every branch
+      one automatically, P&L by cost center and the balance sheet company-wide.
+      **Order:** statements on the calendar (~2 weeks) → formal closure (~1) →
+      FX levels i and ii (~2–3) → cost centers (~1–2) → revaluation (~1).
+      **Statements on the calendar built 2026-09-14 (§84)**; the closure is next
 - [ ] **Receipts and invoices a customer can hold.** A till sale's response carries
       no QR, and the full nine-field QR exists only after the worker signs; a B2B
       invoice is not held back until ZATCA clears it, and handing one over uncleared
@@ -195,6 +237,15 @@ drift with every change.
       name. Days
 - [ ] **Products a till can use:** price, barcode, VAT category, editing, and an
       Arabic name. 1–2 weeks
+- [ ] **Self-serve card billing** (decided above; moved up from growth). One billing
+      record for both ways in: seats by type and a period, at list prices for a card
+      checkout on Moyasar's hosted form, or at a negotiated price on a staff order.
+      Renewal on the saved card token; 14 days' grace on a failed payment with an
+      email and a bell notification, then suspension (§81's drain makes that safe).
+      The platform's own tax invoices issued from its own books as a tenant of
+      itself, through `sales` and `tax_sa`. `PLATFORM_MOYASAR_SECRET` sealed under
+      `SEALING_KEY`, refused if absent. Waits on the seat-type definitions and on
+      the legal entity for the merchant account. 3–5 weeks
 - [ ] **A demo a salesperson can use:** a small hosted environment, staff routes to
       create, reset and convert demo tenants, a clinic booking template, and salon,
       clinic and café seeds with two branches each. 2–3 weeks
@@ -214,9 +265,11 @@ drift with every change.
       About 1 week once the rules are confirmed. The WPS salary file still needs a
       real bank or Mudad specification. **Do not switch payroll on for a customer
       before this lands**
-- [ ] **Seat types for per-user pricing.** Each user is a full, POS, service-provider
-      or worker seat; a cheaper seat is held to its features and counted for
-      billing. Waits on which features each seat gets. 1–2 weeks
+- [ ] **Seat types for per-user pricing** (decided above). Staff-defined rows with a
+      scope set, four shipped; the owner assigns members within the bought counts,
+      or without limit where a staff order says so; the seat's scopes are judged in
+      `Allowed::from_request_parts` where a key's are. Must exist before self-serve
+      billing. 1–2 weeks
 - [ ] **A legal basis for keeping personal data on Hetzner outside the Kingdom**, with
       extra care for clinics' health data. Business and legal
 - [ ] **Production environment on Hetzner:** TLS, including to Postgres; security
@@ -269,8 +322,8 @@ drift with every change.
 
 ### Priority 5 · Growth
 
-- [ ] SaaS billing on the pricing above: per-user seats by type, monthly and annual
-      periods, trials, and suspension for non-payment
+- [x] SaaS billing — **moved to Priority 2** on 2026-09-14 as self-serve card
+      billing; trials stay deliberately unbuilt (the public demo is the trial)
 - [ ] More than one database cluster (the cluster registry only knows `PRIMARY_*`),
       which is also the path from Hetzner to Riyadh; a database login per tenant
 - [ ] ZATCA registration per branch or per till. **Confirm during the simulation
@@ -1211,6 +1264,60 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       `sales/commands.rs:46` (from both credit paths, as they stood then; §70
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
+
+### 84 · Statements are read by the tenant's fiscal calendar
+
+**Built 2026-09-14**, the first Priority 2 item, from the decisions taken that
+evening: the calendar is the tenant's, every figure is a sum at the instant
+asked, and a balance sheet that does not balance is refused rather than shown.
+
+**What exists now.** `ledger::fiscal` — a `FiscalCalendar { starts_on, pattern }`
+under `ledger.fiscal_calendar` (monthly from 2000-01-01 when never set) with
+`Pattern::{Monthly, Quarterly, FourFourFive, FourFiveFour, FiveFourFour,
+Yearly}`; periods are *generated*, never stored: month patterns clamp to short
+months, week patterns start each year on the start date's weekday nearest its
+anniversary and put the 53rd week in the last period, and a year is named by the
+calendar year it starts in (`2026-P03`). Five queries in `projections.rs` —
+`balances_at`, `profit_and_loss` (with a branch), `balance_sheet` (returning the
+lines and, per currency, the trading result split at the fiscal year's start and
+the postings' difference), `journal` paged on `(occurred_on, entry_id)` and
+`journal_entry`. Its OpenAPI line is `StatementLineView`, because `sales` already
+owns `LineView` with another shape and the schema-clash scan said so. Seven routes: `GET`/`PUT /v1/ledger/fiscal-calendar`,
+`GET /v1/ledger/periods`, `GET /v1/ledger/balances`, the two statements under
+`/v1/ledger/statements/`, and `GET /v1/ledger/entries[/{entry}]`. A period is
+resolved on the tenant's own `Calendar`, so `2026-P02` starts at Riyadh
+midnight; revenue, liability and equity are presented in their natural sign.
+
+**What was refused on purpose.** `PUT` on the calendar while the books are
+closed at all (409 `ledger.calendar_locked`) — stricter than the decided
+"from the next open year", because the watermark is still one instant and the
+formal close is what will make it per period. The balance sheet at 503
+`ledger.sheet_does_not_balance` naming the currency and the difference. A
+profit and loss with one end of its range (400 `ledger.not_a_range`), a period
+the calendar does not have (400 `ledger.no_such_period`), a pattern this build
+does not know (400 `ledger.not_a_pattern`).
+
+**A bug the test found, fixed at its root.** `?limit=3` on the journal was a
+400: `erp_web::After` is `#[serde(flatten)]`ed into a route's own query struct,
+serde buffers a flattened struct's values as text, and `Option<i64>` does not
+read text. Every route that folds `After` in — branches, crm, pos,
+notifications, booking's two — had the same 400 on `limit`, untested because no
+test had ever passed one; the audit routes, which take `Query<After>` whole,
+were fine. `After::limit` now reads either shape
+(`wire.rs::limit_however_written`), with a unit test on the flattened case.
+
+**Guards, all falsified.** The 503 (check removed → the HTTP test reads a 200
+sheet), the flattened `limit` (deserializer removed → 400 over HTTP and the unit
+test fails), the fiscal-year split (the sheet bound `as_at` for the year's start
+→ both the module test and the HTTP test see the wrong current and prior
+results). The ledger's own test drives four entries across two years and two
+branches through every query; the HTTP test does the same through the router
+on a 4-4-5 calendar, closes 2025, and slips a posting in behind the projection
+to see the sheet refused.
+
+**Not done here, by the decided order:** the formal period close (the closing
+entry to `3100`, reopening reversing it, the calendar changeable from the next
+open year), FX, cost centers, revaluation.
 
 ### 83 · A branch is something a member belongs to
 

@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.currency as \"currency!\",\n                  COALESCE(sum(p.amount) FILTER (\n                      WHERE a.kind IN ('revenue', 'expense') AND p.occurred_on >= $2), 0)::BIGINT\n                      as \"current_year!\",\n                  COALESCE(sum(p.amount) FILTER (\n                      WHERE a.kind IN ('revenue', 'expense') AND p.occurred_on < $2), 0)::BIGINT\n                      as \"prior_years!\",\n                  COALESCE(sum(p.amount), 0)::BIGINT as \"difference!\"\n             FROM proj_ledger.posting p\n             LEFT JOIN proj_ledger.account a ON a.code = p.account\n            WHERE p.occurred_on < $1\n            GROUP BY p.currency\n            ORDER BY p.currency",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.posting",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "current_year!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "prior_years!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "difference!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "7025f009d3c6ad890b3b6d724c32dc3fb0a984b462b462640525a83bcd84fc96"
+}

@@ -1330,6 +1330,296 @@ async fn a_signed_in_user_can_keep_books() {
     fixture.cleanup().await;
 }
 
+/// **The statements and the calendar, over HTTP.** A tenant sets a 4-4-5
+/// calendar, posts across two fiscal years, and reads every statement by it:
+/// periods, balances as at a date, the profit and loss for a period, the
+/// balance sheet with its two trading results, and the journal paged and
+/// filtered. Then the books close, the calendar is locked, and a posting slipped
+/// in behind the projection makes the sheet a 503 rather than a lie.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one set of postings, and every statement route that reads it"
+)]
+async fn statements_are_read_by_the_fiscal_calendar() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let post = |path: &str, key: &str, body: serde_json::Value| {
+        Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", idem(key))
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let put = |path: &str, body: serde_json::Value| {
+        Request::put(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let read = |path: &str| {
+        Request::get(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // A tenant that never chose has calendar months from 1 January.
+    let (status, calendar, _) = fixture.send(read("/v1/ledger/fiscal-calendar")).await;
+    assert_eq!(status, StatusCode::OK, "{calendar}");
+    assert_eq!(calendar["starts_on"], "2000-01-01");
+    assert_eq!(calendar["pattern"], "monthly");
+
+    let (status, body, _) = fixture
+        .send(put(
+            "/v1/ledger/fiscal-calendar",
+            serde_json::json!({ "starts_on": "2026-01-01", "pattern": "weekly" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "ledger.not_a_pattern");
+
+    let (status, body, _) = fixture
+        .send(put(
+            "/v1/ledger/fiscal-calendar",
+            serde_json::json!({ "starts_on": "2026-01-01", "pattern": "4-4-5" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+    // 2026 starts on the Thursday nearest 1 January — 1 January itself — and
+    // its first period is four weeks.
+    let (status, periods, _) = fixture.send(read("/v1/ledger/periods?year=2026")).await;
+    assert_eq!(status, StatusCode::OK, "{periods}");
+    assert_eq!(periods.as_array().unwrap().len(), 12);
+    assert_eq!(periods[0]["id"], "2026-P01");
+    assert_eq!(periods[0]["from"], "2026-01-01");
+    assert_eq!(periods[0]["until"], "2026-01-29");
+    assert_eq!(periods[0]["closed"], false);
+    assert_eq!(periods[11]["id"], "2026-P12");
+
+    for (code, kind) in [
+        ("1000", "asset"),
+        ("3000", "equity"),
+        ("4000", "revenue"),
+        ("5000", "expense"),
+    ] {
+        let (status, body, _) = fixture
+            .send(post(
+                "/v1/ledger/accounts",
+                code,
+                serde_json::json!({ "code": code, "name": code, "kind": kind, "currency": "SAR" }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    // Capital and a sale in 2025; a sale and the rent in 2026-P02.
+    for (key, on, debit, credit, minor) in [
+        ("capital", "2025-06-01T00:00:00Z", "1000", "3000", 100_000),
+        ("sale-2025", "2025-12-15T00:00:00Z", "1000", "4000", 50_000),
+        ("sale-2026", "2026-02-10T00:00:00Z", "1000", "4000", 30_000),
+        ("rent-2026", "2026-02-20T00:00:00Z", "5000", "1000", 10_000),
+    ] {
+        let (status, body, _) = fixture
+            .send(post(
+                "/v1/ledger/entries",
+                key,
+                serde_json::json!({
+                    "occurred_on": on,
+                    "memo": key,
+                    "lines": [
+                        { "account": debit, "amount": { "minor": minor, "currency": "SAR" } },
+                        { "account": credit, "amount": { "minor": -minor, "currency": "SAR" },
+                          "memo": "the other side" }
+                    ]
+                }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    fixture.project_ledger(tenant).await;
+
+    // Balances as at the start of 2026: the capital and the 2025 sale.
+    let (status, balances, _) = fixture
+        .send(read("/v1/ledger/balances?until=2026-01-01T00:00:00Z"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{balances}");
+    let cash = balances
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["code"] == "1000")
+        .expect("cash is shown");
+    assert_eq!(cash["balance"], 150_000);
+    assert_eq!(cash["postings"], 2);
+
+    // The profit and loss for the period the 2026 entries fall in.
+    let (status, pnl, _) = fixture
+        .send(read(
+            "/v1/ledger/statements/profit-and-loss?period=2026-P02",
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pnl}");
+    assert_eq!(pnl["period"], "2026-P02");
+    assert_eq!(pnl["from"], "2026-01-28T21:00:00Z", "Riyadh midnight");
+    let sar = &pnl["currencies"][0];
+    assert_eq!(sar["currency"], "SAR");
+    assert_eq!(sar["revenue"][0]["code"], "4000");
+    assert_eq!(sar["revenue"][0]["amount"], 30_000);
+    assert_eq!(sar["expenses"][0]["code"], "5000");
+    assert_eq!(sar["expenses"][0]["amount"], 10_000);
+    assert_eq!(sar["total_revenue"], 30_000);
+    assert_eq!(sar["total_expenses"], 10_000);
+    assert_eq!(sar["result"], 20_000);
+
+    let (status, body, _) = fixture
+        .send(read(
+            "/v1/ledger/statements/profit-and-loss?from=2026-01-01T00:00:00Z",
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "ledger.not_a_range");
+    let (status, body, _) = fixture
+        .send(read(
+            "/v1/ledger/statements/profit-and-loss?period=2026-P13",
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "ledger.no_such_period");
+
+    // The balance sheet as at 1 March 2026: this year's result and every
+    // earlier year's are two equity lines the chart does not hold.
+    let (status, sheet, _) = fixture
+        .send(read(
+            "/v1/ledger/statements/balance-sheet?as_at=2026-03-01T00:00:00Z",
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{sheet}");
+    assert_eq!(sheet["fiscal_year_started"], "2026-01-01");
+    let sar = &sheet["currencies"][0];
+    assert_eq!(sar["assets"][0]["code"], "1000");
+    assert_eq!(sar["assets"][0]["amount"], 170_000);
+    assert_eq!(sar["equity"][0]["code"], "3000");
+    assert_eq!(sar["equity"][0]["amount"], 100_000);
+    assert_eq!(sar["current_year_result"], 20_000);
+    assert_eq!(sar["prior_years_result"], 50_000);
+    assert_eq!(sar["total_assets"], 170_000);
+    assert_eq!(sar["total_liabilities"], 0);
+    assert_eq!(sar["total_equity"], 170_000);
+
+    // The journal: newest first, paged, filtered, and one entry with its lines.
+    let (status, page, _) = fixture.send(read("/v1/ledger/entries?limit=3")).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let ids: Vec<&str> = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [idem("rent-2026"), idem("sale-2026"), idem("sale-2025")]
+    );
+    let next = page["next"].as_str().expect("a fourth entry remains");
+    let (status, page, _) = fixture
+        .send(read(&format!("/v1/ledger/entries?limit=3&after={next}")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"][0]["id"], idem("capital"));
+    assert!(page["next"].is_null(), "{page}");
+
+    let (status, page, _) = fixture.send(read("/v1/ledger/entries?account=4000")).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    let (status, page, _) = fixture
+        .send(read(
+            "/v1/ledger/entries?from=2025-01-01T00:00:00Z&until=2026-01-01T00:00:00Z",
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+
+    let (status, rent, _) = fixture
+        .send(read(&format!("/v1/ledger/entries/{}", idem("rent-2026"))))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{rent}");
+    assert_eq!(rent["occurred_on"], "2026-02-20T00:00:00Z");
+    assert_eq!(rent["currency"], "SAR");
+    assert_eq!(rent["lines"][0]["account"], "5000");
+    assert_eq!(rent["lines"][0]["debit"], 10_000);
+    assert_eq!(rent["lines"][0]["credit"], 0);
+    assert_eq!(rent["lines"][1]["credit"], 10_000);
+    assert_eq!(rent["lines"][1]["memo"], "the other side");
+    let (status, body, _) = fixture.send(read("/v1/ledger/entries/nothing")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "ledger.no_such_entry");
+
+    // Close 2025: its periods show closed, and the calendar is locked.
+    let (status, body, _) = fixture
+        .send(put(
+            "/v1/ledger/books",
+            serde_json::json!({ "closed_before": "2026-01-01T00:00:00Z" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, periods, _) = fixture.send(read("/v1/ledger/periods?year=2025")).await;
+    assert_eq!(status, StatusCode::OK, "{periods}");
+    assert!(
+        periods
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["closed"] == true),
+        "{periods}"
+    );
+    let (status, body, _) = fixture
+        .send(put(
+            "/v1/ledger/fiscal-calendar",
+            serde_json::json!({ "starts_on": "2026-01-01", "pattern": "monthly" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "ledger.calendar_locked");
+
+    // A posting nothing balanced — behind the projection's back — and the
+    // sheet is refused rather than shown.
+    {
+        let db = fixture
+            .control
+            .enter_for_maintenance(tenant)
+            .await
+            .expect("maintenance entry");
+        let mut conn = db.acquire().await.expect("connection");
+        sqlx::query(
+            "INSERT INTO proj_ledger.posting \
+                (id, entry_id, line_index, account, amount, currency, occurred_on, recorded_at) \
+             VALUES (gen_random_uuid(), 'ghost', 0, '1000', 1, 'SAR', now(), now())",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("a posting slips in");
+    }
+    let (status, body, _) = fixture
+        .send(read("/v1/ledger/statements/balance-sheet"))
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "ledger.sheet_does_not_balance");
+    assert!(
+        body["detail"].as_str().unwrap().contains("0.01 SAR"),
+        "the message must say by how much: {}",
+        body["detail"]
+    );
+
+    fixture.cleanup().await;
+}
+
 /// An unbalanced entry is a 400 that says by how much — in the caller's
 /// language.
 #[tokio::test]
@@ -2719,6 +3009,14 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("get_customer", ALL_ROLES),
     ("list_accounts", ALL_ROLES),
     ("trial_balance", ALL_ROLES),
+    // Statements are reads of the books, like the trial balance.
+    ("fiscal_calendar", ALL_ROLES),
+    ("periods", ALL_ROLES),
+    ("balances", ALL_ROLES),
+    ("profit_and_loss", ALL_ROLES),
+    ("balance_sheet", ALL_ROLES),
+    ("list_entries", ALL_ROLES),
+    ("journal_entry", ALL_ROLES),
     ("list_invoices", ALL_ROLES),
     ("get_invoice", ALL_ROLES),
     // Who owes what. A viewer may see it — chasing a debt is not a privileged
@@ -3037,6 +3335,8 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     // Declaring the numbers final is the accountant's call, and not
     // something a clerk posting entries should be able to do to them.
     ("close_books", &["owner", "accountant"]),
+    // The calendar is the accountant's call, like closing the books.
+    ("set_fiscal_calendar", &["owner", "accountant"]),
     ("set_vat_rates", &["owner", "accountant"]),
     // Filing is a declaration to a tax authority, not a bookkeeping entry.
     ("file_return", &["owner", "accountant"]),
@@ -3201,8 +3501,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        261,
-        "expected two hundred and sixty-one role-scoped operations"
+        269,
+        "expected two hundred and sixty-nine role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the

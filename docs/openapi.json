@@ -642,6 +642,91 @@
         ],
         "type": "object"
       },
+      "BalanceSheetCurrency": {
+        "properties": {
+          "assets": {
+            "items": {
+              "$ref": "#/components/schemas/StatementLineView"
+            },
+            "type": "array"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "current_year_result": {
+            "description": "Revenue less expenses since the fiscal year started, shown as equity\nbecause no closing entry has moved it into retained earnings.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "equity": {
+            "items": {
+              "$ref": "#/components/schemas/StatementLineView"
+            },
+            "type": "array"
+          },
+          "liabilities": {
+            "items": {
+              "$ref": "#/components/schemas/StatementLineView"
+            },
+            "type": "array"
+          },
+          "prior_years_result": {
+            "description": "The same for every year before this one that was never closed.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_assets": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_equity": {
+            "description": "The equity accounts plus the two results. Equals `total_assets` less\n`total_liabilities`, or the sheet would not have been shown.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_liabilities": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "currency",
+          "assets",
+          "liabilities",
+          "equity",
+          "current_year_result",
+          "prior_years_result",
+          "total_assets",
+          "total_liabilities",
+          "total_equity"
+        ],
+        "type": "object"
+      },
+      "BalanceSheetView": {
+        "description": "What the business holds and owes as at an instant: one sheet per currency.",
+        "properties": {
+          "as_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "currencies": {
+            "items": {
+              "$ref": "#/components/schemas/BalanceSheetCurrency"
+            },
+            "type": "array"
+          },
+          "fiscal_year_started": {
+            "description": "The first day of the fiscal year `as_at` falls in, which is where\n`current_year_result` starts counting.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "as_at",
+          "fiscal_year_started",
+          "currencies"
+        ],
+        "type": "object"
+      },
       "BandView": {
         "properties": {
           "documents": {
@@ -3158,6 +3243,29 @@
         ],
         "type": "object"
       },
+      "FiscalCalendarView": {
+        "description": "The calendar a business keeps its periods by.",
+        "example": {
+          "pattern": "monthly",
+          "starts_on": "2026-01-01"
+        },
+        "properties": {
+          "pattern": {
+            "description": "`monthly`, `quarterly`, `4-4-5`, `4-5-4`, `5-4-4` or `yearly`.",
+            "type": "string"
+          },
+          "starts_on": {
+            "description": "The first day of a fiscal year, once. Every other year starts on its\nanniversary — or, for a week pattern, on that weekday nearest to it.",
+            "example": "2026-01-01",
+            "type": "string"
+          }
+        },
+        "required": [
+          "starts_on",
+          "pattern"
+        ],
+        "type": "object"
+      },
       "FitOut": {
         "example": {
           "trade": "salon"
@@ -3696,6 +3804,76 @@
         "required": [
           "id",
           "number"
+        ],
+        "type": "object"
+      },
+      "JournalEntryRecord": {
+        "description": "One entry with its lines, as the journal lists it.",
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currency": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/JournalLineView"
+            },
+            "type": "array"
+          },
+          "occurred_on": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "occurred_on",
+          "recorded_at",
+          "currency",
+          "lines"
+        ],
+        "type": "object"
+      },
+      "JournalLineView": {
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "credit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "debit": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "memo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "name",
+          "debit",
+          "credit"
         ],
         "type": "object"
       },
@@ -8630,6 +8808,64 @@
         ],
         "type": "object"
       },
+      "Paged_JournalEntryRecord": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "description": "One entry with its lines, as the journal lists it.",
+              "properties": {
+                "branch": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "currency": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "lines": {
+                  "items": {
+                    "$ref": "#/components/schemas/JournalLineView"
+                  },
+                  "type": "array"
+                },
+                "occurred_on": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "recorded_at": {
+                  "format": "date-time",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "occurred_on",
+                "recorded_at",
+                "currency",
+                "lines"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "Paged_LotView": {
         "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
         "properties": {
@@ -9665,6 +9901,44 @@
         ],
         "type": "object"
       },
+      "PeriodView": {
+        "description": "One period of one fiscal year.",
+        "properties": {
+          "closed": {
+            "description": "Whether the books are closed through the end of it.",
+            "type": "boolean"
+          },
+          "from": {
+            "type": "string"
+          },
+          "id": {
+            "description": "`2026-P03`: the fiscal year, named by the calendar year it starts in,\nand the period's number in it.",
+            "type": "string"
+          },
+          "index": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "until": {
+            "description": "Exclusive — the first day of the next period.",
+            "type": "string"
+          },
+          "year": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "year",
+          "index",
+          "from",
+          "until",
+          "closed"
+        ],
+        "type": "object"
+      },
       "PosAccepted": {
         "properties": {
           "id": {
@@ -9815,6 +10089,85 @@
           "unit",
           "tracking",
           "declared_at"
+        ],
+        "type": "object"
+      },
+      "ProfitAndLossCurrency": {
+        "properties": {
+          "currency": {
+            "type": "string"
+          },
+          "expenses": {
+            "items": {
+              "$ref": "#/components/schemas/StatementLineView"
+            },
+            "type": "array"
+          },
+          "result": {
+            "description": "Revenue less expenses. A loss is negative.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "revenue": {
+            "items": {
+              "$ref": "#/components/schemas/StatementLineView"
+            },
+            "type": "array"
+          },
+          "total_expenses": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total_revenue": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "currency",
+          "revenue",
+          "expenses",
+          "total_revenue",
+          "total_expenses",
+          "result"
+        ],
+        "type": "object"
+      },
+      "ProfitAndLossView": {
+        "description": "What the trading accounts did in a range: one statement per currency.",
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "currencies": {
+            "items": {
+              "$ref": "#/components/schemas/ProfitAndLossCurrency"
+            },
+            "type": "array"
+          },
+          "from": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "period": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "description": "Exclusive.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "until",
+          "currencies"
         ],
         "type": "object"
       },
@@ -11619,6 +11972,33 @@
           "awaiting_clearance",
           "chain_length",
           "unsigned"
+        ],
+        "type": "object"
+      },
+      "StatementLineView": {
+        "description": "An account on a statement.",
+        "properties": {
+          "amount": {
+            "description": "Minor units, on the kind's natural side: a revenue account's credit\nbalance and an asset's debit balance are both positive here.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "postings": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "amount",
+          "postings"
         ],
         "type": "object"
       },
@@ -30053,6 +30433,145 @@
         ]
       }
     },
+    "/v1/ledger/balances": {
+      "get": {
+        "description": "`GET /v1/ledger/accounts` with a date: every posting before `until` counts\nand nothing after it. Absent, all-time. Accounts with nothing to show are\nleft out unless `all` is asked for.",
+        "operationId": "balances",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exclusive. Postings dated before this count. Absent means all-time.",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include accounts with no balance and no postings.",
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AccountView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Every account and what it held **as at** an instant.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
     "/v1/ledger/books": {
       "get": {
         "operationId": "books",
@@ -30658,6 +31177,164 @@
       ]
     },
     "/v1/ledger/entries": {
+      "get": {
+        "description": "Filter by a range (exclusive at the far end), an account the entry touches,\nor a branch; a member confined to a branch reads theirs.",
+        "operationId": "list_entries",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inclusive.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exclusive.",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Entries with a line on this account.",
+            "in": "query",
+            "name": "account",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "One branch's entries. A confined member gets their branch.",
+            "in": "query",
+            "name": "branch",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "From a previous page's `next`.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Entries per page. Clamped, never refused.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_JournalEntryRecord"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unreadable cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "The journal: every entry, newest first, with its lines.",
+        "tags": [
+          "ledger"
+        ]
+      },
       "parameters": [
         {
           "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
@@ -30813,6 +31490,131 @@
           "ledger"
         ]
       }
+    },
+    "/v1/ledger/entries/{entry}": {
+      "get": {
+        "operationId": "journal_entry",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The entry's id, as it was posted.",
+            "in": "path",
+            "name": "entry",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JournalEntryRecord"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such entry — `ledger.no_such_entry`"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "One entry, with its lines.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/ledger/entries/{entry}/reversal": {
       "parameters": [
@@ -30979,6 +31781,676 @@
           "ledger"
         ]
       }
+    },
+    "/v1/ledger/fiscal-calendar": {
+      "get": {
+        "description": "Calendar months from 1 January unless it was set.",
+        "operationId": "fiscal_calendar",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FiscalCalendarView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now: `code` is `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "The fiscal calendar: when this business's periods begin and end.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "A start date and a pattern: `monthly`, `quarterly`, `4-4-5`, `4-5-4`,\n`5-4-4` or `yearly`. Every period is generated from the two — `GET\n/v1/ledger/periods` shows them — so a period is never typed in by hand. A\nweek pattern starts each year on the start date's weekday nearest its\nanniversary and puts the 53rd week, when it comes, in the last period.\n\n**Refused while the books are closed anywhere**: periods already declared\nfinal must not move under the declaration. Reopen first, or change it in the\nnext open year. `ManageAccounts`, like closing the books, because it is the\naccountant's call.",
+        "operationId": "set_fiscal_calendar",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FiscalCalendarView"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Set. Periods and statements read by it from now on."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A pattern this build does not know — `ledger.not_a_pattern`"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The books are closed, so the calendar cannot change — `ledger.calendar_locked`"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now: `code` is `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Set the fiscal calendar.",
+        "tags": [
+          "ledger"
+        ]
+      }
+    },
+    "/v1/ledger/periods": {
+      "get": {
+        "description": "The year is named by the calendar year it starts in; absent, the one today\nfalls in.",
+        "operationId": "periods",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The fiscal year, by the calendar year it starts in. Defaults to the one today falls in.",
+            "in": "query",
+            "name": "year",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PeriodView"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now: `code` is `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "The periods of one fiscal year, and which are closed.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/ledger/statements/balance-sheet": {
+      "get": {
+        "description": "One sheet per currency. Give `as_at` (exclusive: postings dated before it\ncount), or a `period`, whose end is the instant; absent, now. The trading\nresult since the fiscal year started, and every earlier year's, appear as\ntwo equity lines beside the chart's own retained earnings, because no\nclosing entry has moved them there yet. Company-wide only: a branch's books\ndo not balance on their own, since a transfer between branches debits one and\ncredits the other.\n\n**Refused, not rendered, when the postings do not balance** — the ledger's\none invariant, and a sheet that did not balance would be a sheet somebody\nacts on.",
+        "operationId": "balance_sheet",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exclusive. Postings dated before this count. Absent means now.",
+            "in": "query",
+            "name": "as_at",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A period of the fiscal calendar; the sheet is as at its end.",
+            "in": "query",
+            "name": "period",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include accounts with no balance.",
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BalanceSheetView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "A period this calendar does not have — `ledger.no_such_period`"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The postings in some currency do not balance as at this instant — `ledger.sheet_does_not_balance` — or the read model is behind Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "The balance sheet as at an instant.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/ledger/statements/profit-and-loss": {
+      "get": {
+        "description": "One statement per currency, because postings carry a currency and nothing\nhere converts. Give a `period` (`2026-P03`) or `from` and `until`, exclusive\nat the far end; `branch` narrows it to one branch's postings, and a member\nconfined to a branch gets theirs. Accounts with nothing in the range are left\nout unless `all` is asked for.",
+        "operationId": "profit_and_loss",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A period of the fiscal calendar, `2026-P03`. Instead of `from` and `until`.",
+            "in": "query",
+            "name": "period",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inclusive.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exclusive.",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "One branch's postings. Absent means the company; a confined member gets their branch.",
+            "in": "query",
+            "name": "branch",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include accounts with nothing in the range.",
+            "in": "query",
+            "name": "all",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Wait for the read model to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfitAndLossView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No range, or a backwards one — `ledger.not_a_range`; a period this calendar does not have — `ledger.no_such_period`"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not permitted, or a branch that is not one of yours — `access.wrong_branch`"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Profit and loss: what the trading accounts did over a range.",
+        "tags": [
+          "ledger"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/ledger/trial-balance": {
       "get": {

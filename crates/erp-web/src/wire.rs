@@ -368,8 +368,29 @@ pub struct After {
     /// How many rows. Absent takes the default; anything above the maximum is
     /// **clamped rather than refused**, because a caller asking for more than
     /// the server will give wants as much as it will give.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "limit_however_written")]
     pub limit: Option<i64>,
+}
+
+/// `?limit=50` reaches a *flattened* `After` as the text `"50"`: serde's
+/// `flatten` buffers a query's values before the inner struct sees them, and a
+/// buffered string does not become a number on its own. A route that takes
+/// `Query<After>` whole gets the number parsed for it. Read either, so a page
+/// size is one parameter however the route declares its query.
+fn limit_however_written<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i64>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Limit {
+        Number(i64),
+        Text(String),
+    }
+    match Option::<Limit>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Limit::Number(n)) => Ok(Some(n)),
+        Some(Limit::Text(t)) => t.trim().parse().map(Some).map_err(serde::de::Error::custom),
+    }
 }
 
 impl After {
@@ -401,5 +422,36 @@ impl After {
                 })
             })
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A route that folds `After` into its own query struct still gets a page
+    /// size — the value reaches it as text, which is what broke every such
+    /// route before this read either.
+    #[test]
+    fn a_flattened_page_size_is_still_a_number() {
+        #[derive(Debug, serde::Deserialize)]
+        struct ListQuery {
+            #[serde(flatten)]
+            page: After,
+            #[serde(default)]
+            closed: bool,
+        }
+        let query: ListQuery =
+            serde_json::from_value(serde_json::json!({ "limit": "3", "closed": true }))
+                .expect("reads");
+        assert_eq!(query.page.limit, Some(3));
+        assert!(query.closed);
+
+        let whole: After =
+            serde_json::from_value(serde_json::json!({ "limit": 7 })).expect("reads");
+        assert_eq!(whole.limit, Some(7));
+        let none: After = serde_json::from_value(serde_json::json!({})).expect("reads");
+        assert_eq!(none.limit, None);
+        assert!(serde_json::from_value::<After>(serde_json::json!({ "limit": "many" })).is_err());
     }
 }

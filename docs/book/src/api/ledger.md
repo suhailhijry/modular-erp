@@ -404,6 +404,13 @@ which is why it is checked continuously and not at month end.
 
 ## Routes
 
+Statements and the calendar: `GET`/`PUT /v1/ledger/fiscal-calendar`,
+`GET /v1/ledger/periods?year=`, `GET /v1/ledger/balances?until=`,
+`GET /v1/ledger/statements/profit-and-loss` and `…/balance-sheet` (a `period`,
+or `from`/`until` and `as_at`), and the journal at `GET /v1/ledger/entries` and
+`GET /v1/ledger/entries/{entry}`. All reads; the calendar's `PUT` is
+`ManageAccounts`, like closing the books.
+
 | Method | Path | Capability |
 |---|---|---|
 | `GET` `POST` | `/v1/ledger/accounts` | Read / ManageAccounts |
@@ -439,8 +446,80 @@ declared every exempt supply in the system to be a financial service.
 `http.rs` is translation only. The aggregates, the invariant and the read models
 are the module; that file turns a request into a call and a result into JSON.
 
+## The fiscal calendar
+
+```rust
+pub struct FiscalCalendar { pub starts_on: NaiveDate, pub pattern: Pattern }
+pub enum Pattern { Monthly, Quarterly, FourFourFive, FourFiveFour, FiveFourFour, Yearly }
+pub struct Period { pub id: String, pub year: i32, pub index: u32,
+                    pub from: NaiveDate, pub until: NaiveDate }
+
+impl FiscalCalendar {
+    pub const KEY: &'static str = "ledger.fiscal_calendar";
+    pub fn year_start(&self, year: i32) -> NaiveDate;
+    pub fn fiscal_year_of(&self, day: NaiveDate) -> i32;
+    pub fn periods(&self, year: i32) -> Vec<Period>;
+    pub fn period_containing(&self, day: NaiveDate) -> Period;
+    pub fn period(&self, id: &str) -> Option<Period>;
+}
+
+pub async fn fiscal_calendar(conn: &mut PgConnection) -> Result<FiscalCalendar, ConfigError>;
+pub async fn set_fiscal_calendar(conn: &mut PgConnection, calendar: FiscalCalendar,
+                                 by: Option<&str>) -> Result<FiscalCalendar, CalendarError>;
+```
+
+**The calendar is the tenant's** (decided 2026-09-14): a start date and a
+pattern, and every period is generated from the two rather than typed in. Month
+patterns start each period on the start date's day of the month, clamped where a
+month is short. The 4-4-5 family counts weeks — each quarter four, four and five
+of them, or 4-5-4, or 5-4-4 — so a year is 52 weeks and every few years 53; each
+fiscal year starts on the start date's weekday nearest its anniversary, which is
+what stops a week calendar drifting, and the 53rd week goes in the last period. A
+fiscal year is named by the calendar year it starts in; periods read `2026-P03`.
+A tenant that never chose gets calendar months from 1 January.
+
+Periods are computed, not stored, so nothing here says which are closed: that is
+still the watermark above, which the formal period close will move period by
+period. Until then a calendar change is refused while the books are closed at all
+— stricter than the decided rule, and deliberately so.
+
+## Statements
+
+```rust
+pub async fn balances_at(conn, until: Option<Timestamp>) -> Result<Vec<AccountBalance>, _>;
+pub async fn profit_and_loss(conn, from: Timestamp, until: Timestamp,
+                             branch: Option<&str>) -> Result<Vec<StatementLine>, _>;
+pub async fn balance_sheet(conn, as_at: Timestamp,
+                           fiscal_year_start: Timestamp) -> Result<SheetParts, _>;
+pub async fn journal(conn, filter: &JournalFilter, limit: i64,
+                     after: Option<&Cursor>) -> Result<Page<JournalEntryView>, _>;
+pub async fn journal_entry(conn, id: &str) -> Result<Option<JournalEntryView>, _>;
+```
+
+Every figure is a sum over `posting` at the moment it is asked, never a
+maintained total — the same argument the balance views make — and every range is
+exclusive at the far end, the convention the VAT return and `closed_before` use.
+**One statement per currency**: postings carry a currency and nothing here
+converts, so a tenant with riyal and dollar postings gets two of each; converting
+to a functional currency is FX's, which comes next.
+
+The balance sheet carries two equity lines no account holds: the trading result
+since the fiscal year started, and the result of every year before it. Neither
+has been closed into retained earnings — the formal close will post that entry —
+so the sheet computes them from the trading accounts at the instant asked, split
+at the fiscal year's start on the tenant's own calendar. **It is refused, not
+rendered, when the postings up to that instant do not sum to zero**: the ledger's
+one invariant, and a sheet that did not balance would be a sheet somebody acts
+on. The profit and loss takes a branch (a confined member gets theirs); the
+balance sheet is company-wide only, because a branch's books do not balance on
+their own.
+
+The journal lists entries newest first, paged on `(occurred_on, entry_id)` so a
+page is stable under new postings, filterable by range, by an account the entry
+touches, and by branch.
+
 ## What is deliberately absent
 
-Fiscal periods as a table, drafts, multi-currency entries with FX, and posting
-rules driven by configuration. Each is real, and each needs somebody to want it
-before its shape is decided.
+Drafts, and posting rules driven by configuration. Each is real, and each needs
+somebody to want it before its shape is decided. Fiscal periods, FX and cost
+centers were wanted on 2026-09-14 and are being built in that order.

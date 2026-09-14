@@ -1,0 +1,90 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.code as \"code!\", a.name as \"name!\", a.kind as \"kind!\",\n                  a.currency as \"currency!\", a.closed as \"closed!\",\n                  COALESCE(sum(p.amount) FILTER (WHERE $1::timestamptz IS NULL OR p.occurred_on < $1), 0)::BIGINT\n                      as \"balance!\",\n                  count(p.id) FILTER (WHERE $1::timestamptz IS NULL OR p.occurred_on < $1)\n                      as \"postings!\"\n             FROM proj_ledger.account a\n             LEFT JOIN proj_ledger.posting p ON p.account = a.code\n            GROUP BY a.code, a.name, a.kind, a.currency, a.closed\n            ORDER BY a.code",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "code!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency!",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "closed!",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "proj_ledger.account",
+            "name": "closed"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "balance!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "postings!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "16bade40fc1060f8ee2bad27a3487aee99c2857612956554a4049e5c67b02f89"
+}
