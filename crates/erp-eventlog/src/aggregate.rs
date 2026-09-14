@@ -353,7 +353,35 @@ where
     A: Aggregate,
     F: Fn(&Loaded<A>) -> Result<Decision<A::Event>, E>,
 {
-    let loaded = load::<A>(&mut *conn, id, upcasters).await?;
+    try_execute_from(conn, id, upcasters, metadata, A::default(), decide).await
+}
+
+/// [`try_execute`], folding the stream into `seed` rather than into
+/// `A::default()`.
+///
+/// **For a fold that has to be told what to look for.** `Default` cannot carry
+/// a question, and some decisions need one answered from the whole stream
+/// rather than from what a bounded aggregate kept: `inventory` returning goods
+/// has to find the one consumption it is undoing, however long ago it was, and
+/// keeping every consumption in the aggregate to make that possible would grow
+/// a café's shelf for ever. The seed names the movement; the fold follows it.
+///
+/// The load, the decision and the optimistic append are the same single pass
+/// [`try_execute`] makes, so what the decision saw is what the append is
+/// checked against.
+pub async fn try_execute_from<A, F, E>(
+    conn: &mut PgConnection,
+    id: &AggregateId,
+    upcasters: &Upcasters,
+    metadata: &Metadata,
+    seed: A,
+    decide: F,
+) -> Result<Committed<A::Event>, ExecuteError<E>>
+where
+    A: Aggregate,
+    F: Fn(&Loaded<A>) -> Result<Decision<A::Event>, E>,
+{
+    let loaded = load_since::<A>(&mut *conn, id, upcasters, seed, Sequence::ZERO).await?;
     let decision = decide(&loaded).map_err(ExecuteError::Rejected)?;
 
     // A decision to do nothing is a success, not an empty append.

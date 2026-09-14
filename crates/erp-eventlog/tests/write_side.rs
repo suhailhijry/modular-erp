@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 const LOADS: [&str; 3] = ["erp_eventlog::load", "aggregate::load", "load_since"];
 
 /// Paths that may. Matched as suffixes.
-const ALLOWED: [&str; 10] = [
+const ALLOWED: [&str; 11] = [
     // Command handling. This is the whole point of the write model.
     //
     // `booking` loads more than the others and each one is a decision made from
@@ -46,6 +46,14 @@ const ALLOWED: [&str; 10] = [
     // term has been served. Both are decisions taken from history inside the
     // transaction that writes; neither answers a query.
     "modules/prepaid/src/commands.rs",
+    // `inventory` loads a shelf to decide which lots a movement comes out of
+    // and what each portion costs — a lot's remaining quantity and remaining
+    // value are facts about every movement that has touched it — and to ask
+    // whether this movement has already been recorded. It loads a product to
+    // answer whether stock of it may move at all and how closely it is tracked,
+    // which is `crm`'s argument for reading the log rather than the read model.
+    // Every one of them is a decision taken from history; none answers a query.
+    "modules/inventory/src/commands.rs",
     // `pos` loads a shift to answer what the drawer should hold, and loads the
     // invoice a retried sale already issued to report its total back.
     "modules/pos/src/commands.rs",

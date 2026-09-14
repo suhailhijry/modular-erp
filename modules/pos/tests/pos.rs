@@ -227,6 +227,10 @@ fn coffee(tenders: Vec<Tender>) -> Basket {
             description: "قهوة".to_owned(),
             net: money(1_500),
             category: ledger::VatCategory::Standard,
+            product: None,
+            quantity: None,
+            serials: Vec::new(),
+            lot: None,
         }],
         discounts: Vec::new(),
         currency: sar(),
@@ -249,6 +253,10 @@ fn coffee_and_cake(tenders: Vec<Tender>) -> Basket {
         description: "كيك".to_owned(),
         net: money(2_000),
         category: ledger::VatCategory::Standard,
+        product: None,
+        quantity: None,
+        serials: Vec::new(),
+        lot: None,
     });
     basket
 }
@@ -261,6 +269,8 @@ fn cake_back(tendered: i64) -> pos::Return {
         lines: vec![sales::CreditLine {
             against: 1,
             net: money(2_000),
+            quantity: None,
+            serials: Vec::new(),
         }],
         why: "أعاد الكيك".to_owned(),
         at: on("2026-04-01"),
@@ -1048,6 +1058,10 @@ async fn a_till_holds_a_clerk_to_the_document_limit() {
             description: "آلة قهوة".to_owned(),
             net: money(1_000_000),
             category: ledger::VatCategory::Standard,
+            product: None,
+            quantity: None,
+            serials: Vec::new(),
+            lot: None,
         }],
         ..coffee(tenders)
     };
@@ -1306,6 +1320,120 @@ async fn a_till_return_needs_the_credit_note_claim() {
         money(0),
         "three sales rung and three handed back; the refusals moved nothing"
     );
+
+    fixture.cleanup().await;
+}
+
+/// **The till rides the same path as every other invoice.**
+///
+/// A till sale is a `sales` invoice issued through `issue_in`, and that is
+/// where stock comes off a shelf (decision 2) — so the till itself decides
+/// nothing about stock and carries the product and the quantity straight
+/// through to the draft. Ringing three sacks takes three sacks and books what
+/// those three cost; handing one back puts one back, at what it left at.
+#[tokio::test]
+async fn a_till_sale_takes_the_stock_off_the_shelf_and_a_return_puts_it_back() {
+    const BEANS: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
+    let fixture = Fixture::new().await;
+    opened(&fixture, "SHIFT-STOCK", 0).await;
+
+    inventory::declare(
+        &fixture.db,
+        &code(BEANS),
+        "بن",
+        "كيس",
+        inventory::Tracking::None,
+        on("2026-01-01"),
+        &Metadata::default(),
+    )
+    .await
+    .expect("the product is declared");
+    // Ten sacks for 100.00 — 10.00 each.
+    inventory::receive(
+        &fixture.db,
+        &code(BEANS),
+        &inventory::Receipt {
+            quantity: 10,
+            value: money(10_000),
+            code: None,
+            expires_on: None,
+            serials: Vec::new(),
+            reference: "dn-1".to_owned(),
+            at: on("2026-01-02"),
+        },
+        &Metadata::default(),
+    )
+    .await
+    .expect("the delivery lands");
+
+    let shelf = || async {
+        let id = inventory::stock_id(&code(BEANS), None).expect("a key");
+        let mut conn = fixture.pool.acquire().await.expect("connection");
+        erp_eventlog::load::<inventory::Stock>(&mut conn, &id, inventory::upcasters())
+            .await
+            .expect("loads")
+            .aggregate
+    };
+
+    // Three sacks at 25.00 each: 75.00 net, 86.25 gross at 15%.
+    let mut basket = coffee(vec![Tender::new(Method::Cash, money(8_625))]);
+    basket.lines = vec![sales::DraftLine {
+        allowances: Vec::new(),
+        description: "بن".to_owned(),
+        net: money(2_500),
+        category: ledger::VatCategory::Standard,
+        product: Some(code(BEANS)),
+        quantity: Some(3),
+        serials: Vec::new(),
+        lot: None,
+    }];
+    sell(
+        &fixture.db,
+        &code("SHIFT-STOCK"),
+        &code("SALE-STOCK"),
+        &basket,
+        &Metadata::default(),
+        sales::Authority::Member { owner: false },
+    )
+    .await
+    .expect("the sale rings");
+
+    assert_eq!(shelf().await.on_hand(), 7, "three sacks left the shop");
+    fixture.project().await;
+    assert_eq!(fixture.balance("5010").await, money(3_000));
+    assert_eq!(fixture.balance("1300").await, money(7_000));
+
+    // One sack back: 25.00 net, 28.75 gross.
+    pos::take_back(
+        &fixture.db,
+        &code("SHIFT-STOCK"),
+        &code("SALE-STOCK"),
+        &pos::Return {
+            reference: "RET-STOCK".to_owned(),
+            tenders: vec![Tender::new(Method::Cash, money(2_875))],
+            lines: vec![sales::CreditLine {
+                against: 0,
+                net: money(2_500),
+                quantity: Some(1),
+                serials: Vec::new(),
+            }],
+            why: "أعاد كيسًا".to_owned(),
+            at: on("2026-04-01"),
+        },
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+    .expect("the return goes through");
+
+    assert_eq!(shelf().await.on_hand(), 8, "one sack came back");
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("5010").await,
+        money(2_000),
+        "30.00 went out and 10.00 came back"
+    );
+    assert_eq!(fixture.balance("1300").await, money(8_000));
 
     fixture.cleanup().await;
 }

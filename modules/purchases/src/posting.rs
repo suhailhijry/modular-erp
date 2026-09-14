@@ -14,6 +14,17 @@
 //!     Cr  accounts payable                        gross
 //! ```
 //!
+//! # A line that bought stock
+//!
+//! Its account is not its own. A line naming a product `inventory` knows lands
+//! in the goods-received-not-invoiced account the delivery credited, because
+//! the receipt already put the goods on the balance sheet; the bill is the
+//! invoice catching up with it. That substitution happens in
+//! `commands::stocked`, **before** these lines are built, so this function
+//! stays what it was: summation over the accounts it is handed. Input VAT and
+//! the payable are untouched, and a line with no product on it is untouched
+//! too.
+//!
 //! # Why exempt tax does not go to input VAT
 //!
 //! Input tax on an exempt supply is **not reclaimable** — it is a cost of the
@@ -146,6 +157,7 @@ mod tests {
         crate::bill::BillLine {
             description: "something".to_owned(),
             account: code(account),
+            product: None,
             net: money(net),
             category,
             rate_bp: ledger::Rates::saudi_arabia().of(category),

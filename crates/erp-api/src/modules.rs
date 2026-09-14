@@ -128,6 +128,15 @@ const REGISTERED: &[Registered] = &[
         http: prepaid::http::routes,
         catalog: &prepaid::CATALOG,
     },
+    // After `ledger`, which it is built on: where a count's discrepancy and a
+    // sale's cost land is a decision about the chart of accounts, and the codes
+    // a tenant chooses are checked against their own chart.
+    Registered {
+        name: "inventory",
+        setup: inventory::setup,
+        http: inventory::http::routes,
+        catalog: &inventory::CATALOG,
+    },
     Registered {
         name: "pos",
         setup: pos::setup,

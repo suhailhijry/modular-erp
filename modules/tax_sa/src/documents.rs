@@ -562,6 +562,11 @@ fn line(line: &InvoiceLine) -> Line {
         rate_bp: line.vat.basis_points,
         exemption_reason: line.vat.exemption_reason.clone(),
         tax: tax_of(line),
+        // **The factors as `sales` recorded them, not recomputed.** A line
+        // given as a single amount has neither, and renders as one unit at that
+        // amount — which is what the document said before they existed.
+        quantity: line.quantity,
+        unit_price: line.unit,
         allowances: line
             .allowances
             .iter()

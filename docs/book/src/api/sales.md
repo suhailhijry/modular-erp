@@ -78,10 +78,19 @@ tenant's configuration, resolved in the command's own transaction, because a rat
 that changed between the request and the write would stamp an invoice with one
 that was never current.
 
-There is no quantity or unit price. A client that shows "3 × 250.00" already
-computed the 750.00 it sends. Storing the factors matters when ZATCA's line-level
-fields are implemented, and adding them then is an upcaster, which is the
-mechanism this system already has and tests.
+A line may be given as a **price and a quantity**, and then the line comes to
+their product — computed here and never divided back out of a total, because
+going backwards from a total is a division that does not always land on a whole
+halala and `cbc:PriceAmount` has to be exact. A line given as a single amount is
+quantity one, which is what every invoice issued before the factors existed is,
+and both fields are optional on the wire.
+
+A line may also name a **product**, and then issuing the invoice takes that many
+units off that product's shelf at the request's branch, in the invoice's own
+transaction, and books what they cost. A serial-tracked line names its units,
+and any line may name the **lot** to take them from instead of the one that
+expires first. A credit line says how many units came back and, for
+serial-tracked stock, which. See `inventory`.
 
 ### Why a discount is not a negative line
 

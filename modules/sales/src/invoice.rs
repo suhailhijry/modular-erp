@@ -120,13 +120,59 @@ impl Customer {
 
 /// One thing being charged for.
 ///
-/// ponytail: no quantity or unit price. A client that shows "3 × 250.00" already
-/// computed the 750.00 it sends; storing the factors matters when ZATCA's
-/// line-level fields are implemented, and adding them then is an upcaster — the
-/// mechanism this system already has and tests.
+/// # Why the factors are stored now
+///
+/// They used not to be: a client that showed "3 × 250.00" sent the 750.00 it
+/// had already worked out, and the document said quantity one. That was enough
+/// while nothing downstream cared. Two things now do. **ZATCA** wants the real
+/// `cbc:InvoicedQuantity` and `cbc:PriceAmount`, and BT-131 only balanced
+/// because the quantity was hard-coded to one. And **stock**: a line that
+/// depletes a shelf has to say how many units, and dividing a total back out by
+/// a price is exactly the guess decision 3 forbids — it does not always land.
+///
+/// Both are `#[serde(default)]`, so every line written before they existed
+/// decodes as one with neither, which is what it was: a bare total, quantity
+/// one. No upcaster needed, the same argument `allowances` makes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvoiceLine {
     pub description: String,
+    /// **What this line is a sale of**, when it is a sale of something the
+    /// business keeps on a shelf. `inventory` depletes it at issue and a credit
+    /// note puts it back.
+    ///
+    /// Optional and it stays optional: a consultancy hour is not stock, and
+    /// most lines in this system are not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<AggregateId>,
+    /// **How many units**, when the line was given as a price times a quantity.
+    /// `None` is a line given as a bare total, which is quantity one and is
+    /// what every line written before this field was here is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<i64>,
+    /// **What one unit was charged at** — UBL's `cbc:PriceAmount`, BT-146.
+    ///
+    /// Stored rather than divided back out of [`Self::net`]: `net` is
+    /// `unit × quantity` less the line's allowances, and going backwards from
+    /// it is a division that does not always land on a whole halala. Present
+    /// exactly when [`Self::quantity`] is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<Money>,
+    /// **Which units**, on a serial-tracked product: one name per unit, from
+    /// the caller (L8). `inventory` refuses a name that is not on the shelf —
+    /// unknown, already sold or written off — because a serial is an identity
+    /// and nothing corrects one (decision 17).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serials: Vec<String>,
+    /// **Which lot**, when the line overrides the picking rule — a scanned
+    /// batch, stock promised to this customer. The lot's id as
+    /// `GET /v1/inventory/lots` lists it, never its code: codes repeat.
+    /// `inventory` refuses a lot that is not open on the shelf the sale is at,
+    /// and one that holds fewer than the line takes.
+    ///
+    /// `#[serde(default)]`, so every line written before it existed decodes as
+    /// one that let the picking rule choose — which is what it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lot: Option<String>,
     /// **What this line is charged, excluding tax and after its own
     /// allowances.** UBL's `LineExtensionAmount`, BT-131 — which the standard
     /// defines as the price less the line's allowances, and which is what the
@@ -212,10 +258,26 @@ pub struct Allowance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftLine {
     pub description: String,
-    /// **Before this line's own allowances.** The list amount; what is charged
-    /// is this less [`Self::allowances`], and that is what gets taxed.
+    /// **Before this line's own allowances**, and **per unit when
+    /// [`Self::quantity`] is given**: what is charged is `net × quantity` less
+    /// [`Self::allowances`], and that is what gets taxed. With no quantity it is
+    /// the line's whole amount, which is what every client sending one today
+    /// means.
     pub net: Money,
     pub category: ledger::VatCategory,
+    /// What this line sells off a shelf, when it sells one.
+    pub product: Option<AggregateId>,
+    /// How many units, when the line is priced per unit. `None` is a bare
+    /// total and one unit — the shape this system had before, and the reason
+    /// both of these are optional on the wire: a required field breaks every
+    /// client that exists.
+    pub quantity: Option<i64>,
+    /// Which units, on a serial-tracked product. A line that names any must
+    /// name the product and charge for exactly that many.
+    pub serials: Vec<String>,
+    /// Which lot the units come off, when the picking rule is overridden. A
+    /// line that names one must name the product.
+    pub lot: Option<String>,
     /// What comes off this line, each with its own reason.
     #[allow(clippy::struct_field_names, reason = "it is what it is called")]
     pub allowances: Vec<Allowance>,
@@ -735,6 +797,11 @@ mod tests {
             lines: vec![InvoiceLine {
                 allowances: Vec::new(),
                 description: "Consulting".to_owned(),
+                product: None,
+                quantity: None,
+                unit: None,
+                serials: Vec::new(),
+                lot: None,
                 net,
                 vat: vat.clone(),
             }],

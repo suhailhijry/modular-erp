@@ -92,6 +92,12 @@ pub struct Seeded {
     pub prepaid: usize,
     /// Sales rung through the till, on a shift that was counted.
     pub till_sales: usize,
+    /// Things the café keeps on a shelf, declared with the unit they are
+    /// counted in.
+    pub products: usize,
+    /// What the stocktake could not find, in the product's own unit. Negative
+    /// on purpose, for the reason the drawer is fifty halalas short.
+    pub stock_short: i64,
     /// Places the business trades from.
     pub branches: usize,
     /// People on the books, arranged as an org chart with claims travelling up
@@ -249,11 +255,6 @@ pub async fn seed(
     let credited = seed_corrections(&app, slug, &token).await?;
     let invoices = invoices + credited;
 
-    // The other side of a VAT return. Without bills a demo shows output tax and
-    // calls it a return, which is half a number and the wrong half to show
-    // somebody deciding whether this can file for them.
-    let bills = seed_bills(&app, slug, &token).await?;
-
     // The diary. After the customers, because a booking is made *by* somebody
     // and the reference is what stops two spellings being two people — and
     // **before the last projection run**, or the rota and the day are in the
@@ -275,6 +276,21 @@ pub async fn seed(
     // A month's pay. **After the people**, obviously, and after the chart —
     // approving posts, and a posting needs accounts to post into.
     let paid = seed_payroll(&app, slug, &token).await?;
+
+    // The shelf. **After the branches**, because stock is held per branch and
+    // the café's is at Olaya — a receipt with no branch would land on a
+    // different shelf from the one anybody looks at.
+    let (products, stock_short) = seed_inventory(&app, slug, &token).await?;
+
+    // The other side of a VAT return. Without bills a demo shows output tax and
+    // calls it a return, which is half a number and the wrong half to show
+    // somebody deciding whether this can file for them.
+    //
+    // **After the shelf**, because the bill that buys the stock names the four
+    // products on its lines and a line naming a product nobody declared is
+    // refused. Nothing requires the *delivery* to have happened — a bill may
+    // beat its goods, and then `2010` sits as a debit — only the product.
+    let bills = seed_bills(&app, slug, &token).await?;
 
     // The counter. After the customers for the same reason the diary is, and
     // before the last projection run.
@@ -358,6 +374,8 @@ pub async fn seed(
         reservations,
         prepaid,
         till_sales,
+        products,
+        stock_short,
         branches,
         employees,
         paid,
@@ -373,6 +391,7 @@ pub async fn project(control: &Arc<ControlPlane>, tenant: TenantId) -> Result<()
     advance::<hr::Hr>(&db, &hr::projections(), hr::upcasters()).await?;
     advance::<payroll::Payroll>(&db, &payroll::projections(), payroll::upcasters()).await?;
     advance::<pos::Pos>(&db, &pos::projections(), pos::upcasters()).await?;
+    advance::<inventory::Inventory>(&db, &inventory::projections(), inventory::upcasters()).await?;
     advance::<crm::Crm>(&db, &crm::projections(), crm::upcasters()).await?;
     advance::<ledger::Ledger>(&db, &ledger::projections(), ledger::upcasters()).await?;
     advance::<sales::Sales>(&db, &sales::projections(), sales::upcasters()).await?;
@@ -1165,6 +1184,13 @@ async fn seed_filing(app: &axum::Router, slug: &str, token: &str) -> Result<usiz
 /// One of them is exempt — residential rent — because the difference between
 /// zero-rated and exempt is invisible until a return has both, and it is the
 /// distinction that costs money to get wrong.
+///
+/// **One of them buys the stock**, and it is what clears the holding account.
+/// Its four lines name the four products [`seed_inventory`] declared, so each
+/// debits `2010 Goods received, not invoiced` — the account the deliveries
+/// credited — rather than the account written on the line. Without it the café
+/// would show a liability for goods it had been billed for, which is what
+/// `2010` is for and what `the_shelf_was_counted` asserts is zero here.
 async fn seed_bills(app: &axum::Router, slug: &str, token: &str) -> Result<usize, DemoError> {
     let bills = [
         (
@@ -1212,6 +1238,31 @@ async fn seed_bills(app: &axum::Router, slug: &str, token: &str) -> Result<usize
             serde_json::json!([
                 { "description": "Office rent, March", "account": "5100",
                   "net": 1_500_000, "vat": "exempt", "vat_rate": 0, "tax": 0 },
+            ]),
+        ),
+        // **The stock itself**, line for line with what arrived in
+        // `stock_arrives`. Every line names its `product`, and that is what
+        // decides where it posts: the deliveries already debited
+        // `1300 Inventory` and credited `2010 Goods received, not invoiced`, so
+        // these lines debit `2010` back and the account ends at zero. The
+        // `account` on each is what a bookkeeper would have typed for goods
+        // that were not stock — with a product named it is not used, which is
+        // the feature.
+        (
+            "ap-2260",
+            "Jazirah Coffee Supply",
+            "310555444300003",
+            "JCS-4417",
+            "2026-04-01T00:00:00Z",
+            serde_json::json!([
+                { "description": "Espresso beans, two roasts", "account": "5010", "product": demo_id("PROD-BEANS"),
+                  "net": 70_000, "vat": "standard", "vat_rate": 1500, "tax": 10_500 },
+                { "description": "Fresh milk, one crate", "account": "5010", "product": demo_id("PROD-MILK"),
+                  "net": 12_000, "vat": "standard", "vat_rate": 1500, "tax": 1_800 },
+                { "description": "Croissants, one tray", "account": "5010", "product": demo_id("PROD-PASTRY"),
+                  "net": 18_000, "vat": "standard", "vat_rate": 1500, "tax": 2_700 },
+                { "description": "Coffee grinders, two", "account": "5010", "product": demo_id("PROD-GRINDER"),
+                  "net": 240_000, "vat": "standard", "vat_rate": 1500, "tax": 36_000 },
             ]),
         ),
     ];
@@ -1800,6 +1851,199 @@ async fn seed_payroll(app: &axum::Router, slug: &str, token: &str) -> Result<usi
     Ok(paid)
 }
 
+/// The café's shelf: four things it keeps, in all three ways of keeping them.
+///
+/// # Why one of each
+///
+/// Because the three tracking modes are three different products, not three
+/// settings on one: beans arrive in dated batches, pastry is a bin nobody
+/// batches, and a grinder has a plate on it with a number. A demo with only the
+/// middle one would leave the two halves that cost the most to get wrong —
+/// expiry and identity — with nothing behind them.
+///
+/// # Why the milk expired and the pastry came up short
+///
+/// The same reason the drawer closes fifty halalas down: **a variance of zero
+/// demonstrates the arithmetic and nothing about the feature.** A crate of milk
+/// past its date and three croissants nobody can account for are what a real
+/// Tuesday looks like, and they are the numbers a manager reads.
+///
+/// # What posts, and the canary it makes
+///
+/// Every delivery posts: `Dr 1300 Inventory`, `Cr 2010 Goods received, not
+/// invoiced`. The supplier's bill in [`seed_bills`] names the same four
+/// products and debits `2010` back, so the holding account ends at zero — the
+/// café was billed for exactly what it received. What leaves posts too: the
+/// crate of milk and the damaged grinder credit `1300` against waste, the three
+/// missing croissants against the count variance account, so the inventory
+/// account ends at exactly what the shelves are worth. That equality is
+/// `the_shelf_was_counted`'s last assertion and the property
+/// `StockValueAgrees` checks on every tenant.
+async fn seed_inventory(
+    app: &axum::Router,
+    slug: &str,
+    token: &str,
+) -> Result<(usize, i64), DemoError> {
+    let products = [
+        ("PROD-BEANS", "حبوب إسبريسو", "gram", "lot"),
+        ("PROD-MILK", "حليب طازج", "bottle", "lot"),
+        ("PROD-PASTRY", "كرواسان", "piece", "none"),
+        ("PROD-GRINDER", "مطحنة قهوة", "piece", "serial"),
+    ];
+    for (id, name, unit, tracking) in &products {
+        create(
+            app,
+            slug,
+            "/v1/inventory/products",
+            token,
+            id,
+            &serde_json::json!({
+                "name": name, "unit": unit, "tracking": tracking,
+                "at": "2026-04-01T05:00:00Z"
+            }),
+            StatusCode::CREATED,
+        )
+        .await?;
+    }
+
+    stock_arrives(app, slug, token).await?;
+    stock_leaves(app, slug, token).await?;
+
+    Ok((products.len(), -3))
+}
+
+/// Two roasts of beans, the older one first out; a crate of milk with a week on
+/// it; a tray of pastry nobody batches; and two grinders with numbers.
+async fn stock_arrives(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
+    let deliveries = [
+        (
+            "RCV-0001",
+            "PROD-BEANS",
+            serde_json::json!({
+                "quantity": 5_000, "value": { "minor": 30_000, "currency": "SAR" },
+                "code": "ROAST-2026-03-24", "expires_on": "2026-06-24",
+                "at": "2026-04-01T05:30:00Z"
+            }),
+        ),
+        (
+            "RCV-0002",
+            "PROD-BEANS",
+            serde_json::json!({
+                "quantity": 5_000, "value": { "minor": 40_000, "currency": "SAR" },
+                "code": "ROAST-2026-03-31", "expires_on": "2026-07-01",
+                "at": "2026-04-01T05:30:00Z"
+            }),
+        ),
+        (
+            "RCV-0003",
+            "PROD-MILK",
+            serde_json::json!({
+                "quantity": 24, "value": { "minor": 12_000, "currency": "SAR" },
+                "code": "B-2026-04-05", "expires_on": "2026-04-11",
+                "at": "2026-04-05T05:30:00Z"
+            }),
+        ),
+        (
+            "RCV-0004",
+            "PROD-PASTRY",
+            serde_json::json!({
+                "quantity": 60, "value": { "minor": 18_000, "currency": "SAR" },
+                "at": "2026-04-01T05:30:00Z"
+            }),
+        ),
+        (
+            "RCV-0005",
+            "PROD-GRINDER",
+            serde_json::json!({
+                "quantity": 2, "value": { "minor": 240_000, "currency": "SAR" },
+                "serials": ["EK43-77301", "EK43-77302"],
+                "at": "2026-04-01T05:30:00Z"
+            }),
+        ),
+    ];
+    for (id, product, body) in &deliveries {
+        create_at(
+            app,
+            slug,
+            &format!("/v1/inventory/stock/{}/receipts", demo_id(product)),
+            token,
+            id,
+            Some(&demo_id("BRANCH-OLAYA")),
+            body,
+            StatusCode::CREATED,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// A crate thrown out, a machine written off by name, and a tray counted short.
+async fn stock_leaves(app: &axum::Router, slug: &str, token: &str) -> Result<(), DemoError> {
+    let olaya = demo_id("BRANCH-OLAYA");
+
+    // The milk went off on the 11th and was thrown out on the 12th. No lot is
+    // named: earliest expiry first picks the only one there is, which is the
+    // rule doing its own work.
+    create_at(
+        app,
+        slug,
+        &format!("/v1/inventory/stock/{}/write-offs", demo_id("PROD-MILK")),
+        token,
+        "WOF-0001",
+        Some(&olaya),
+        &serde_json::json!({
+            "reason": "expired", "quantity": 24, "at": "2026-04-12T06:00:00Z"
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+
+    // One grinder came out of its box damaged. A serial is named, because a
+    // quantity could not say which one.
+    create_at(
+        app,
+        slug,
+        &format!("/v1/inventory/stock/{}/write-offs", demo_id("PROD-GRINDER")),
+        token,
+        "WOF-0002",
+        Some(&olaya),
+        &serde_json::json!({
+            "reason": "damaged", "serials": ["EK43-77302"],
+            "at": "2026-04-02T06:00:00Z"
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+
+    // Sixty came in and fifty-seven are there. An untracked product still has
+    // lots — they are the FIFO layers — so the count names the one layer there
+    // is, which is the lot the delivery made.
+    create_at(
+        app,
+        slug,
+        &format!("/v1/inventory/stock/{}/counts", demo_id("PROD-PASTRY")),
+        token,
+        "CNT-0001",
+        Some(&olaya),
+        &serde_json::json!({
+            // The lot carries its shelf as well as the receipt's key — see
+            // `inventory::lot_of`.
+            "lot": format!(
+                "lot.{}.{}.{}",
+                demo_id("PROD-PASTRY"),
+                olaya,
+                demo_id("RCV-0004")
+            ),
+            "declared": 57,
+            "at": "2026-04-01T16:00:00Z"
+        }),
+        StatusCode::CREATED,
+    )
+    .await?;
+
+    Ok(())
+}
+
 /// A day at the counter: a shift opened, sales rung, and the drawer counted.
 ///
 /// # Why the demo closes short by half a riyal
@@ -2361,6 +2605,7 @@ async fn seed_notifications(
         &db,
         notifications::Kind::BookingReserved,
         &subjects,
+        &[],
         // **A literal, like every other instant this seed writes.** A demo that
         // stamped "now" would read differently every time it was built, and
         // nothing here is a clock.

@@ -30,15 +30,21 @@ pub enum Kind {
     TaxRefused,
     /// An iqama, licence or medical is about to lapse — or has.
     DocumentExpiring,
+    /// A lot reaches its expiry date inside the tenant's warning window.
+    StockExpiring,
+    /// …or has passed it, and is still on the shelf.
+    StockExpired,
 }
 
 impl Kind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::BookingReserved,
         Self::PaymentsSettled,
         Self::PaymentsFailed,
         Self::TaxRefused,
         Self::DocumentExpiring,
+        Self::StockExpiring,
+        Self::StockExpired,
     ];
 
     /// The name it is stored and configured under.
@@ -54,6 +60,8 @@ impl Kind {
             Self::PaymentsFailed => "payments_failed",
             Self::TaxRefused => "tax_refused",
             Self::DocumentExpiring => "document_expiring",
+            Self::StockExpiring => "stock_expiring",
+            Self::StockExpired => "stock_expired",
         }
     }
 
@@ -67,6 +75,7 @@ impl Kind {
             // open is the document the money was against.
             Self::PaymentsSettled | Self::PaymentsFailed | Self::TaxRefused => Topic::Invoice,
             Self::DocumentExpiring => Topic::Employee,
+            Self::StockExpiring | Self::StockExpired => Topic::Lot,
         }
     }
 
@@ -76,6 +85,9 @@ impl Kind {
     /// That is what lets one field say "the stylist it was booked with, and
     /// whoever runs the branch when nobody was assigned" without a fallback
     /// written out at each producer.
+    ///
+    /// **None for a kind the caller names the people for** — see
+    /// [`Self::told_by_caller`].
     #[must_use]
     pub const fn audiences(self) -> &'static [Audience] {
         match self {
@@ -85,7 +97,21 @@ impl Kind {
             Self::PaymentsSettled | Self::PaymentsFailed | Self::TaxRefused => {
                 &[Audience::BranchManager]
             }
+            Self::StockExpiring | Self::StockExpired => &[],
         }
+    }
+
+    /// **Whether the caller names who is told**, rather than an audience.
+    ///
+    /// Stock going off is for whoever may write it off, and that is a login's
+    /// role in a tenant — control-plane, which nothing this module or
+    /// `messaging` holds can ask. Only a composition root holds both planes
+    /// (§47), so the worker resolves them from the write-off route's own
+    /// permission and hands them over in [`crate::Announcing::to`]. Exactly the
+    /// kinds with no [`Self::audiences`].
+    #[must_use]
+    pub const fn told_by_caller(self) -> bool {
+        matches!(self, Self::StockExpiring | Self::StockExpired)
     }
 }
 
@@ -131,7 +157,12 @@ mod tests {
     fn every_kind_is_addressed_to_an_audience_its_topic_has() {
         for kind in Kind::ALL {
             let allowed = kind.topic().audiences();
-            assert!(!kind.audiences().is_empty(), "{kind} reaches nobody");
+            assert_eq!(
+                kind.audiences().is_empty(),
+                kind.told_by_caller(),
+                "{kind} must name an audience or be told to whom the caller names — \
+                 one of the two, or it reaches nobody"
+            );
             for audience in kind.audiences() {
                 assert!(
                     allowed.contains(audience),

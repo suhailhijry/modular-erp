@@ -48,5 +48,10 @@ erp-i18n = { workspace = true }
 # `sales:approve_credit_note` is granted on `hr`'s org chart — so proving the
 # till asks for it takes an org chart to grant it on.
 hr = { workspace = true }
+# **For the one test that rings a product off a shelf.** The till does not call
+# `inventory` — `sales::issue_in` does — so this is a dev-dependency and not a
+# real one: it is here to declare a product and stock it, and then to read the
+# shelf back.
+inventory = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

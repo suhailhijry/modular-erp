@@ -143,6 +143,12 @@ static SERVICES: &[TemplateAccount] = &[
         "ضريبة القيمة المضافة المستحقة",
         AccountKind::Asset,
     ),
+    // **Stock, in every chart and not only in retail.** A salon sells colour
+    // over the counter and a letting agent holds consumables; `1300` and `5010`
+    // ship everywhere for the reason `2300 Zakat payable` does — a chart
+    // missing them is one the first business to enable `inventory` has to fix
+    // before its first count. See `inventory::PostingAccounts::conventional`.
+    account("1300", "Inventory", "المخزون", AccountKind::Asset),
     account(
         "1500",
         "Prepaid expenses",
@@ -153,6 +159,19 @@ static SERVICES: &[TemplateAccount] = &[
         "2000",
         "Accounts payable",
         "الذمم الدائنة",
+        AccountKind::Liability,
+    ),
+    // **What has arrived and not been invoiced.** A delivery is in the building
+    // and the supplier's paperwork is not; `inventory::receive` debits the
+    // stock and credits this, and the bill line that names the product debits
+    // it back. Between the two it is a real liability — the goods are owed for
+    // — and after both it is zero. In every chart for the reason `1300` is: the
+    // first business to receive stock before its invoice needs it that day, and
+    // without it `StockValueAgrees` alarms for the whole window.
+    account(
+        "2010",
+        "Goods received, not invoiced",
+        "بضاعة مستلمة غير مفوترة",
         AccountKind::Liability,
     ),
     // Output VAT: charged on sales, owed to ZATCA.
@@ -226,6 +245,12 @@ static SERVICES: &[TemplateAccount] = &[
         "Discounts given",
         "الخصومات الممنوحة",
         AccountKind::Revenue,
+    ),
+    account(
+        "5010",
+        "Cost of goods sold",
+        "تكلفة البضاعة المباعة",
+        AccountKind::Expense,
     ),
     account(
         "5000",
@@ -326,6 +351,12 @@ static RETAIL: &[TemplateAccount] = &[
         "2000",
         "Accounts payable",
         "الذمم الدائنة",
+        AccountKind::Liability,
+    ),
+    account(
+        "2010",
+        "Goods received, not invoiced",
+        "بضاعة مستلمة غير مفوترة",
         AccountKind::Liability,
     ),
     account(
@@ -505,6 +536,12 @@ static REAL_ESTATE: &[TemplateAccount] = &[
         "ضريبة القيمة المضافة المستحقة",
         AccountKind::Asset,
     ),
+    // **Stock, in every chart and not only in retail.** A salon sells colour
+    // over the counter and a letting agent holds consumables; `1300` and `5010`
+    // ship everywhere for the reason `2300 Zakat payable` does — a chart
+    // missing them is one the first business to enable `inventory` has to fix
+    // before its first count. See `inventory::PostingAccounts::conventional`.
+    account("1300", "Inventory", "المخزون", AccountKind::Asset),
     account(
         "1500",
         "Prepaid expenses",
@@ -530,6 +567,12 @@ static REAL_ESTATE: &[TemplateAccount] = &[
         "2000",
         "Accounts payable",
         "الذمم الدائنة",
+        AccountKind::Liability,
+    ),
+    account(
+        "2010",
+        "Goods received, not invoiced",
+        "بضاعة مستلمة غير مفوترة",
         AccountKind::Liability,
     ),
     account(
@@ -628,6 +671,12 @@ static REAL_ESTATE: &[TemplateAccount] = &[
         "Discounts given",
         "الخصومات الممنوحة",
         AccountKind::Revenue,
+    ),
+    account(
+        "5010",
+        "Cost of goods sold",
+        "تكلفة البضاعة المباعة",
+        AccountKind::Expense,
     ),
     account(
         "5000",

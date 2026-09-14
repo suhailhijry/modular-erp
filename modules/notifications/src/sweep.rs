@@ -2,8 +2,8 @@
 //!
 //! # Why this is here and not in each job
 //!
-//! The four producers differ only in what they read: new bookings, settled
-//! payments, refused documents, expiring papers. What they do with it — skip
+//! The producers differ only in what they read: new bookings, settled
+//! payments, refused documents, expiring papers, stock going off. What they do with it — skip
 //! what has been said, announce the rest, one transaction each, carry on past a
 //! refusal — is the same loop four times, and a loop written four times is
 //! three chances to get the transaction boundary wrong.
@@ -52,10 +52,14 @@ pub enum SweepError {
 /// Nothing here is fatal. A producer sweeps a window every tick and the window
 /// overlaps the last one by design; the interesting outcomes are counted and
 /// returned rather than raised.
+///
+/// `to` is [`crate::Announcing::to`] for every subject: who is told, for a kind
+/// the caller names them for, and empty for every other.
 pub async fn announce_all(
     db: &TenantDb,
     kind: Kind,
     subjects: &[AggregateId],
+    to: &[String],
     at: Timestamp,
 ) -> Result<Swept, SweepError> {
     let mut swept = Swept::default();
@@ -81,6 +85,7 @@ pub async fn announce_all(
         let announcing = Announcing {
             kind,
             subject: Subject::new(kind.topic(), subject.clone()),
+            to: to.to_vec(),
             at,
         };
         let mut tx = db.begin().await?;

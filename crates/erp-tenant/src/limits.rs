@@ -55,7 +55,9 @@
 use erp_rules::{FactRegistry, Facts, Kind, Rules};
 use serde::{Deserialize, Serialize};
 
-use crate::roles::{Capability, Role};
+use erp_types::ModuleId;
+
+use crate::roles::{Access, Capability, Role};
 
 /// What a matching limit decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +174,32 @@ impl Limits {
         }
     }
 
+    /// **The whole decision, for one person**: the role that applies in the
+    /// module, and then these limits, with that role added as the `role` fact.
+    ///
+    /// What `TenantDb::permits` answers for whoever is asking once it has read
+    /// the limits, and what anybody asking *who else may do this* asks per
+    /// member — the worker telling whoever may write stock off — so the two
+    /// cannot disagree about who may.
+    #[must_use]
+    pub fn permit(
+        &self,
+        access: &Access,
+        capability: Capability,
+        module: Option<&ModuleId>,
+        facts: &Facts,
+    ) -> bool {
+        let allowed = access.allows(capability, module);
+        if !allowed || !narrows(capability) {
+            return allowed;
+        }
+        let facts = facts.clone().with(
+            ROLE,
+            erp_rules::Value::Text(access.role_in(module).as_str().to_owned()),
+        );
+        self.narrow(allowed, &facts)
+    }
+
     /// **Why**, in the same shape [`erp_rules::Rules::explain`] gives — for the
     /// question a refused person asks. [`Self::narrow`] reads its answer here,
     /// so the two cannot disagree.
@@ -213,6 +241,21 @@ pub fn facts_for(capability: Capability) -> Facts {
         CAPABILITY,
         erp_rules::Value::Text(capability.as_str().to_owned()),
     )
+}
+
+/// **What the edge knows**: the capability, and the branch the request is for
+/// when it names one.
+///
+/// The facts `Allowed` checks a route against before its handler has read a
+/// body — one function, so that asking the same question from somewhere with
+/// no request builds the same facts.
+#[must_use]
+pub fn facts_at(capability: Capability, branch: Option<&str>) -> Facts {
+    let facts = facts_for(capability);
+    match branch {
+        Some(branch) => facts.with(BRANCH, erp_rules::Value::Text(branch.to_owned())),
+        None => facts,
+    }
 }
 
 #[cfg(test)]

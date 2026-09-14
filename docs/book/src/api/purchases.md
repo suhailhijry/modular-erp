@@ -64,7 +64,8 @@ impl Supplier {
 
 pub struct BillLine {
     pub description: String,
-    pub account: AggregateId,      // per line: one bill covers rent and stationery
+    pub account: AggregateId,      // where it posted: one bill covers rent and stationery
+    pub product: Option<AggregateId>, // the stocked product it bought, if any
     pub net: Money,                // excluding tax
     pub category: VatCategory,
     pub rate_bp: i32,              // the rate the supplier charged
@@ -167,6 +168,28 @@ touches.
 
 `entry_for_bill` takes the lines as the supplier stated them, and the arithmetic
 is only summation, so it cannot disagree with the document.
+
+### A line that bought stock
+
+A line may name a **stocked product**. Then it posts to `inventory`'s
+goods-received-not-invoiced account (`2010` in every shipped chart) instead of
+the account on the line, because the delivery already debited `1300 Inventory`
+and credited `2010` when the goods landed — the bill is what clears it. Input
+VAT and the payable are unchanged, and a line with no product on it behaves
+exactly as it always did.
+
+The substitution happens in `commands::stocked`, before the entry is built, and
+the resolved account is what the event stores: a journal entry and the document
+it came from must not disagree about where the money went. Either document may
+arrive first — a bill with no delivery behind it leaves `2010` a debit, which
+is *invoiced, not yet received* — and nothing about entering a supplier invoice
+waits for goods. A product nobody declared is **refused** rather than posted to
+the account the line named.
+
+`purchases` depends on `inventory` for this, and only for this: the bill is the
+document that posts, so the decision has to be taken where the entry is built.
+The cost is the system's usual one — `/v1/purchases` is refused while
+`proj_inventory` is older than the build.
 
 ### Why exempt tax does not go to input VAT
 

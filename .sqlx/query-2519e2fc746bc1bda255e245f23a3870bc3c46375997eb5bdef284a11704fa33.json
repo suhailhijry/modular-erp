@@ -1,0 +1,185 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT l.id as \"id!\", l.product as \"product!\", p.name as \"name?\", l.branch,\n                  l.code, l.expires_on,\n                  l.quantity as \"quantity!\", l.remaining as \"remaining!\",\n                  l.value as \"value!\", l.currency as \"currency!\",\n                  l.received_at as \"received_at!\", l.recorded_at as \"recorded_at!\",\n                  l.position as \"position!\",\n                  COALESCE(\n                      ARRAY(SELECT s.serial FROM proj_inventory.serial s\n                             WHERE s.lot = l.id AND s.state = 'on_hand'\n                             ORDER BY s.serial),\n                      '{}'\n                  ) as \"serials!: Vec<String>\"\n             FROM proj_inventory.lot l\n             LEFT JOIN proj_inventory.product p ON p.id = l.product\n            WHERE l.remaining > 0\n              AND (COALESCE(l.expires_on, $5::DATE), l.position) > ($1::DATE, $2)\n              AND ($3::TEXT IS NULL OR l.product = $3)\n              -- Strictly before, which is what `expiring_before` says: a batch\n              -- dated the day asked for is still good that day.\n              AND ($4::DATE IS NULL OR l.expires_on < $4)\n              AND ($7::TEXT IS NULL OR l.branch = $7)\n            ORDER BY COALESCE(l.expires_on, $5::DATE), l.position\n            LIMIT $6",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "product!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "product"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.product",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "expires_on",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "expires_on"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "quantity!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "quantity"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "remaining!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "remaining"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "value!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "value"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "received_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "received_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "recorded_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "recorded_at"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "position!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "serials!: Vec<String>",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Date",
+        "Int8",
+        "Text",
+        "Date",
+        "Date",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "2519e2fc746bc1bda255e245f23a3870bc3c46375997eb5bdef284a11704fa33"
+}

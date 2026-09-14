@@ -1,0 +1,115 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.stock as \"stock!\", s.product as \"product!\", p.name as \"name?\",\n                  s.branch, s.on_hand as \"on_hand!\", s.value as \"value!\", s.currency,\n                  s.last_at as \"last_at!\"\n             FROM proj_inventory.stock_item s\n             LEFT JOIN proj_inventory.product p ON p.id = s.product\n            WHERE s.stock > $1 AND ($2::TEXT IS NULL OR s.product = $2)\n              AND ($3::TEXT IS NULL OR s.branch = $3)\n            ORDER BY s.stock\n            LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "stock!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "stock"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "product!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "product"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.product",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "on_hand!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "on_hand"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "value!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "value"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "last_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "last_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "1469ea2856c6c6487a04f25d1bd96a46df6aa39d64e00e7478d147789be58fa4"
+}

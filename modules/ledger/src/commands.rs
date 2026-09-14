@@ -519,6 +519,27 @@ pub async fn accepts_postings(
     Ok(account.aggregate.accepts_postings())
 }
 
+/// **The one currency an account will take a line in**, or nothing when there
+/// is no such account.
+///
+/// [`post_entry_in`] refuses a line whose currency is not the account's, and it
+/// is the last thing to run in a transaction a module has already half
+/// written — so a module that can be told the currency *before* it accepts the
+/// document the posting will come from can refuse the document instead.
+/// `inventory` is the caller: a delivery priced in a currency the inventory
+/// account is not kept in would sit on the shelf and never be able to leave it.
+/// Read from the log for the reason [`accepts_postings`] is.
+///
+/// # Errors
+/// The log could not be read.
+pub async fn posting_currency(
+    conn: &mut sqlx::PgConnection,
+    code: &AggregateId,
+) -> Result<Option<CurrencyCode>, erp_eventlog::LoadError> {
+    let account = erp_eventlog::load::<Account>(conn, code, crate::upcasters()).await?;
+    Ok(account.aggregate.currency)
+}
+
 /// [`install_chart`] on a caller's transaction.
 ///
 /// **This is where preview and install stop being two things.** A preview is

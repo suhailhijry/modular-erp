@@ -152,6 +152,14 @@ pub async fn bill_reservation(
                 description: line.what.clone(),
                 net: charge.net,
                 category: sales::VatCategory::Standard,
+                // **A booking charges for a slot, not for a thing.** A room and
+                // an hour are not on a shelf, and `booking` has no product on
+                // its lines to pass through — a resort that also sells minibar
+                // stock bills that on an ordinary invoice.
+                product: None,
+                quantity: None,
+                serials: Vec::new(),
+                lot: None,
             })
         })
         .collect();

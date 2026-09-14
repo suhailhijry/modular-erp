@@ -63,6 +63,16 @@ pub enum PurchaseError {
     NoSupplierVatNumber,
     #[error("{0} cannot be used as a reference")]
     InvalidReference(String),
+    /// A line named a product nobody declared.
+    ///
+    /// **Refused rather than posted to the account the line named.** A product
+    /// id is a typo away from another one, and a stocked line that quietly
+    /// posts to `5010` instead of the holding account leaves the stock account
+    /// and the shelves disagreeing until somebody reconciles a year of them
+    /// (L6). Nothing about a *delivery* is required — an invoice may arrive
+    /// first — only that the product exists.
+    #[error("there is no product {0}")]
+    NoSuchProduct(String),
     #[error(transparent)]
     Config(#[from] erp_eventlog::ConfigError),
     #[error(transparent)]
@@ -106,6 +116,8 @@ impl erp_i18n::Localize for PurchaseError {
             Self::NoSupplierVatNumber => Message::new(messages::NO_SUPPLIER_VAT_NUMBER),
             Self::InvalidReference(reference) => Message::new(messages::INVALID_REFERENCE)
                 .with("reference", MessageArg::text(reference.clone())),
+            Self::NoSuchProduct(product) => Message::new(messages::NO_SUCH_PRODUCT)
+                .with("product", MessageArg::text(product.clone())),
             // All three already say the right thing in both languages.
             Self::Config(e) => e.message(),
             Self::Unbalanced(e) => e.message(),
@@ -260,8 +272,9 @@ async fn record_in(
     metadata: &Metadata,
 ) -> Result<Committed<BillEvent>, ExecuteError<PurchaseError>> {
     let (accounts, metadata) = resolve_accounts(&mut *conn, metadata).await?;
+    let lines = stocked(&mut *conn, &draft.lines).await?;
 
-    let entry_lines = entry_for_bill(&draft.lines, totals.gross, &accounts).map_err(|e| {
+    let entry_lines = entry_for_bill(&lines, totals.gross, &accounts).map_err(|e| {
         ExecuteError::Rejected(match e {
             ledger::Unbalanced::TooFewLines(_) => PurchaseError::NothingOnIt,
             other => PurchaseError::Unbalanced(other),
@@ -283,7 +296,7 @@ async fn record_in(
                 billed_on: draft.billed_on,
                 due_on: draft.due_on,
                 currency: draft.currency,
-                lines: draft.lines.clone(),
+                lines: lines.clone(),
                 net: totals.net,
                 tax: totals.tax,
                 gross: totals.gross,
@@ -305,6 +318,73 @@ async fn record_in(
     .map_err(lift)?;
 
     Ok(committed)
+}
+
+/// **The lines, with a stocked one pointed at the delivery it pays for.**
+///
+/// A line that names a product `inventory` knows lands in that module's
+/// goods-received-not-invoiced account instead of the account the request
+/// carried: the receipt already debited the stock and credited the holding
+/// account, and this is the invoice clearing it. Either order works — the bill
+/// may be first, and then the account sits as a debit until the goods turn up —
+/// so **nothing here asks whether anything has been delivered**, only whether
+/// the product exists.
+///
+/// # Why this module asks `inventory` rather than the other way round
+///
+/// The bill is the document that posts, so the decision has to be taken where
+/// the entry is built; `inventory` cannot reach in and change it. The arrow
+/// points `purchases` → `inventory`, which is legal because `inventory`
+/// depends on `ledger` and `branches` and on nothing that depends on it —
+/// `sales` will need the same edge the day a line depletes a shelf.
+/// [`inventory::accepts_movements`] is the seam, asked of the **log** and in
+/// this transaction, the way `sales` asks `crm::accepts_documents`: the read
+/// model lags, and a product declared a moment ago would otherwise be reported
+/// as not existing.
+///
+/// A tenant without the module has no products, so no line can name one and
+/// nothing changes for them.
+///
+/// **The generation on the metadata already covers this** (L5).
+/// `configuration::version` is the whole table's, not one key's, so the number
+/// `resolve_accounts` stamped a line above moves when a tenant re-points
+/// `inventory`'s accounts as well as when they re-point this module's — and it
+/// was read in this transaction, beside the account it describes.
+async fn stocked(
+    conn: &mut sqlx::PgConnection,
+    lines: &[BillLine],
+) -> Result<Vec<BillLine>, ExecuteError<PurchaseError>> {
+    // **A bill with nothing stocked on it does not ask anything**, which is
+    // most of them and every one recorded before this existed.
+    if lines.iter().all(|line| line.product.is_none()) {
+        return Ok(lines.to_vec());
+    }
+
+    let holding = inventory::PostingAccounts::resolve(&mut *conn)
+        .await
+        .map_err(|e| ExecuteError::Rejected(PurchaseError::Config(e)))?
+        .goods_received;
+
+    let mut resolved = Vec::with_capacity(lines.len());
+    for line in lines {
+        let Some(product) = &line.product else {
+            resolved.push(line.clone());
+            continue;
+        };
+        if !inventory::accepts_movements(&mut *conn, product)
+            .await
+            .map_err(ExecuteError::Load)?
+        {
+            return Err(ExecuteError::Rejected(PurchaseError::NoSuchProduct(
+                product.to_string(),
+            )));
+        }
+        resolved.push(BillLine {
+            account: holding.clone(),
+            ..line.clone()
+        });
+    }
+    Ok(resolved)
 }
 
 /// Pays a supplier, and moves the money in the ledger.
@@ -525,6 +605,7 @@ mod tests {
         BillLine {
             description: "something".to_owned(),
             account: code("5000"),
+            product: None,
             net: money(net),
             category,
             rate_bp: ledger::Rates::saudi_arabia().of(category),

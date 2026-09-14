@@ -393,6 +393,14 @@ async fn bill_the_deposit(
                 description: format!("Deposit · {}", advance.against),
                 net: advance.net,
                 category: sales::VatCategory::Standard,
+                // **A deposit is money taken before the supply**, and nothing
+                // leaves a shelf when it is taken. The goods are depleted by
+                // the final invoice, which is an ordinary one and carries the
+                // product lines.
+                product: None,
+                quantity: None,
+                serials: Vec::new(),
+                lot: None,
             }],
             discounts: Vec::new(),
             // **386, not 388.** The document says it bills for money taken

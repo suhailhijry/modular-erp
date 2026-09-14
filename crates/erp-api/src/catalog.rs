@@ -47,6 +47,7 @@ pub static CATALOG: Composite = Composite::new(&[
     &branches::CATALOG,
     &prepaid::CATALOG,
     &pos::CATALOG,
+    &inventory::CATALOG,
     &hr::CATALOG,
     &payroll::CATALOG,
     &hr_sa::CATALOG,

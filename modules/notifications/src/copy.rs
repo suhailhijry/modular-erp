@@ -24,6 +24,8 @@
 //! an error, and putting it there would list "a booking arrived" among the
 //! failures a client can branch on.
 
+use std::collections::BTreeMap;
+
 use erp_i18n::Locale;
 
 use crate::Kind;
@@ -40,6 +42,11 @@ pub struct Copy {
 /// The `{{ … }}` names are the same vocabulary a template may use for that
 /// kind's topic — `every_kind_says_only_what_can_be_resolved` checks it, so a
 /// name that would render as braces in front of somebody is a build failure.
+///
+/// **A kind may have more than one sentence in a language**, in order: [`of`]
+/// takes the first whose every name the subject answers. A lot at no branch has
+/// no branch to name, and the wording is frozen when it is announced, so a
+/// sentence that asked for one would say `{{ branch.name }}` for ever.
 const COPY: &[(Kind, Locale, Copy)] = &[
     (
         Kind::BookingReserved,
@@ -121,17 +128,99 @@ const COPY: &[(Kind, Locale, Copy)] = &[
             body: "وثيقة عمل يحملها {{ employee.name }} على وشك الانتهاء.",
         },
     ),
+    (
+        Kind::StockExpiring,
+        Locale::English,
+        Copy {
+            title: "Stock is about to expire",
+            body: "{{ product.name }}, batch {{ lot.code }} at {{ branch.name }}, is good until {{ lot.expires_on }}.",
+        },
+    ),
+    (
+        Kind::StockExpiring,
+        Locale::Arabic,
+        Copy {
+            title: "مخزون على وشك انتهاء الصلاحية",
+            body: "{{ product.name }}، الدفعة {{ lot.code }} في {{ branch.name }}، صالحة حتى {{ lot.expires_on }}.",
+        },
+    ),
+    (
+        Kind::StockExpired,
+        Locale::English,
+        Copy {
+            title: "Stock is past its date",
+            body: "{{ product.name }}, batch {{ lot.code }} at {{ branch.name }}, was good until {{ lot.expires_on }} and is still on the shelf. Write off what cannot be sold or sent back.",
+        },
+    ),
+    (
+        Kind::StockExpired,
+        Locale::Arabic,
+        Copy {
+            title: "مخزون انتهت صلاحيته",
+            body: "{{ product.name }}، الدفعة {{ lot.code }} في {{ branch.name }}، كانت صالحة حتى {{ lot.expires_on }} وما زالت على الرف. اشطب من المخزون ما لا يمكن بيعه أو إرجاعه.",
+        },
+    ),
+    // **The same, for a lot at no branch**: a business with one shelf.
+    (
+        Kind::StockExpiring,
+        Locale::English,
+        Copy {
+            title: "Stock is about to expire",
+            body: "{{ product.name }}, batch {{ lot.code }}, is good until {{ lot.expires_on }}.",
+        },
+    ),
+    (
+        Kind::StockExpiring,
+        Locale::Arabic,
+        Copy {
+            title: "مخزون على وشك انتهاء الصلاحية",
+            body: "{{ product.name }}، الدفعة {{ lot.code }}، صالحة حتى {{ lot.expires_on }}.",
+        },
+    ),
+    (
+        Kind::StockExpired,
+        Locale::English,
+        Copy {
+            title: "Stock is past its date",
+            body: "{{ product.name }}, batch {{ lot.code }}, was good until {{ lot.expires_on }} and is still on the shelf. Write off what cannot be sold or sent back.",
+        },
+    ),
+    (
+        Kind::StockExpired,
+        Locale::Arabic,
+        Copy {
+            title: "مخزون انتهت صلاحيته",
+            body: "{{ product.name }}، الدفعة {{ lot.code }}، كانت صالحة حتى {{ lot.expires_on }} وما زالت على الرف. اشطب من المخزون ما لا يمكن بيعه أو إرجاعه.",
+        },
+    ),
 ];
 
-/// What this kind says in one language.
+/// What this kind says in one language, about a subject `values` describes:
+/// **the first of its sentences whose every name `values` answers**, or its
+/// first sentence when none is.
 ///
 /// Falls back to [`Locale::DEFAULT`] rather than returning nothing: a kind
 /// added without its Arabic would otherwise announce an empty bell, and the
 /// test below is what stops that reaching a build in the first place.
 #[must_use]
-pub fn of(kind: Kind, locale: Locale) -> Copy {
-    find(kind, locale)
-        .or_else(|| find(kind, Locale::DEFAULT))
+pub fn of(kind: Kind, locale: Locale, values: &BTreeMap<String, String>) -> Copy {
+    let locale = if find(kind, locale).is_some() {
+        locale
+    } else {
+        Locale::DEFAULT
+    };
+    let answered = |copy: &Copy| {
+        [copy.title, copy.body].into_iter().all(|text| {
+            messaging::template::placeholders(text)
+                .iter()
+                .all(|name| values.contains_key(name))
+        })
+    };
+    COPY.iter()
+        .filter(|(k, l, _)| *k == kind && *l == locale)
+        .map(|(_, _, copy)| *copy)
+        .find(answered)
+        .or_else(|| find(kind, locale))
         .unwrap_or(Copy {
             title: "",
             body: "",
@@ -174,8 +263,7 @@ mod tests {
     fn every_kind_says_only_what_can_be_resolved() {
         for kind in Kind::ALL {
             let vocabulary = messaging::template::vocabulary(kind.topic());
-            for locale in Locale::ALL {
-                let copy = of(kind, locale);
+            for (_, _, copy) in COPY.iter().filter(|(k, _, _)| *k == kind) {
                 for text in [copy.title, copy.body] {
                     for placeholder in messaging::template::placeholders(text) {
                         assert!(

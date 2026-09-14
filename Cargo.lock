@@ -727,6 +727,7 @@ dependencies = [
  "futures-util",
  "hr",
  "hr_sa",
+ "inventory",
  "ledger",
  "messaging",
  "notifications",
@@ -801,6 +802,7 @@ dependencies = [
  "files",
  "hr",
  "hr_sa",
+ "inventory",
  "ledger",
  "messaging",
  "notifications",
@@ -1049,11 +1051,13 @@ dependencies = [
  "erp-links",
  "erp-occupancy",
  "erp-projection",
+ "erp-tenant",
  "erp-testkit",
  "erp-types",
  "files",
  "hex",
  "hr",
+ "inventory",
  "ledger",
  "lettre",
  "messaging",
@@ -1806,6 +1810,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "inventory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "branches",
+ "chrono",
+ "erp-control",
+ "erp-eventlog",
+ "erp-i18n",
+ "erp-projection",
+ "erp-tenant",
+ "erp-testkit",
+ "erp-types",
+ "erp-web",
+ "ledger",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+]
+
+[[package]]
 name = "ipconfig"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2058,6 +2089,7 @@ dependencies = [
  "erp-types",
  "erp-web",
  "hr",
+ "inventory",
  "ledger",
  "openssl",
  "reqwest",
@@ -2442,6 +2474,7 @@ dependencies = [
  "erp-web",
  "futures-util",
  "hr",
+ "inventory",
  "ledger",
  "sales",
  "serde",
@@ -2555,6 +2588,7 @@ dependencies = [
  "erp-types",
  "erp-web",
  "hr",
+ "inventory",
  "ledger",
  "serde",
  "serde_json",
@@ -2903,6 +2937,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "branches",
  "chrono",
  "crm",
  "erp-control",
@@ -2914,6 +2949,7 @@ dependencies = [
  "erp-types",
  "erp-web",
  "hr",
+ "inventory",
  "ledger",
  "proptest",
  "serde",

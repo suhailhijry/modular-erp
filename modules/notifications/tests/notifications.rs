@@ -41,6 +41,7 @@ fn booking_of(id: &str) -> Announcing {
     Announcing {
         kind: Kind::BookingReserved,
         subject: Subject::new(Topic::Reservation, code(id)),
+        to: Vec::new(),
         at: at("2026-05-01", "09"),
     }
 }
@@ -112,7 +113,7 @@ impl Fixture {
             ensure_group_schema::<booking::Booking>(&mut conn)
                 .await
                 .expect("k");
-            // **Invoices, because three of the five kinds are about one.** Not
+            // **Invoices, because three of the kinds are about one.** Not
             // for anything this tenant issues — for the bindings a notification
             // about a document renders against.
             sales::install(&mut conn).await.expect("sales");
@@ -554,6 +555,46 @@ async fn a_notification_can_only_be_read_by_whoever_it_was_addressed_to() {
     fixture.cleanup().await;
 }
 
+/// **Stock going off is told in the system, and a grid cannot say otherwise.**
+///
+/// Those kinds go to logins, which have no email address or phone number, so a
+/// grid asking for SMS on one would be saved and never obeyed (L6): refused.
+/// The bell alone is saved for them, and SMS for any other kind as before.
+#[tokio::test]
+async fn a_kind_told_to_logins_takes_no_channel_but_in_system() {
+    let fixture = Fixture::new("bell-in-system-only").await;
+    for kind in [Kind::StockExpiring, Kind::StockExpired] {
+        let refused = notifications::set_preferences(
+            &fixture.db,
+            MANAGER,
+            BTreeMap::from([(
+                kind.as_str().to_owned(),
+                vec![Channel::InSystem, Channel::Sms],
+            )]),
+            at("2026-05-01", "09"),
+            &Metadata::default(),
+        )
+        .await
+        .expect_err("SMS for stock going off was saved, and could never be sent");
+        assert!(
+            format!("{refused:?}").contains("InSystemOnly"),
+            "{refused:?}"
+        );
+    }
+    fixture
+        .prefers(MANAGER, Kind::StockExpiring, &[Channel::InSystem])
+        .await;
+    fixture
+        .prefers(
+            MANAGER,
+            Kind::BookingReserved,
+            &[Channel::InSystem, Channel::Sms],
+        )
+        .await;
+
+    fixture.cleanup().await;
+}
+
 /// **A default does not spend money.**
 ///
 /// With nothing said, announcing writes the bell and promises nothing. Asking
@@ -601,6 +642,7 @@ async fn nothing_is_sent_until_somebody_asks_for_it() {
         .announce(&Announcing {
             kind: Kind::DocumentExpiring,
             subject: Subject::new(Topic::Employee, code("EMP-STYLIST")),
+            to: Vec::new(),
             at: at("2026-05-01", "09"),
         })
         .await
@@ -618,6 +660,7 @@ async fn nothing_is_sent_until_somebody_asks_for_it() {
         .announce(&Announcing {
             kind: Kind::DocumentExpiring,
             subject: Subject::new(Topic::Employee, code("EMP-MANAGER")),
+            to: Vec::new(),
             at: at("2026-05-01", "09"),
         })
         .await
@@ -777,6 +820,7 @@ async fn a_sweep_announces_once_however_often_it_runs() {
         &fixture.db,
         Kind::BookingReserved,
         &both,
+        &[],
         at("2026-05-01", "09"),
     )
     .await
@@ -790,6 +834,7 @@ async fn a_sweep_announces_once_however_often_it_runs() {
         &fixture.db,
         Kind::BookingReserved,
         &both,
+        &[],
         at("2026-05-01", "10"),
     )
     .await
@@ -808,6 +853,7 @@ async fn a_sweep_announces_once_however_often_it_runs() {
         &fixture.db,
         Kind::BookingReserved,
         &mixed,
+        &[],
         at("2026-05-01", "11"),
     )
     .await
@@ -825,7 +871,7 @@ async fn a_sweep_announces_once_however_often_it_runs() {
 ///
 /// An invoice has no branch — where its postings landed is `ledger`'s and a
 /// different projection group — so "whoever runs the branch" has to mean
-/// whoever runs the business. Without this, three of the five kinds would
+/// whoever runs the business. Without this, three of the kinds would
 /// resolve to nobody for ever: a refused ZATCA document, a settled payment and
 /// a failed one are all about an invoice.
 #[tokio::test]
@@ -837,6 +883,7 @@ async fn something_that_happened_to_a_document_reaches_whoever_runs_the_business
         .announce(&Announcing {
             kind: Kind::TaxRefused,
             subject: Subject::new(Topic::Invoice, code("INV-1")),
+            to: Vec::new(),
             at: at("2026-05-01", "09"),
         })
         .await

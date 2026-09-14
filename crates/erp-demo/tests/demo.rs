@@ -200,6 +200,7 @@ async fn every_module_is_enabled_and_answering() {
     );
 
     the_counter_counted(&demo).await;
+    the_shelf_was_counted(&demo).await;
 
     let membership = demo
         .get(&format!(
@@ -448,6 +449,7 @@ async fn the_demo_replays_to_exactly_what_is_live() {
         replay!(pool, crm, crm::Crm, "customer"),
         replay!(pool, prepaid, prepaid::Prepaid, "entitlement"),
         replay!(pool, pos, pos::Pos, "shift"),
+        replay!(pool, inventory, inventory::Inventory, "stock_item"),
         replay!(pool, branches, branches::Branches, "branch"),
         replay!(pool, hr, hr::Hr, "employee"),
         replay!(pool, payroll, payroll::Payroll, "run"),
@@ -543,6 +545,30 @@ async fn the_demo_passes_every_invariant() {
             .iter()
             .map(reports::Discrepancy::describe)
             .collect::<Vec<_>>()
+    );
+
+    // **Decision R3's invariant**, which is `StockValueAgrees` in `bin/worker`
+    // said here: what the shelves are worth against the account that says so.
+    // `inventory` writes `1300` at both ends now — a receipt debits it, every
+    // movement out credits it — so this catches a movement that did not post
+    // or an entry somebody made against the stock account by hand, and it is
+    // quiet across the delivery-then-bill window that used to make it shout.
+    let held: i64 = inventory::value_on_hand(&mut conn)
+        .await
+        .expect("reads")
+        .iter()
+        .map(|money| money.minor())
+        .sum();
+    let account = inventory::PostingAccounts::conventional().inventory;
+    let carried = ledger::account_balances(&mut conn)
+        .await
+        .expect("reads")
+        .into_iter()
+        .find(|a| a.code == account.as_str())
+        .map_or(0, |a| a.balance.minor());
+    assert_eq!(
+        carried, held,
+        "the demo's books and its shelves disagree about what the stock is worth"
     );
 
     let outbox = erp_eventlog::outbox_health(&mut conn).await.expect("reads");
@@ -816,4 +842,213 @@ async fn the_counter_counted(demo: &Demo) {
         "the demo's drawer is fifty halalas short, on purpose"
     );
     assert_eq!(shift["expected"]["minor"], 23_645);
+}
+
+/// **The shelf, and the number that says the quantity is honest.**
+///
+/// Four things the café keeps, in all three ways of keeping them: beans in two
+/// dated roasts, a crate of milk that went off and was thrown out, a tray of
+/// pastry three short of what the books say, and two grinders with numbers on
+/// them of which one arrived damaged.
+///
+/// The canary is the last assertion, and it holds **lot by lot**: what is on a
+/// batch is the sum of the movements against it. Nothing reconciles those two;
+/// the projection writes a signed delta per portion and the lot's remainder is
+/// those deltas added up, so a disagreement means the read model and the log
+/// have parted company.
+async fn the_shelf_was_counted(demo: &Demo) {
+    let products = demo.get("/v1/inventory/products").await["items"].clone();
+    assert_eq!(
+        products.as_array().expect("a list").len(),
+        demo.seeded.products,
+        "inventory has its products"
+    );
+    assert_eq!(
+        products
+            .as_array()
+            .expect("a list")
+            .iter()
+            .filter(|p| p["tracking"] == "lot")
+            .count(),
+        2,
+        "the two that arrive in dated batches"
+    );
+
+    let shelves = demo.get("/v1/inventory/stock").await["items"].clone();
+    let shelves = shelves.as_array().expect("a list");
+    let on = |name: &str| {
+        shelves
+            .iter()
+            .find(|row| row["product"] == erp_demo::demo_id(name))
+            .expect("the product is on a shelf")
+    };
+
+    assert_eq!(on("PROD-BEANS")["on_hand"], 10_000, "five kilos twice");
+    assert_eq!(
+        on("PROD-BEANS")["value"]["minor"],
+        70_000,
+        "300.00 and 400.00, each roast carried at what it cost"
+    );
+    assert_eq!(
+        on("PROD-BEANS")["branch"],
+        erp_demo::demo_id("BRANCH-OLAYA"),
+        "stock is held per branch"
+    );
+    assert_eq!(
+        on("PROD-MILK")["on_hand"],
+        0,
+        "the crate went off and was thrown out"
+    );
+    assert_eq!(
+        on("PROD-PASTRY")["on_hand"],
+        57,
+        "sixty came in and fifty-seven are there"
+    );
+    assert_eq!(on("PROD-GRINDER")["on_hand"], 1, "one of two was damaged");
+
+    let lots = demo.get("/v1/inventory/lots").await["items"].clone();
+    let lots = lots.as_array().expect("a list");
+    the_batches_are_in_the_order_they_go_out(lots);
+
+    let movements = demo.get("/v1/inventory/movements").await["items"].clone();
+    let movements = movements.as_array().expect("a list");
+
+    let count = movements
+        .iter()
+        .find(|row| row["kind"] == "counted")
+        .expect("somebody counted a lot");
+    assert_eq!(
+        count["quantity"], demo.seeded.stock_short,
+        "the demo's stocktake is three short, on purpose"
+    );
+    assert_eq!(count["expected"], 60);
+    assert_eq!(count["declared"], 57);
+
+    let expired = movements
+        .iter()
+        .find(|row| row["reason"] == "expired")
+        .expect("the milk was thrown out");
+    assert_eq!(expired["quantity"], -24);
+    assert_eq!(expired["value"]["minor"], -12_000);
+
+    what_moved_explains_what_is_there(lots, shelves, movements);
+
+    // **The canary decision R3 makes load-bearing.** `1300 Inventory` was
+    // debited by every delivery and has been credited by everything that left
+    // the shelves — the crate of milk, the damaged grinder, the three
+    // croissants nobody could find — and it has to come to exactly what the
+    // shelves are worth.
+    //
+    // Two numbers built by two routes that share nothing but the log: one from
+    // `proj_inventory`, one from `proj_ledger`. This is the same assertion
+    // `StockValueAgrees` makes as a health finding on every tenant; here it is
+    // made against a business with something on its shelves.
+    let held: i64 = shelves
+        .iter()
+        .filter_map(|row| row["value"]["minor"].as_i64())
+        .sum();
+    let carried = demo.get("/v1/ledger/accounts").await;
+    let carried = carried
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|account| account["code"] == "1300")
+        .and_then(|account| account["balance"].as_i64())
+        .expect("the chart has an inventory account");
+    assert_eq!(
+        carried, held,
+        "the books and the shelves disagree about what the stock is worth"
+    );
+    assert!(held > 0, "a demo whose shelves are empty proves nothing");
+
+    // **And the other side of it: the café was billed for what it received.**
+    // Every delivery credited `2010 Goods received, not invoiced` and the
+    // supplier's bill debited it back, line for line, so the holding account is
+    // flat. A non-zero balance here is goods received and never invoiced, or
+    // invoiced and never received — both real, and both readable off one
+    // account rather than out of a health finding.
+    let holding = carried_on(demo, "2010").await;
+    assert_eq!(
+        holding, 0,
+        "the deliveries and the bill that paid for them do not cancel"
+    );
+}
+
+/// What one account's balance is, from the ledger's own route.
+async fn carried_on(demo: &Demo, code: &str) -> i64 {
+    demo.get("/v1/ledger/accounts")
+        .await
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|account| account["code"] == code)
+        .and_then(|account| account["balance"].as_i64())
+        .expect("the chart has the account")
+}
+
+/// **What is left, by batch, in the order it will go out.** The milk is not
+/// here: a lot that empties closes, and its history is in the movements.
+fn the_batches_are_in_the_order_they_go_out(lots: &[serde_json::Value]) {
+    assert_eq!(
+        lots.iter()
+            .map(|l| (l["code"].clone(), l["expires_on"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                serde_json::json!("ROAST-2026-03-24"),
+                serde_json::json!("2026-06-24")
+            ),
+            (
+                serde_json::json!("ROAST-2026-03-31"),
+                serde_json::json!("2026-07-01")
+            ),
+            // Undated batches sort after every dated one, oldest first.
+            (serde_json::Value::Null, serde_json::Value::Null),
+            (serde_json::Value::Null, serde_json::Value::Null),
+        ],
+        "the listing is not the order stock goes out in"
+    );
+    let grinder = lots
+        .iter()
+        .find(|l| l["product"] == erp_demo::demo_id("PROD-GRINDER"))
+        .expect("the grinder that is left");
+    assert_eq!(
+        grinder["serials"],
+        serde_json::json!(["EK43-77301"]),
+        "the damaged one should have left its lot by name"
+    );
+}
+
+/// **The canary.** What is on a batch is the sum of the movements against it,
+/// and what is on a shelf is the sum of the movements against the product —
+/// the same property one level up.
+fn what_moved_explains_what_is_there(
+    lots: &[serde_json::Value],
+    shelves: &[serde_json::Value],
+    movements: &[serde_json::Value],
+) {
+    for lot in lots {
+        assert_eq!(
+            movements
+                .iter()
+                .filter(|row| row["lot"] == lot["id"])
+                .filter_map(|row| row["quantity"].as_i64())
+                .sum::<i64>(),
+            lot["remaining"].as_i64().expect("a quantity"),
+            "lot {} holds a quantity its movements do not explain",
+            lot["id"]
+        );
+    }
+    for shelf in shelves {
+        assert_eq!(
+            movements
+                .iter()
+                .filter(|row| row["product"] == shelf["product"])
+                .filter_map(|row| row["quantity"].as_i64())
+                .sum::<i64>(),
+            shelf["on_hand"].as_i64().expect("a quantity"),
+            "{} holds a quantity its movements do not explain",
+            shelf["product"]
+        );
+    }
 }

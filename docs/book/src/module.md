@@ -28,12 +28,13 @@ One list in `erp-api/src/modules.rs` carries both views of a module, its setup
 and its routes:
 
 ```rust
-const REGISTERED: &[Registered] = &[ /* ledger, sales, purchases, tax_sa */ ];
+const REGISTERED: &[Registered] = &[ /* one entry per module: branches, crm, ledger, inventory, sales, … */ ];
 ```
 
-Three tests guard it. Every module's routes live under its own name, no two
-modules claim the same path, and a module that requires one of several
-dependencies is satisfied by any one of them.
+Tests beside it guard it: every module's routes live under its own name, no two
+modules claim the same path or the same schema, every requirement names a module
+that exists, and a module that requires one of several dependencies is satisfied
+by any one of them.
 
 ## Extending another module
 
@@ -68,6 +69,8 @@ renders in Arabic and in English from one definition. A module
 renders its own failures through a composite of its catalog and `erp_web::CATALOG`,
 because it can't name its sibling modules and has no reason to.
 
-`erp_api::CATALOG` is the union of all of them and is what `docs/ERRORS.md` gets
-generated from, so a code missing from any part fails the build. Otherwise it
-would reach a user as a bare string.
+`erp_api::CATALOG` is the union of all of them. A module is registered with its
+catalogue beside its routes, so it cannot reach the platform without one, and
+`erp_i18n::testing::assert_complete` fails the build when a code in the union is
+missing a language (`crates/erp-api/src/catalog.rs`). Otherwise it would reach a
+user as a bare string.

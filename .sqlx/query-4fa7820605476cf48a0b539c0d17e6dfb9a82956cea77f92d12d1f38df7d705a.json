@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id as \"id!\", name as \"name!\", unit as \"unit!\",\n                  tracking as \"tracking!\", declared_at as \"declared_at!\"\n             FROM proj_inventory.product\n            WHERE id > $1\n            ORDER BY id\n            LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.product",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.product",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "unit!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.product",
+            "name": "unit"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "tracking!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.product",
+            "name": "tracking"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "declared_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.product",
+            "name": "declared_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4fa7820605476cf48a0b539c0d17e6dfb9a82956cea77f92d12d1f38df7d705a"
+}

@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.branch, s.product as \"product!\", p.name as \"name?\",\n                  s.on_hand as \"on_hand!\", s.currency,\n                  COALESCE((SELECT -SUM(m.value)\n                              FROM proj_inventory.stock_movement m\n                             WHERE m.stock = s.stock AND m.lot IS NULL), 0)::BIGINT as \"owes!\"\n             FROM proj_inventory.stock_item s\n             LEFT JOIN proj_inventory.product p ON p.id = s.product\n            WHERE s.on_hand < 0 AND ($1::TEXT IS NULL OR s.branch = $1)\n            ORDER BY s.product",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "product!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "product"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.product",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "on_hand!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "on_hand"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "owes!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "13ee3f3255a190a7a4150fce09401ba171bea5de8af7d1cb504fc5e29bc40ca9"
+}

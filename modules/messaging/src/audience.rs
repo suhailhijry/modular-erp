@@ -35,14 +35,18 @@ pub enum Topic {
     Invoice,
     Customer,
     Employee,
+    /// A delivery on a shelf — the thing that spoils, so the thing a warning
+    /// about stock going off is about.
+    Lot,
 }
 
 impl Topic {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Reservation,
         Self::Invoice,
         Self::Customer,
         Self::Employee,
+        Self::Lot,
     ];
 
     #[must_use]
@@ -52,6 +56,7 @@ impl Topic {
             Self::Invoice => "invoice",
             Self::Customer => "customer",
             Self::Employee => "employee",
+            Self::Lot => "lot",
         }
     }
 
@@ -80,6 +85,8 @@ impl Topic {
                 Audience::BranchManager,
                 Audience::Operator,
             ],
+            // Nobody works on a lot and no customer owns one.
+            Self::Lot => &[Audience::BranchManager, Audience::Operator],
         }
     }
 }
@@ -276,7 +283,7 @@ async fn client_of(conn: &mut PgConnection, subject: &Subject) -> Result<Vec<Per
         Topic::Invoice => sales::invoice(conn, subject.id.as_str())
             .await?
             .and_then(|i| i.summary.customer_id),
-        Topic::Employee => None,
+        Topic::Employee | Topic::Lot => None,
     };
 
     let Some(id) = id else {
@@ -325,7 +332,7 @@ async fn worker_of(conn: &mut PgConnection, subject: &Subject) -> Result<Vec<Per
         // deliberate simplification — ponytail: every assigned worker, when a
         // business asks for it, and the shape below already returns a list.
         Topic::Reservation => assigned(conn, subject.id.as_str()).await?,
-        Topic::Invoice | Topic::Customer => None,
+        Topic::Invoice | Topic::Customer | Topic::Lot => None,
     };
 
     let Some(id) = id else {
@@ -456,6 +463,12 @@ async fn place_of(conn: &mut PgConnection, subject: &Subject) -> Result<Place, s
         // Not checked for existence: an invoice this system has not projected
         // yet is still the business's, and `bindings` says what it can about it.
         Topic::Invoice | Topic::Customer => Place::Company,
+        // **A lot is where its shelf is**, and one at no branch is on the
+        // business's shelf.
+        Topic::Lot => match inventory::lot(conn, subject.id.as_str()).await? {
+            None => Place::Missing,
+            Some(lot) => lot.branch.map_or(Place::Company, Place::At),
+        },
     })
 }
 

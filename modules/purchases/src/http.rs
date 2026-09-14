@@ -70,7 +70,9 @@ static CATALOG: erp_i18n::Composite =
     "currency": "SAR",
     "lines": [
         { "description": "Office rent, February", "account": "5100",
-          "net": 1_200_000, "vat": "standard", "vat_rate": 1500, "tax": 180_000 }
+          "net": 1_200_000, "vat": "standard", "vat_rate": 1500, "tax": 180_000 },
+        { "description": "Espresso beans", "account": "5010", "product": "PROD-BEANS",
+          "net": 70_000, "vat": "standard", "vat_rate": 1500, "tax": 10_500 }
     ]
 }))]
 struct NewBill {
@@ -105,8 +107,21 @@ struct NewSupplier {
 struct NewBillLine {
     description: String,
     /// The expense or asset account this lands in. One bill routinely covers
-    /// several.
+    /// several. **Ignored when `product` names a stocked product** — that line
+    /// lands in the goods-received-not-invoiced account the delivery credited.
     account: String,
+    /// **The stocked product this line bought**, if it bought one.
+    ///
+    /// Leave it off for anything that is not stock, which is most lines. With
+    /// it, the line posts against the delivery rather than to `account`: the
+    /// receipt already debited inventory and credited
+    /// `2010 Goods received, not invoiced`, and this is the invoice clearing
+    /// it. It works in either order — a bill that arrives before its delivery
+    /// leaves `2010` a debit, which is *invoiced, not yet received* — and
+    /// nothing about a supplier invoice is blocked by a delivery that has not
+    /// turned up. A product nobody declared is refused.
+    #[serde(default)]
+    product: Option<String>,
     /// Minor units, excluding tax.
     net: i64,
     /// `standard`, `zero` or `exempt`, as the supplier treated it.
@@ -224,6 +239,12 @@ fn view(summary: crate::BillSummary) -> BillView {
 ///
 /// One transaction: the bill and its journal entry either both happen or neither
 /// does. The tax is taken **as the supplier stated it** — see `tax` on a line.
+///
+/// **A line that names a stocked product posts against the delivery**, not to
+/// the account it names: `inventory` debited the stock and credited
+/// `2010 Goods received, not invoiced` when the goods landed, and this debits
+/// that back. Input VAT and the supplier payable are unchanged, and a line with
+/// no `product` on it behaves exactly as it always has.
 #[utoipa::path(
     post,
     path = "/v1/purchases/bills",
@@ -237,7 +258,7 @@ fn view(summary: crate::BillSummary) -> BillView {
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, description = "No such tenant, not yours, or the purchases module is not enabled here", body = Problem),
         (status = CONFLICT, description = "Sustained contention on this bill. Retryable.", body = Problem),
-        (status = UNPROCESSABLE_ENTITY, description = "An account that does not exist or is closed, or a tax point in a closed period", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "An account that does not exist or is closed, a tax point in a closed period, or a line naming a product nobody declared", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
     ),
 )]
@@ -273,6 +294,11 @@ async fn record_bill(
         lines.push(crate::BillLine {
             description: line.description,
             account: parse_id(&line.account, locale)?,
+            product: line
+                .product
+                .as_deref()
+                .map(|product| parse_id(product, locale))
+                .transpose()?,
             net: erp_types::Money::from_minor(line.net, currency),
             category,
             rate_bp: line.vat_rate,
@@ -499,10 +525,13 @@ fn purchase_problem(error: &CommandError<PurchaseError>, locale: Locale) -> Prob
             match rejection {
                 // Well-formed, and about something that is not there or not in a
                 // state that allows it. A closed period arrives here too, from
-                // the ledger.
-                PurchaseError::NotRecorded(_) | PurchaseError::Ledger(_) => {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                }
+                // the ledger, and so does a line naming a product nobody
+                // declared: the request is the right shape and the product is
+                // the thing that is missing, which is `inventory`'s own reading
+                // of the same refusal.
+                PurchaseError::NotRecorded(_)
+                | PurchaseError::NoSuchProduct(_)
+                | PurchaseError::Ledger(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 // The bill moved on between the client reading it and paying it.
                 PurchaseError::Overpayment { .. } => StatusCode::CONFLICT,
                 _ => StatusCode::BAD_REQUEST,
@@ -537,4 +566,23 @@ fn purchase_problem(error: &CommandError<PurchaseError>, locale: Locale) -> Prob
     };
 
     Problem::new(status, &message, locale, &CATALOG)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A line naming a product nobody declared is a 422**, not the 400 the
+    /// catch-all arm would give it. The request is well formed; the product is
+    /// what is not there — which is what `inventory` answers for the same
+    /// refusal, and what this route's own 422 description promises.
+    #[test]
+    fn a_line_naming_a_product_nobody_declared_is_refused_on_the_state_of_the_world() {
+        let refused = CommandError::Execute(ExecuteError::Rejected(PurchaseError::NoSuchProduct(
+            "PROD-BEENS".to_owned(),
+        )));
+        let problem = purchase_problem(&refused, Locale::English);
+        assert_eq!(problem.status, 422);
+        assert_eq!(problem.code, "purchases.no_such_product");
+    }
 }

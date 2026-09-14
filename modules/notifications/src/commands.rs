@@ -30,12 +30,20 @@ pub enum NotificationError {
     /// would let somebody learn which ids exist by the shape of the refusal.
     #[error("no notification of yours has that id")]
     NotYours,
+    /// **A channel this kind can never reach.** A kind the caller names the
+    /// people for ([`crate::Kind::told_by_caller`]) is addressed to logins, and
+    /// a login has no email address or phone number — so a grid that asks for
+    /// one would be saved and never obeyed (L6).
+    #[error("{kind} is told in the system only")]
+    InSystemOnly { kind: String },
 }
 
 impl Localize for NotificationError {
     fn message(&self) -> Message {
         match self {
             Self::NotYours => Message::new(crate::messages::NOT_YOURS),
+            Self::InSystemOnly { kind } => Message::new(crate::messages::IN_SYSTEM_ONLY)
+                .with("kind", erp_i18n::MessageArg::text(kind)),
         }
     }
 }
@@ -108,6 +116,15 @@ pub async fn set_preferences(
     let identity = identity.to_owned();
     let id = person_id(&identity);
     db.execute::<Person, _, NotificationError>(&id, crate::upcasters(), metadata, move |loaded| {
+        if let Some(kind) = entries.iter().find_map(|(kind, channels)| {
+            kind.parse::<crate::Kind>().ok().filter(|kind| {
+                kind.told_by_caller() && channels.iter().any(|c| *c != Channel::InSystem)
+            })
+        }) {
+            return Err(NotificationError::InSystemOnly {
+                kind: kind.as_str().to_owned(),
+            });
+        }
         if loaded.aggregate.preferences == entries {
             // Saving the same grid again is nothing: a form submitted twice is
             // one statement, not two.

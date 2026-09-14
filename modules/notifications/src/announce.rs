@@ -3,7 +3,7 @@
 //! # The order, and why the record comes before the messages
 //!
 //! 1. **Resolve** the audience against the read model — who has a login, right
-//!    now.
+//!    now — or, for a kind the caller names the people for, take its names.
 //! 2. **Word it** in both languages, against the bindings, right now.
 //! 3. **Record it** in the tenant's log. This is the notification.
 //! 4. **Fan out** to the paid channels each person asked for.
@@ -36,6 +36,11 @@ pub struct Announcing {
     /// What it is about. The **only** thing a producer supplies about content —
     /// the wording asks the read model for the rest.
     pub subject: Subject,
+    /// **Who is told, for a kind the caller names them for**
+    /// ([`Kind::told_by_caller`]): logins, resolved by whoever could ask. Not
+    /// read for any other kind, whose audience is resolved here — leave it
+    /// empty.
+    pub to: Vec<String>,
     pub at: Timestamp,
 }
 
@@ -106,6 +111,19 @@ pub async fn announce(
     // login wins, which is how one field says "the stylist it was booked with,
     // and whoever runs the branch when nobody was assigned".
     let mut people = Vec::new();
+    if announcing.kind.told_by_caller() {
+        // **Logins, and nothing else about them.** They reach the bell; a paid
+        // channel needs an address, and an address is `hr`'s to know.
+        people = announcing
+            .to
+            .iter()
+            .map(|identity| messaging::audience::Person {
+                identity: Some(identity.clone()),
+                email: None,
+                phone: None,
+            })
+            .collect();
+    }
     for audience in announcing.kind.audiences() {
         let found = messaging::audience::people(&mut *conn, *audience, &announcing.subject, None)
             .await?
@@ -256,7 +274,7 @@ async fn wording(
         let (title, body) = if let Some(body) = own.and_then(|t| t.body(locale)) {
             (body.subject.clone(), body.text.clone())
         } else {
-            let copy = crate::copy::of(announcing.kind, locale);
+            let copy = crate::copy::of(announcing.kind, locale, &values);
             (copy.title.to_owned(), copy.body.to_owned())
         };
         wording.insert(

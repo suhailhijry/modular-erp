@@ -52,6 +52,10 @@ fn line(description: &str, net: Money, category: VatCategory) -> DraftLine {
         description: description.to_owned(),
         net,
         category,
+        product: None,
+        quantity: None,
+        serials: Vec::new(),
+        lot: None,
     }
 }
 
@@ -3814,7 +3818,12 @@ async fn credit_part(
 /// Credit `net` off line `against` of the invoice. The description and the
 /// treatment come from that line, which is the point.
 fn credit_line(against: u16, net: Money) -> sales::CreditLine {
-    sales::CreditLine { against, net }
+    sales::CreditLine {
+        against,
+        net,
+        quantity: None,
+        serials: Vec::new(),
+    }
 }
 
 /// **The half-a-deposit case**, which is the one a cancellation policy needs.
@@ -4260,6 +4269,10 @@ fn line_with(
         net,
         category,
         allowances,
+        product: None,
+        quantity: None,
+        serials: Vec::new(),
+        lot: None,
     }
 }
 
@@ -5432,7 +5445,12 @@ async fn a_credit_note_over_the_limit_is_refused_whole_or_in_part() {
 
     let part = |reference: &str, net: Money| sales::CreditNote {
         reference: reference.to_owned(),
-        lines: vec![sales::CreditLine { against: 0, net }],
+        lines: vec![sales::CreditLine {
+            against: 0,
+            net,
+            quantity: None,
+            serials: Vec::new(),
+        }],
         reason: "partly returned".to_owned(),
         on: on("2026-03-02"),
     };
@@ -5561,4 +5579,1345 @@ async fn refund_as_the_clerk(
         MEMBER,
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// The shelf
+//
+// **An invoice is what takes stock off a shelf.** Every one this system issues
+// goes through `issue_in`, which is where `inventory::consume_in` is called —
+// so a till sale, a booking bill and a `/v1/sales` invoice all deplete through
+// one path (decision 2) and these tests cover all three at once. What is here
+// is the contract between the two modules: what comes off, at what cost, what
+// is refused, and what a credit note puts back.
+// ---------------------------------------------------------------------------
+
+/// Sacks of beans. A plain product: no batches, no names.
+const BEANS: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
+/// Milk. Lot-tracked, so a sale it cannot cover is refused (R1).
+const MILK: &str = "9f2a6d0c-11d0-7dec-a765-00a0c91e6bf7";
+/// A grinder. Serial-tracked: every unit has a name (decision 17).
+const GRINDER: &str = "3c1b7e55-0a44-4f2d-8b9c-2d5a1e6f7a88";
+/// A second place for a shelf to be.
+const OLAYA: &str = "BRANCH-OLAYA";
+
+impl Fixture {
+    /// The tenant, plus the three accounts a stock movement touches.
+    async fn keeping_stock() -> Self {
+        let fixture = Self::new().await;
+        for (account, kind) in [
+            ("1300", AccountKind::Asset),     // Inventory
+            ("2010", AccountKind::Liability), // Goods received, not invoiced
+            ("5010", AccountKind::Expense),   // Cost of goods sold
+        ] {
+            fixture.open(account, kind, sar()).await;
+        }
+        fixture
+    }
+
+    async fn declare(&self, product: &str, tracking: inventory::Tracking) {
+        inventory::declare(
+            &self.db,
+            &code(product),
+            product,
+            "piece",
+            tracking,
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("the product is declared");
+    }
+
+    /// A delivery: `quantity` units for `value` altogether.
+    async fn receive(&self, product: &str, quantity: i64, value: Money, reference: &str) {
+        self.receiving(product, quantity, value, reference, None, Vec::new())
+            .await;
+    }
+
+    async fn receiving(
+        &self,
+        product: &str,
+        quantity: i64,
+        value: Money,
+        reference: &str,
+        batch: Option<(&str, &str)>,
+        serials: Vec<String>,
+    ) {
+        inventory::receive(
+            &self.db,
+            &code(product),
+            &inventory::Receipt {
+                quantity,
+                value,
+                code: batch.map(|(code, _)| code.to_owned()),
+                expires_on: batch.map(|(_, day)| day.parse().expect("a date")),
+                serials,
+                reference: reference.to_owned(),
+                at: on("2026-01-02"),
+            },
+            &Metadata::default(),
+        )
+        .await
+        .expect("the delivery lands");
+    }
+
+    /// **The shelf as the write side holds it**, rehydrated from the log —
+    /// never `proj_inventory`, which is a projection and says what the worker
+    /// last saw.
+    async fn shelf(&self, product: &str) -> inventory::Stock {
+        let id = inventory::stock_id(&code(product), None).expect("a key");
+        let mut conn = self.db.acquire().await.expect("connection");
+        erp_eventlog::load::<inventory::Stock>(&mut conn, &id, inventory::upcasters())
+            .await
+            .expect("loads")
+            .aggregate
+    }
+}
+
+/// A line that sells `quantity` units of `product` at `unit` each.
+fn stocked(description: &str, unit: Money, quantity: i64, product: &str) -> DraftLine {
+    DraftLine {
+        allowances: Vec::new(),
+        description: description.to_owned(),
+        net: unit,
+        category: VatCategory::Standard,
+        product: Some(code(product)),
+        quantity: Some(quantity),
+        serials: Vec::new(),
+        lot: None,
+    }
+}
+
+/// **The whole of it in one test.** Three sacks off a shelf of ten, the line
+/// priced per unit and totalled here, the asset down by what those three cost
+/// on their own lot and the expense up by the same.
+#[tokio::test]
+async fn an_invoice_takes_its_lines_off_the_shelf_and_books_what_they_cost() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    // Ten sacks for 100.00 — 10.00 each.
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+
+    let issued = issue(
+        &fixture,
+        "INV-STOCK",
+        vec![stocked("بن", riyals(25), 3, BEANS)],
+    )
+    .await
+    .expect("issues");
+    assert!(issued.at.is_some());
+
+    let shelf = fixture.shelf(BEANS).await;
+    assert_eq!(shelf.on_hand(), 7, "three sacks went out");
+    assert_eq!(shelf.value().expect("sums"), Some(riyals(70)));
+
+    fixture.project().await;
+    // **The line is 25.00 × 3**, computed and never divided back out.
+    let invoice = fixture.invoice("INV-STOCK").await.expect("a row");
+    assert_eq!(invoice.summary.net, riyals(75));
+    // Three sacks at what *that lot* cost, not at what they sold for.
+    assert_eq!(fixture.balance("5010").await, riyals(30));
+    assert_eq!(fixture.balance("1300").await, riyals(70));
+    assert!(fixture.imbalances().await.is_empty());
+
+    fixture.cleanup().await;
+}
+
+/// **Cost comes from the lot, so one line can cost two things.** Six sacks off
+/// a cheap lot of five and a dear lot of five is 50.00 + 18.00, and an average
+/// across the shelf would have said 84.00.
+#[tokio::test]
+async fn one_line_across_two_lots_costs_what_each_lot_cost() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 5, riyals(50), "dn-cheap").await;
+    fixture.receive(BEANS, 5, riyals(90), "dn-dear").await;
+
+    issue(
+        &fixture,
+        "INV-TWO-LOTS",
+        vec![stocked("بن", riyals(30), 6, BEANS)],
+    )
+    .await
+    .expect("issues");
+
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("5010").await,
+        riyals(68),
+        "an average across the shelf would have charged 84.00"
+    );
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 4);
+    assert_eq!(fixture.balance("1300").await, riyals(72));
+
+    fixture.cleanup().await;
+}
+
+/// **A retried invoice depletes once.** The client's request timed out and it
+/// sent the same one again; the shelf recognises the movement's reference and
+/// records nothing, which is the whole reason that reference is derived from
+/// the invoice and the line rather than minted (L8).
+#[tokio::test]
+async fn the_same_invoice_sent_twice_takes_the_stock_once() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+
+    let line = || vec![stocked("بن", riyals(25), 3, BEANS)];
+    issue(&fixture, "INV-RETRY", line()).await.expect("issues");
+    issue(&fixture, "INV-RETRY", line())
+        .await
+        .expect("the retry is the same invoice");
+
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 7, "not four");
+    fixture.project().await;
+    assert_eq!(fixture.balance("5010").await, riyals(30));
+
+    fixture.cleanup().await;
+}
+
+/// **A tracked product refuses, and takes the document with it** (R1). What is
+/// on a lot-tracked shelf is meant to be known exactly: a phantom carton has no
+/// batch and no date, so there is nowhere to put it. The invoice is refused in
+/// the same transaction, so nothing at all was written.
+#[tokio::test]
+async fn a_tracked_product_the_shelf_cannot_cover_refuses_and_leaves_no_invoice() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(MILK, inventory::Tracking::Lot).await;
+    fixture
+        .receiving(
+            MILK,
+            2,
+            riyals(20),
+            "dn-milk",
+            Some(("B-2026-04", "2026-06-01")),
+            Vec::new(),
+        )
+        .await;
+
+    let refused = issue(
+        &fixture,
+        "INV-SHORT-MILK",
+        vec![stocked("حليب", riyals(9), 3, MILK)],
+    )
+    .await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Stock(inventory::InventoryError::NotEnoughStock { held: 2, wanted: 3 })
+            )))
+        ),
+        "{refused:?}"
+    );
+
+    assert!(!fixture.is_issued("INV-SHORT-MILK").await, "no document");
+    assert_eq!(fixture.shelf(MILK).await.on_hand(), 2, "nothing moved");
+    fixture.project().await;
+    assert_eq!(fixture.balance("5010").await, money(0));
+
+    fixture.cleanup().await;
+}
+
+/// **A plain product sells anyway and says what it owes** (decision 16, R1).
+/// The till does not stop for a bad count. Two sacks come off the lot at 10.00
+/// each and the third is a shortfall at the last unit cost the shelf saw — so
+/// the goods that left the building are in the books, and the negative number
+/// is the report a count corrects.
+#[tokio::test]
+async fn a_plain_product_the_shelf_cannot_cover_sells_and_records_the_shortfall() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 2, riyals(20), "dn-1").await;
+
+    issue(
+        &fixture,
+        "INV-SHORT",
+        vec![stocked("بن", riyals(25), 3, BEANS)],
+    )
+    .await
+    .expect("a till does not stop");
+
+    let shelf = fixture.shelf(BEANS).await;
+    assert_eq!(shelf.on_hand(), -1, "the shelf owes a sack");
+    assert_eq!(
+        shelf.value().expect("sums"),
+        Some(riyals(-10)),
+        "and the value owes what it was charged out at"
+    );
+
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("5010").await,
+        riyals(30),
+        "two off the lot and one at the last unit cost — not 20.00"
+    );
+    assert_eq!(fixture.balance("1300").await, riyals(-10));
+    assert!(fixture.imbalances().await.is_empty());
+
+    fixture.cleanup().await;
+}
+
+/// **A serial is an identity and identities are not invented** (decision 17).
+/// A name that was never received is a wrong input, not a wrong count, and
+/// nothing corrects it — so the sale is refused and no document exists.
+#[tokio::test]
+async fn a_line_naming_a_unit_that_is_not_on_the_shelf_refuses() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(GRINDER, inventory::Tracking::Serial).await;
+    fixture
+        .receiving(
+            GRINDER,
+            1,
+            riyals(300),
+            "dn-grinder",
+            None,
+            vec!["SN-1".to_owned()],
+        )
+        .await;
+
+    let mut line = stocked("مطحنة", riyals(500), 1, GRINDER);
+    line.serials = vec!["SN-NOBODY".to_owned()];
+    let refused = issue(&fixture, "INV-SERIAL", vec![line]).await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Stock(inventory::InventoryError::NoSuchSerial(_))
+            )))
+        ),
+        "{refused:?}"
+    );
+    assert!(!fixture.is_issued("INV-SERIAL").await);
+    assert_eq!(fixture.shelf(GRINDER).await.on_hand(), 1);
+
+    fixture.cleanup().await;
+}
+
+/// **A credit note puts the goods back where they came from, at what they left
+/// at.** Not at today's cost, which would restate a margin already reported,
+/// and not at a share of what was credited (decision 12) — the units are the
+/// client's statement and the money is another. The lot the sale emptied
+/// reopens as itself.
+#[tokio::test]
+async fn a_returned_line_puts_the_stock_back_and_the_cost_with_it() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 3, riyals(30), "dn-1").await;
+
+    issue(
+        &fixture,
+        "INV-BACK",
+        vec![stocked("بن", riyals(25), 3, BEANS)],
+    )
+    .await
+    .expect("issues");
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 0, "the lot emptied");
+
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code("INV-BACK"),
+        &sales::CreditNote {
+            reference: "returned-two".to_owned(),
+            lines: vec![sales::CreditLine {
+                against: 0,
+                net: riyals(50),
+                quantity: Some(2),
+                serials: Vec::new(),
+            }],
+            reason: "أعاد كيسين".to_owned(),
+            on: on("2026-03-02"),
+        },
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+    .expect("credits");
+
+    let shelf = fixture.shelf(BEANS).await;
+    assert_eq!(shelf.on_hand(), 2, "two sacks are back");
+    assert_eq!(
+        shelf.value().expect("sums"),
+        Some(riyals(20)),
+        "at what they left at, on the lot they left from"
+    );
+
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("5010").await,
+        riyals(10),
+        "30.00 went out and 20.00 came back"
+    );
+    assert_eq!(fixture.balance("1300").await, riyals(20));
+    assert!(fixture.imbalances().await.is_empty());
+
+    fixture.cleanup().await;
+}
+
+/// **A whole cancellation puts the whole of it back**, at the quantities the
+/// lines were sold at — which the invoice itself records, so nothing is derived
+/// from the money.
+#[tokio::test]
+async fn cancelling_an_invoice_puts_everything_back_on_the_shelf() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+    issue(
+        &fixture,
+        "INV-CANCEL",
+        vec![stocked("بن", riyals(25), 4, BEANS)],
+    )
+    .await
+    .expect("issues");
+
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("INV-CANCEL"),
+        "CN-CLIENT-1",
+        "لم يُسلَّم",
+        on("2026-03-02"),
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+    .expect("cancels");
+
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 10);
+    fixture.project().await;
+    assert_eq!(fixture.balance("5010").await, money(0));
+    assert_eq!(fixture.balance("1300").await, riyals(100));
+
+    fixture.cleanup().await;
+}
+
+/// **An invoice that sells nothing off a shelf is the invoice this system
+/// always issued.** No movement, no cost, and the same posting — which is what
+/// makes both new fields a widening rather than a change.
+#[tokio::test]
+async fn an_invoice_with_no_product_on_it_behaves_exactly_as_before() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+
+    issue(
+        &fixture,
+        "INV-PLAIN",
+        vec![line("Consulting", riyals(100), VatCategory::Standard)],
+    )
+    .await
+    .expect("issues");
+
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 10, "nothing moved");
+    fixture.project().await;
+    assert_eq!(fixture.balance("5010").await, money(0));
+    assert_eq!(fixture.balance("1300").await, riyals(100));
+    assert_eq!(fixture.balance("1100").await, riyals(115));
+    assert_eq!(fixture.balance("4000").await, riyals(-100));
+
+    fixture.cleanup().await;
+}
+
+/// **A lot the sale emptied reopens as itself.**
+///
+/// The batch code and the expiry date are frozen onto the portion when the
+/// goods leave, for the same reason the cost is: a lot that empties closes and
+/// leaves the aggregate, so by the time the customer brings it back there is
+/// nothing left to ask — and the read model may not be asked (L3). Without them
+/// a returned carton of milk would come back undated and go out last, which is
+/// the opposite of what an expiry rule is for.
+#[tokio::test]
+async fn a_returned_batch_comes_back_with_its_code_and_its_date() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(MILK, inventory::Tracking::Lot).await;
+    fixture
+        .receiving(
+            MILK,
+            2,
+            riyals(20),
+            "dn-milk",
+            Some(("B-2026-04", "2026-06-01")),
+            Vec::new(),
+        )
+        .await;
+
+    issue(
+        &fixture,
+        "INV-MILK",
+        vec![stocked("حليب", riyals(9), 2, MILK)],
+    )
+    .await
+    .expect("issues");
+    assert!(
+        fixture.shelf(MILK).await.lots.is_empty(),
+        "the lot emptied and closed"
+    );
+
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code("INV-MILK"),
+        &sales::CreditNote {
+            reference: "milk-back".to_owned(),
+            lines: vec![sales::CreditLine {
+                against: 0,
+                net: riyals(18),
+                quantity: Some(2),
+                serials: Vec::new(),
+            }],
+            reason: "أعاد الحليب".to_owned(),
+            on: on("2026-03-02"),
+        },
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+    .expect("credits");
+
+    let shelf = fixture.shelf(MILK).await;
+    let [lot] = shelf.lots.as_slice() else {
+        panic!("one lot, reopened: {:?}", shelf.lots)
+    };
+    assert_eq!(lot.quantity, 2);
+    assert_eq!(lot.code.as_deref(), Some("B-2026-04"), "the batch it was");
+    assert_eq!(
+        lot.expires_on.map(|d| d.to_string()).as_deref(),
+        Some("2026-06-01"),
+        "and it still spoils when it always did"
+    );
+    assert_eq!(lot.value, riyals(20));
+
+    fixture.cleanup().await;
+}
+
+/// **Two lines of the same product on one invoice**, which is the case that
+/// takes one shelf's lock twice inside one transaction.
+///
+/// Worth its own test because `consume_in` has no retry loop of its own — it
+/// runs in the invoice's transaction, so a version conflict between the two
+/// would surface as contention and the whole invoice would be retried until it
+/// gave up. The second load sees the first line's own event, and the two
+/// movements are told apart by the line's position in the reference.
+#[tokio::test]
+async fn two_lines_of_one_product_take_the_shelf_twice() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+
+    issue(
+        &fixture,
+        "INV-TWICE",
+        vec![
+            stocked("بن", riyals(25), 2, BEANS),
+            stocked("بن (هدية)", riyals(25), 3, BEANS),
+        ],
+    )
+    .await
+    .expect("issues");
+
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 5, "two then three");
+    fixture.project().await;
+    assert_eq!(fixture.balance("5010").await, riyals(50));
+
+    fixture.cleanup().await;
+}
+
+/// Credits 10.00 off line zero of `INV-TWICE-BACK`, claiming `quantity`
+/// units came back with it.
+async fn returning(
+    fixture: &Fixture,
+    reference: &str,
+    quantity: i64,
+) -> Result<sales::Numbered, CommandError<SalesError>> {
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code("INV-TWICE-BACK"),
+        &sales::CreditNote {
+            reference: reference.to_owned(),
+            lines: vec![sales::CreditLine {
+                against: 0,
+                net: riyals(10),
+                quantity: Some(quantity),
+                serials: Vec::new(),
+            }],
+            reason: "أعاد".to_owned(),
+            on: on("2026-03-02"),
+        },
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+}
+
+/// **Two credit notes against one sale put back what was sold, and no more.**
+///
+/// The money's cap does not stand in for the goods': how much of a line is
+/// credited and how many units came back are two different statements
+/// (decision 12), so a client crediting 10.00 twice off a 75.00 line could
+/// claim three sacks each time. The shelf takes each return off what that
+/// movement still has out, so the second one is refused for the part the first
+/// already brought back.
+#[tokio::test]
+async fn a_second_credit_note_can_only_return_what_the_first_one_left() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 3, riyals(30), "dn-1").await;
+    issue(
+        &fixture,
+        "INV-TWICE-BACK",
+        vec![stocked("بن", riyals(25), 3, BEANS)],
+    )
+    .await
+    .expect("issues");
+
+    returning(&fixture, "back-1", 2)
+        .await
+        .expect("two come back");
+    let refused = returning(&fixture, "back-2", 2).await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Stock(inventory::InventoryError::MoreThanWasTaken {
+                    taken: 1,
+                    wanted: 2
+                })
+            )))
+        ),
+        "only one sack is still out: {refused:?}"
+    );
+
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 2, "two, never four");
+    returning(&fixture, "back-3", 1)
+        .await
+        .expect("the last one comes back");
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 3);
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// What review found in the slice that depletes stock. Each test below is the
+// failure a reviewer reproduced, and each was watched to fail with its fix
+// broken. See IMPLEMENTATION.md §74, "What review found".
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// Enough receipts that a shelf's window of references heard has rolled
+    /// past everything before them.
+    async fn move_the_shelf_on(&self, product: &str) {
+        for n in 0..inventory::stock::HEARD_WINDOW {
+            self.receive(product, 1, riyals(10), &format!("dn-later-{n}"))
+                .await;
+        }
+    }
+}
+
+/// **A retried invoice takes nothing, however long after.** The invoice is
+/// idempotent for ever and the shelf only remembers its last two hundred
+/// movements, so a retry that reached the shelf took the stock a second time
+/// — while the cost entry, whose id is derived, posted nothing, and the shelf
+/// stopped agreeing with `1300 Inventory`.
+#[tokio::test]
+async fn a_retried_invoice_takes_nothing_once_the_shelf_has_moved_on() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+
+    let line = || vec![stocked("بن", riyals(25), 3, BEANS)];
+    issue(&fixture, "INV-OLD-RETRY", line())
+        .await
+        .expect("issues");
+    fixture.move_the_shelf_on(BEANS).await;
+    let before = fixture.shelf(BEANS).await;
+
+    let retried = issue(&fixture, "INV-OLD-RETRY", line())
+        .await
+        .expect("the retry is the same invoice");
+    assert!(retried.at.is_none(), "nothing was written");
+
+    let after = fixture.shelf(BEANS).await;
+    assert_eq!(
+        after.on_hand(),
+        before.on_hand(),
+        "the sale took its three once"
+    );
+    assert_eq!(after.value().expect("sums"), before.value().expect("sums"));
+    fixture.project().await;
+    assert_eq!(fixture.balance("5010").await, riyals(30));
+    assert_eq!(
+        Some(fixture.balance("1300").await),
+        after.value().expect("sums"),
+        "the shelf and the books agree"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **An invoice can be cancelled however busy its shelf has been since.** A
+/// return used to read what the sale took out of the shelf's window, so once
+/// that shelf had seen two hundred more movements the credit note — and with
+/// it the statutory cancellation — was refused for good.
+#[tokio::test]
+async fn an_invoice_can_be_cancelled_long_after_its_shelf_has_moved_on() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+    issue(
+        &fixture,
+        "INV-OLD-CANCEL",
+        vec![stocked("بن", riyals(25), 4, BEANS)],
+    )
+    .await
+    .expect("issues");
+    fixture.move_the_shelf_on(BEANS).await;
+    let before = fixture.shelf(BEANS).await.on_hand();
+
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("INV-OLD-CANCEL"),
+        "CN-OLD",
+        "لم يُسلَّم",
+        on("2026-03-02"),
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+    .expect("cancels");
+
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), before + 4);
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("5010").await,
+        money(0),
+        "the cost came back"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// Credits one unit off line zero of `invoice` under `reference`.
+async fn one_back(
+    fixture: &Fixture,
+    invoice: &str,
+    reference: &str,
+    lines: Vec<sales::CreditLine>,
+) -> Result<sales::Numbered, CommandError<SalesError>> {
+    sales::credit_invoice_part(
+        &fixture.db,
+        &code(invoice),
+        &sales::CreditNote {
+            reference: reference.to_owned(),
+            lines,
+            reason: "أعاد".to_owned(),
+            on: on("2026-03-02"),
+        },
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+}
+
+fn a_unit_of_line_zero() -> sales::CreditLine {
+    sales::CreditLine {
+        against: 0,
+        net: riyals(25),
+        quantity: Some(1),
+        serials: Vec::new(),
+    }
+}
+
+/// **One client reference on two invoices is two returns.** A client key is
+/// only unique per invoice, and a return keyed on it alone made the second
+/// invoice's unit a "retry" of the first's: its money was credited and its
+/// goods never came back.
+#[tokio::test]
+async fn one_client_reference_on_two_invoices_puts_both_back() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+    for invoice in ["INV-REF-A", "INV-REF-B"] {
+        issue(&fixture, invoice, vec![stocked("بن", riyals(25), 2, BEANS)])
+            .await
+            .expect("issues");
+    }
+
+    for invoice in ["INV-REF-A", "INV-REF-B"] {
+        one_back(&fixture, invoice, "RET-1", vec![a_unit_of_line_zero()])
+            .await
+            .expect("credits");
+    }
+
+    assert_eq!(
+        fixture.shelf(BEANS).await.on_hand(),
+        8,
+        "one back from each"
+    );
+    fixture.project().await;
+    assert_eq!(fixture.balance("5010").await, riyals(20));
+
+    fixture.cleanup().await;
+}
+
+/// **Two lines of one credit note against one invoice line add up.** The
+/// credit note may say so, and each line used to be its own return under the
+/// same reference — the second heard as a retry and dropped.
+#[tokio::test]
+async fn two_credit_lines_against_one_invoice_line_put_both_back() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+    issue(
+        &fixture,
+        "INV-SPLIT",
+        vec![stocked("بن", riyals(25), 3, BEANS)],
+    )
+    .await
+    .expect("issues");
+
+    one_back(
+        &fixture,
+        "INV-SPLIT",
+        "RET-SPLIT",
+        vec![a_unit_of_line_zero(), a_unit_of_line_zero()],
+    )
+    .await
+    .expect("credits");
+
+    assert_eq!(
+        fixture.shelf(BEANS).await.on_hand(),
+        9,
+        "both units are back"
+    );
+    fixture.project().await;
+    assert_eq!(fixture.balance("5010").await, riyals(10));
+
+    fixture.cleanup().await;
+}
+
+/// **A return lands on the shelf the sale came off**, not the one at the
+/// branch that raised the credit note. A sale rung at Olaya and cancelled from
+/// head office used to look for the consumption on head office's shelf, find
+/// nothing, and refuse the cancellation.
+#[tokio::test]
+async fn a_cancellation_from_another_branch_puts_the_goods_back_where_they_were_sold() {
+    let fixture = Fixture::keeping_stock().await;
+    let at_olaya = fixture.opening_olaya().await;
+
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    inventory::receive(
+        &fixture.db,
+        &code(BEANS),
+        &inventory::Receipt {
+            quantity: 10,
+            value: riyals(100),
+            code: None,
+            expires_on: None,
+            serials: Vec::new(),
+            reference: "dn-olaya".to_owned(),
+            at: on("2026-01-02"),
+        },
+        &at_olaya,
+    )
+    .await
+    .expect("the delivery lands at Olaya");
+    issue_invoice(
+        &fixture.db,
+        &code("INV-OLAYA"),
+        &draft(vec![stocked("بن", riyals(25), 4, BEANS)]),
+        &at_olaya,
+        sales::Authority::System,
+    )
+    .await
+    .expect("rung at Olaya");
+
+    sales::cancel_invoice(
+        &fixture.db,
+        &code("INV-OLAYA"),
+        "CN-HQ",
+        "لم يُسلَّم",
+        on("2026-03-02"),
+        &Metadata::default(),
+        sales::Authority::System,
+    )
+    .await
+    .expect("head office cancels a sale rung at Olaya");
+
+    let olaya = inventory::stock_id(&code(BEANS), Some(OLAYA)).expect("a key");
+    let mut conn = fixture.db.acquire().await.expect("connection");
+    let shelf = erp_eventlog::load::<inventory::Stock>(&mut conn, &olaya, inventory::upcasters())
+        .await
+        .expect("loads")
+        .aggregate;
+    drop(conn);
+    assert_eq!(shelf.on_hand(), 10, "back on Olaya's shelf");
+    assert_eq!(
+        fixture.shelf(BEANS).await.on_hand(),
+        0,
+        "and nothing appeared at head office"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Units that cannot go anywhere are refused, not dropped** (L6). A quantity
+/// against a line that sold no product, and a quantity of nothing, used to be
+/// accepted and ignored — telling the client stock came back when none did.
+#[tokio::test]
+async fn units_coming_back_that_cannot_land_are_refused() {
+    let fixture = Fixture::keeping_stock().await;
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture.receive(BEANS, 10, riyals(100), "dn-1").await;
+    issue(
+        &fixture,
+        "INV-MIXED",
+        vec![
+            line("Consulting", riyals(100), VatCategory::Standard),
+            stocked("بن", riyals(25), 3, BEANS),
+        ],
+    )
+    .await
+    .expect("issues");
+
+    let on_a_service = one_back(
+        &fixture,
+        "INV-MIXED",
+        "RET-SERVICE",
+        vec![sales::CreditLine {
+            against: 0,
+            net: riyals(50),
+            quantity: Some(5),
+            serials: Vec::new(),
+        }],
+    )
+    .await;
+    assert!(
+        matches!(
+            on_a_service,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::NotAStockLine { line: 0, .. }
+            )))
+        ),
+        "an hour of consultancy has no shelf: {on_a_service:?}"
+    );
+
+    let none = one_back(
+        &fixture,
+        "INV-MIXED",
+        "RET-NONE",
+        vec![sales::CreditLine {
+            against: 1,
+            net: riyals(25),
+            quantity: Some(0),
+            serials: Vec::new(),
+        }],
+    )
+    .await;
+    assert!(
+        matches!(
+            none,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::NotAQuantity
+            )))
+        ),
+        "nothing coming back is not a quantity: {none:?}"
+    );
+
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 7, "and nothing moved");
+
+    fixture.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// A line that names its lot, and a return that names its units. See
+// IMPLEMENTATION.md §76.
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// Opens Olaya and returns a request made there.
+    async fn opening_olaya(&self) -> Metadata {
+        {
+            let mut conn = self.db.acquire().await.expect("connection");
+            branches::install(&mut conn).await.expect("branches");
+            ensure_group_schema::<branches::Branches>(&mut conn)
+                .await
+                .expect("the branches' checkpoint");
+        }
+        branches::open_branch(
+            &self.db,
+            &code(OLAYA),
+            &branches::Details {
+                name: "العليا".to_owned(),
+                name_latin: None,
+                address: branches::Address {
+                    street: "طريق الملك فهد".to_owned(),
+                    building: None,
+                    district: None,
+                    city: "الرياض".to_owned(),
+                    postal_code: None,
+                    country: "SA".to_owned(),
+                },
+            },
+            on("2026-01-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("the branch opens");
+        Metadata::default().at_branch(OLAYA)
+    }
+}
+
+/// The lot a delivery made on the shelf with no branch.
+fn lot_on_the_shelf(product: &str, reference: &str) -> String {
+    inventory::lot_of(
+        &inventory::stock_id(&code(product), None).expect("a key"),
+        reference,
+    )
+}
+
+/// Milk in two batches: ten of `B-EARLY` at 5.00, which goes off first, and
+/// three of `B-LATE` at 8.00. The picking rule would take the early batch.
+async fn two_batches_of_milk(fixture: &Fixture) {
+    fixture.declare(MILK, inventory::Tracking::Lot).await;
+    fixture
+        .receiving(
+            MILK,
+            10,
+            riyals(50),
+            "dn-early",
+            Some(("B-EARLY", "2026-04-01")),
+            Vec::new(),
+        )
+        .await;
+    fixture
+        .receiving(
+            MILK,
+            3,
+            riyals(24),
+            "dn-late",
+            Some(("B-LATE", "2026-09-01")),
+            Vec::new(),
+        )
+        .await;
+}
+
+/// `quantity` bottles, off the lot the line names.
+fn from_lot(quantity: i64, lot: &str) -> DraftLine {
+    DraftLine {
+        lot: Some(lot.to_owned()),
+        ..stocked("حليب", riyals(10), quantity, MILK)
+    }
+}
+
+/// **A line that names a lot takes from that lot**, whatever the picking rule
+/// would have chosen (decision 9) — and at that lot's cost, because it is that
+/// lot's bottles that left.
+#[tokio::test]
+async fn an_invoice_naming_a_lot_takes_from_that_lot() {
+    let fixture = Fixture::keeping_stock().await;
+    two_batches_of_milk(&fixture).await;
+    let late = lot_on_the_shelf(MILK, "dn-late");
+
+    issue(&fixture, "INV-NAMED-LOT", vec![from_lot(2, &late)])
+        .await
+        .expect("issues");
+
+    let shelf = fixture.shelf(MILK).await;
+    assert_eq!(
+        shelf.lot(&late).map(|lot| lot.quantity),
+        Some(1),
+        "two came off the batch the line named"
+    );
+    assert_eq!(
+        shelf
+            .lot(&lot_on_the_shelf(MILK, "dn-early"))
+            .map(|lot| lot.quantity),
+        Some(10),
+        "and none off the batch that goes off first"
+    );
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("5010").await,
+        riyals(16),
+        "at the named batch's 8.00, not the early batch's 5.00"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **A named lot that cannot cover the line refuses** — although the shelf as
+/// a whole could — rather than being topped up from the next batch: whoever
+/// named it is holding that batch and is wrong about it. The invoice goes with
+/// it. And a lot named with no product is refused before any shelf is asked.
+///
+/// **This guards a product owner's decision** (D-A, 2026-09-14; §77): a named
+/// lot on a *plain* product refuses the same way. It is the one way a plain
+/// sale is refused for stock, and it is deliberate — the line asked for that
+/// lot. A change here is a change to that decision, not to this test.
+#[tokio::test]
+async fn a_named_lot_that_cannot_cover_the_line_refuses() {
+    let fixture = Fixture::keeping_stock().await;
+    two_batches_of_milk(&fixture).await;
+    let late = lot_on_the_shelf(MILK, "dn-late");
+
+    let refused = issue(&fixture, "INV-LOT-SHORT", vec![from_lot(4, &late)]).await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Stock(inventory::InventoryError::LotIsShort {
+                    held: 3,
+                    wanted: 4,
+                    ..
+                })
+            )))
+        ),
+        "three in the batch and four asked for: {refused:?}"
+    );
+    assert!(!fixture.is_issued("INV-LOT-SHORT").await);
+    assert_eq!(fixture.shelf(MILK).await.on_hand(), 13, "nothing moved");
+
+    let orphan = DraftLine {
+        product: None,
+        ..from_lot(1, &late)
+    };
+    let refused = issue(&fixture, "INV-LOT-ORPHAN", vec![orphan]).await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::LotWithoutAProduct { .. }
+            )))
+        ),
+        "a lot of nothing: {refused:?}"
+    );
+
+    // **A plain product's named lot refuses the same way.** R1's shortfall is
+    // for a line that names nothing; naming a lot is a claim about that lot.
+    // Decided by the product owner after §76's review (D-A): the refusal
+    // stands, for plain stock as for tracked.
+    fixture.declare(BEANS, inventory::Tracking::None).await;
+    fixture
+        .receiving(BEANS, 2, riyals(20), "dn-beans", None, Vec::new())
+        .await;
+    let plain = DraftLine {
+        lot: Some(lot_on_the_shelf(BEANS, "dn-beans")),
+        ..stocked("بن", riyals(10), 3, BEANS)
+    };
+    let refused = issue(&fixture, "INV-PLAIN-LOT-SHORT", vec![plain]).await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Stock(inventory::InventoryError::LotIsShort {
+                    held: 2,
+                    wanted: 3,
+                    ..
+                })
+            )))
+        ),
+        "two in a plain lot and three asked for of that lot: {refused:?}"
+    );
+    assert_eq!(fixture.shelf(BEANS).await.on_hand(), 2, "nothing moved");
+
+    fixture.cleanup().await;
+}
+
+/// **A lot at another branch is not on this shelf.** A shelf is a product at a
+/// place, so Olaya's batch named on a sale at head office is refused — even
+/// though head office holds milk the line could have had.
+#[tokio::test]
+async fn a_lot_from_another_branch_refuses() {
+    let fixture = Fixture::keeping_stock().await;
+    let at_olaya = fixture.opening_olaya().await;
+    fixture.declare(MILK, inventory::Tracking::Lot).await;
+    inventory::receive(
+        &fixture.db,
+        &code(MILK),
+        &inventory::Receipt {
+            quantity: 5,
+            value: riyals(25),
+            code: Some("B-OLAYA".to_owned()),
+            expires_on: None,
+            serials: Vec::new(),
+            reference: "dn-olaya".to_owned(),
+            at: on("2026-01-02"),
+        },
+        &at_olaya,
+    )
+    .await
+    .expect("the delivery lands at Olaya");
+    fixture
+        .receiving(
+            MILK,
+            5,
+            riyals(25),
+            "dn-hq",
+            Some(("B-HQ", "2026-09-01")),
+            Vec::new(),
+        )
+        .await;
+    let olaya = inventory::lot_of(
+        &inventory::stock_id(&code(MILK), Some(OLAYA)).expect("a key"),
+        "dn-olaya",
+    );
+
+    let refused = issue(&fixture, "INV-OTHER-SHELF", vec![from_lot(1, &olaya)]).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Stock(inventory::InventoryError::NoSuchLot(lot))
+            ))) if *lot == olaya
+        ),
+        "Olaya's batch is not on head office's shelf: {refused:?}"
+    );
+    assert!(!fixture.is_issued("INV-OTHER-SHELF").await);
+    assert_eq!(
+        fixture.shelf(MILK).await.on_hand(),
+        5,
+        "head office's own batch is untouched"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// A delivery of three named grinders at 300.00 each.
+async fn three_grinders(fixture: &Fixture) {
+    fixture.declare(GRINDER, inventory::Tracking::Serial).await;
+    fixture
+        .receiving(
+            GRINDER,
+            3,
+            riyals(900),
+            "dn-grinders",
+            None,
+            vec!["SN-1".to_owned(), "SN-2".to_owned(), "SN-3".to_owned()],
+        )
+        .await;
+}
+
+/// A line selling these grinders by name.
+fn grinders(serials: &[&str]) -> DraftLine {
+    let units = i64::try_from(serials.len()).expect("a count");
+    DraftLine {
+        serials: serials.iter().map(|serial| (*serial).to_owned()).collect(),
+        ..stocked("مطحنة", riyals(500), units, GRINDER)
+    }
+}
+
+/// A credit note against line zero of `invoice`, saying these grinders came
+/// back.
+async fn grinders_back(
+    fixture: &Fixture,
+    invoice: &str,
+    reference: &str,
+    serials: &[&str],
+) -> Result<sales::Numbered, CommandError<SalesError>> {
+    one_back(
+        fixture,
+        invoice,
+        reference,
+        vec![sales::CreditLine {
+            against: 0,
+            net: riyals(500),
+            quantity: Some(i64::try_from(serials.len()).expect("a count")),
+            serials: serials.iter().map(|serial| (*serial).to_owned()).collect(),
+        }],
+    )
+    .await
+}
+
+/// **A return names the units that came back — only ones this invoice sold,
+/// and each of them once.**
+///
+/// A phone shop taking back one of two phones says which. `SN-3` went out, on
+/// another invoice, so this one cannot bring it back. `SN-2` comes back once;
+/// sold again to somebody else it is off the shelf as well, so a check against
+/// the shelf would let the first invoice bring it back a second time. What is
+/// still out is the sale itself, followed through the shelf's whole stream.
+/// And names with no quantity beside them are refused, not skipped.
+#[tokio::test]
+async fn a_serial_return_names_only_what_the_invoice_sold_and_only_once() {
+    let fixture = Fixture::keeping_stock().await;
+    three_grinders(&fixture).await;
+    issue(
+        &fixture,
+        "INV-TWO-GRINDERS",
+        vec![grinders(&["SN-1", "SN-2"])],
+    )
+    .await
+    .expect("issues");
+    issue(&fixture, "INV-ONE-GRINDER", vec![grinders(&["SN-3"])])
+        .await
+        .expect("issues");
+
+    let uncounted = one_back(
+        &fixture,
+        "INV-TWO-GRINDERS",
+        "back-uncounted",
+        vec![sales::CreditLine {
+            against: 0,
+            net: riyals(500),
+            quantity: None,
+            serials: vec!["SN-1".to_owned()],
+        }],
+    )
+    .await;
+    assert!(
+        matches!(
+            uncounted,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::NamedUnits { named: 1 }
+            )))
+        ),
+        "a name with no quantity would have credited the money and put nothing back: \
+         {uncounted:?}"
+    );
+
+    let wrong = grinders_back(&fixture, "INV-TWO-GRINDERS", "back-wrong", &["SN-3"]).await;
+    assert!(
+        matches!(
+            &wrong,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Stock(inventory::InventoryError::NotOut(serial))
+            ))) if serial == "SN-3"
+        ),
+        "SN-3 went out on another invoice: {wrong:?}"
+    );
+
+    grinders_back(&fixture, "INV-TWO-GRINDERS", "back-sn-2", &["SN-2"])
+        .await
+        .expect("one of the two comes back, by name");
+    let shelf = fixture.shelf(GRINDER).await;
+    assert_eq!(shelf.on_hand(), 1);
+    assert!(
+        shelf.lot_holding("SN-2").is_some() && shelf.lot_holding("SN-1").is_none(),
+        "the one on the shelf is the one the customer brought back"
+    );
+
+    issue(&fixture, "INV-SN-2-AGAIN", vec![grinders(&["SN-2"])])
+        .await
+        .expect("sold again");
+    let twice = grinders_back(&fixture, "INV-TWO-GRINDERS", "back-sn-2-again", &["SN-2"]).await;
+    assert!(
+        matches!(
+            &twice,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                SalesError::Stock(inventory::InventoryError::NotOut(serial))
+            ))) if serial == "SN-2"
+        ),
+        "SN-2 has already come back on that invoice: {twice:?}"
+    );
+    assert_eq!(fixture.shelf(GRINDER).await.on_hand(), 0);
+
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("5010").await,
+        riyals(900),
+        "900.00 out, 300.00 back, 300.00 out again"
+    );
+    assert_eq!(fixture.balance("1300").await, riyals(0));
+    assert!(fixture.imbalances().await.is_empty());
+
+    fixture.cleanup().await;
 }

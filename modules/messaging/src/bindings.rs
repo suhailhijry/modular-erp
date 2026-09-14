@@ -6,8 +6,8 @@
 //!
 //! # Why this is not a cross-group read
 //!
-//! `proj_booking`, `proj_crm`, `proj_sales` and `proj_hr` are four groups and
-//! none may read another (L3). Nothing here does: it calls each module's own
+//! `proj_booking`, `proj_crm`, `proj_sales`, `proj_hr` and `proj_inventory` are
+//! separate groups and none may read another (L3). Nothing here does: it calls each module's own
 //! read function and assembles the answers in Rust, which is exactly what
 //! `tax_sa::report` does and for the same reason.
 //!
@@ -64,6 +64,7 @@ pub async fn of(
         Topic::Invoice => invoice(conn, id, calendar, &mut values).await?,
         Topic::Customer => customer(conn, id, &mut values).await?,
         Topic::Employee => employee(conn, id, &mut values).await?,
+        Topic::Lot => lot(conn, id, &mut values).await?,
     }
 
     Ok(values)
@@ -190,6 +191,49 @@ async fn employee(
         && let Some(place) = branches::branch(conn, branch).await?
     {
         values.insert("employee.branch".to_owned(), place.name);
+    }
+    Ok(())
+}
+
+/// **A lot, the way somebody finds it on a shelf**: the product, the batch,
+/// the day it goes off, and where.
+///
+/// **`branch.name` is absent for a lot at no branch**: a business with one
+/// shelf has no branch to name, and a sentence that needs none is the caller's
+/// to choose. **A lot at a branch always has one** — the branch's name, or,
+/// while the `branches` read model has not caught up with that branch, the key
+/// the lot was received under. The branch is in the log (the ledger refuses a
+/// receipt's posting at a branch never opened), so only a read model behind
+/// leaves it unnamed, and a notification's wording is frozen when it is
+/// announced: the key, which is how the lot list names the branch, as an
+/// untracked lot's id is how it names the batch, beats braces for ever.
+async fn lot(
+    conn: &mut PgConnection,
+    id: &str,
+    values: &mut BTreeMap<String, String>,
+) -> Result<(), sqlx::Error> {
+    let Some(lot) = inventory::lot(conn, id).await? else {
+        return Ok(());
+    };
+    values.insert("lot.id".to_owned(), lot.id.clone());
+    // An untracked delivery carries no batch code; the id is how the lot list
+    // names it.
+    values.insert(
+        "lot.code".to_owned(),
+        lot.code.clone().unwrap_or_else(|| lot.id.clone()),
+    );
+    if let Some(day) = lot.expires_on {
+        values.insert("lot.expires_on".to_owned(), day.to_string());
+    }
+    values.insert("lot.remaining".to_owned(), lot.remaining.to_string());
+    if let Some(product) = inventory::product(conn, &lot.product).await? {
+        values.insert("product.name".to_owned(), product.name);
+    }
+    if let Some(branch) = lot.branch.as_deref() {
+        let name = branches::branch(conn, branch)
+            .await?
+            .map_or_else(|| branch.to_owned(), |place| place.name);
+        values.insert("branch.name".to_owned(), name);
     }
     Ok(())
 }

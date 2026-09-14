@@ -495,7 +495,7 @@
             "type": "string"
           },
           "topic": {
-            "description": "`reservation`, `invoice`, `customer` or `employee`.",
+            "description": "`reservation`, `invoice`, `customer`, `employee` or `lot`.",
             "type": "string"
           }
         },
@@ -1224,6 +1224,54 @@
           "name",
           "address",
           "opened_on"
+        ],
+        "type": "object"
+      },
+      "BranchStock": {
+        "properties": {
+          "below_zero": {
+            "description": "The shelves here below zero, by product.",
+            "items": {
+              "$ref": "#/components/schemas/StockBelowZero"
+            },
+            "type": "array"
+          },
+          "branch": {
+            "description": "Absent on the shelves of a business that sends no `X-Branch`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expired": {
+            "description": "Open lots dated before `today`, still on the shelf.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "expiring": {
+            "description": "Open lots dated from `today` to `expiring_through`. A lot dated today is\nstill good today, so it is here and not in `expired`.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "products": {
+            "description": "How many products have a shelf here, whatever is on it: the rows\n`GET /v1/inventory/stock?branch=` lists.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "value": {
+            "description": "What the shelves here are carried at, one amount per currency: the\n`value`s `GET /v1/inventory/stock?branch=` lists, added up — the debt\nof a shelf below zero already off it.",
+            "items": {
+              "$ref": "#/components/schemas/Amount"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "value",
+          "products",
+          "expiring",
+          "expired",
+          "below_zero"
         ],
         "type": "object"
       },
@@ -3381,6 +3429,24 @@
         ],
         "type": "object"
       },
+      "InventoryAccepted": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "InvitationCreated": {
         "properties": {
           "accept_path": {
@@ -3966,6 +4032,79 @@
         ],
         "type": "object"
       },
+      "LotView": {
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code": {
+            "description": "The tenant's own batch code, on a lot-tracked product.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_on": {
+            "description": "Absent on a batch with no shelf life. Those go out after every dated\nlot, oldest first.",
+            "example": "2026-04-21",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "description": "The product's name, as declared. `null` only when the read model holds\nno declaration for it: the lot is still listed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "product": {
+            "type": "string"
+          },
+          "quantity": {
+            "description": "What arrived.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "received_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "remaining": {
+            "description": "What is still here.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "serials": {
+            "description": "The units still on this lot, on a serial-tracked product.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "value": {
+            "$ref": "#/components/schemas/Amount",
+            "description": "What the remainder is carried at."
+          }
+        },
+        "required": [
+          "id",
+          "product",
+          "quantity",
+          "remaining",
+          "value",
+          "serials",
+          "received_at"
+        ],
+        "type": "object"
+      },
       "LoyaltySchemeRecord": {
         "properties": {
           "rate_bp": {
@@ -4214,6 +4353,84 @@
         ],
         "type": "object"
       },
+      "MovementView": {
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "declared": {
+            "description": "What was counted.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expected": {
+            "description": "What the books said was there — on the lot, or on the shelf for a count\nof the shelf. Set on a count, and frozen as it was found.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "`received` (bought in, or put back by a credit note), `consumed` (sold\non a document), `written_off` or `counted`.",
+            "type": "string"
+          },
+          "lot": {
+            "description": "Which lot this came off, or went back onto. **Absent only where no lot\nwas involved** — units a plain product's sale took that no lot could\ncover (R1), the part of a return or a count of the shelf that settles\nthat debt, and the one row a count of the shelf leaves when it moved\nnothing.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "moved_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "product": {
+            "type": "string"
+          },
+          "quantity": {
+            "description": "Signed: what this movement did to what is on hand. The movements sum to\nthe quantity above, lot by lot.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "`expired` or `damaged`, on a write-off.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "description": "The request or document this movement was for.",
+            "type": "string"
+          },
+          "value": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Amount"
+              }
+            ]
+          }
+        },
+        "required": [
+          "product",
+          "kind",
+          "quantity",
+          "reference",
+          "moved_at"
+        ],
+        "type": "object"
+      },
       "NamedTemplate": {
         "allOf": [
           {
@@ -4323,6 +4540,15 @@
               "tax": 180000,
               "vat": "standard",
               "vat_rate": 1500
+            },
+            {
+              "account": "5010",
+              "description": "Espresso beans",
+              "net": 70000,
+              "product": "PROD-BEANS",
+              "tax": 10500,
+              "vat": "standard",
+              "vat_rate": 1500
             }
           ],
           "reference": "NS-8891",
@@ -4376,7 +4602,7 @@
       "NewBillLine": {
         "properties": {
           "account": {
-            "description": "The expense or asset account this lands in. One bill routinely covers\nseveral.",
+            "description": "The expense or asset account this lands in. One bill routinely covers\nseveral. **Ignored when `product` names a stocked product** — that line\nlands in the goods-received-not-invoiced account the delivery credited.",
             "type": "string"
           },
           "description": {
@@ -4386,6 +4612,13 @@
             "description": "Minor units, excluding tax.",
             "format": "int64",
             "type": "integer"
+          },
+          "product": {
+            "description": "**The stocked product this line bought**, if it bought one.\n\nLeave it off for anything that is not stock, which is most lines. With\nit, the line posts against the delivery rather than to `account`: the\nreceipt already debited inventory and credited\n`2010 Goods received, not invoiced`, and this is the invoice clearing\nit. It works in either order — a bill that arrives before its delivery\nleaves `2010` a debit, which is *invoiced, not yet received* — and\nnothing about a supplier invoice is blocked by a delivery that has not\nturned up. A product nobody declared is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tax": {
             "description": "**The tax the supplier charged, in minor units.** Not computed here: a\nreclaim is evidenced by their document, so the figure in the books has to\nbe the figure on it. Must be zero on anything not standard-rated.",
@@ -4653,6 +4886,21 @@
           "amount": {
             "$ref": "#/components/schemas/Amount",
             "description": "Excluding tax, and positive — stated the way the invoice stated it\nrather than as a negative. May be less than the line: part of a line\ncan come back."
+          },
+          "quantity": {
+            "description": "**How many units came back onto the shelf**, when the invoice line sold\nstock. Optional, and never worked out from `amount`: a partial credit is\nas often a price adjustment as a returned carton, and the two are\ndifferent statements. Leave it out and nothing goes back on the shelf.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "serials": {
+            "description": "**Which units came back**, on a line that sold serial-tracked stock:\none name per unit, as many as `quantity`. Each must be one this invoice\nline sold and that has not come back already. Leave it out and the\nunits come back by quantity, which for named units only the whole line\ncan.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -5491,10 +5739,39 @@
           "description": {
             "type": "string"
           },
+          "lot": {
+            "description": "**Which lot** to take the units from, overriding the picking rule — a\nscanned batch, or stock promised to this customer. The lot's `id` as\n`GET /v1/inventory/lots` lists it, not its batch code. A line that names\none must also name the `product`; a lot that is not open at this branch,\nor that holds fewer than the line takes, is refused. Leave it out and\nthe earliest expiry goes first.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "net": {
-            "description": "Minor units, in the invoice's currency. Excluding tax, and **before this\nline's own allowances** — what is charged is this less them.",
+            "description": "Minor units, in the invoice's currency. Excluding tax, and **before this\nline's own allowances** — what is charged is this less them.\n\n**Per unit when `quantity` is given**, and the whole line otherwise. The\nline comes to `net × quantity`, worked out here and never divided back\nout: going backwards from a total is a division that does not always\nland on a whole halala, and the tax document has to balance.",
             "format": "int64",
             "type": "integer"
+          },
+          "product": {
+            "description": "**What this line sells off a shelf**, when it sells one: the product's\nid, as `/v1/inventory/products` declared it.\n\nOptional. A line with one depletes that product's stock at this branch\nin the same transaction as the invoice, and books what it cost; a line\nwithout one behaves exactly as before. A product nobody declared is\nrefused rather than ignored.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quantity": {
+            "description": "**How many units.** Optional: leave it out and the line is a single\namount charged once, which is what every invoice issued before this\nfield existed is.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "serials": {
+            "description": "**Which units**, on a serial-tracked product — one name per unit, as\nthey were received. A line that names any must also name the `product`\nand charge for exactly that many. A name that is not on the shelf —\nunknown, already sold, written off — is refused.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "vat": {
             "description": "`standard`, `zero` or `exempt`. The *rate* is not a client's to choose —\nit is statutory, and resolved here. Zero-rated and exempt are both 0%\nand mean different things on a return, so both are kept.",
@@ -5584,10 +5861,39 @@
           "description": {
             "type": "string"
           },
+          "lot": {
+            "description": "Which lot the units come off, when the till overrides the picking rule\n— a scanned batch. The lot's `id`; a line that names one must also name\nthe `product`, and a lot that is not open here or is short is refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "net": {
-            "description": "Before tax, in the sale's currency. **The rate is not yours to send**:\nit is the tenant's configured one, resolved inside the write, so an\ninvoice cannot be stamped with a rate that was never current.",
+            "description": "Before tax, in the sale's currency. **The rate is not yours to send**:\nit is the tenant's configured one, resolved inside the write, so an\ninvoice cannot be stamped with a rate that was never current.\n\n**Per unit when `quantity` is given**, and the whole line otherwise —\nthe till rings a price and says how many.",
             "format": "int64",
             "type": "integer"
+          },
+          "product": {
+            "description": "The product this rings off the shelf, when the till sells stock.\nOptional: the shelf comes down and the cost is booked in the same write\nas the sale, and a line without one behaves exactly as before.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quantity": {
+            "description": "How many. Optional; one when it is left out.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "serials": {
+            "description": "Which units, on a serial-tracked product — one name per unit. A line\nthat names any must also name the `product` and ring exactly that many.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "vat": {
             "description": "`standard`, `zero` or `exempt`.",
@@ -5978,6 +6284,97 @@
         },
         "required": [
           "reference"
+        ],
+        "type": "object"
+      },
+      "NewProduct": {
+        "example": {
+          "name": "حليب طازج",
+          "tracking": "lot",
+          "unit": "bottle"
+        },
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "tracking": {
+            "description": "**Frozen.** `none`, `lot` or `serial`; `none` when absent. A lot-tracked\ndelivery names its batch and may name an expiry; a serial-tracked one\nnames every unit.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit": {
+            "description": "**Frozen.** What one of these is — `gram`, `piece`, `bottle`. Every\nquantity ever recorded against this product is a number in it, and there\nis no route that changes it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "unit"
+        ],
+        "type": "object"
+      },
+      "NewReceipt": {
+        "example": {
+          "code": "B-2026-04",
+          "expires_on": "2026-04-21",
+          "quantity": 24,
+          "value": {
+            "currency": "SAR",
+            "minor": 12000
+          }
+        },
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code": {
+            "description": "The batch this came in, in the tenant's own words. Required on a\nlot-tracked product and refused on any other. It may repeat: the lot's\nown id keeps two deliveries of one code apart.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_on": {
+            "description": "When this batch goes off. Only on a lot-tracked product, and only when\nthe batch has a shelf life — an undated lot goes out after every dated\none, oldest first.",
+            "example": "2026-04-21",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quantity": {
+            "description": "A whole number of the product's own unit.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "serials": {
+            "description": "One per unit, on a serial-tracked product. **Yours, not ours**: a serial\nis an identity and this system does not invent identities.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "value": {
+            "$ref": "#/components/schemas/Amount",
+            "description": "What the **whole** delivery cost, not what one unit did."
+          }
+        },
+        "required": [
+          "quantity",
+          "value"
         ],
         "type": "object"
       },
@@ -6604,6 +7001,43 @@
         ],
         "type": "object"
       },
+      "NewStockCount": {
+        "example": {
+          "declared": 21
+        },
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "declared": {
+            "description": "What was actually there. On a serial-tracked product, how many units\n`serials` names.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "lot": {
+            "description": "**Which lot was counted**, for someone counting batches. Leave it out to\ncount the shelf — see the `count` operation's description.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serials": {
+            "description": "The units found, by name, on a serial-tracked product. What was on hand\nand is not named here leaves as missing.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "declared"
+        ],
+        "type": "object"
+      },
       "NewSubscription": {
         "example": {
           "customer": "CUST-0001",
@@ -6699,6 +7133,51 @@
         },
         "required": [
           "phone"
+        ],
+        "type": "object"
+      },
+      "NewWriteOff": {
+        "example": {
+          "quantity": 6,
+          "reason": "expired"
+        },
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lot": {
+            "description": "Which lot to take it from, overriding earliest-expiry-first. A lot that\ncannot cover it is refused rather than topped up from the next.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quantity": {
+            "description": "How many. On a product tracked by quantity, and refused on a\nserial-tracked one.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "`expired` or `damaged`.",
+            "type": "string"
+          },
+          "serials": {
+            "description": "Which units. On a serial-tracked product, and refused on any other.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "reason"
         ],
         "type": "object"
       },
@@ -8071,6 +8550,195 @@
         ],
         "type": "object"
       },
+      "Paged_LotView": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "branch": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "code": {
+                  "description": "The tenant's own batch code, on a lot-tracked product.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "expires_on": {
+                  "description": "Absent on a batch with no shelf life. Those go out after every dated\nlot, oldest first.",
+                  "example": "2026-04-21",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "description": "The product's name, as declared. `null` only when the read model holds\nno declaration for it: the lot is still listed.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "product": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "description": "What arrived.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "received_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "remaining": {
+                  "description": "What is still here.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "serials": {
+                  "description": "The units still on this lot, on a serial-tracked product.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "value": {
+                  "$ref": "#/components/schemas/Amount",
+                  "description": "What the remainder is carried at."
+                }
+              },
+              "required": [
+                "id",
+                "product",
+                "quantity",
+                "remaining",
+                "value",
+                "serials",
+                "received_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Paged_MovementView": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "branch": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "declared": {
+                  "description": "What was counted.",
+                  "format": "int64",
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "expected": {
+                  "description": "What the books said was there — on the lot, or on the shelf for a count\nof the shelf. Set on a count, and frozen as it was found.",
+                  "format": "int64",
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "description": "`received` (bought in, or put back by a credit note), `consumed` (sold\non a document), `written_off` or `counted`.",
+                  "type": "string"
+                },
+                "lot": {
+                  "description": "Which lot this came off, or went back onto. **Absent only where no lot\nwas involved** — units a plain product's sale took that no lot could\ncover (R1), the part of a return or a count of the shelf that settles\nthat debt, and the one row a count of the shelf leaves when it moved\nnothing.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "moved_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "product": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "description": "Signed: what this movement did to what is on hand. The movements sum to\nthe quantity above, lot by lot.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "reason": {
+                  "description": "`expired` or `damaged`, on a write-off.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "reference": {
+                  "description": "The request or document this movement was for.",
+                  "type": "string"
+                },
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Amount"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "product",
+                "kind",
+                "quantity",
+                "reference",
+                "moved_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "Paged_NotificationView": {
         "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
         "properties": {
@@ -8088,7 +8756,7 @@
                   "type": "string"
                 },
                 "kind": {
-                  "description": "One of `booking_reserved`, `payments_settled`, `payments_failed`,\n`tax_refused` or `document_expiring`.",
+                  "description": "One of `booking_reserved`, `payments_settled`, `payments_failed`,\n`tax_refused`, `document_expiring`, `stock_expiring` or `stock_expired`.",
                   "type": "string"
                 },
                 "read_at": {
@@ -8106,7 +8774,7 @@
                   "type": "string"
                 },
                 "topic": {
-                  "description": "What it is about: `reservation`, `invoice`, `customer` or `employee`,\nand which one. Fetch the record itself through its own route.",
+                  "description": "What it is about: `reservation`, `invoice`, `customer`, `employee` or\n`lot`, and which one. Fetch the record itself through its own route.",
                   "type": "string"
                 }
               },
@@ -8118,6 +8786,54 @@
                 "title",
                 "body",
                 "announced_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Paged_ProductView": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "declared_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "tracking": {
+                  "description": "`none`, `lot` or `serial`.",
+                  "type": "string"
+                },
+                "unit": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "unit",
+                "tracking",
+                "declared_at"
               ],
               "type": "object"
             },
@@ -8427,6 +9143,72 @@
                 "expected",
                 "sales_count",
                 "opened_at"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next": {
+            "description": "Pass back as `?after=` for the next page. Absent when there are no more.\n\nOpaque: what is in it is the query's business, and a client that parsed\none would break the day a list is ordered differently.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
+      "Paged_StockView": {
+        "description": "One page of a list, and where the next one starts.\n\n# Why every list is shaped like this\n\nBecause the alternative was a bare array that stopped at 200 and said\nnothing. A tenant with 201 invoices saw 200 and had no way to tell — the\nresponse looked exactly like a complete one, which is the worst shape a bug\ncan have.\n\n`next` absent means **the list ended**. Present means pass it back as\n`?after=` to continue.",
+        "properties": {
+          "items": {
+            "items": {
+              "properties": {
+                "branch": {
+                  "description": "Absent on a business that sends no `X-Branch`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "last_at": {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                "name": {
+                  "description": "The product's name, as declared. `null` only when the read model holds\nno declaration for it: the row is still listed.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "on_hand": {
+                  "description": "The open lots added up, **less what the shelf owes**. Negative when a\nplain product has been sold off an empty shelf — a till does not stop\nfor a bad count (R1), and the negative number is the report a count\ncorrects.",
+                  "format": "int64",
+                  "type": "integer"
+                },
+                "product": {
+                  "type": "string"
+                },
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Amount",
+                      "description": "What that is carried at: the sum of the lots' own values, less what any\nunits sold short were charged out at, and never an average across them.\nAbsent until something has been received here."
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "product",
+                "on_hand",
+                "last_at"
               ],
               "type": "object"
             },
@@ -8924,6 +9706,35 @@
           "status",
           "code",
           "detail"
+        ],
+        "type": "object"
+      },
+      "ProductView": {
+        "properties": {
+          "declared_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tracking": {
+            "description": "`none`, `lot` or `serial`.",
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "unit",
+          "tracking",
+          "declared_at"
         ],
         "type": "object"
       },
@@ -9633,6 +10444,21 @@
           "net": {
             "$ref": "#/components/schemas/Amount",
             "description": "How much of that line is coming back, excluding tax, as a positive\namount. Its tax follows from the line's own rate."
+          },
+          "quantity": {
+            "description": "**How many units are physically coming back onto the shelf**, when that\nline sold stock. Optional, and never worked out from `net`: the money\nand the goods are two statements. Leave it out and only the money goes\nback.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "serials": {
+            "description": "Which units are coming back, on a line that sold serial-tracked stock —\none name per unit, as many as `quantity`, each one this sale took and\nthat has not come back already. Leave it out and a line of named units\ncan only come back whole.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -10716,6 +11542,172 @@
         ],
         "type": "object"
       },
+      "StockAccounts": {
+        "example": {
+          "cogs": "5010",
+          "goods_received": "2010",
+          "inventory": "1300",
+          "variance": "5900",
+          "waste": "5900"
+        },
+        "properties": {
+          "cogs": {
+            "description": "What went out the door cost. Defaults to 5010.",
+            "type": "string"
+          },
+          "goods_received": {
+            "description": "What a delivery owes before anybody has billed for it — a liability.\nDefaults to 2010. A receipt credits it; the supplier's bill line that\nnames the product debits it back.",
+            "type": "string"
+          },
+          "inventory": {
+            "description": "What is on the shelf, as an asset. Defaults to 1300.",
+            "type": "string"
+          },
+          "variance": {
+            "description": "What a count could not find, or found more of. Defaults to 5900.",
+            "type": "string"
+          },
+          "waste": {
+            "description": "What a write-off threw away. Defaults to 5900 as well — they are two\nfields so a business that wants spoilage apart from shrinkage can have\nit without a code change, not because the shipped charts separate them.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "inventory",
+          "goods_received",
+          "cogs",
+          "variance",
+          "waste"
+        ],
+        "type": "object"
+      },
+      "StockBelowZero": {
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "on_hand": {
+            "description": "Negative.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "owes": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Amount",
+                "description": "**What the shelf owes**: what the units no lot could cover were charged\nout at, less what returns and counts have settled. A delivery since does\nnot pay it; a count does. Absent while nothing has ever been received\nonto the shelf."
+              }
+            ]
+          },
+          "product": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "on_hand"
+        ],
+        "type": "object"
+      },
+      "StockExpiryWindow": {
+        "example": {
+          "days": 30
+        },
+        "properties": {
+          "days": {
+            "description": "How many days ahead of an expiry the business wants warning. Nothing to\nten years.",
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "days"
+        ],
+        "type": "object"
+      },
+      "StockSummary": {
+        "description": "**The shelves at a glance**, a branch at a time.",
+        "properties": {
+          "branches": {
+            "description": "One per branch with a shelf, the shelves of no branch first. Empty when\nnothing has been received or sold.",
+            "items": {
+              "$ref": "#/components/schemas/BranchStock"
+            },
+            "type": "array"
+          },
+          "expiring_through": {
+            "description": "The last day `expiring` reaches: `today` plus the tenant's expiry\nwindow.",
+            "example": "2026-10-14",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "today": {
+            "description": "The tenant's day the dates below were read against, on its own\ncalendar.",
+            "example": "2026-09-14",
+            "type": "string"
+          }
+        },
+        "required": [
+          "today",
+          "branches"
+        ],
+        "type": "object"
+      },
+      "StockView": {
+        "properties": {
+          "branch": {
+            "description": "Absent on a business that sends no `X-Branch`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "description": "The product's name, as declared. `null` only when the read model holds\nno declaration for it: the row is still listed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "on_hand": {
+            "description": "The open lots added up, **less what the shelf owes**. Negative when a\nplain product has been sold off an empty shelf — a till does not stop\nfor a bad count (R1), and the negative number is the report a count\ncorrects.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "product": {
+            "type": "string"
+          },
+          "value": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Amount",
+                "description": "What that is carried at: the sum of the lots' own values, less what any\nunits sold short were charged out at, and never an average across them.\nAbsent until something has been received here."
+              }
+            ]
+          }
+        },
+        "required": [
+          "product",
+          "on_hand",
+          "last_at"
+        ],
+        "type": "object"
+      },
       "SubscriptionRecord": {
         "properties": {
           "cancelled_at": {
@@ -11184,7 +12176,7 @@
             "type": "string"
           },
           "topic": {
-            "description": "What it is about — `reservation`, `invoice`, `customer` or `employee`.\nDecides which bindings and which audiences are allowed.",
+            "description": "What it is about — `reservation`, `invoice`, `customer`, `employee` or\n`lot`.\nDecides which bindings and which audiences are allowed.",
             "type": "string"
           }
         },
@@ -17670,7 +18662,7 @@
             }
           },
           {
-            "description": "`reservation`, `invoice`, `customer` or `employee`.",
+            "description": "`reservation`, `invoice`, `customer`, `employee` or `lot`.",
             "in": "path",
             "name": "topic",
             "required": true,
@@ -17838,7 +18830,7 @@
             }
           },
           {
-            "description": "`reservation`, `invoice`, `customer` or `employee`.",
+            "description": "`reservation`, `invoice`, `customer`, `employee` or `lot`.",
             "in": "path",
             "name": "topic",
             "required": true,
@@ -18012,7 +19004,7 @@
             }
           },
           {
-            "description": "`reservation`, `invoice`, `customer` or `employee`.",
+            "description": "`reservation`, `invoice`, `customer`, `employee` or `lot`.",
             "in": "path",
             "name": "topic",
             "required": true,
@@ -25681,6 +26673,1960 @@
         ]
       }
     },
+    "/v1/inventory/expiry-window": {
+      "get": {
+        "description": "The worker reads it: each open lot that reaches its date within this many\ndays, and each one already past it, is announced once to whoever may write\nstock off, on their notification bell. It warns and nothing more — stock\nleaves through a write-off. `GET /v1/inventory/summary` counts the same lots\nagainst it.\nThe warning needs the `notifications` module: without it nothing is\nannounced, and the window only drives the summary's counts.\n`GET /v1/inventory/lots?expiring_before=` takes a day per request and does\nnot fall back to it.",
+        "operationId": "expiry_window",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockExpiryWindow"
+                }
+              }
+            },
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable inventory"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "How long before an expiry the business wants warning.",
+        "tags": [
+          "inventory"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "set_expiry_window",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The `ETag` a GET answered with.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StockExpiryWindow"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Stored."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a number of days between none and ten years"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable inventory"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Choose it.",
+        "tags": [
+          "inventory"
+        ]
+      }
+    },
+    "/v1/inventory/lots": {
+      "get": {
+        "description": "Open lots only, earliest expiry first, undated last, oldest received first\namong equals — which is the order stock will actually go out in, because it\nis the same sort the picking rule follows. The list somebody reads before\nthey count, and before they decide what to write off.",
+        "operationId": "list_lots",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only this product.",
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only this branch. Absent means every branch; not the request's `X-Branch`.",
+            "in": "query",
+            "name": "branch",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only lots that go off before this day. Undated lots are never in the answer.",
+            "in": "query",
+            "name": "expiring_before",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Up to 200. Defaults to 50.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The `next` from the previous page.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_LotView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a cursor, or not a date"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "**What is on the shelf by batch, and what expires when.**",
+        "tags": [
+          "inventory"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/inventory/movements": {
+      "get": {
+        "description": "One row per lot a movement touched, so a write-off that came off two batches\nis two rows. What a lot holds is the sum of the rows against it.",
+        "operationId": "list_movements",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only this product.",
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Up to 200. Defaults to 50.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The `next` from the previous page.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_MovementView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Why a quantity is what it is: every movement, newest first.",
+        "tags": [
+          "inventory"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/inventory/posting-accounts": {
+      "get": {
+        "description": "A receipt debits inventory and credits goods received not invoiced, a\nwrite-off's loss goes to the waste account against inventory, a count's\ndiscrepancy to the variance account against the same one, and what a\ndocument consumes to cost of goods sold. The holding account is the one the\nsupplier's bill relieves, on a line that names a stocked product.\n\n**The two loss accounts default to the same code.** They are separate fields\nso a business can put spoilage somewhere other than shrinkage in one request,\nnot because the shipped charts separate them.",
+        "operationId": "stock_accounts",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockAccounts"
+                }
+              }
+            },
+            "description": "Done.",
+            "headers": {
+              "ETag": {
+                "description": "The version of this setting. Send it back as `If-Match` to write only if nobody else has since.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable inventory"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Where stock posts.",
+        "tags": [
+          "inventory"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "description": "`ManageAccounts`, not `ManageTenant`, for the reason `sales` gives: this is a\ndecision about the chart of accounts, and the person who maintains the chart\nis the person who should make it.\n\n**Not retrospective.** Entries already posted keep the accounts they were\nposted to, because those went into the journal entry as values (L5).\n\nEach code is checked against the tenant's own chart before it is stored —\nasked of the **log**, not of `proj_ledger.account`, because the read model\nlags and would refuse a chart installed a second ago.",
+        "operationId": "set_stock_accounts",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The `ETag` a GET answered with. With it, the write happens only if the setting is still at that version; without it, unconditionally.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StockAccounts"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Stored. Applies to the next entry this module posts; entries already posted keep the accounts they were posted to."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "An unusable code, or one that is not an open account here"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable inventory"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`If-Match` named a version that is no longer current; reload and try again"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Choose them.",
+        "tags": [
+          "inventory"
+        ]
+      }
+    },
+    "/v1/inventory/products": {
+      "get": {
+        "operationId": "list_products",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Up to 200. Defaults to 50.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The `next` from the previous page.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_ProductView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "What the business keeps.",
+        "tags": [
+          "inventory"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Both are **frozen**. Every quantity ever recorded against this product is a\nnumber in its unit, and every rule about batches and serials is a rule about\nits tracking mode — changing either would restate history. A product in a\nnew unit, or tracked a new way, is a new product.",
+        "operationId": "declare_product",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A UUID. **It is the product's id.**",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewProduct"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InventoryAccepted"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No name, no unit, or a tracking mode that is not one of the three"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable inventory"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "That id is already a different product"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is JSON and not the shape this route takes. `args.reason` names the field."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Declare something the business keeps: its unit, and how closely it is\nwatched.",
+        "tags": [
+          "inventory"
+        ]
+      }
+    },
+    "/v1/inventory/stock": {
+      "get": {
+        "operationId": "list_stock",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only this product.",
+            "in": "query",
+            "name": "product",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only this branch. Absent means every branch; not the request's `X-Branch`.",
+            "in": "query",
+            "name": "branch",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Up to 200. Defaults to 50.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "The `next` from the previous page.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Paged_StockView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a cursor"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "What is on hand, per product and branch.",
+        "tags": [
+          "inventory"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/inventory/stock/{product}/counts": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "# The shelf, and where the difference lands\n\nSend what is there. A shortage comes off the lots in the order stock goes\nout — earliest expiry first, undated oldest-first, the order\n`GET /v1/inventory/lots` lists them in — each at its own lot's cost. An\noverage joins the lot at the far end of that order, at that lot's cost; more than the lots hold\nwith no lot open to join is refused, and is a delivery instead. A count of\nthe shelf also clears what a plain product sold below zero owes.\n\n**Name a `lot` to count one batch**, and the difference lands on it. What the\nshelf owes is on no lot, so a count of one leaves it alone.\n\n# A serial-tracked product names what it found\n\n`serials` is the units found and `declared` how many they are. What was on\nhand and is not named leaves at its own lot's cost; a name that is not on\nhand is refused, because a count corrects a quantity and not an identity.\n\nThe variance and where it landed are frozen as they were found: by the next\ndelivery a lot may be closed, and a stocktake that answers a different number\ntomorrow is evidence of nothing.\n\n**The discrepancy is booked**, in this request's own transaction: short is a\nloss against inventory, over is the same entry the other way round, and a\ncount that moved no value posts nothing at all.",
+        "operationId": "count_stock",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Which shelf was counted.",
+            "in": "header",
+            "name": "X-Branch",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "A UUID. Counting twice under one key records one count.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The key the product was declared under.",
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewStockCount"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InventoryAccepted"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a quantity, serials that do not agree with `declared`, or serials on a product that is not serial-tracked"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable inventory"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The shelf is under sustained contention"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such product, no such open lot, a serial that is not on the shelf, more found than the lots hold with no lot open to join, or a ledger that refuses the entry"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Count **the shelf** or one lot on it, and record what the books disagreed by.",
+        "tags": [
+          "inventory"
+        ]
+      }
+    },
+    "/v1/inventory/stock/{product}/receipts": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "Every receipt makes one, whatever the tracking mode, because cost is carried\nper lot: what a movement costs is what *its own* delivery cost, and a\nproduct with no lots would need a second costing method.\n\n**It posts**, in this request's own transaction: `Dr` inventory, `Cr` goods\nreceived not invoiced, at what the delivery cost. Stock is in the books the\nmoment it lands. The supplier's bill debits the holding account back on the\nline that names this product, so between the two that account is what has\narrived and not been invoiced — and after both it is zero.",
+        "operationId": "receive_stock",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Where this arrived. Stock is held per branch.",
+            "in": "header",
+            "name": "X-Branch",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "A UUID. **The lot is named after it**, so receiving twice under one key records one delivery.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The key the product was declared under.",
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewReceipt"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InventoryAccepted"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a quantity, not an amount, a lot-tracked delivery with no code, or serials that do not match the units"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable inventory"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The shelf is under sustained contention"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such product, a batch code on a product that is not lot-tracked, a serial already on the shelf, another currency, or a ledger that refuses the entry — a closed account, a closed period, or a branch nobody opened"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Record a delivery onto the shelf this request is at. **It becomes a lot.**",
+        "tags": [
+          "inventory"
+        ]
+      }
+    },
+    "/v1/inventory/stock/{product}/write-offs": {
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "description": "**Earliest expiry first**, unless a lot is named — a recall, a scanned batch.\nEach portion is costed on the lot it came off. A serial-tracked product names\nthe units that are going, and one that is not on the shelf is refused rather\nthan invented.\n\n**More than is there is refused.** This is somebody holding the goods, not a\ntill: a till may not stop for a bad count, and a person looking at a shelf\nmay be told the shelf says otherwise.\n\n**The loss is booked**, in this request's own transaction: `Dr` waste, `Cr`\ninventory at what the lots it took were carried at. A closed account or a\nclosed period therefore refuses the write-off itself.",
+        "operationId": "write_off_stock",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Which shelf it went off.",
+            "in": "header",
+            "name": "X-Branch",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "A UUID. Writing off twice under one key throws away one lot's worth.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The key the product was declared under.",
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewWriteOff"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InventoryAccepted"
+                }
+              }
+            },
+            "description": "Created."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a reason, not a quantity, or serials that do not match how the product is tracked"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The tenant did not enable inventory"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The shelf is under sustained contention"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body is larger than this route takes. Every route is capped; an upload is capped higher than the rest."
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The body was sent without `Content-Type: application/json`."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such product, no such lot or serial, more than the shelf holds, or a ledger that refuses the entry"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Backpressure. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "Throw stock away, and say why.",
+        "tags": [
+          "inventory"
+        ]
+      }
+    },
+    "/v1/inventory/summary": {
+      "get": {
+        "description": "One row per branch with a shelf, or only `branch` when it is asked for.\n**Worth is per currency**: a tenant whose inventory account changed currency\nholds stock in both, and adding them would be a number nobody could use.\n\n**Going off is the tenant's own window, from the tenant's own today.** A lot\ncounts as `expiring` when its date is from today to `expiring_through`, and\nas `expired` before today while anything is on it; an undated lot is\nneither. That is the rule the notification bell is rung by, and `today` is\nthe day on the tenant's calendar, not UTC's.\n\n**What it adds up is what the lists show.** `value` and `products` are\n`GET /v1/inventory/stock?branch=` added up, and the lot counts are the open\nlots `GET /v1/inventory/lots?branch=` lists, before and through those days.\nA shelf below zero comes with what it owes — what its units no lot covered\nwere charged out at — which a count settles and a delivery does not.",
+        "operationId": "stock_summary",
+        "parameters": [
+          {
+            "description": "The tenant's host: its subdomain of the platform domain — `bassat.erp.com` — or any host under a domain it has proved (`POST /v1/domains`, then the DNS record, then `POST /v1/domains/{domain}/verification`), such as `api.bassat.sa`. Every path is about that tenant.",
+            "in": "header",
+            "name": "Host",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only this branch. Absent means every branch; not the request's `X-Branch`.",
+            "in": "query",
+            "name": "branch",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the read models to reach this log position.",
+            "in": "query",
+            "name": "consistent_after",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockSummary"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`x-api-version` names a version this API does not serve — `code` is `request.api_version_too_old` or `request.api_version_too_new`, and `args` carries the range. Where a route takes a body or a query string, a 400 may also mean that could not be read: see `code`."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No session, or one that has expired. Log in again."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Your role here does not permit this."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No such tenant, or not one of yours — the same answer for both, so this API is not a tenant-enumeration oracle."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Something went wrong here. `code` is `system.internal_error`, and nothing more specific is safe to infer."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not serving right now rather than broken. Retryable. Or `request.read_model_rebuilding` while a read model this module is served from was built by an older release and has not been rebuilt yet — nothing is shown from tables worked out by rules this release has replaced. Retryable."
+          }
+        },
+        "summary": "**The shelves at a glance**: per branch, what they are worth, how many\nproducts are on them, what is going off and what has gone, and which shelves\nare below zero.",
+        "tags": [
+          "inventory"
+        ]
+      },
+      "parameters": [
+        {
+          "description": "`ar` or `en`. Anything else falls back to English. Honoured on errors too.",
+          "in": "header",
+          "name": "Accept-Language",
+          "required": false,
+          "schema": {
+            "examples": [
+              "ar"
+            ],
+            "type": "string"
+          }
+        }
+      ]
+    },
     "/v1/invitations": {
       "get": {
         "operationId": "list_invitations",
@@ -31478,7 +34424,7 @@
                 }
               }
             },
-            "description": "No such kind, or no such channel"
+            "description": "No such kind, no such channel, or a channel other than `in_system` for `stock_expiring` or `stock_expired` — those are told to logins, which have no address (`notifications.in_system_only`)"
           },
           "401": {
             "content": {
@@ -36895,7 +39841,7 @@
                 }
               }
             },
-            "description": "Nothing on the sale, or a value that did not parse"
+            "description": "Nothing on the sale, a value that did not parse, or a line of the wrong shape: a quantity that is not one (`sales.not_a_quantity`, `inventory.not_a_quantity`), serials that do not match their line (`sales.named_units`, `inventory.needs_serials`), a lot named with no product (`sales.lot_without_a_product`), or a product id that cannot be one (`inventory.not_a_product_id`)"
           },
           "401": {
             "content": {
@@ -36955,7 +39901,7 @@
                 }
               }
             },
-            "description": "The till is shut, the tenders do not come to the sale, or the ledger refused it"
+            "description": "The till is shut, the tenders do not come to the sale, the ledger refused it, or the shelf refuses a line: a product nobody declared (`inventory.no_such_product`), a serial that is not on the shelf (`inventory.no_such_serial`), a named lot that is not open here (`inventory.no_such_lot`) or is short (`inventory.lot_is_short`), or more of a lot- or serial-tracked product than the shelf holds (`inventory.not_enough_stock`)"
           },
           "500": {
             "content": {
@@ -37051,7 +39997,7 @@
                 }
               }
             },
-            "description": "Nothing handed back, or a value that did not parse"
+            "description": "Nothing handed back, a value that did not parse, or a returned line of the wrong shape: a quantity that is not one (`sales.not_a_quantity`), or names that do not agree with the quantity (`sales.named_units`, `inventory.needs_serials`)"
           },
           "401": {
             "content": {
@@ -37111,7 +40057,7 @@
                 }
               }
             },
-            "description": "The till is shut, the sale is not one that can be credited, the tenders do not come to what the lines credit, or the ledger refused it"
+            "description": "The till is shut, the sale is not one that can be credited, the tenders do not come to what the lines credit, the ledger refused it, or the shelf refuses the units coming back (`inventory.not_consumed`, `inventory.more_than_was_taken`, `inventory.named_units_come_back_whole`, `inventory.not_out`)"
           },
           "500": {
             "content": {
@@ -40894,7 +43840,7 @@
         }
       ],
       "post": {
-        "description": "One transaction: the bill and its journal entry either both happen or neither\ndoes. The tax is taken **as the supplier stated it** — see `tax` on a line.",
+        "description": "One transaction: the bill and its journal entry either both happen or neither\ndoes. The tax is taken **as the supplier stated it** — see `tax` on a line.\n\n**A line that names a stocked product posts against the delivery**, not to\nthe account it names: `inventory` debited the stock and credited\n`2010 Goods received, not invoiced` when the goods landed, and this debits\nthat back. Input VAT and the supplier payable are unchanged, and a line with\nno `product` on it behaves exactly as it always has.",
         "operationId": "record_bill",
         "parameters": [
           {
@@ -41006,7 +43952,7 @@
                 }
               }
             },
-            "description": "An account that does not exist or is closed, or a tax point in a closed period"
+            "description": "An account that does not exist or is closed, a tax point in a closed period, or a line naming a product nobody declared"
           },
           "500": {
             "content": {
@@ -42411,7 +45357,7 @@
                 }
               }
             },
-            "description": "No lines that come to anything, mixed currencies, an unknown VAT category, or an unusable id"
+            "description": "No lines that come to anything, mixed currencies, an unknown VAT category, an unusable id, a quantity that is not one (`sales.not_a_quantity`), serials that do not match their line (`sales.named_units`, `inventory.needs_serials`), a lot named with no product (`sales.lot_without_a_product`), or a product id that cannot be one (`inventory.not_a_product_id`)"
           },
           "401": {
             "content": {
@@ -42481,7 +45427,7 @@
                 }
               }
             },
-            "description": "The posting accounts are missing or closed"
+            "description": "The posting accounts are missing or closed, no such customer, or the shelf refuses a line: a product nobody declared (`inventory.no_such_product`), a serial that is not on the shelf (`inventory.no_such_serial`), a named lot that is not open at this branch (`inventory.no_such_lot`) or holds fewer than the line takes (`inventory.lot_is_short`), or more of a lot- or serial-tracked product than the shelf holds (`inventory.not_enough_stock`). A plain product that names no lot never refuses for stock."
           },
           "500": {
             "content": {
@@ -42702,7 +45648,7 @@
                 }
               }
             },
-            "description": "An unusable id"
+            "description": "An unusable id, or an invoice already partly credited (`sales.already_credited`)"
           },
           "401": {
             "content": {
@@ -42772,7 +45718,7 @@
                 }
               }
             },
-            "description": "No such invoice, or one with payments against it — refund those first"
+            "description": "No such invoice, one with payments against it — refund those first —, or a product line the shelf it was sold from has no record of (`inventory.not_consumed`)"
           },
           "500": {
             "content": {
@@ -42981,7 +45927,7 @@
                 }
               }
             },
-            "description": "An unusable id, or an amount that is not one"
+            "description": "An unusable id, an amount that is not one, no such line (`sales.no_such_line`), more than is left to credit (`sales.credit_too_large`), an invoice already cancelled outright (`sales.already_credited`), a quantity that is not one (`sales.not_a_quantity`), units coming back on a line that sold no product (`sales.not_a_stock_line`), or names that do not agree with the quantity (`sales.named_units`, `inventory.needs_serials`)"
           },
           "401": {
             "content": {
@@ -43021,7 +45967,7 @@
                 }
               }
             },
-            "description": "The invoice was already cancelled outright"
+            "description": "Sustained contention on this invoice. Retryable."
           },
           "413": {
             "content": {
@@ -43051,7 +45997,7 @@
                 }
               }
             },
-            "description": "No such invoice, no such line, or more than is left to credit"
+            "description": "No such invoice, or the shelf refuses the units coming back: no record of that line going out (`inventory.not_consumed`), more than that sale still has out (`inventory.more_than_was_taken`), part of a sale whose units have names given as a quantity rather than by name (`inventory.named_units_come_back_whole`), or a name that sale did not take or that has already come back (`inventory.not_out`)"
           },
           "500": {
             "content": {

@@ -2299,6 +2299,39 @@ const PERMISSIONS: &[(&str, &[&str])] = &[
     ("send_in_conversation", &["owner", "accountant", "clerk"]),
     ("list_unmatched", &["owner", "accountant", "clerk"]),
     ("assign_unmatched", &["owner", "accountant", "clerk"]),
+    // **What is on the shelf.** A viewer may read it: the person at the counter
+    // has to be able to say "we have two left", the lots behind that number are
+    // what says which batch and when it goes off, and the movements are what
+    // makes the answer worth anything. Both settings are read like every other.
+    // **The summary is those lists added up**, so it is read by whoever may read
+    // them: a total withheld from somebody who can page through the rows and
+    // add them protects nothing.
+    ("list_products", ALL_ROLES),
+    ("list_stock", ALL_ROLES),
+    ("list_lots", ALL_ROLES),
+    ("stock_summary", ALL_ROLES),
+    ("list_movements", ALL_ROLES),
+    ("stock_accounts", ALL_ROLES),
+    ("expiry_window", ALL_ROLES),
+    // Receiving a delivery, counting a lot and throwing away what has gone off
+    // are recording what happened, which is the clerk's job — and a count is
+    // what the books get corrected from, so it sits with the rest of
+    // `post_entries`. **Writing off is there too, deliberately**: the person who
+    // finds the milk past its date is the person holding it, and a loss nobody
+    // may record is a loss that goes in the bin unrecorded.
+    ("receive_stock", &["owner", "accountant", "clerk"]),
+    ("count_stock", &["owner", "accountant", "clerk"]),
+    ("write_off_stock", &["owner", "accountant", "clerk"]),
+    // **Declaring a product is not.** The unit and the tracking mode are frozen
+    // at declaration and every quantity ever recorded is a number in that unit,
+    // so this is the shape of the business rather than a day's work in it — the
+    // same call as `declare_bookable`.
+    ("declare_product", OWNER),
+    // Where stock will post is the shape of the books, like every other
+    // `set_*_accounts`. How long before an expiry to warn is the shape of the
+    // business, like the rest of `manage_tenant`.
+    ("set_stock_accounts", &["owner", "accountant"]),
+    ("set_expiry_window", OWNER),
     // Documents. Reading what is attached is ordinary; attaching and taking
     // off is recording what happened, which is a clerk's job.
     ("list_attachments", ALL_ROLES),
@@ -2625,8 +2658,8 @@ async fn every_role_against_every_endpoint() {
     );
     assert_eq!(
         served.len(),
-        247,
-        "expected two hundred and forty-seven role-scoped operations"
+        260,
+        "expected two hundred and sixty role-scoped operations"
     );
 
     // A member, so `{identity}` names somebody real rather than testing the
@@ -14380,6 +14413,7 @@ async fn a_bell_rings_on_one_screen_and_not_the_other() {
                 messaging::Topic::Invoice,
                 erp_types::AggregateId::new("INV-1").expect("an id"),
             ),
+            to: Vec::new(),
             at: chrono::Utc::now(),
         },
         &erp_eventlog::Metadata::default(),
@@ -15003,6 +15037,753 @@ async fn a_clerk_over_the_document_limit_is_refused_and_the_worker_is_not() {
     .await
     .expect("the pass runs");
     assert_eq!(billed, 1, "nobody at the desk, so nobody limited");
+
+    fixture.cleanup().await;
+}
+
+/// **A shelf, over HTTP: declared, received into lots, written off, counted and
+/// explained.**
+///
+/// Phase 19's first box end to end — and the canary with it, because the number
+/// a screen shows and the movements it shows underneath are two reads of one log
+/// and a business cannot act on a quantity it cannot explain.
+///
+/// A lot-tracked product, because that is where every part of the slice shows at
+/// once: a batch code, a date, earliest-expiry-first picking, and a count of the
+/// lot that is left.
+///
+/// The refusals are asserted in both languages, because a refusal a clerk cannot
+/// read is a refusal that becomes a phone call.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "a product, two dated deliveries, a write-off, a count, three \
+              refusals in two languages and both settings — what the slice is \
+              made of"
+)]
+async fn stock_is_declared_received_written_off_and_counted() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    // **Because every movement out posts, and a posting is dated to a branch.**
+    // `ledger::post_entry_in` checks the `X-Branch` this request carries
+    // against the log, so a shelf at a branch nobody opened cannot be written
+    // off — which is the right answer and is new in this slice.
+    fixture.enable_module(tenant, branches::setup()).await;
+    fixture.enable_module(tenant, inventory::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let milk = idem("PROD-MILK");
+    let olaya = idem("BRANCH-OLAYA");
+    let post = |path: String, key: &str, branch: Option<&str>, body: serde_json::Value| {
+        let mut request = Request::post(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("Idempotency-Key", idem(key));
+        if let Some(branch) = branch {
+            request = request.header("x-branch", branch);
+        }
+        request.body(Body::from(body.to_string())).unwrap()
+    };
+
+    // The books, because a write-off books its loss and a count books its
+    // discrepancy — and because the posting-accounts setting is checked against
+    // the tenant's own chart before it can be stored.
+    let (status, installed, _) = fixture
+        .send(
+            Request::post("/v1/ledger/chart")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "template": "services", "currency": "SAR" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{installed}");
+
+    // The place the stock sits, opened before anything is received into it.
+    let (status, branch, _) = fixture
+        .send(post(
+            "/v1/branches".to_owned(),
+            "BRANCH-OLAYA",
+            None,
+            serde_json::json!({
+                "name": "العليا",
+                "address": { "street": "King Fahd Road", "city": "Riyadh",
+                             "country": "SA" }
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{branch}");
+    assert_eq!(branch["id"], olaya);
+
+    // A product with no unit is refused, and says so in the caller's language.
+    let (status, refused, _) = fixture
+        .send(
+            Request::post("/v1/inventory/products")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT_LANGUAGE, "ar")
+                .header("Idempotency-Key", idem("PROD-NOTHING"))
+                .body(Body::from(
+                    serde_json::json!({ "name": "حليب", "unit": "  " }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["code"], "inventory.needs_a_name_and_a_unit");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .expect("a detail")
+            .contains("الوحدة"),
+        "the refusal did not answer in Arabic: {refused}"
+    );
+
+    // And so is a way of tracking one that this build does not know.
+    let (status, refused, _) = fixture
+        .send(post(
+            "/v1/inventory/products".to_owned(),
+            "PROD-BATCH",
+            None,
+            serde_json::json!({ "name": "حليب", "unit": "bottle", "tracking": "batch" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["code"], "inventory.not_a_tracking_mode");
+
+    let (status, declared, _) = fixture
+        .send(post(
+            "/v1/inventory/products".to_owned(),
+            "PROD-MILK",
+            None,
+            serde_json::json!({ "name": "حليب طازج", "unit": "bottle", "tracking": "lot" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{declared}");
+    assert_eq!(declared["id"], milk);
+
+    // Two crates, the second expiring first. Both at Olaya, because stock is
+    // held per branch and this business has one.
+    let mut lots = Vec::new();
+    for (key, quantity, minor, code, expires) in [
+        ("RCV-1", 24, 12_000, "B-2026-04-05", "2026-04-21"),
+        ("RCV-2", 12, 7_200, "B-2026-04-02", "2026-04-11"),
+    ] {
+        let (status, body, _) = fixture
+            .send(post(
+                format!("/v1/inventory/stock/{milk}/receipts"),
+                key,
+                Some(olaya.as_str()),
+                serde_json::json!({
+                    "quantity": quantity,
+                    "value": { "minor": minor, "currency": "SAR" },
+                    "code": code,
+                    "expires_on": expires,
+                }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        // **The lot is named after the shelf and the receipt**, never minted —
+        // the shelf because an idempotency key is unique only to the client
+        // that sent it, and `lot.id` is a key across the whole tenant.
+        assert_eq!(body["id"], format!("lot.{milk}.{olaya}.{}", idem(key)));
+        lots.push(body["id"].as_str().expect("a lot id").to_owned());
+    }
+
+    // A crate of milk with no batch code on it is refused: this product is
+    // tracked by lot, and a delivery that will not say which batch it is cannot
+    // be recalled or thrown away by date.
+    let (status, refused, _) = fixture
+        .send(post(
+            format!("/v1/inventory/stock/{milk}/receipts"),
+            "RCV-3",
+            Some(olaya.as_str()),
+            serde_json::json!({
+                "quantity": 6, "value": { "minor": 3_000, "currency": "SAR" }
+            }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["code"], "inventory.needs_a_lot_code");
+
+    // The older crate goes off and is thrown out. No lot is named, so the
+    // picking rule takes the one expiring first.
+    let (status, thrown, _) = fixture
+        .send(post(
+            format!("/v1/inventory/stock/{milk}/write-offs"),
+            "WOF-1",
+            Some(olaya.as_str()),
+            serde_json::json!({ "reason": "expired", "quantity": 12 }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{thrown}");
+
+    // More than is on the shelf is refused, in English this time — this is
+    // somebody holding the goods, not a till.
+    let (status, short, _) = fixture
+        .send(post(
+            format!("/v1/inventory/stock/{milk}/write-offs"),
+            "WOF-2",
+            Some(olaya.as_str()),
+            serde_json::json!({ "reason": "damaged", "quantity": 99 }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{short}");
+    assert_eq!(short["code"], "inventory.not_enough_stock");
+    assert!(
+        short["detail"]
+            .as_str()
+            .expect("a detail")
+            .contains("Count the shelf"),
+        "{short}"
+    );
+
+    // A count of a batch that is not on the shelf is refused: the lot a count
+    // names reaches the command, and the one thrown out has closed.
+    let (status, refused, _) = fixture
+        .send(post(
+            format!("/v1/inventory/stock/{milk}/counts"),
+            "CNT-0",
+            Some(olaya.as_str()),
+            serde_json::json!({ "lot": lots[1], "declared": 22 }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "inventory.no_such_lot");
+
+    // Somebody counts **the shelf**, naming no batch, and finds two missing. The
+    // shortage comes off the lot that goes out next, which is the one left.
+    let (status, counted, _) = fixture
+        .send(post(
+            format!("/v1/inventory/stock/{milk}/counts"),
+            "CNT-1",
+            Some(olaya.as_str()),
+            serde_json::json!({ "declared": 22 }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{counted}");
+
+    // Stock of a product nobody declared is refused on the state of the world,
+    // not on the shape of the request.
+    let (status, unknown, _) = fixture
+        .send(post(
+            format!("/v1/inventory/stock/{}/receipts", idem("PROD-GHOST")),
+            "RCV-4",
+            Some(olaya.as_str()),
+            serde_json::json!({ "quantity": 1, "value": { "minor": 1, "currency": "SAR" } }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{unknown}");
+    assert_eq!(unknown["code"], "inventory.no_such_product");
+    assert!(
+        unknown["detail"]
+            .as_str()
+            .expect("a detail")
+            .contains("There is no product"),
+        "{unknown}"
+    );
+
+    fixture
+        .project::<inventory::Inventory>(tenant, &inventory::projections(), inventory::upcasters())
+        .await;
+    // The books too, because the last thing this test asserts is what they now
+    // hold — and an unprojected ledger would say nothing whatever happened.
+    fixture
+        .project::<ledger::Ledger>(tenant, &ledger::projections(), ledger::upcasters())
+        .await;
+
+    let get = |path: &str| {
+        Request::get(path.to_owned())
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (status, shelves, _) = fixture.send(get("/v1/inventory/stock")).await;
+    assert_eq!(status, StatusCode::OK, "{shelves}");
+    let shelf = &shelves["items"][0];
+    assert_eq!(shelf["product"], milk);
+    assert_eq!(shelf["branch"], olaya, "stock is held per branch");
+    assert_eq!(
+        shelf["on_hand"], 22,
+        "twenty-four less the two nobody found"
+    );
+    // 120.00 for twenty-four, less two of them at their own lot's cost.
+    assert_eq!(shelf["value"]["minor"], 11_000);
+
+    // **What is left is one lot, and the listing says which and when.**
+    let (status, open, _) = fixture.send(get("/v1/inventory/lots")).await;
+    assert_eq!(status, StatusCode::OK, "{open}");
+    let open = open["items"].as_array().expect("a list");
+    assert_eq!(
+        open.len(),
+        1,
+        "the crate that expired first emptied and closed"
+    );
+    assert_eq!(open[0]["id"], lots[0]);
+    assert_eq!(open[0]["code"], "B-2026-04-05");
+    assert_eq!(open[0]["expires_on"], "2026-04-21");
+    assert_eq!(open[0]["quantity"], 24, "what arrived");
+    assert_eq!(open[0]["remaining"], 22, "what is still there");
+
+    let (status, movements, _) = fixture.send(get("/v1/inventory/movements")).await;
+    assert_eq!(status, StatusCode::OK, "{movements}");
+    let movements = movements["items"].as_array().expect("a list");
+    assert_eq!(movements.len(), 4, "two in, one out, one counted");
+
+    let thrown = movements
+        .iter()
+        .find(|row| row["kind"] == "written_off")
+        .expect("the write-off is in the list");
+    assert_eq!(thrown["reason"], "expired");
+    assert_eq!(thrown["quantity"], -12);
+    assert_eq!(
+        thrown["lot"], lots[1],
+        "the rule took the crate expiring first, not the one received first"
+    );
+
+    let count = movements
+        .iter()
+        .find(|row| row["kind"] == "counted")
+        .expect("the count is in the list");
+    assert_eq!(count["expected"], 24);
+    assert_eq!(count["declared"], 22);
+    assert_eq!(count["quantity"], -2);
+    assert_eq!(count["lot"], lots[0]);
+
+    // **The canary**: what is on hand is the sum of what moved, lot by lot.
+    for lot in open {
+        assert_eq!(
+            movements
+                .iter()
+                .filter(|row| row["lot"] == lot["id"])
+                .filter_map(|row| row["quantity"].as_i64())
+                .sum::<i64>(),
+            lot["remaining"].as_i64().expect("a quantity"),
+            "a lot holds a quantity its movements do not explain"
+        );
+    }
+    assert_eq!(
+        movements
+            .iter()
+            .filter_map(|row| row["quantity"].as_i64())
+            .sum::<i64>(),
+        shelf["on_hand"].as_i64().expect("a quantity"),
+        "the shelf holds a quantity its movements do not explain"
+    );
+
+    // **And what it cost, in the books.** The crate that went off is 72.00 —
+    // what that lot was carried at, not an average across both — and the two
+    // bottles nobody found are 2 of 24 of 120.00, which is 10.00. Both are
+    // losses and both came off the asset. The deliveries put it there: a
+    // receipt debits `1300` and credits `2010 Goods received, not invoiced`,
+    // so the asset is 192.00 delivered less 82.00 lost, and the holding account
+    // is the whole 192.00 this tenant has never been billed for.
+    let (status, accounts, _) = fixture.send(get("/v1/ledger/accounts")).await;
+    assert_eq!(status, StatusCode::OK, "{accounts}");
+    let balance = |code: &str| {
+        accounts
+            .as_array()
+            .expect("a list")
+            .iter()
+            .find(|account| account["code"] == code)
+            .and_then(|account| account["balance"].as_i64())
+            .expect("an account")
+    };
+    assert_eq!(
+        balance("5900"),
+        7_200 + 1_000,
+        "the crate and the two bottles"
+    );
+    assert_eq!(
+        balance("1300"),
+        12_000 + 7_200 - (7_200 + 1_000),
+        "what was delivered, less what was lost"
+    );
+    assert_eq!(
+        balance("2010"),
+        -(12_000 + 7_200),
+        "nobody has billed this tenant for any of it"
+    );
+
+    // Where it posts, and the ETag that guards the choice.
+    let response = fixture.raw(get("/v1/inventory/posting-accounts")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let chosen: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .expect("reads"),
+    )
+    .expect("json");
+    assert_eq!(chosen["inventory"], "1300");
+    assert_eq!(chosen["goods_received"], "2010");
+    assert_eq!(chosen["cogs"], "5010");
+    assert_eq!(chosen["variance"], "5900");
+    assert_eq!(chosen["waste"], "5900");
+
+    // An account this tenant's chart does not have is refused rather than
+    // stored — the guard `sales` makes, asked of the log.
+    // **`If-Match` only when there is one to send.** Without it the write is
+    // unconditional, which is what a first setting has to be.
+    let put = |path: &str, body: serde_json::Value, etag: Option<&str>| {
+        let mut request = Request::put(path.to_owned())
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(etag) = etag {
+            request = request.header(header::IF_MATCH, etag);
+        }
+        request.body(Body::from(body.to_string())).unwrap()
+    };
+    let (status, refused, _) = fixture
+        .send(put(
+            "/v1/inventory/posting-accounts",
+            serde_json::json!({
+                "inventory": "1300", "goods_received": "2010", "cogs": "5010",
+                "variance": "5900", "waste": "9999"
+            }),
+            Some(etag.as_str()),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["code"], "ledger.no_such_account");
+
+    let (status, stored, _) = fixture
+        .send(put(
+            "/v1/inventory/posting-accounts",
+            // **Spoilage apart from shrinkage**, which is the whole reason the
+            // two are separate fields: one PUT, no code change, and a manager
+            // reads what was thrown away without a count variance in it.
+            serde_json::json!({
+                "inventory": "1300", "goods_received": "2010", "cogs": "5010",
+                "variance": "5900", "waste": "5400"
+            }),
+            Some(etag.as_str()),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{stored}");
+
+    let (status, chosen, _) = fixture.send(get("/v1/inventory/posting-accounts")).await;
+    assert_eq!(status, StatusCode::OK, "{chosen}");
+    assert_eq!(chosen["waste"], "5400");
+    assert_eq!(
+        chosen["variance"], "5900",
+        "and the count's stays where it was"
+    );
+
+    // **And how long before a date the business wants warning.** Nothing reads
+    // it yet and the route says so; it ships now so the answer is already there
+    // when the check that reads it arrives.
+    let (status, window, _) = fixture.send(get("/v1/inventory/expiry-window")).await;
+    assert_eq!(status, StatusCode::OK, "{window}");
+    assert_eq!(window["days"], 30);
+
+    let (status, refused, _) = fixture
+        .send(put(
+            "/v1/inventory/expiry-window",
+            serde_json::json!({ "days": -1 }),
+            None,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["code"], "inventory.not_a_window");
+
+    let (status, stored, _) = fixture
+        .send(put(
+            "/v1/inventory/expiry-window",
+            serde_json::json!({ "days": 7 }),
+            None,
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{stored}");
+    let (_, window, _) = fixture.send(get("/v1/inventory/expiry-window")).await;
+    assert_eq!(window["days"], 7);
+
+    fixture.cleanup().await;
+}
+
+/// **The shelves at a glance, over HTTP.** An empty tenant's summary is empty;
+/// a batch is going off or gone by the tenant's own day and the tenant's own
+/// window; a shelf below zero says what it owes; and `branch` narrows the
+/// summary, the stock and the lots to one branch, each row naming its product.
+///
+/// **The tenant's clock is set to a zone whose day is not UTC's** when the test
+/// runs — of UTC-12 and UTC+14 one always is — and the two branches hold batches
+/// dated the tenant's today and the day before. Read by UTC's day, one of them
+/// lands in the other column, whichever way the zone differs. The zone is one
+/// whose day will not turn for an hour, so the day the test dates its batches
+/// by is still the day when the route reads its clock.
+///
+/// **The window is two days, set through its route**, and Olaya also holds
+/// batches dated its last day and the day after: read under the default thirty
+/// days, the day after would be going off too.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "a chart, two branches, two products, four dated batches, a short sale and three routes read twice"
+)]
+async fn stock_is_summarised_a_branch_at_a_time() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    fixture.enable_module(tenant, branches::setup()).await;
+    fixture.enable_module(tenant, inventory::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let get = |path: &str| {
+        Request::get(path.to_owned())
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let send = |method: &str, path: &str, branch: Option<&str>, body: serde_json::Value| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path.to_owned())
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("Idempotency-Key", idem(&format!("{path}{body}")));
+        if let Some(branch) = branch {
+            request = request.header("x-branch", branch);
+        }
+        request.body(Body::from(body.to_string())).unwrap()
+    };
+
+    // **An empty tenant**: nothing on a shelf is an empty summary.
+    let (status, empty, _) = fixture.send(get("/v1/inventory/summary")).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["branches"], serde_json::json!([]), "{empty}");
+
+    let now = chrono::Utc::now();
+    let utc = erp_types::Calendar::UTC.day(now);
+    // UTC-12 is on another day before noon UTC and UTC+14 from ten, and each
+    // turns at one of those hours; an hour's margin always leaves one of them.
+    let zone = ["Etc/GMT+12", "Pacific/Kiritimati"]
+        .into_iter()
+        .find(|zone| {
+            let calendar = erp_types::Calendar::named(zone).expect("a zone");
+            calendar.day(now) != utc
+                && calendar.day(now + chrono::Duration::hours(1)) == calendar.day(now)
+        })
+        .expect("one of the two is on another day than UTC, and stays on it for an hour");
+    let (status, set, _) = fixture
+        .send(send(
+            "PUT",
+            "/v1/tenant/calendar",
+            None,
+            serde_json::json!({ "zone": zone }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{set}");
+    let today = erp_types::Calendar::named(zone).expect("a zone").day(now);
+    let (status, set, _) = fixture
+        .send(send(
+            "PUT",
+            "/v1/inventory/expiry-window",
+            None,
+            serde_json::json!({ "days": 2 }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{set}");
+    let last_day = today + chrono::Days::new(2);
+
+    let (status, installed, _) = fixture
+        .send(send(
+            "POST",
+            "/v1/ledger/chart",
+            None,
+            serde_json::json!({ "template": "services", "currency": "SAR" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{installed}");
+    let mut opened = Vec::new();
+    for name in ["العليا", "الملز"] {
+        let (status, branch, _) = fixture
+            .send(send(
+                "POST",
+                "/v1/branches",
+                None,
+                serde_json::json!({
+                    "name": name,
+                    "address": { "street": "King Fahd Road", "city": "Riyadh", "country": "SA" }
+                }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{branch}");
+        opened.push(branch["id"].as_str().expect("an id").to_owned());
+    }
+    let (olaya, malaz) = (&opened[0], &opened[1]);
+    let (status, milk, _) = fixture
+        .send(send(
+            "POST",
+            "/v1/inventory/products",
+            None,
+            serde_json::json!({ "name": "حليب طازج", "unit": "bottle", "tracking": "lot" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{milk}");
+    let milk = milk["id"].as_str().expect("an id").to_owned();
+
+    // Olaya's batches good until the tenant's today and the window's last day
+    // are going off, and the one good a day longer is not yet; Malaz's was good
+    // until the day before, so it has gone.
+    for (branch, code, expires_on) in [
+        (olaya, "B-TODAY", today),
+        (olaya, "B-LAST-DAY", last_day),
+        (olaya, "B-OUTSIDE", last_day + chrono::Days::new(1)),
+        (malaz, "B-YESTERDAY", today.pred_opt().expect("a day")),
+    ] {
+        let (status, received, _) = fixture
+            .send(send(
+                "POST",
+                &format!("/v1/inventory/stock/{milk}/receipts"),
+                Some(branch),
+                serde_json::json!({
+                    "quantity": 6,
+                    "value": { "minor": 3_000, "currency": "SAR" },
+                    "code": code,
+                    "expires_on": expires_on.to_string()
+                }),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{received}");
+    }
+
+    // **Beans sold short at Olaya**: two bags at 5.00 received, five sold the
+    // way `sales` sells them, so three bags are owed at 5.00.
+    let (status, beans, _) = fixture
+        .send(send(
+            "POST",
+            "/v1/inventory/products",
+            None,
+            serde_json::json!({ "name": "حبوب إسبريسو", "unit": "bag" }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{beans}");
+    let beans = beans["id"].as_str().expect("an id").to_owned();
+    let (status, received, _) = fixture
+        .send(send(
+            "POST",
+            &format!("/v1/inventory/stock/{beans}/receipts"),
+            Some(olaya),
+            serde_json::json!({ "quantity": 2, "value": { "minor": 1_000, "currency": "SAR" } }),
+        ))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{received}");
+    let db = fixture
+        .control
+        .enter_for_maintenance(tenant)
+        .await
+        .expect("maintenance entry");
+    let mut tx = db.begin().await.expect("a transaction");
+    inventory::consume_in(
+        &mut tx,
+        &erp_types::AggregateId::new(&beans).expect("an id"),
+        &inventory::Consumption {
+            quantity: Some(5),
+            lot: None,
+            serials: Vec::new(),
+            reference: "inv-1.1".to_owned(),
+            at: now,
+        },
+        &erp_eventlog::Metadata::default().at_branch(olaya),
+    )
+    .await
+    .expect("a plain product sells short");
+    tx.commit().await.expect("commits");
+
+    fixture
+        .project::<inventory::Inventory>(tenant, &inventory::projections(), inventory::upcasters())
+        .await;
+
+    let (status, summary, _) = fixture.send(get("/v1/inventory/summary")).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(
+        summary["today"],
+        today.to_string(),
+        "the tenant's day in {zone}, not UTC's {utc}"
+    );
+    assert_eq!(
+        summary["expiring_through"],
+        last_day.to_string(),
+        "the tenant's two days, not the default thirty"
+    );
+    let rows = summary["branches"].as_array().expect("a list").clone();
+    assert_eq!(rows.len(), 2, "{summary}");
+    let row = |branch: &str| {
+        rows.iter()
+            .find(|row| row["branch"] == branch)
+            .cloned()
+            .unwrap_or_else(|| panic!("no row for {branch}: {summary}"))
+    };
+    assert_eq!(
+        (&row(olaya)["expiring"], &row(olaya)["expired"]),
+        (&serde_json::json!(2), &serde_json::json!(0)),
+        "good until the tenant's today and the window's last day, and the day after not yet: {summary}"
+    );
+    assert_eq!(
+        (&row(malaz)["expiring"], &row(malaz)["expired"]),
+        (&serde_json::json!(0), &serde_json::json!(1)),
+        "good until the tenant's yesterday has gone: {summary}"
+    );
+    assert_eq!(row(olaya)["products"], 2);
+    assert_eq!(
+        row(olaya)["value"],
+        serde_json::json!([{ "minor": 3 * 3_000 - 1_500, "currency": "SAR" }])
+    );
+    assert_eq!(
+        row(olaya)["below_zero"],
+        serde_json::json!([{
+            "product": beans,
+            "name": "حبوب إسبريسو",
+            "on_hand": -3,
+            "owes": { "minor": 1_500, "currency": "SAR" }
+        }]),
+        "three bags owed at 5.00: {summary}"
+    );
+    assert_eq!(row(malaz)["below_zero"], serde_json::json!([]));
+
+    // **One branch, when asked for**, on all three routes.
+    let (status, one, _) = fixture
+        .send(get(&format!("/v1/inventory/summary?branch={malaz}")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{one}");
+    assert_eq!(one["branches"], serde_json::json!([row(malaz)]));
+
+    let (status, every, _) = fixture.send(get("/v1/inventory/stock")).await;
+    assert_eq!(status, StatusCode::OK, "{every}");
+    assert_eq!(every["items"].as_array().map(Vec::len), Some(3));
+    let (status, shelves, _) = fixture
+        .send(get(&format!("/v1/inventory/stock?branch={malaz}")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{shelves}");
+    let shelves = shelves["items"].as_array().expect("a list").clone();
+    assert_eq!(shelves.len(), 1, "{shelves:?}");
+    assert_eq!(shelves[0]["branch"], malaz.as_str());
+    assert_eq!(shelves[0]["name"], "حليب طازج");
+
+    let (status, lots, _) = fixture
+        .send(get(&format!("/v1/inventory/lots?branch={olaya}")))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{lots}");
+    let lots = lots["items"].as_array().expect("a list").clone();
+    assert_eq!(lots.len(), 3, "{lots:?}");
+    for lot in &lots {
+        assert_eq!(lot["branch"], olaya.as_str());
+        assert_eq!(lot["name"], "حليب طازج");
+    }
 
     fixture.cleanup().await;
 }

@@ -159,7 +159,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
     // `sales.no_such_customer`, which is the honest answer — there is no such
     // customer, because there are none.
     .requiring(&["ledger"])
-    .reading(&["crm", "hr", "ledger"])
+    .reading(&["crm", "hr", "inventory", "ledger"])
 }
 
 /// This module's entitlement name.

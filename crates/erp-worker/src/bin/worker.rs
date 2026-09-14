@@ -133,14 +133,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // One health job for both planes: every tenant's invariants, and the
     // control plane's outbox on its own turn of the same interval.
     let health = Arc::new(
-        HealthJob::every(Duration::from_mins(5))
+        HealthJob::every(HEALTH_INTERVAL)
             .with(Arc::new(TrialBalance))
             .with(Arc::new(ReportsReconcile))
+            .with(Arc::new(StockValueAgrees))
+            .with(Arc::new(StockBellRings {
+                grace: bell_grace(&config.schedule),
+            }))
             .with(Arc::new(NoOverpaidInvoice))
             .with(Arc::new(NoOverpaidBill))
             .with(Arc::new(CertificateExpiry))
             .with(Arc::new(WorkDocumentExpiry)),
     );
+    let stock_bell = Arc::clone(&control);
     let mut worker = Worker::new(control, config)
         .with_platform_job(Arc::new(PlatformOutboxJob::new(platform, EMAIL_BATCH)))
         .with_platform_job(health.clone())
@@ -153,6 +158,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_job(Arc::new(LandInboundMessages))
         .with_job(Arc::new(AnnounceNewBookings))
         .with_job(Arc::new(AnnounceExpiringDocuments))
+        .with_job(Arc::new(AnnounceExpiringStock {
+            control: stock_bell,
+        }))
         .with_job(Arc::new(BookingReminders))
         .with_job(Arc::new(ExpireUnpaidHolds))
         .with_job(Arc::new(BillCompletedBookings))
@@ -237,6 +245,565 @@ impl Invariant for TrialBalance {
                 )
             })
             .collect())
+    }
+}
+
+/// **What the shelves are worth, against the account that says so.**
+///
+/// Two readings of one log: what `proj_inventory` carries every lot at, and
+/// what `proj_ledger` says `1300` holds. `inventory` writes the account at
+/// both ends now — a receipt debits it, and every write-off, count variance and
+/// consumption credits it, each in the transaction that writes the movement —
+/// so a difference is not paperwork in flight. It is a posting that did not
+/// happen, an entry somebody made against the stock account by hand, or a
+/// projection that has not caught up.
+///
+/// It lives here for the same reason [`TrialBalance`] and [`ReportsReconcile`]
+/// do, and here specifically rather than in `inventory`: the comparison needs
+/// `proj_ledger` beside `proj_inventory`, and L3 forbids a module from reading
+/// across projection groups. `inventory::value_on_hand` is the half that
+/// belongs to the module; this is the other.
+///
+/// # It used to fire for every delivery, and that was the alarm nobody could act on
+///
+/// Until 2026-09-13 receiving posted nothing and the *supplier's bill* debited
+/// the asset, so the days between goods arriving and their invoice being typed
+/// in were days this check called a violation — the ordinary state of a
+/// business, logged at error level every five minutes. The receipt posts now,
+/// against `2010 Goods received, not invoiced`, and the bill line that names
+/// the product relieves that account instead of `1300`. The window this
+/// complained about is a balance on `2010`, where it belongs, and a finding
+/// here means something is actually wrong.
+///
+/// # Both sides, including the one with no rows
+///
+/// The comparison is driven from [`stock_disagreements`], which pairs each
+/// currency the shelves hold with the account's balance **and** adds the
+/// account's own currency when no shelf holds it. `value_on_hand` groups
+/// `stock_item` rows, so a tenant whose stock account holds money and whose
+/// shelves are empty produces no row at all — and that is precisely the case
+/// this check's own wording names, a debit that never reached a shelf. A
+/// currency the account cannot be compared in is **reported rather than
+/// dropped** for the same reason: stock in a second currency is stock somebody
+/// has to be told about.
+struct StockValueAgrees;
+
+/// **What the two sides disagree by**, as `(held, booked)` pairs, one per
+/// currency that either side knows about.
+///
+/// Pure, and separately tested, because the interesting case has no row on one
+/// side and a comparison written as a filter over one of the two lists silently
+/// skips it. `booked` is the account's balance, which exists in exactly one
+/// currency — the one the account was opened in.
+fn stock_disagreements(
+    held: &[erp_types::Money],
+    booked: Option<erp_types::Money>,
+) -> Vec<(erp_types::Money, Option<erp_types::Money>)> {
+    let mut sides: Vec<(erp_types::Money, Option<erp_types::Money>)> = held
+        .iter()
+        .map(|held| {
+            (
+                *held,
+                booked.filter(|booked| booked.currency() == held.currency()),
+            )
+        })
+        .collect();
+
+    // **The side with no shelf.** A balance on the account in a currency no lot
+    // is carried in is stock the books claim and the shelves have never heard
+    // of, which is the one shape a row-driven comparison cannot see.
+    if let Some(booked) = booked.filter(|booked| !booked.is_zero())
+        && !held.iter().any(|held| held.currency() == booked.currency())
+    {
+        sides.push((erp_types::Money::zero(booked.currency()), Some(booked)));
+    }
+
+    sides
+        .into_iter()
+        .filter(|(held, booked)| booked.map(erp_types::Money::minor) != Some(held.minor()))
+        .collect()
+}
+
+#[async_trait::async_trait]
+impl Invariant for StockValueAgrees {
+    fn name(&self) -> &'static str {
+        "stock_value"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(inventory::module_id())
+    }
+
+    async fn check(
+        &self,
+        db: &erp_control::TenantDb,
+    ) -> Result<Vec<Finding>, erp_worker::BoxError> {
+        let mut conn = db.acquire().await?;
+        // The tenant's own account, not the conventional code: a business that
+        // pointed stock at `1310` would otherwise be reported as broken for
+        // ever.
+        let account = inventory::PostingAccounts::resolve(&mut conn)
+            .await?
+            .inventory;
+        let booked = ledger::account_balances(&mut conn)
+            .await?
+            .into_iter()
+            .find(|a| a.code == account.as_str())
+            .map(|a| a.balance);
+
+        Ok(
+            stock_disagreements(&inventory::value_on_hand(&mut conn).await?, booked)
+                .into_iter()
+                .map(|(held, booked)| {
+                    Finding::new(
+                        "stock_value",
+                        format!(
+                            "the shelves are worth {held} and {account} holds {} — a movement \
+                             that did not post, an entry made against the stock account by \
+                             hand, or a read model behind the log",
+                            booked.map_or_else(|| "nothing".to_owned(), |b| b.to_string()),
+                        ),
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+/// **Stock going off, on the bell of whoever may write it off** — decision 9's
+/// warning, raised as a notification (D-B) rather than logged for operators.
+///
+/// Reads the tenant's own window ([`inventory::ExpiryWindow`]) and calendar and
+/// the open lots out of `proj_inventory`, and puts each through [`going_off`]:
+/// a lot that reaches its date inside the window is `stock_expiring`, one past
+/// its date and still on the shelf `stock_expired`. **A lot with no date, or
+/// with nothing left on it, is neither** — whether a sale, a count or a
+/// write-off emptied it — and one that empties after it was told is never told
+/// again. It posts nothing and moves nothing: what leaves the shelf leaves
+/// through a write-off a person enters.
+///
+/// **A job and not a hook in `inventory`**, because no module may ring the bell
+/// (§47): `messaging` reads `inventory` to say what a lot is, so `inventory`
+/// announcing would close a cycle cargo refuses. A scan like every producer
+/// here — no cursor, every visit.
+///
+/// # Once per lot, and once more when its date has passed
+///
+/// A notification's id is derived from its kind and its subject
+/// (`notifications::announce::derived_id`); here the subject is the lot and the
+/// kind is its state. So a second run writes nothing, and neither does a window
+/// widened to reach a lot already told — the window is not part of the id.
+/// **Passing its date earns a second, distinct notification**, because it asks
+/// for a different act: going off soon is an order to rotate or mark down while
+/// the batch can still be sold, and gone but still on the shelf is stock that
+/// has to come off it today — a write-off for `expired`, or a return.
+/// Collapsing the two is how the second reads as a repeat of the first. It too
+/// is said once.
+///
+/// # Who is told
+///
+/// **Exactly the members the write-off route would let write that lot off**
+/// ([`who_may_write_off`]). That is membership and roles, control-plane, which
+/// is why this job holds the control plane and names them to the bell itself —
+/// and asks it only when there is somebody to tell.
+struct AnnounceExpiringStock {
+    control: Arc<ControlPlane>,
+}
+
+/// How many lots one read covers, for the announcer and the check alike.
+const STOCK_PAGE: i64 = 200;
+
+#[async_trait::async_trait]
+impl erp_worker::Job for AnnounceExpiringStock {
+    fn name(&self) -> &'static str {
+        "notifications.stock"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(inventory::module_id())
+    }
+
+    async fn tick(&self, db: &erp_control::TenantDb) -> Result<Activity, erp_worker::BoxError> {
+        if !announces(db) {
+            return Ok(Activity::Idle);
+        }
+        let now = chrono::Utc::now();
+        let (window, today, limits) = {
+            let mut conn = db.read().await?;
+            let window = inventory::ExpiryWindow::resolve(&mut conn).await?;
+            // The tenant's day: a batch dated the 11th is still good at one in
+            // the morning on the 11th in Riyadh.
+            let today = erp_eventlog::configuration::calendar(&mut conn)
+                .await?
+                .day(now);
+            // **Unreadable limits stop the job** rather than reading as none,
+            // exactly as `TenantDb::permits` refuses: telling somebody a limit
+            // keeps away from the stock is not a smaller fault than telling
+            // nobody, and the bell check says so either way.
+            let limits = erp_eventlog::configuration::get::<erp_tenant::Limits>(
+                &mut conn,
+                erp_tenant::Limits::KEY,
+            )
+            .await?
+            .map(|configured| configured.value)
+            .unwrap_or_default();
+            (window, today, limits)
+        };
+
+        // ponytail: every open lot inside the window is read on every visit, a
+        // page at a time, so lots past the first page are not starved behind
+        // the ones already told. A watermark if a shop with thousands of dated
+        // lots ever makes the read show.
+        let mut members = None;
+        let mut after = None;
+        loop {
+            let page = {
+                let mut conn = db.read().await?;
+                inventory::lots(
+                    &mut conn,
+                    None,
+                    None,
+                    read_before(today, window),
+                    STOCK_PAGE,
+                    after.as_ref(),
+                )
+                .await?
+            };
+            let (gone, soon) = going_off(&page.items, today, window);
+            let mut worked = false;
+            for (kind, lots) in [
+                (notifications::Kind::StockExpired, gone),
+                (notifications::Kind::StockExpiring, soon),
+            ] {
+                let ids: Vec<String> = lots.iter().map(|lot| lot.id.clone()).collect();
+                let told = {
+                    let mut conn = db.read().await?;
+                    notifications::announced_subjects(&mut conn, kind, &ids).await?
+                };
+                // **By branch**, because who may write stock off can differ by
+                // branch.
+                let mut untold = std::collections::BTreeMap::<_, Vec<_>>::new();
+                for lot in lots.into_iter().filter(|lot| !told.contains(&lot.id)) {
+                    match erp_types::AggregateId::new(lot.id.clone()) {
+                        Ok(id) => untold.entry(lot.branch.as_deref()).or_default().push(id),
+                        // Not skipped quietly: the bell check reports it too.
+                        Err(error) => tracing::warn!(
+                            tenant = %db.tenant(),
+                            lot = %lot.id,
+                            %error,
+                            "a lot whose id cannot name a notification"
+                        ),
+                    }
+                }
+                if untold.is_empty() {
+                    continue;
+                }
+                if members.is_none() {
+                    members = Some(self.control.members(db.tenant()).await?);
+                }
+                let everybody = members.as_deref().unwrap_or_default();
+                for (branch, subjects) in untold {
+                    let to = who_may_write_off(everybody, &limits, branch);
+                    let swept = notifications::announce_all(db, kind, &subjects, &to, now).await?;
+                    worked |= swept.announced > 0;
+                }
+            }
+            // **One page of announcements a tick**, which keeps a visit bounded;
+            // the next tick reads past what this one told.
+            if worked {
+                return Ok(Activity::Worked);
+            }
+            match page.next {
+                Some(next) => after = Some(next),
+                None => return Ok(Activity::Idle),
+            }
+        }
+    }
+}
+
+/// **The logins the write-off route would let write a lot at `branch` off.**
+///
+/// The route's own decision, asked per member: its capability
+/// ([`inventory::http::WRITE_OFF`], named from the type the handler takes)
+/// under `inventory`, through the role that applies there — a module role over
+/// the tenant-wide one — narrowed by the tenant's limits with the lot's branch
+/// as the request's (`Limits::permit` over `limits::facts_at`, which is what
+/// `Allowed` runs). **A suspended login is not told**: it cannot sign in to
+/// write anything off.
+fn who_may_write_off(
+    members: &[erp_control::Member],
+    limits: &erp_tenant::Limits,
+    branch: Option<&str>,
+) -> Vec<String> {
+    let module = inventory::module_id();
+    let facts = erp_tenant::limits::facts_at(inventory::http::WRITE_OFF, branch);
+    members
+        .iter()
+        .filter(|member| !member.suspended)
+        .filter(|member| {
+            limits.permit(
+                &erp_control::Access {
+                    role: member.role,
+                    overrides: member.module_roles.clone(),
+                },
+                inventory::http::WRITE_OFF,
+                Some(&module),
+                &facts,
+            )
+        })
+        .map(|member| member.identity.to_string())
+        .collect()
+}
+
+/// **What the listing is asked for**: the day after
+/// [`inventory::ExpiryWindow::warns_until`], because
+/// `expiring_before` is strictly before and the window's last day warns. Only
+/// a narrowing of what is read — [`going_off`] decides — but a narrowing that
+/// reads too little warns too little, and no classifier can notice a lot it
+/// was never handed, so this half of the boundary is tested too.
+fn read_before(
+    today: chrono::NaiveDate,
+    window: inventory::ExpiryWindow,
+) -> Option<chrono::NaiveDate> {
+    window.warns_until(today).and_then(|last| last.succ_opt())
+}
+
+/// **Which lots have passed their date, and which reach it inside the window**
+/// — `(gone, soon)`, in the order given.
+///
+/// The rule, in one function tested without a database. **A lot with no date
+/// never warns**: nothing on it spoils. **An emptied lot never warns**: there
+/// is nothing left on it to throw away. A lot is gone once its date is behind
+/// `today` — a batch dated today is still good today, which is the reading
+/// `GET /v1/inventory/lots?expiring_before=` takes — and soon when its date is
+/// no later than [`inventory::ExpiryWindow::warns_until`].
+fn going_off(
+    lots: &[inventory::LotRow],
+    today: chrono::NaiveDate,
+    window: inventory::ExpiryWindow,
+) -> (Vec<&inventory::LotRow>, Vec<&inventory::LotRow>) {
+    let last = window.warns_until(today);
+    let mut gone = Vec::new();
+    let mut soon = Vec::new();
+    for lot in lots.iter().filter(|lot| lot.remaining > 0) {
+        let Some(expires_on) = lot.expires_on else {
+            continue;
+        };
+        if expires_on < today {
+            gone.push(lot);
+        } else if last.is_none_or(|last| expires_on <= last) {
+            soon.push(lot);
+        }
+    }
+    (gone, soon)
+}
+
+/// **Whether the bell rang for stock going off** — what operators watch in
+/// place of every tenant's expiring lots (D-C).
+///
+/// A tenant is told about its own lots, on its own bell
+/// ([`AnnounceExpiringStock`]), and an operator can do nothing about a batch of
+/// milk. What an operator can act on is the telling not happening: **a lot the
+/// announcer should have told somebody about, with no notification of the kind
+/// its state calls for, for longer than [`bell_grace`]**. That is the job not
+/// running, the bell's read model behind, nobody who may write stock off where
+/// the lot is — a limit refusing everybody, a suspended owner — or a
+/// notification that cannot be recorded. Silent while the bell works.
+///
+/// Two readings of one log, like [`StockValueAgrees`]: the lots out of
+/// `proj_inventory` and what was announced out of `proj_notifications`,
+/// compared here because L3 keeps either module from reading the other's. The
+/// rule is [`unannounced`], pure and tested.
+///
+/// **Silent without a bell.** A tenant that has not enabled `notifications` has
+/// no path to be broken, and nobody is told either — see §77.
+struct StockBellRings {
+    grace: chrono::TimeDelta,
+}
+
+/// How often the health job looks at a tenant.
+const HEALTH_INTERVAL: Duration = Duration::from_mins(5);
+
+/// **How long a lot may be due a notification with none raised before that is
+/// a finding.**
+///
+/// [`AnnounceExpiringStock`] runs on every visit to a tenant, so the ordinary
+/// wait between a lot falling due and being told is the wait for the next visit
+/// — at its longest, for a tenant with nothing else going on,
+/// [`erp_control::WorkSchedule::longest_idle_delay`]: the six-hour ceiling and
+/// two hours of jitter with the shipped schedule. **Plus one health interval**,
+/// because the notification reaches the bell's read model a round after it is
+/// written and the check only looks that often: a finding means a whole visit
+/// came and went without it. Derived from the schedule the worker runs, so a
+/// longer ceiling moves the grace with it.
+fn bell_grace(schedule: &erp_control::WorkSchedule) -> chrono::TimeDelta {
+    chrono::TimeDelta::from_std(schedule.longest_idle_delay() + HEALTH_INTERVAL)
+        .unwrap_or(chrono::TimeDelta::MAX)
+}
+
+/// **The lots the bell should have rung for by now and has not** — those past
+/// their date first, then those going off.
+///
+/// A lot is due `stock_expired` from the start of the tenant's day after its
+/// date, and `stock_expiring` from the start of the day its window first
+/// reaches its date — **or from when the lot was recorded, or (going off) when
+/// the tenant last set the window, if either is later**. A delivery that lands
+/// already inside its window, or a window widened this morning, is due from
+/// then, because nothing could have told anybody before it. It is a finding
+/// once it has been due for longer than `grace` and `told` says no notification
+/// of that kind about it exists.
+fn unannounced(
+    lots: &[inventory::LotRow],
+    told: impl Fn(notifications::Kind, &str) -> bool,
+    calendar: erp_types::Calendar,
+    now: erp_types::Timestamp,
+    window: inventory::ExpiryWindow,
+    window_set_at: Option<erp_types::Timestamp>,
+    grace: chrono::TimeDelta,
+) -> Vec<&inventory::LotRow> {
+    let (gone, soon) = going_off(lots, calendar.day(now), window);
+    let days = chrono::Days::new(u64::try_from(window.days).unwrap_or_default());
+    let expired = gone.into_iter().map(|lot| {
+        let from = lot.expires_on.and_then(|day| day.succ_opt());
+        (notifications::Kind::StockExpired, lot, from, None)
+    });
+    let expiring = soon.into_iter().map(|lot| {
+        let from = lot.expires_on.and_then(|day| day.checked_sub_days(days));
+        (notifications::Kind::StockExpiring, lot, from, window_set_at)
+    });
+    expired
+        .chain(expiring)
+        .filter(|(kind, lot, _, _)| !told(*kind, &lot.id))
+        .filter(|(_, lot, from, set)| {
+            let due = from
+                .map(|day| calendar.start_of(day))
+                .into_iter()
+                .chain([lot.recorded_at])
+                .chain(*set)
+                .max()
+                .unwrap_or(lot.recorded_at);
+            now - due > grace
+        })
+        .map(|(_, lot, _, _)| lot)
+        .collect()
+}
+/// The first few lots, **by id and nothing else**. An operator acts on the
+/// bell, not on the stock: what is on a tenant's shelf, how much and until
+/// when, is the tenant's (D-C), and the id is enough to find the lot and its
+/// notification.
+fn describe_lots(lots: &[&inventory::LotRow]) -> String {
+    const NAMED: usize = 5;
+    let named: Vec<&str> = lots.iter().take(NAMED).map(|lot| lot.id.as_str()).collect();
+    if lots.len() > NAMED {
+        format!("{}, and {} more", named.join("; "), lots.len() - NAMED)
+    } else {
+        named.join("; ")
+    }
+}
+
+#[async_trait::async_trait]
+impl Invariant for StockBellRings {
+    fn name(&self) -> &'static str {
+        "stock_bell"
+    }
+
+    fn module(&self) -> Option<ModuleId> {
+        Some(inventory::module_id())
+    }
+
+    async fn check(
+        &self,
+        db: &erp_control::TenantDb,
+    ) -> Result<Vec<Finding>, erp_worker::BoxError> {
+        if !announces(db) {
+            return Ok(Vec::new());
+        }
+        let now = chrono::Utc::now();
+        let mut conn = db.read().await?;
+        // The window with when it was set — see `unannounced`.
+        let (window, window_set_at) = erp_eventlog::configuration::get::<inventory::ExpiryWindow>(
+            &mut conn,
+            inventory::ExpiryWindow::KEY,
+        )
+        .await?
+        .map_or((inventory::ExpiryWindow::DEFAULT, None), |configured| {
+            (configured.value, Some(configured.set_at))
+        });
+        let calendar = erp_eventlog::configuration::calendar(&mut conn).await?;
+
+        let mut late = Vec::new();
+        let mut after = None;
+        loop {
+            let page = inventory::lots(
+                &mut conn,
+                None,
+                None,
+                read_before(calendar.day(now), window),
+                STOCK_PAGE,
+                after.as_ref(),
+            )
+            .await?;
+            let ids: Vec<String> = page.items.iter().map(|lot| lot.id.clone()).collect();
+            let expiring = notifications::announced_subjects(
+                &mut conn,
+                notifications::Kind::StockExpiring,
+                &ids,
+            )
+            .await?;
+            let expired = notifications::announced_subjects(
+                &mut conn,
+                notifications::Kind::StockExpired,
+                &ids,
+            )
+            .await?;
+            let told = |kind: notifications::Kind, id: &str| {
+                if kind == notifications::Kind::StockExpired {
+                    expired.contains(id)
+                } else {
+                    expiring.contains(id)
+                }
+            };
+            late.extend(
+                unannounced(
+                    &page.items,
+                    told,
+                    calendar,
+                    now,
+                    window,
+                    window_set_at,
+                    self.grace,
+                )
+                .into_iter()
+                .cloned(),
+            );
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        drop(conn);
+
+        if late.is_empty() {
+            return Ok(Vec::new());
+        }
+        let named: Vec<&inventory::LotRow> = late.iter().collect();
+        Ok(vec![Finding::new(
+            "stock_bell",
+            format!(
+                "{} {} been due a notification for more than {} minutes with none \
+                 announced — the stock announcer is not running, nobody may write stock \
+                 off where {} kept, or the bell cannot record one: {}",
+                late.len(),
+                if late.len() == 1 {
+                    "lot has"
+                } else {
+                    "lots have"
+                },
+                self.grace.num_minutes(),
+                if late.len() == 1 { "it is" } else { "they are" },
+                describe_lots(&named),
+            ),
+        )])
     }
 }
 
@@ -1324,7 +1891,7 @@ impl erp_worker::Job for SettleGatewayPayments {
 const REPAIR_BATCH: i64 = 200;
 
 // ---------------------------------------------------------------------------
-// Announcing: four producers, one shape
+// Announcing: the producers, one shape
 // ---------------------------------------------------------------------------
 
 /// How far back an announcer looks.
@@ -1398,7 +1965,7 @@ async fn announce_payments(db: &erp_control::TenantDb) {
             .filter(|(k, _)| *k == kind)
             .map(|(_, invoice)| invoice)
             .collect();
-        if let Err(error) = notifications::announce_all(db, kind, &subjects, now).await {
+        if let Err(error) = notifications::announce_all(db, kind, &subjects, &[], now).await {
             tracing::warn!(kind = kind.as_str(), %error, "could not announce");
         }
     }
@@ -1430,7 +1997,7 @@ async fn announce_refusals(db: &erp_control::TenantDb) {
         .filter_map(|source| erp_types::AggregateId::new(source).ok())
         .collect();
     if let Err(error) =
-        notifications::announce_all(db, notifications::Kind::TaxRefused, &subjects, now).await
+        notifications::announce_all(db, notifications::Kind::TaxRefused, &subjects, &[], now).await
     {
         tracing::warn!(%error, "could not announce a refusal");
     }
@@ -1542,9 +2109,14 @@ impl erp_worker::Job for AnnounceNewBookings {
             .filter_map(|id| erp_types::AggregateId::new(id).ok())
             .collect();
 
-        let swept =
-            notifications::announce_all(db, notifications::Kind::BookingReserved, &subjects, now)
-                .await?;
+        let swept = notifications::announce_all(
+            db,
+            notifications::Kind::BookingReserved,
+            &subjects,
+            &[],
+            now,
+        )
+        .await?;
 
         Ok(if swept.announced > 0 {
             Activity::Worked
@@ -1593,9 +2165,14 @@ impl erp_worker::Job for AnnounceExpiringDocuments {
         subjects.sort();
         subjects.dedup();
 
-        let swept =
-            notifications::announce_all(db, notifications::Kind::DocumentExpiring, &subjects, now)
-                .await?;
+        let swept = notifications::announce_all(
+            db,
+            notifications::Kind::DocumentExpiring,
+            &subjects,
+            &[],
+            now,
+        )
+        .await?;
 
         Ok(if swept.announced > 0 {
             Activity::Worked
@@ -1838,6 +2415,15 @@ fn module_jobs(signals: Option<&Arc<dyn erp_worker::Signals>>) -> Vec<Arc<dyn er
             .signalling(signals.cloned()),
         ),
         Arc::new(
+            ProjectionJob::<inventory::Inventory>::new(
+                inventory::projections(),
+                Arc::new(inventory::upcasters().clone()),
+                200,
+            )
+            .for_module(inventory::module_id())
+            .signalling(signals.cloned()),
+        ),
+        Arc::new(
             ProjectionJob::<crm::Crm>::new(
                 crm::projections(),
                 Arc::new(crm::upcasters().clone()),
@@ -2032,8 +2618,831 @@ impl Invariant for NoOverpaidInvoice {
 
 #[cfg(test)]
 mod tests {
-    use super::{certificate_time, describe, module_jobs, payments_to_announce, zatca_jobs};
+    use super::{
+        AnnounceExpiringStock, StockBellRings, bell_grace, certificate_time, describe, going_off,
+        module_jobs, payments_to_announce, read_before, stock_disagreements, unannounced,
+        who_may_write_off, zatca_jobs,
+    };
     use std::collections::BTreeSet;
+
+    fn sar(minor: i64) -> erp_types::Money {
+        erp_types::Money::from_minor(
+            minor,
+            erp_types::CurrencyCode::new("SAR").expect("a real code"),
+        )
+    }
+
+    /// **The blind spot, and the reason this comparison is not a filter.**
+    ///
+    /// `value_on_hand` groups rows in `proj_inventory.stock_item`, so a tenant
+    /// whose stock account holds money and whose shelves are empty has nothing
+    /// to iterate — and the finding's own wording names that case. Driving the
+    /// comparison from both sides is what reports it.
+    #[test]
+    fn a_stock_account_with_no_shelf_behind_it_is_a_finding() {
+        let found = stock_disagreements(&[], Some(sar(70_000)));
+        assert_eq!(
+            found,
+            vec![(sar(0), Some(sar(70_000)))],
+            "a debit that never reached a shelf has to be reported, and there is no row to hang it on"
+        );
+
+        assert!(
+            stock_disagreements(&[], Some(sar(0))).is_empty(),
+            "a tenant with no stock and no balance is not unhealthy"
+        );
+        assert!(
+            stock_disagreements(&[], None).is_empty(),
+            "nor is one who never opened the account"
+        );
+    }
+
+    /// A shelf in a currency the account is not kept in cannot be compared, so
+    /// it is **reported** rather than filtered away: it is stock somebody has
+    /// to be told about.
+    #[test]
+    fn a_shelf_the_account_cannot_be_compared_with_is_still_reported() {
+        let usd = erp_types::Money::from_minor(
+            5_000,
+            erp_types::CurrencyCode::new("USD").expect("a real code"),
+        );
+        let found = stock_disagreements(&[sar(1_200), usd], Some(sar(1_200)));
+        assert_eq!(
+            found,
+            vec![(usd, None)],
+            "the SAR side agrees; the USD side has nothing to agree with"
+        );
+    }
+
+    fn day(literal: &str) -> chrono::NaiveDate {
+        literal.parse().expect("a date")
+    }
+
+    fn lot(id: &str, expires_on: Option<&str>, remaining: i64) -> inventory::LotRow {
+        inventory::LotRow {
+            id: id.to_owned(),
+            product: "MILK".to_owned(),
+            name: None,
+            branch: None,
+            code: None,
+            expires_on: expires_on.map(day),
+            quantity: 12,
+            remaining,
+            value: remaining * 500,
+            currency: "SAR".to_owned(),
+            received_at: chrono::DateTime::UNIX_EPOCH,
+            recorded_at: chrono::DateTime::UNIX_EPOCH,
+            position: 1,
+            serials: Vec::new(),
+        }
+    }
+
+    fn ids(lots: &[&inventory::LotRow]) -> Vec<String> {
+        lots.iter().map(|lot| lot.id.clone()).collect()
+    }
+
+    /// **The expiry warning's window, at both ends.** Thirty days from the
+    /// 10th of April: yesterday's batch is past its date, today's is still good
+    /// today and warns, the 10th of May is the last day inside, and the 11th is
+    /// outside it.
+    #[test]
+    fn a_lot_warns_inside_the_window_and_not_outside_it() {
+        let today = day("2026-04-10");
+        let window = inventory::ExpiryWindow::new(30).expect("a window");
+        assert_eq!(window.warns_until(today), Some(day("2026-05-10")));
+        assert_eq!(
+            read_before(today, window),
+            Some(day("2026-05-11")),
+            "the listing is strictly before, so it is asked for the day after the last that warns"
+        );
+
+        let lots = [
+            lot("yesterday", Some("2026-04-09"), 4),
+            lot("today", Some("2026-04-10"), 4),
+            lot("last-day", Some("2026-05-10"), 4),
+            lot("outside", Some("2026-05-11"), 4),
+        ];
+        let (gone, soon) = going_off(&lots, today, window);
+        assert_eq!(ids(&gone), ["yesterday"], "past its date and on the shelf");
+        assert_eq!(ids(&soon), ["today", "last-day"], "inside the window");
+
+        let (gone, soon) = going_off(&lots, today, inventory::ExpiryWindow::new(0).expect("none"));
+        assert_eq!(
+            ids(&gone),
+            ["yesterday"],
+            "a window of none still reports what has gone"
+        );
+        assert_eq!(ids(&soon), ["today"], "and what goes today");
+    }
+
+    /// **Nothing on an undated lot spoils, and nothing is left on an emptied
+    /// one** — neither warns however wide the window, and an emptied lot does
+    /// not warn even with its date long gone.
+    #[test]
+    fn an_undated_or_emptied_lot_never_warns() {
+        let today = day("2026-04-10");
+        let widest = inventory::ExpiryWindow::new(inventory::expiry::MAX_DAYS).expect("a window");
+        let lots = [
+            lot("undated", None, 4),
+            lot("emptied-and-gone", Some("2026-01-01"), 0),
+            lot("emptied-and-soon", Some("2026-04-20"), 0),
+        ];
+        let (gone, soon) = going_off(&lots, today, widest);
+        assert!(gone.is_empty(), "{:?}", ids(&gone));
+        assert!(soon.is_empty(), "{:?}", ids(&soon));
+    }
+
+    fn member(
+        role: erp_control::Role,
+        module_roles: &[(&str, erp_control::Role)],
+        suspended: bool,
+    ) -> erp_control::Member {
+        erp_control::Member {
+            identity: erp_types::IdentityId::new(),
+            module_roles: module_roles
+                .iter()
+                .map(|(module, role)| (erp_types::ModuleId::new(*module).expect("a module"), *role))
+                .collect(),
+            handle: None,
+            role,
+            since: chrono::DateTime::UNIX_EPOCH,
+            suspended,
+        }
+    }
+
+    /// **Who is told a lot is going off is who may write it off** — the
+    /// write-off route's own decision (`PERMISSIONS`' `write_off_stock` row:
+    /// owner, accountant and clerk), asked per member. The role that applies in
+    /// `inventory` counts over the tenant-wide one and a role elsewhere does
+    /// not; a suspended login is nobody; and a limit the owner wrote narrows it
+    /// at the branch the lot is at, judged on the role in `inventory`.
+    #[test]
+    fn whoever_may_write_stock_off_is_told_and_nobody_else() {
+        use erp_control::Role::{Accountant, Clerk, Owner, Viewer};
+        let names = [
+            "owner",
+            "accountant",
+            "clerk",
+            "viewer",
+            "a clerk who only views stock",
+            "a viewer who is a clerk for stock",
+            "a clerk who only views sales",
+            "a suspended owner",
+        ];
+        let members = vec![
+            member(Owner, &[], false),
+            member(Accountant, &[], false),
+            member(Clerk, &[], false),
+            member(Viewer, &[], false),
+            member(Clerk, &[("inventory", Viewer)], false),
+            member(Viewer, &[("inventory", Clerk)], false),
+            member(Clerk, &[("sales", Viewer)], false),
+            member(Owner, &[], true),
+        ];
+        let told = |limits: &erp_tenant::Limits, branch: Option<&str>| {
+            let logins = who_may_write_off(&members, limits, branch);
+            members
+                .iter()
+                .zip(names)
+                .filter(|(m, _)| logins.contains(&m.identity.to_string()))
+                .map(|(_, name)| name)
+                .collect::<Vec<_>>()
+        };
+
+        let may = [
+            "owner",
+            "accountant",
+            "clerk",
+            "a viewer who is a clerk for stock",
+            "a clerk who only views sales",
+        ];
+        let unlimited = erp_tenant::Limits::default();
+        assert_eq!(told(&unlimited, Some("BR-MALAZ")), may);
+        assert_eq!(told(&unlimited, None), may);
+
+        let no_clerks_at_malaz: erp_tenant::Limits = serde_json::from_value(serde_json::json!([{
+            "name": "no clerks at Malaz",
+            "when": { "when": "all", "of": [
+                { "when": "is", "fact": "role", "op": "eq", "value": { "type": "text", "of": "clerk" } },
+                { "when": "is", "fact": "branch", "op": "eq", "value": { "type": "text", "of": "BR-MALAZ" } },
+            ] },
+            "then": "refuse",
+        }]))
+        .expect("a limit");
+        assert_eq!(
+            told(&no_clerks_at_malaz, Some("BR-MALAZ")),
+            ["owner", "accountant"],
+            "the limit refuses whoever is a clerk in inventory, at Malaz"
+        );
+        assert_eq!(
+            told(&no_clerks_at_malaz, Some("BR-OLAYA")),
+            may,
+            "and Olaya is not Malaz"
+        );
+    }
+
+    /// **Silent while the bell works, and a finding when it did not ring.**
+    ///
+    /// Thirty days from the 10th of April in Riyadh: a lot going off on the
+    /// 20th has been due its notification since the 21st of March and one gone
+    /// on the 9th its second since the 10th, both long past the grace. Each is a
+    /// finding until the notification its own state calls for exists — the one
+    /// the other state calls for does not count — and an undated, an emptied or
+    /// a far-off lot is never one.
+    #[test]
+    fn a_lot_due_a_notification_is_a_finding_until_its_own_one_exists() {
+        let calendar = erp_types::Calendar::default();
+        let now: erp_types::Timestamp = "2026-04-10T09:00:00Z".parse().expect("an instant");
+        let window = inventory::ExpiryWindow::new(30).expect("a window");
+        let grace = bell_grace(&erp_control::WorkSchedule::default());
+        let lots = [
+            lot("soon", Some("2026-04-20"), 4),
+            lot("gone", Some("2026-04-09"), 4),
+            lot("undated", None, 4),
+            lot("emptied", Some("2026-04-15"), 0),
+            lot("outside", Some("2026-06-01"), 4),
+        ];
+
+        let nobody = |_: notifications::Kind, _: &str| false;
+        assert_eq!(
+            ids(&unannounced(
+                &lots, nobody, calendar, now, window, None, grace
+            )),
+            ["gone", "soon"]
+        );
+
+        let rang = |kind: notifications::Kind, id: &str| {
+            matches!(
+                (kind, id),
+                (notifications::Kind::StockExpiring, "soon")
+                    | (notifications::Kind::StockExpired, "gone")
+            )
+        };
+        assert!(unannounced(&lots, rang, calendar, now, window, None, grace).is_empty());
+
+        let crossed = |kind: notifications::Kind, id: &str| {
+            matches!(
+                (kind, id),
+                (notifications::Kind::StockExpired, "soon")
+                    | (notifications::Kind::StockExpiring, "gone")
+            )
+        };
+        assert_eq!(
+            ids(&unannounced(
+                &lots, crossed, calendar, now, window, None, grace
+            )),
+            ["gone", "soon"],
+            "being told a lot was going off is not being told it has gone"
+        );
+    }
+
+    /// **The ordinary gap is silent.** A lot is due from the start of the day
+    /// its window reaches it, from when it was recorded, or from when the window
+    /// was last set, whichever is latest, and only one due for longer than the
+    /// grace is a finding. The grace is the longest a quiet tenant waits for the
+    /// visit that announces, and one health interval.
+    #[test]
+    fn a_lot_is_silent_inside_the_grace_from_whenever_it_fell_due() {
+        let calendar = erp_types::Calendar::default();
+        let window = inventory::ExpiryWindow::new(30).expect("a window");
+        let grace = bell_grace(&erp_control::WorkSchedule::default());
+        assert_eq!(
+            grace,
+            chrono::TimeDelta::hours(8) + chrono::TimeDelta::minutes(5)
+                - chrono::TimeDelta::milliseconds(1),
+            "six hours of ceiling, two of jitter, five minutes of health interval"
+        );
+        let nobody = |_: notifications::Kind, _: &str| false;
+
+        // The 10th of May enters a thirty-day window on the 10th of April.
+        let lots = [lot("may-10", Some("2026-05-10"), 4)];
+        let entered = calendar.start_of(day("2026-04-10"));
+        let inside = entered + grace;
+        let past = inside + chrono::TimeDelta::minutes(1);
+        assert!(
+            unannounced(&lots, nobody, calendar, inside, window, None, grace).is_empty(),
+            "the ordinary wait for a visit"
+        );
+        assert_eq!(
+            ids(&unannounced(
+                &lots, nobody, calendar, past, window, None, grace
+            )),
+            ["may-10"]
+        );
+
+        // Delivered an hour ago already inside its window: due from then.
+        let mut delivered = lot("delivered", Some("2026-04-20"), 4);
+        delivered.recorded_at = past - chrono::TimeDelta::hours(1);
+        assert!(
+            unannounced(
+                std::slice::from_ref(&delivered),
+                nobody,
+                calendar,
+                past,
+                window,
+                None,
+                grace
+            )
+            .is_empty()
+        );
+
+        // A window set an hour ago reaches the lot only from then…
+        let widened = Some(past - chrono::TimeDelta::hours(1));
+        assert!(unannounced(&lots, nobody, calendar, past, window, widened, grace).is_empty());
+        // …and does not move when a lot passed its date.
+        let gone = [lot("gone", Some("2026-04-08"), 4)];
+        assert_eq!(
+            ids(&unannounced(
+                &gone, nobody, calendar, past, window, widened, grace
+            )),
+            ["gone"]
+        );
+    }
+
+    static CONTROL: erp_testkit::Schema =
+        erp_testkit::Schema::migrations("control", &erp_control::MIGRATIONS);
+    static TENANT: erp_testkit::Schema =
+        erp_testkit::Schema::migrations("tenant", &erp_eventlog::MIGRATIONS);
+
+    const MILK: &str = "9f2a6d0c-11d0-7dec-a765-00a0c91e6bf7";
+    const BEANS: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
+    const OLAYA: &str = "BR-OLAYA";
+
+    /// **A café with a shelf and a bell**, for what a unit test cannot reach:
+    /// what the announcer reads and whom it tells, and what the check reads
+    /// back. Built through the modules' own commands.
+    struct Shop {
+        control: std::sync::Arc<erp_control::ControlPlane>,
+        tenant: erp_types::TenantId,
+        db: erp_control::TenantDb,
+        pool: sqlx::PgPool,
+        database: String,
+        _control_db: erp_testkit::TestDb,
+    }
+
+    impl Shop {
+        #[expect(
+            clippy::too_many_lines,
+            reason = "a whole café — a control plane, a tenant, four read models, a chart, a \
+                      branch and two products — built once for both tests"
+        )]
+        async fn open(slug: &str) -> Self {
+            use erp_control::Actor;
+            let control_db = erp_testkit::Template::get(&CONTROL)
+                .await
+                .expect("control template builds")
+                .fresh()
+                .await
+                .expect("control database clones");
+            let clusters = erp_control::ClusterRegistry::new()
+                .with_url("primary", &erp_testkit::database_url())
+                .expect("the test database URL parses");
+            let control = std::sync::Arc::new(erp_control::ControlPlane::new(
+                control_db.pool().clone(),
+                erp_control::TenantPools::new(clusters, erp_control::PoolConfig::default()),
+            ));
+            control
+                .register_cluster(
+                    "primary",
+                    "ERP_CLUSTER_PRIMARY_URL",
+                    None,
+                    10_000,
+                    10_000,
+                    Actor::system(),
+                )
+                .await
+                .expect("cluster registers");
+            let tenant = control
+                .register_tenant_on(slug, "Café", "primary", Actor::system())
+                .await
+                .expect("tenant registers");
+            erp_testkit::create_named_database(&tenant.database_name, &TENANT)
+                .await
+                .expect("tenant database is created");
+            control
+                .activate_tenant(tenant.id, Actor::system())
+                .await
+                .expect("tenant activates");
+            for module in [inventory::module_id(), notifications::module_id()] {
+                control
+                    .enable_module(tenant.id, &module, Actor::system())
+                    .await
+                    .expect("enables");
+            }
+            let db = control
+                .enter_for_maintenance(tenant.id)
+                .await
+                .expect("maintenance entry");
+            {
+                let mut conn = db.acquire().await.expect("connection");
+                inventory::install(&mut conn).await.expect("inventory");
+                erp_projection::ensure_group_schema::<inventory::Inventory>(&mut conn)
+                    .await
+                    .expect("i");
+                ledger::install(&mut conn).await.expect("ledger");
+                erp_projection::ensure_group_schema::<ledger::Ledger>(&mut conn)
+                    .await
+                    .expect("l");
+                branches::install(&mut conn).await.expect("branches");
+                erp_projection::ensure_group_schema::<branches::Branches>(&mut conn)
+                    .await
+                    .expect("b");
+                notifications::install(&mut conn).await.expect("bell");
+                erp_projection::ensure_group_schema::<notifications::Notifications>(&mut conn)
+                    .await
+                    .expect("n");
+            }
+            ledger::install_chart(
+                &db,
+                ledger::chart("services").expect("the services chart ships"),
+                erp_types::CurrencyCode::new("SAR").expect("a currency"),
+                erp_i18n::Locale::English,
+                &erp_eventlog::Metadata::default(),
+            )
+            .await
+            .expect("the chart installs");
+            branches::open_branch(
+                &db,
+                &code(OLAYA),
+                &branches::Details {
+                    name: "العليا".to_owned(),
+                    name_latin: None,
+                    address: branches::Address {
+                        street: "طريق الملك فهد".to_owned(),
+                        building: None,
+                        district: None,
+                        city: "الرياض".to_owned(),
+                        postal_code: None,
+                        country: "SA".to_owned(),
+                    },
+                },
+                chrono::Utc::now() - chrono::TimeDelta::days(30),
+                &erp_eventlog::Metadata::default(),
+            )
+            .await
+            .expect("the branch opens");
+            for (product, name, tracking) in [
+                (MILK, "حليب طازج", inventory::Tracking::Lot),
+                (BEANS, "بن", inventory::Tracking::None),
+            ] {
+                inventory::declare(
+                    &db,
+                    &code(product),
+                    name,
+                    "piece",
+                    tracking,
+                    chrono::Utc::now() - chrono::TimeDelta::days(30),
+                    &erp_eventlog::Metadata::default(),
+                )
+                .await
+                .expect("declares");
+            }
+
+            let url = erp_testkit::database_url();
+            let base = url.rsplit_once('/').map_or(url.as_str(), |(h, _)| h);
+            let pool = sqlx::PgPool::connect(&format!("{base}/{}", tenant.database_name))
+                .await
+                .expect("connects");
+            Self {
+                control,
+                tenant: tenant.id,
+                db,
+                pool,
+                database: tenant.database_name,
+                _control_db: control_db,
+            }
+        }
+
+        async fn member(&self, handle: &str, role: erp_control::Role) -> String {
+            self.control
+                .add_member(
+                    self.tenant,
+                    format!("{handle}@cafe.test"),
+                    "hunter2hunter2".to_owned(),
+                    role,
+                    erp_control::Actor::system(),
+                )
+                .await
+                .expect("a member")
+                .to_string()
+        }
+
+        /// A delivery of four at Olaya, carrying a batch and its date when given,
+        /// and saying it arrived `at`.
+        async fn receive(
+            &self,
+            product: &str,
+            reference: &str,
+            batch: Option<(&str, chrono::NaiveDate)>,
+            at: erp_types::Timestamp,
+        ) -> String {
+            self.receive_at(Some(OLAYA), product, reference, batch, at)
+                .await
+        }
+
+        /// …at `branch`, or at no branch at all.
+        async fn receive_at(
+            &self,
+            branch: Option<&str>,
+            product: &str,
+            reference: &str,
+            batch: Option<(&str, chrono::NaiveDate)>,
+            at: erp_types::Timestamp,
+        ) -> String {
+            let metadata = branch.map_or_else(erp_eventlog::Metadata::default, |branch| {
+                erp_eventlog::Metadata::default().at_branch(branch)
+            });
+            inventory::receive(
+                &self.db,
+                &code(product),
+                &inventory::Receipt {
+                    quantity: 4,
+                    value: sar(2_000),
+                    code: batch.map(|(code, _)| code.to_owned()),
+                    expires_on: batch.map(|(_, day)| day),
+                    serials: Vec::new(),
+                    reference: reference.to_owned(),
+                    at,
+                },
+                &metadata,
+            )
+            .await
+            .expect("receives");
+            inventory::lot_of(
+                &inventory::stock_id(&code(product), branch).expect("a shelf"),
+                reference,
+            )
+        }
+
+        async fn project(&self) {
+            self.projecting(true).await;
+        }
+
+        /// …or everything but `branches`, which is a read model behind.
+        async fn projecting(&self, with_branches: bool) {
+            macro_rules! run {
+                ($module:ident, $group:ty) => {{
+                    let owned = $module::projections();
+                    let refs: Vec<&dyn erp_projection::Projection<Group = $group>> =
+                        owned.iter().map(AsRef::as_ref).collect();
+                    erp_projection::run_to_head::<$group>(
+                        &self.pool,
+                        &refs,
+                        $module::upcasters(),
+                        200,
+                    )
+                    .await
+                    .expect("projects");
+                }};
+            }
+            run!(inventory, inventory::Inventory);
+            // What a notification about a lot says of where it is.
+            if with_branches {
+                run!(branches, branches::Branches);
+            }
+            run!(notifications, notifications::Notifications);
+        }
+
+        async fn bell(&self, login: &str) -> Vec<notifications::InboxRow> {
+            let mut conn = self.db.acquire().await.expect("connection");
+            notifications::inbox(&mut conn, login, false, 50, None)
+                .await
+                .expect("reads")
+                .items
+        }
+
+        async fn cleanup(self) {
+            drop(self.db);
+            self.pool.close().await;
+            let _ = erp_testkit::drop_named_database(&self.database).await;
+        }
+    }
+
+    /// **A lot going off is told once, to whoever may write it off**, in both
+    /// languages, naming the product, the batch, the branch and the date — and
+    /// nothing is told about a lot outside the window, an undated one or one
+    /// written off to nothing. A second run raises nothing; a wider window
+    /// reaches the next lot without telling the first again; and the bell check
+    /// is silent, because the bell rang.
+    #[tokio::test]
+    async fn a_lot_going_off_is_told_once_to_whoever_may_write_it_off() {
+        use erp_worker::{Activity, Invariant, Job};
+        let shop = Shop::open("stock-bell").await;
+        let owner = shop.member("owner", erp_control::Role::Owner).await;
+        let clerk = shop.member("clerk", erp_control::Role::Clerk).await;
+        let viewer = shop.member("viewer", erp_control::Role::Viewer).await;
+
+        let today = erp_types::Calendar::default().day(chrono::Utc::now());
+        let in_days = |n: i64| today + chrono::TimeDelta::days(n);
+        let now = chrono::Utc::now();
+        let soon = shop
+            .receive(MILK, "dn-soon", Some(("B-SOON", in_days(10))), now)
+            .await;
+        let later = shop
+            .receive(MILK, "dn-later", Some(("B-LATER", in_days(60))), now)
+            .await;
+        let emptied = shop
+            .receive(MILK, "dn-emptied", Some(("B-EMPTIED", in_days(5))), now)
+            .await;
+        shop.receive(BEANS, "dn-beans", None, now).await;
+        inventory::write_off(
+            &shop.db,
+            &code(MILK),
+            &inventory::WriteOff {
+                reason: inventory::Reason::Damaged,
+                quantity: Some(4),
+                lot: Some(emptied),
+                serials: Vec::new(),
+                reference: "wo-emptied".to_owned(),
+                at: chrono::Utc::now(),
+            },
+            &erp_eventlog::Metadata::default().at_branch(OLAYA),
+        )
+        .await
+        .expect("writes the lot off to nothing");
+        shop.project().await;
+
+        let job = AnnounceExpiringStock {
+            control: std::sync::Arc::clone(&shop.control),
+        };
+        assert_eq!(job.tick(&shop.db).await.expect("ticks"), Activity::Worked);
+        shop.project().await;
+        assert_eq!(
+            job.tick(&shop.db).await.expect("ticks again"),
+            Activity::Idle,
+            "a second run raised something"
+        );
+        shop.project().await;
+
+        for login in [&owner, &clerk] {
+            let bell = shop.bell(login).await;
+            assert_eq!(bell.len(), 1, "{bell:?}");
+            assert_eq!(bell[0].kind, "stock_expiring");
+            assert_eq!(bell[0].subject_id, soon);
+            for (locale, says) in [("en", "good until"), ("ar", "صالحة حتى")] {
+                let body = &bell[0].wording[locale].body;
+                for part in [
+                    "حليب طازج",
+                    "B-SOON",
+                    "العليا",
+                    &in_days(10).to_string(),
+                    says,
+                ] {
+                    assert!(body.contains(part), "{locale} does not say {part}: {body}");
+                }
+            }
+        }
+        assert!(
+            shop.bell(&viewer).await.is_empty(),
+            "a viewer cannot write stock off, and was told"
+        );
+
+        // Ninety days reaches the later batch, and says nothing about the first
+        // again.
+        {
+            let mut conn = shop.db.acquire().await.expect("connection");
+            erp_eventlog::configuration::set(
+                &mut conn,
+                inventory::ExpiryWindow::KEY,
+                &inventory::ExpiryWindow::new(90).expect("a window"),
+                None,
+                None,
+            )
+            .await
+            .expect("widens the window");
+        }
+        assert_eq!(job.tick(&shop.db).await.expect("ticks"), Activity::Worked);
+        shop.project().await;
+        let bell = shop.bell(&owner).await;
+        let about: Vec<&str> = bell.iter().map(|row| row.subject_id.as_str()).collect();
+        assert_eq!(about.len(), 2, "{about:?}");
+        assert!(about.contains(&soon.as_str()) && about.contains(&later.as_str()));
+
+        let strict = StockBellRings {
+            grace: chrono::TimeDelta::zero(),
+        };
+        assert!(
+            strict.check(&shop.db).await.expect("checks").is_empty(),
+            "the bell rang for every lot due, and the check says otherwise"
+        );
+
+        shop.cleanup().await;
+    }
+
+    /// **A whole sentence, wherever the lot is.** A lot at no branch — a
+    /// business with one shelf and no business name set — is told without a
+    /// branch, and one at a branch the `branches` read model has not caught up
+    /// with is told under the key it was received at. Neither says
+    /// `{{ branch.name }}`, which a notification, frozen when announced, would
+    /// say for ever.
+    #[tokio::test]
+    async fn a_lot_at_no_branch_or_an_unknown_one_is_told_in_a_whole_sentence() {
+        use erp_worker::{Activity, Job};
+        let shop = Shop::open("stock-bell-places").await;
+        let owner = shop.member("owner", erp_control::Role::Owner).await;
+        let now = chrono::Utc::now();
+        let good_until = erp_types::Calendar::default().day(now) + chrono::TimeDelta::days(10);
+        let home = shop
+            .receive_at(None, MILK, "dn-home", Some(("B-HOME", good_until)), now)
+            .await;
+        let olaya = shop
+            .receive(MILK, "dn-olaya", Some(("B-OLAYA", good_until)), now)
+            .await;
+        shop.projecting(false).await;
+
+        let job = AnnounceExpiringStock {
+            control: std::sync::Arc::clone(&shop.control),
+        };
+        assert_eq!(job.tick(&shop.db).await.expect("ticks"), Activity::Worked);
+        shop.projecting(false).await;
+
+        let bell = shop.bell(&owner).await;
+        assert_eq!(bell.len(), 2, "{bell:?}");
+        for (lot, batch, place) in [(&home, "B-HOME", None), (&olaya, "B-OLAYA", Some(OLAYA))] {
+            let row = bell
+                .iter()
+                .find(|row| &row.subject_id == lot)
+                .unwrap_or_else(|| panic!("nobody was told about {lot}: {bell:?}"));
+            for locale in ["en", "ar"] {
+                let said = &row.wording[locale];
+                for text in [&said.title, &said.body] {
+                    assert!(!text.contains("{{"), "{locale} leaves a hole: {text}");
+                }
+                let date = good_until.to_string();
+                for part in ["حليب طازج", batch, date.as_str()].into_iter().chain(place) {
+                    assert!(
+                        said.body.contains(part),
+                        "{locale} does not say {part}: {}",
+                        said.body
+                    );
+                }
+            }
+        }
+
+        shop.cleanup().await;
+    }
+
+    /// **A bell that did not ring is a finding**, read out of the two read
+    /// models the check compares: a lot past its date with nothing announced,
+    /// once the grace is behind it — and silent inside the grace, and once its
+    /// own notification exists.
+    #[tokio::test]
+    async fn a_lot_past_its_date_nobody_was_told_about_is_a_finding() {
+        use erp_worker::{Activity, Invariant, Job};
+        let shop = Shop::open("stock-bell-silent").await;
+        let today = erp_types::Calendar::default().day(chrono::Utc::now());
+        // Entered a moment ago, two days past its date, and saying it arrived
+        // three days ago: due from when it was recorded, not from the day it
+        // went off, nor from the day it claims to have come in.
+        let gone = shop
+            .receive(
+                MILK,
+                "dn-gone",
+                Some(("B-GONE", today - chrono::TimeDelta::days(2))),
+                chrono::Utc::now() - chrono::TimeDelta::days(3),
+            )
+            .await;
+        shop.project().await;
+
+        let shipped = StockBellRings {
+            grace: bell_grace(&erp_control::WorkSchedule::default()),
+        };
+        assert!(
+            shipped.check(&shop.db).await.expect("checks").is_empty(),
+            "recorded a moment ago, however long ago it says it arrived, so still inside the grace"
+        );
+        let strict = StockBellRings {
+            grace: chrono::TimeDelta::zero(),
+        };
+        let found = strict.check(&shop.db).await.expect("checks");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].check, "stock_bell");
+        assert!(found[0].detail.contains(&gone), "{}", found[0].detail);
+        assert!(
+            !found[0].detail.contains("B-GONE"),
+            "an operator is told which lot, not what is on it: {}",
+            found[0].detail
+        );
+
+        let owner = shop.member("owner", erp_control::Role::Owner).await;
+        let job = AnnounceExpiringStock {
+            control: std::sync::Arc::clone(&shop.control),
+        };
+        assert_eq!(job.tick(&shop.db).await.expect("ticks"), Activity::Worked);
+        shop.project().await;
+        let bell = shop.bell(&owner).await;
+        assert_eq!(bell.len(), 1, "{bell:?}");
+        assert_eq!(
+            bell[0].kind, "stock_expired",
+            "a lot past its date is told it has gone"
+        );
+        assert!(
+            strict.check(&shop.db).await.expect("checks").is_empty(),
+            "told, and still a finding"
+        );
+
+        shop.cleanup().await;
+    }
 
     fn finished(id: &str, stage: &str, invoice: Option<&str>) -> payments::Finished {
         payments::Finished {

@@ -811,13 +811,10 @@ impl<C: Capability> Allowed<C> {
         extra: impl IntoIterator<Item = (&'static str, erp_rules::Value)>,
         locale: Locale,
     ) -> Result<(), Problem> {
-        let mut facts = erp_tenant::limits::facts_for(C::CAPABILITY);
-        if let Some(branch) = &self.branch {
-            facts = facts.with(
-                erp_tenant::limits::BRANCH,
-                erp_rules::Value::Text(branch.as_str().to_owned()),
-            );
-        }
+        let mut facts = erp_tenant::limits::facts_at(
+            C::CAPABILITY,
+            self.branch.as_ref().map(AggregateId::as_str),
+        );
         for (name, value) in extra {
             facts = facts.with(name, value);
         }
@@ -938,13 +935,8 @@ impl<C: Capability> FromRequestParts<AppState> for Allowed<C> {
         // **What the edge knows.** An amount is in a body this extractor has
         // not read, so a limit about one is narrowed later by the handler that
         // learns it — see `Allowed::still_permits`.
-        let mut facts = erp_tenant::limits::facts_for(C::CAPABILITY);
-        if let Some(branch) = &branch {
-            facts = facts.with(
-                erp_tenant::limits::BRANCH,
-                erp_rules::Value::Text(branch.as_str().to_owned()),
-            );
-        }
+        let facts =
+            erp_tenant::limits::facts_at(C::CAPABILITY, branch.as_ref().map(AggregateId::as_str));
 
         let permitted = tenant
             .db

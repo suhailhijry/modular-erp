@@ -175,7 +175,40 @@ struct NewInvoiceLine {
     description: String,
     /// Minor units, in the invoice's currency. Excluding tax, and **before this
     /// line's own allowances** — what is charged is this less them.
+    ///
+    /// **Per unit when `quantity` is given**, and the whole line otherwise. The
+    /// line comes to `net × quantity`, worked out here and never divided back
+    /// out: going backwards from a total is a division that does not always
+    /// land on a whole halala, and the tax document has to balance.
     net: i64,
+    /// **What this line sells off a shelf**, when it sells one: the product's
+    /// id, as `/v1/inventory/products` declared it.
+    ///
+    /// Optional. A line with one depletes that product's stock at this branch
+    /// in the same transaction as the invoice, and books what it cost; a line
+    /// without one behaves exactly as before. A product nobody declared is
+    /// refused rather than ignored.
+    #[serde(default)]
+    product: Option<String>,
+    /// **How many units.** Optional: leave it out and the line is a single
+    /// amount charged once, which is what every invoice issued before this
+    /// field existed is.
+    #[serde(default)]
+    quantity: Option<i64>,
+    /// **Which units**, on a serial-tracked product — one name per unit, as
+    /// they were received. A line that names any must also name the `product`
+    /// and charge for exactly that many. A name that is not on the shelf —
+    /// unknown, already sold, written off — is refused.
+    #[serde(default)]
+    serials: Vec<String>,
+    /// **Which lot** to take the units from, overriding the picking rule — a
+    /// scanned batch, or stock promised to this customer. The lot's `id` as
+    /// `GET /v1/inventory/lots` lists it, not its batch code. A line that names
+    /// one must also name the `product`; a lot that is not open at this branch,
+    /// or that holds fewer than the line takes, is refused. Leave it out and
+    /// the earliest expiry goes first.
+    #[serde(default)]
+    lot: Option<String>,
     /// What comes off **this line**, each printed as its own figure.
     ///
     /// No treatment on them: the line already says how it is taxed, so an
@@ -416,12 +449,12 @@ fn view(summary: crate::InvoiceSummary) -> InvoiceView {
     request_body = NewInvoice,
     responses(
         (status = CREATED, description = "Issued, or already issued under this key.", body = Issued),
-        (status = BAD_REQUEST, description = "No lines that come to anything, mixed currencies, an unknown VAT category, or an unusable id", body = Problem),
+        (status = BAD_REQUEST, description = "No lines that come to anything, mixed currencies, an unknown VAT category, an unusable id, a quantity that is not one (`sales.not_a_quantity`), serials that do not match their line (`sales.named_units`, `inventory.needs_serials`), a lot named with no product (`sales.lot_without_a_product`), or a product id that cannot be one (`inventory.not_a_product_id`)", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, description = "Not a role that may, or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = NOT_FOUND, description = "No such tenant, not yours, or the sales module is not enabled here", body = Problem),
         (status = CONFLICT, description = "Sustained contention on this invoice. Retryable.", body = Problem),
-        (status = UNPROCESSABLE_ENTITY, description = "The posting accounts are missing or closed", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The posting accounts are missing or closed, no such customer, or the shelf refuses a line: a product nobody declared (`inventory.no_such_product`), a serial that is not on the shelf (`inventory.no_such_serial`), a named lot that is not open at this branch (`inventory.no_such_lot`) or holds fewer than the line takes (`inventory.lot_is_short`), or more of a lot- or serial-tracked product than the shelf holds (`inventory.not_enough_stock`). A plain product that names no lot never refuses for stock.", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
     ),
 )]
@@ -444,30 +477,7 @@ async fn issue_invoice(
         )
     })?;
 
-    let mut lines = Vec::with_capacity(body.lines.len());
-    for line in body.lines {
-        let category: VatCategory = line.vat.parse().map_err(|_| {
-            bad_request(
-                erp_web::messages::UNKNOWN_VAT_CATEGORY,
-                "vat",
-                &line.vat,
-                locale,
-            )
-        })?;
-        lines.push(DraftLine {
-            description: line.description,
-            net: erp_types::Money::from_minor(line.net, currency),
-            category,
-            allowances: line
-                .allowances
-                .into_iter()
-                .map(|a| crate::Allowance {
-                    reason: a.reason,
-                    amount: erp_types::Money::from_minor(a.amount, currency),
-                })
-                .collect(),
-        });
-    }
+    let lines = drafted(body.lines, currency, locale)?;
 
     let mut discounts = Vec::with_capacity(body.discounts.len());
     for discount in body.discounts {
@@ -696,12 +706,12 @@ async fn refund_payment(
     request_body = NewCreditNote,
     responses(
         (status = OK, description = "Credited, or already credited under this key.", body = Issued),
-        (status = BAD_REQUEST, description = "An unusable id", body = Problem),
+        (status = BAD_REQUEST, description = "An unusable id, or an invoice already partly credited (`sales.already_credited`)", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, description = "Not a role that may, without the `sales:approve_credit_note` claim once the tenant uses claims (`sales.not_approved`), or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = NOT_FOUND, body = Problem),
         (status = CONFLICT, description = "Already cancelled by a *different* credit note", body = Problem),
-        (status = UNPROCESSABLE_ENTITY, description = "No such invoice, or one with payments against it — refund those first", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such invoice, one with payments against it — refund those first —, or a product line the shelf it was sold from has no record of (`inventory.not_consumed`)", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
     ),
 )]
@@ -752,6 +762,19 @@ struct NewCreditLine {
     /// rather than as a negative. May be less than the line: part of a line
     /// can come back.
     amount: Amount,
+    /// **How many units came back onto the shelf**, when the invoice line sold
+    /// stock. Optional, and never worked out from `amount`: a partial credit is
+    /// as often a price adjustment as a returned carton, and the two are
+    /// different statements. Leave it out and nothing goes back on the shelf.
+    #[serde(default)]
+    quantity: Option<i64>,
+    /// **Which units came back**, on a line that sold serial-tracked stock:
+    /// one name per unit, as many as `quantity`. Each must be one this invoice
+    /// line sold and that has not come back already. Leave it out and the
+    /// units come back by quantity, which for named units only the whole line
+    /// can.
+    #[serde(default)]
+    serials: Vec<String>,
 }
 
 /// A credit note against part of an invoice.
@@ -885,12 +908,12 @@ async fn list_credit_notes(
     request_body = NewPartialCreditNote,
     responses(
         (status = OK, description = "Credited, or already credited under this key.", body = Issued),
-        (status = BAD_REQUEST, description = "An unusable id, or an amount that is not one", body = Problem),
+        (status = BAD_REQUEST, description = "An unusable id, an amount that is not one, no such line (`sales.no_such_line`), more than is left to credit (`sales.credit_too_large`), an invoice already cancelled outright (`sales.already_credited`), a quantity that is not one (`sales.not_a_quantity`), units coming back on a line that sold no product (`sales.not_a_stock_line`), or names that do not agree with the quantity (`sales.named_units`, `inventory.needs_serials`)", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, description = "Not a role that may, without the `sales:approve_credit_note` claim once the tenant uses claims (`sales.not_approved`), or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = NOT_FOUND, body = Problem),
-        (status = CONFLICT, description = "The invoice was already cancelled outright", body = Problem),
-        (status = UNPROCESSABLE_ENTITY, description = "No such invoice, no such line, or more than is left to credit", body = Problem),
+        (status = CONFLICT, description = "Sustained contention on this invoice. Retryable.", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "No such invoice, or the shelf refuses the units coming back: no record of that line going out (`inventory.not_consumed`), more than that sale still has out (`inventory.more_than_was_taken`), part of a sale whose units have names given as a quantity rather than by name (`inventory.named_units_come_back_whole`), or a name that sale did not take or that has already come back (`inventory.not_out`)", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
     ),
 )]
@@ -906,13 +929,7 @@ async fn credit_invoice_part(
     let raw = params.get("invoice").map_or("", String::as_str);
     let invoice = parse_id(raw, locale)?;
 
-    let mut lines = Vec::with_capacity(body.lines.len());
-    for line in body.lines {
-        lines.push(crate::CreditLine {
-            against: line.against,
-            net: line.amount.parse(locale)?,
-        });
-    }
+    let lines = credit_lines(body.lines, locale)?;
 
     let credited = crate::credit_invoice_part(
         &tenant.db,
@@ -1607,6 +1624,71 @@ fn config_problem(error: &erp_eventlog::ConfigError, locale: Locale) -> Problem 
 
 // ---------------------------------------------------------------------------
 
+/// The request's lines as a draft's — the treatment parsed, the amounts put
+/// into the invoice's currency, and the product id parsed **here** so a
+/// malformed one is a 400 about the id rather than a refusal from inside the
+/// issuing transaction. The same place, and the same reason, as the customer
+/// reference.
+fn drafted(
+    sent: Vec<NewInvoiceLine>,
+    currency: CurrencyCode,
+    locale: Locale,
+) -> Result<Vec<DraftLine>, Problem> {
+    sent.into_iter()
+        .map(|line| {
+            let category: VatCategory = line.vat.parse().map_err(|_| {
+                bad_request(
+                    erp_web::messages::UNKNOWN_VAT_CATEGORY,
+                    "vat",
+                    &line.vat,
+                    locale,
+                )
+            })?;
+            Ok(DraftLine {
+                description: line.description,
+                net: erp_types::Money::from_minor(line.net, currency),
+                category,
+                product: line
+                    .product
+                    .as_deref()
+                    .map(|id| parse_id(id, locale))
+                    .transpose()?,
+                quantity: line.quantity,
+                serials: line.serials,
+                lot: line.lot,
+                allowances: line
+                    .allowances
+                    .into_iter()
+                    .map(|a| crate::Allowance {
+                        reason: a.reason,
+                        amount: erp_types::Money::from_minor(a.amount, currency),
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+/// The request's credit lines as the command's: the amount parsed, and **the
+/// units coming back carried through here** — how many and which. A field
+/// dropped in this translation is a credit note whose money posts and whose
+/// goods never reach the shelf.
+fn credit_lines(
+    sent: Vec<NewCreditLine>,
+    locale: Locale,
+) -> Result<Vec<crate::CreditLine>, Problem> {
+    sent.into_iter()
+        .map(|line| {
+            Ok(crate::CreditLine {
+                against: line.against,
+                net: line.amount.parse(locale)?,
+                quantity: line.quantity,
+                serials: line.serials,
+            })
+        })
+        .collect()
+}
+
 /// Maps a command failure onto a status.
 ///
 /// Same shape as [`ledger::http`]'s, and deliberately still its own function:
@@ -1636,6 +1718,14 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
                 | SalesError::Ledger(_)
                 | SalesError::HasPayments(_)
                 | SalesError::NoSuchCustomer(_) => StatusCode::UNPROCESSABLE_ENTITY,
+                // **A line of the wrong shape**, decided in one place the till
+                // asks too, so the two doors cannot answer it differently.
+                refused if refused.is_malformed() => StatusCode::BAD_REQUEST,
+                // **The shelf's own split, not a second one.** A serial that is
+                // not there and a product nobody declared are well-formed
+                // requests about a world that says no; `inventory` already
+                // decides which of its refusals are which.
+                SalesError::Stock(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 _ => StatusCode::BAD_REQUEST,
             },
             rejection.message(),
@@ -1668,4 +1758,82 @@ fn sales_problem(error: &CommandError<SalesError>, locale: Locale) -> Problem {
     };
 
     Problem::new(status, &message, locale, &CATALOG)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The wire's product, quantity, serials and lot reach the draft**, which is
+    /// the whole of what this layer does on the stock path: `issue_in`
+    /// depletes, and a field dropped here is an invoice that takes nothing off
+    /// a shelf and books no cost. The `net` stays **one unit's** — multiplying
+    /// is `priced_lines`' job, and doing it twice is a division nobody can
+    /// undo.
+    #[test]
+    fn a_line_carries_its_product_and_its_units_to_the_draft() {
+        let sent: Vec<NewInvoiceLine> = serde_json::from_value(serde_json::json!([{
+            "description": "بن",
+            "net": 2_500,
+            "vat": "standard",
+            "product": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "quantity": 3,
+            "serials": ["A-1", "A-2", "A-3"],
+            "lot": "lot.x"
+        }]))
+        .expect("a line");
+        let sar = CurrencyCode::new("SAR").expect("a currency");
+        let drafted = drafted(sent, sar, Locale::English).expect("a draft");
+        let line = &drafted[0];
+        assert_eq!(
+            line.product.as_ref().map(erp_types::AggregateId::as_str),
+            Some("f81d4fae-7dec-11d0-a765-00a0c91e6bf6")
+        );
+        assert_eq!(line.quantity, Some(3));
+        assert_eq!(line.serials, ["A-1", "A-2", "A-3"]);
+        assert_eq!(line.lot.as_deref(), Some("lot.x"));
+        assert_eq!(
+            line.net,
+            erp_types::Money::from_minor(2_500, sar),
+            "one unit's, not the line's"
+        );
+    }
+
+    /// A line without them is what every invoice issued before they existed
+    /// is: a single amount, charged once, off no shelf.
+    #[test]
+    fn a_line_without_them_is_a_bare_total() {
+        let sent: Vec<NewInvoiceLine> = serde_json::from_value(serde_json::json!([
+            { "description": "استشارة", "net": 2_500, "vat": "standard" }
+        ]))
+        .expect("a line");
+        let sar = CurrencyCode::new("SAR").expect("a currency");
+        let drafted = drafted(sent, sar, Locale::English).expect("a draft");
+        assert_eq!(drafted[0].product, None);
+        assert_eq!(drafted[0].quantity, None);
+        assert!(drafted[0].serials.is_empty());
+        assert_eq!(drafted[0].lot, None);
+    }
+
+    /// **A credit line carries the units coming back to the command** — how
+    /// many and which. Every test that calls the command directly passes
+    /// whatever this does, which is §74's lesson from the till.
+    #[test]
+    fn a_credit_line_carries_its_units_to_the_command() {
+        let sent: Vec<NewCreditLine> = serde_json::from_value(serde_json::json!([
+            {
+                "against": 0,
+                "amount": { "minor": 50_000, "currency": "SAR" },
+                "quantity": 1,
+                "serials": ["SN-2"]
+            },
+            { "against": 1, "amount": { "minor": 1_000, "currency": "SAR" } }
+        ]))
+        .expect("lines");
+        let lines = credit_lines(sent, Locale::English).expect("parses");
+        assert_eq!(lines[0].quantity, Some(1));
+        assert_eq!(lines[0].serials, ["SN-2"]);
+        assert_eq!(lines[1].quantity, None, "money only, and no goods");
+        assert!(lines[1].serials.is_empty());
+    }
 }

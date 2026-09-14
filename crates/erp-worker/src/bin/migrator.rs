@@ -540,6 +540,12 @@ async fn rebuild(
                 owned.iter().map(AsRef::as_ref).collect();
             rebuild_swap::<files::Files>(&pool, sql, &refs, upcasters, 500).await?
         }
+        "inventory" => {
+            let owned = inventory::projections();
+            let refs: Vec<&dyn Projection<Group = inventory::Inventory>> =
+                owned.iter().map(AsRef::as_ref).collect();
+            rebuild_swap::<inventory::Inventory>(&pool, sql, &refs, upcasters, 500).await?
+        }
         "conversations" => {
             let owned = conversations::projections();
             let refs: Vec<&dyn Projection<Group = conversations::Conversations>> =
@@ -794,6 +800,19 @@ mod tests {
             "063d9abc7de7f0c1e71b1a339483fb16adbda04ad2e7a69fb0b857ad52c06d75",
         ),
         (
+            // Version 2 for a serial a count did not find (`missing`, §75), and 3
+            // for the `lot` row a return opens for units a count had cleared
+            // (§75's review) — a projection that writes rows it did not, with the
+            // script's shape unchanged, so the hash stays. The module has not
+            // shipped, so no tenant has `proj_inventory` to rebuild and the bump
+            // costs nothing but this line. After it ships the same edit is a
+            // fleet rebuild. See §71. Version 4 for a return that reopens an
+            // emptied lot moving its `recorded_at` (§77's review), the same way.
+            "inventory",
+            4,
+            "e05ca10a686134ce6b6fca60d6239a042c1149f868a32684f9ff228da3ea13e1",
+        ),
+        (
             "ledger",
             1,
             "44672ee16d291279d7bd588773c4fa304cfa6bf36d8a3dc3f483104039da8edd",
@@ -961,6 +980,7 @@ mod tests {
             "crm",
             "ledger",
             "prepaid",
+            "inventory",
             "hr",
             "payroll",
             "pos",

@@ -24,6 +24,16 @@ ledger = { workspace = true }
 # that is not a request: a job paying a bill is still approving a payment.
 hr = { workspace = true }
 
+# **Where a bill line that bought stock posts.** A delivery debits inventory and
+# credits goods-received-not-invoiced; the bill line that names the product
+# debits that back, so the decision has to be taken where the entry is built.
+# `inventory` depends on `ledger` and `branches` and on nothing that depends on
+# it, so the arrow points one way and cargo has no cycle to refuse. It costs one
+# thing, and it is the system's own rule: `/v1/purchases` is refused while
+# `proj_inventory` is older than the build, because `reads` is what a route is
+# served from.
+inventory = { workspace = true }
+
 # The module ships its own routes; `erp-web` is what they are built from.
 erp-web = { workspace = true }
 tracing = { workspace = true }

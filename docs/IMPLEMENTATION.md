@@ -927,6 +927,2503 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
 
+### 78 · A tenant reads its shelves at a glance, and the lists say what they list
+
+**Built 2026-09-14**, from **D-D**, which the product owner took beside D-C
+after looking at what a tenant can see: a summary of the shelves per branch, and
+a branch filter and the product's name on the stock and lot lists. Read side
+only. Nothing posts, nothing moves, and no event or projection changed.
+
+#### What the summary answers
+
+**`GET /v1/inventory/summary`** (`modules/inventory/src/http.rs:875`) answers
+one row per branch with a shelf, or just the one `branch` names:
+
+- **`value`**: what the shelves are carried at, **one amount per currency**.
+- **`products`**: how many products have a shelf there.
+- **`expiring`** and **`expired`**: open lots going off within the tenant's
+  window, and lots past their date that are still on the shelf.
+- **`below_zero`**: each shelf below zero, named, with what it **`owes`**.
+
+Around the rows the response gives **`today`**, the day the dates were read
+against, and **`expiring_through`**, the last day the window reaches. A count
+of lots going off means nothing to a reader who does not know from when.
+
+**`branch` is a query parameter and not the request's `X-Branch`.** The header
+says where a request comes from, and a manager at head office asking about Malaz
+is not at Malaz. Leaving it out means every branch. The stock and lot lists
+already ignored the header, and the three routes now read `branch` the same way.
+A branch with no shelf is not in the answer, and an empty tenant gets
+`"branches": []` with a 200.
+
+**Readable by every role, like the lists** (`crates/erp-api/tests/http.rs:2312`).
+The summary is `GET /v1/inventory/stock` and `GET /v1/inventory/lots` added up.
+A viewer can page through both and do the sum, so withholding the total protects
+nothing. It would only make one screen harder to build for the person at the
+counter.
+
+#### Added up when asked, never kept
+
+**Nothing in it is stored.** §71 argued that a projection may not read while it
+applies, which is why a movement row carries a signed change rather than a
+running total. A total the projection kept would be one more number it could not
+check against anything. `inventory::summary`
+(`modules/inventory/src/projections.rs:1289`) sums the rows the projection
+already writes, at the moment it is asked:
+
+- **Worth is per currency.** A shelf is kept in its inventory account's currency,
+  and a tenant that moves that account to dollars holds the old stock in riyals
+  and the new stock in dollars. A single total would add riyals to dollars. The
+  test builds that state through the product's own commands: a dollar asset
+  account and a dollar holding account, chosen as the posting accounts, then a
+  delivery.
+- **A product counts once it has a shelf, whatever is on it.** A product that
+  sold out is still one the branch stocks, and a shelf below zero is counted too,
+  and also listed. A count of shelves with something on them would drop a product
+  the moment it sold out, and would disagree with the stock list it summarises.
+- **What a shelf owes is its debt, not its value.** It is the sum of the shelf's
+  movement rows with no lot, with the sign flipped. A shortfall takes units off
+  with no lot, and whatever a return or a count settles puts units back with
+  none. That sum is `Stock::owed`, rebuilt from rows. It is not the shelf's
+  value, because a delivery does not pay the debt (decision 16, §74). Take two
+  bags at 5.00 each, five sold, then one more bag at 7.00: the shelf holds −2,
+  is worth −8.00, and owes 15.00 — which is what a count of the shelf settles,
+  at what the sale charged the three bags out at.
+- **One snapshot.** The three reads run in one `REPEATABLE READ READ ONLY`
+  transaction, so the value, the lot counts and the shelves below zero come from
+  one moment of the read model and not three. `TenantDb::read` hands out a plain
+  pooled connection, and a replica serves the transaction as well as the primary
+  does.
+
+#### Going off: one rule, and the tenant's day
+
+**The route works out today; the read never does.** `stock_summary` reads the
+tenant's `ExpiryWindow` and calendar and takes `calendar.day(Utc::now())`
+(`http.rs:892`). The read takes `today` and `expiring_through` as arguments, so
+nothing below the route reads a clock, and the tests can choose their day.
+
+**The window's far end is worked out in one place.** `warns_until` was a private
+function in the worker binary. It is now `ExpiryWindow::warns_until`
+(`modules/inventory/src/expiry.rs:81`), and it is the same arithmetic. The
+worker's `read_before` and `going_off` call it, and so does the summary route.
+Without the move there would be two `today + days`, and the bell and the summary
+could disagree about the last day of the window. A lot is **`expired`** when its
+date is before today, and **`expiring`** from today through
+`expiring_through`: a batch dated today is still good today, which is how
+`going_off` reads it. An undated lot is neither. A lot with nothing left on it is
+neither, because the read counts only lots with something remaining, as the lot
+list does.
+
+#### The lists: a branch and a name
+
+`inventory::stock` and `inventory::lots` take a `branch`, and
+`GET /v1/inventory/stock` and `GET /v1/inventory/lots` pass it through. Movements
+do not; nobody asked.
+
+**Every stock and lot row carries the product's `name`**, joined at read time
+from the module's own `product` table: the same schema and the same projection
+group, read by a route rather than by a projection applying an event, so it
+crosses no group and L3 has nothing to say about it. When the table has no declaration for
+the product, the row shows **`null`** and is still listed. Inside one group that
+state is not reachable today: a product is declared before anything moves
+(`accepts_movements` asks the log), and the group applies events in log order.
+The join does not rely on that, so a name can never become a 500 or a missing
+row. `inventory::lot`, the single read `messaging` uses, names the product too,
+because `LotRow` gained the field.
+
+#### Costs
+
+**SQL**: `stock`, `lots` and `lot` gained the join, and `stock` and `lots` gained
+the filter; `summary` is three new queries. `just prepare` regenerated `.sqlx`.
+It also removed `query-380776…`, the `configuration::get` from before §77 added
+`set_at`, which no code has used since. **No install script changed, and no
+projection writes anything differently**, so `proj_inventory` stays at version 4
+and the `READ_MODELS` pin stands. A version bump is for what a rebuild would write
+differently, and nothing here is written.
+
+**One route**, `stock_summary`, in `PERMISSIONS` for every role. The count of
+role-scoped operations went from two hundred and fifty-nine to two hundred and
+sixty, and `just openapi` regenerated the document. The route adds optional
+`branch` parameters and new response fields. No baseline was taken.
+
+**Signatures**: `inventory::stock` and `inventory::lots` take `branch`, and the
+worker's two calls and the inventory tests pass `None`. `LotRow` and `StockRow`
+gained `name`, so the worker's test literal says `None`. There is no new refusal
+and no new message: a branch with no shelves is an empty answer, not an error.
+
+**Tests.** In `inventory`, against a tenant:
+`a_summary_is_the_lists_it_summarises_added_up`
+(`modules/inventory/tests/inventory.rs:2574`) checks that an empty tenant gets an
+empty summary. It then builds six shelves at two branches and at none, in two
+currencies, and checks each branch's worth, currency by currency, and its product
+count against the stock list, and its lot counts against the lot list read
+before today and through the window. It also checks the numbers themselves, so
+the agreement is not nothing agreeing with nothing, then the beans shelf below
+zero owing 15.00 while it is worth −8.00, the sugar sold to exactly nothing
+counted as stocked and absent from `below_zero`, the branch filter on all three
+reads, and the name on every row.
+`a_lot_is_going_off_from_today_through_the_windows_last_day` (`:2855`) sets
+batches dated yesterday, today, tomorrow, the window's last day and the day after,
+plus an undated batch and one written off to nothing, and reads them under a
+thirty-day window, a window of none and the widest window. In `erp-api`,
+`stock_is_summarised_a_branch_at_a_time` (`crates/erp-api/tests/http.rs:15535`)
+starts from an empty summary. **It sets the tenant's calendar to whichever of
+UTC−12 and UTC+14 is on a different day from UTC when the test runs, and will
+stay on that day for the next hour** (one of them always is) and stocks one
+branch with a batch dated the tenant's today and the other with one dated the
+day before. Read by UTC's day, one of the two batches lands in the wrong column,
+whichever way the zone differs. **It sets the window to two days through its
+route**, and Olaya also holds batches dated the window's last day and the day
+after, so the default thirty days would count one more. Beans sold three short at
+Olaya put an entry in `below_zero`. The test then checks `today`,
+`expiring_through`, the `below_zero` entry field by field, `branch` on the
+summary, the stock and the lots, and the name on both lists.
+
+**Falsified.** Each fix broken in Rust, the guard run and watched to fail on an
+assertion, the file restored from a copy (sha256-identical, then touched) and the
+guard run again and watched to pass:
+
+| broke | failed |
+|---|---|
+| the summary adds a branch's currencies into one amount | `a_summary_is_the_lists_it_summarises_added_up`: *Olaya worth what its shelves are, a currency at a time* — *left* `[("SAR", 34200)]`, *right* `[("SAR", 4200), ("USD", 30000)]` |
+| the summary skips the shelves of no branch | same: *a row per branch with a shelf, the shelves of no branch first* — *left* `[Malaz, Olaya]` |
+| `summary` ignores the branch it is given | same: asked for Malaz, *left* all three rows |
+| `stock` ignores the branch it is given | same: *left* 5 shelves at Olaya, *right* 3 |
+| `lots` ignores the branch it is given | same: *left* five lots at Malaz, *right* the one received there |
+| a stock row carries no name | same: *left* `None`, *right* `Some("حليب طازج")` |
+| a lot row carries no name | same, at the lot at Malaz |
+| `ExpiryWindow::warns_until` one day short | `a_lot_is_going_off_from_today_through_the_windows_last_day`: *today, tomorrow and the 10th of May going off* — *left* `(2, 1)`, *right* `(3, 1)`; and the worker's `a_lot_warns_inside_the_window_and_not_outside_it`: *left* `Some(2026-05-09)` |
+| a lot dated today counted as gone | `a_lot_is_going_off_from_today_through_the_windows_last_day`: *left* `(2, 2)`, *right* `(3, 1)` |
+| the route reads today off UTC's calendar | `stock_is_summarised_a_branch_at_a_time`: *the tenant's day in Etc/GMT+12, not UTC's 2026-09-14* — *left* `"2026-09-14"`, *right* `"2026-09-13"` |
+| the stock route drops `branch` | `stock_is_summarised_a_branch_at_a_time`: `?branch=` Malaz — *left* 2 shelves, *right* 1 |
+| the lots route drops `branch` | same: `?branch=` Olaya — *left* 2 lots, *right* 1 |
+| the summary route drops `branch` | same: `?branch=` Malaz — *left* both rows, *right* Malaz's |
+| the stock view drops the name | same: *left* `null`, *right* `"حليب طازج"` |
+| the lot view drops the name | same, on the lot list |
+| the summary route asks `ManageTenant` rather than `Read` | `every_role_against_every_endpoint`: *accountant → GET /v1/inventory/summary (stock_summary) answered 403 Forbidden, and the table says allowed* |
+| what a shelf owes read off its value (`-s.value`), built against the type-check database | `a_summary_is_the_lists_it_summarises_added_up`: *three bags no lot covered, at the 5.00 the last delivery cost* — *left* `owes: 800`, *right* `owes: 1500` |
+| an emptied lot counted (`remaining > 0` dropped), the same way | `a_lot_is_going_off_from_today_through_the_windows_last_day`: *left* `(3, 2)`, *right* `(3, 1)` |
+| *(review)* the summary route reads `ExpiryWindow::DEFAULT`, not the tenant's window | `stock_is_summarised_a_branch_at_a_time`: *the tenant's two days, not the default thirty* — *left* `"2026-10-13"`, *right* `"2026-09-15"` |
+| *(review)* a shelf at zero read as below zero (`on_hand <= 0`), against the type-check database | `a_summary_is_the_lists_it_summarises_added_up`: *…the empty sugar shelf owes nothing* — *left* the sugar at 0 owing 0 and the beans, *right* the beans |
+| *(review)* the product count skips empty shelves (`AND on_hand <> 0`), the same way | same: *Olaya: a product for every shelf the list shows* — *left* 3, *right* 4 |
+| *(review)* `owes` on the wire read off `on_hand` | `stock_is_summarised_a_branch_at_a_time`: *three bags owed at 5.00* — *left* `"minor": -3`, *right* `"minor": 1500` |
+
+**Prose the change made false, and fixed.** `expiry.rs`'s *What reads it* named
+only the worker, and the description of `GET /v1/inventory/expiry-window` did
+too. The book's read-model signatures had no branch, and its route table had no
+summary. §76 and §77 named `warns_until` as the worker's own function.
+
+#### What review found
+
+**Four findings, all in the tests and none in the code.** Each was a way the
+code could go wrong while every guard still passed. They share one root: the
+tests gave the route inputs under which the thing a guard should pin could not
+show. No batch sat at a window's edge, no shelf was sold to exactly nothing,
+nothing was below zero over HTTP, and a day was captured once and read twice.
+
+- **The summary never used the tenant's own window** (medium). The HTTP test set
+  no window, and its batches were dated today and yesterday, so every window gave
+  the same counts. `ExpiryWindow::DEFAULT` in place of `resolve` passed every
+  guard. The test now sets two days, dates batches at the window's last day and
+  the day after, and checks `expiring_through` and the count.
+- **No shelf stood at exactly zero** (low). With `on_hand <= 0`, a sold-out shelf
+  would show in `below_zero` owing nothing. A `held` read that skipped empty
+  shelves would stop counting a sold-out product, which breaks the rule this
+  section states. The inventory test now sells sugar to nothing at Olaya.
+- **The wire shape of `below_zero` was not tested** (low). The only HTTP
+  assertion was `[]`, so `owes` read off `on_hand`, or left out, would reach a
+  client. No stock route sells, so the HTTP test sells beans short through
+  `inventory::consume_in`, the call `sales` makes, and checks the entry.
+- **The HTTP test could fail on correct code at noon UTC** (low). It took the
+  tenant's day from its own clock before seconds of setup, and the route read
+  the clock again afterwards. UTC−12 turns its day at 12:00 UTC, a boundary the
+  zone choice could straddle. The test now takes a zone whose day will not turn
+  within the hour. UTC−12 is on another day than UTC before noon, and UTC+14 is
+  from ten; each turns at one of those two hours, so any margin under two hours
+  leaves one of them. **This fix could not be falsified in Rust**, because the
+  route's clock cannot be moved. Instead, the rule was run against tzdata for
+  every minute of two days, and no minute was left without a zone.
+
+**Left open.**
+
+- **A tenant with shelves at a branch and shelves at none cannot filter to the
+  shelves at none.** Leaving `branch` out means every branch. This is a business
+  that traded without `X-Branch` and then opened branches, and its old shelves
+  show under `branch: null` in the summary.
+- **`below_zero` is not paged.** Every shelf below zero at a branch comes back in
+  one response. A café has a few; a store with thousands of plain products never
+  counted would have many.
+- **A shelf below zero sums its whole movement history to find its debt**
+  (`ponytail:` at the query). Only shelves below zero are read that way, and a
+  count clears them. A column the projection keeps would need a version bump,
+  and nothing has asked for one yet.
+- **Units sold short before anything was received owe nothing.** No cost was
+  booked for them. If a delivery later gives the shelf a currency, they read as
+  owing 0.00 in it, which is what the books hold and may still surprise a reader.
+- **The movement list has neither the filter nor the name.** D-D asked for the
+  stock and lot lists only.
+- **A run that crosses midnight UTC does not guard the route's day.** In the
+  hour before it UTC+14 is chosen, and once UTC turns, its day and the tenant's
+  agree, so a route reading UTC's day would pass that one run. Correct code
+  still passes.
+
+### 77 · Stock going off rings the bell, and operators watch that it rang
+
+**Built 2026-09-14**, from three decisions the product owner took after §76's
+review and a look at what a tenant can see: **D-A**, a plain product's named lot
+refuses; **D-B**, the expiry warning reaches the tenant's notification bell, once
+per lot, for the people who may write stock off; and **D-C**, which corrects
+D-B's *the warning moves*: the operators' per-lot finding is not removed but
+**replaced** by a check that the bell works. An earlier run of this slice was
+stopped when the product owner questioned removing the health check; it left
+nothing in the tree, and nothing of it is here.
+
+#### No module rings the bell, so the worker does
+
+§47 is the rule: announcing resolves an audience through `messaging`, which reads
+the domain modules, so a module announcing closes a cycle cargo refuses.
+`inventory` is now one of the modules `messaging` reads — a notification about a
+lot has to say what the lot is — so the cycle is literal: `inventory →
+notifications → messaging → inventory`. The warning is raised where §47 puts
+every producer, **a job in `crates/erp-worker/src/bin/worker.rs`**:
+`AnnounceExpiringStock` (`:409`), a scan with no cursor that runs on every visit,
+like `AnnounceExpiringDocuments` beside it.
+
+It reads the tenant's `ExpiryWindow`, the tenant's calendar and the open lots,
+and puts them through `going_off` — the classifier §76 wrote and tested, kept
+unchanged along with `warns_until` and `read_before`. (§78 moved `warns_until`,
+unchanged, onto `ExpiryWindow`, so the summary counts by it too.) A lot reaching its date
+inside the window is **`stock_expiring`**; one past its date and still on the
+shelf is **`stock_expired`**. Undated lots are never either, and neither is a lot
+with nothing on it, however it emptied — sold, counted or written off — so a lot
+that empties after it was told is never told again.
+
+#### Once per lot, by construction
+
+**The notification's id is derived from its kind and its subject**
+(`notifications::announce::derived_id`), and here the subject is the lot and the
+kind is its state (L8). So a second run finds the aggregate and writes nothing,
+and a window widened to reach a lot already told writes nothing either: the
+window is not in the id. No cursor, no table of what was said.
+
+**Passing its date earns a second, distinct notification, also once.** The two
+ask for different acts. *Going off soon* is an order to rotate, mark down or send
+back while the batch can still be sold; *gone and still on the shelf* is stock
+that must come off it today — a write-off with reason `expired`. That is the
+split `WorkDocumentExpiry` has between an expiring document and a lapsed one, and
+§76 kept for the same reason; a person who read the first and did nothing is
+exactly who the second is for, and folding it into the first would make it a
+repeat nobody reads.
+
+#### Who is told is who may write it off — which no audience can say
+
+The write-off route is `POST /v1/inventory/stock/{product}/write-offs`, whose
+`PERMISSIONS` row is owner, accountant and clerk and whose extractor is
+`Allowed<PostEntries>` under `/v1/inventory`. **That decision is asked again, per
+member**, by `who_may_write_off` (`:533`):
+
+- **The capability is named once**, as the type the handler takes:
+  `inventory::http::WritesOff` (`modules/inventory/src/http.rs:707`), with
+  `WRITE_OFF` its value. Change the route's extractor and whoever is told
+  changes with it.
+- **The role that applies in `inventory`** — a module role over the tenant-wide
+  one, `Access::allows`.
+- **The tenant's permission limits**, with the lot's branch as the request's
+  branch and that role as the `role` fact. So that this is the route's decision
+  and not a copy of it, the two halves `Allowed` and `TenantDb::permits` ran
+  inline are functions now: `erp_tenant::limits::facts_at` builds the facts the
+  edge knows (`crates/erp-tenant/src/limits.rs:253`), used by the extractor and
+  by `still_permits` (`crates/erp-web/src/extract.rs:808`); `Limits::permit` is
+  the whole decision for one person (`:185`), and `TenantDb::permits` calls it
+  once it has read the limits (`crates/erp-tenant/src/db.rs:178`). The route's
+  answer did not change; it is computed in one place.
+- **A suspended login is not told**: it cannot sign in to write anything off.
+
+**This is a departure from §47, and the reason is §47's own.** Every kind before
+these resolves an `Audience` through `messaging`: an employee linked to a login,
+by where they work and whom they report to. §47 built that link to answer *which
+bell rings* and said, in so many words, that nothing about what somebody **may
+do** reads it — 9c refused to bridge the planes for authorization. *Who may write
+stock off* is exactly what somebody may do: a login's role in a tenant and the
+tenant's limits, control-plane, which nothing `notifications` or `messaging`
+holds can ask, and which a tenant with no `hr` records could not answer through
+an audience at all. So the one place holding both planes — the composition root,
+where §47 already puts every producer — resolves the logins and names them.
+**`Kind::told_by_caller`** (`modules/notifications/src/kind.rs:113`) says which
+kinds are addressed that way — the two stock kinds, exactly the ones with no
+audiences, and `every_kind_is_addressed_to_an_audience_its_topic_has` (`:157`)
+now asserts one or the other — and `Announcing::to`
+(`modules/notifications/src/announce.rs:43`) carries the names, read for those
+kinds and no other. An empty `to` is `AnnounceError::Unreachable`, as an
+audience that resolves to nobody always was. The control plane is asked only
+when a page holds a lot nobody has been told about. What §47 forbids still
+holds: no module announces, and the id is still derived.
+
+#### What the notification says
+
+`messaging::Topic::Lot` (`modules/messaging/src/audience.rs:40`) is what the
+notification is about, with bindings `lot.id`, `lot.code`, `lot.expires_on`,
+`lot.remaining`, `product.name` and `branch.name` (`bindings.rs:210`,
+`template.rs:234`). `messaging` depends on `inventory` to answer them —
+`inventory::lot` and `inventory::product`, two single-row reads — and declares it
+in `reading`, which `a_modules_reads_are_its_crate_dependencies` insists on. An
+untracked lot's `lot.code` is its id, which is how the lot list names it.
+
+**Where the lot is, and never a hole.** A notification's wording is rendered once
+and frozen in `Announced`, and its id is derived, so a sentence recorded with
+`{{ branch.name }}` in it says so for ever. Two lots have no branch name to give:
+
+- **A lot at no branch** — a business with one shelf, `X-Branch` optional — has
+  no branch at all. Each stock kind has a second sentence without *at {branch}*,
+  and `notifications::copy::of` (`modules/notifications/src/copy.rs:206`) takes
+  **the first of a kind's sentences whose every name the subject answers**. A
+  kind with one sentence renders as it always did.
+- **A lot at a branch the `branches` read model has not caught up with** is named
+  by the key it was received under. The branch is in the log — the ledger
+  refuses a receipt's posting at a branch that was never opened
+  (`branches::accepts_documents`) — so only a read model behind leaves it
+  unnamed; the key is how the lot list names a branch, as the id is how it names
+  an untracked batch; and a key in the sentence beats braces in it for ever.
+
+The copy (`copy.rs:132`), both languages, neither a translation of the other:
+
+| kind | en | ar |
+|---|---|---|
+| `stock_expiring` | *{product}, batch {code} at {branch}, is good until {date}.* | *{product}، الدفعة {code} في {branch}، صالحة حتى {date}.* |
+| `stock_expired` | *…was good until {date} and is still on the shelf. Write off what cannot be sold or sent back.* | *…كانت صالحة حتى {date} وما زالت على الرف. اشطب من المخزون ما لا يمكن بيعه أو إرجاعه.* |
+
+*Good until*, because a batch dated today is still good today — the reading
+`going_off` and `expiring_before` take. A tenant who wants other words writes an
+in-system template named after the kind, like every kind.
+
+**The bell and nothing else.** The people named are logins, and a login has no
+email address or phone number, so no paid channel can reach them. A grid asking
+a stock kind for one would be saved and never obeyed, so `set_preferences`
+refuses it (`NotificationError::InSystemOnly`, `notifications.in_system_only`,
+en + ar, 400 at `PUT /v1/notifications/preferences`).
+
+A topic is not only a notification's: `lot` is now a topic a `messaging` template
+and a `conversations` thread may name, addressed to the branch manager or an
+operator. The descriptions that listed four topics list five.
+
+#### The check operators see: did the bell ring?
+
+**`StockExpiry` is gone.** Operators were being shown every tenant's expiring
+lots, which none of them can do anything about. **`StockBellRings`** (`:620`,
+registered as `stock_bell` at `:140`) reports instead **a lot the announcer should
+have told somebody about, with no notification of the kind its state calls for,
+for longer than the grace**. That is a fault somebody can fix: the job not
+running, the bell's read model behind, a limit or a suspension leaving nobody who
+may write stock off where the lot is, or a notification that cannot be recorded.
+**It names the lots by id and nothing else** (`describe_lots`, `:694`): what is on
+a tenant's shelf, how much and until when, is the tenant's. It reads two groups —
+the lots out of `proj_inventory`, what was announced out of `proj_notifications`
+— in the composition root for the reason `StockValueAgrees` does, and the rule is
+a pure function, **`unannounced`** (`:655`):
+
+- A lot is due `stock_expired` from the start of the tenant's day after its
+  date, and `stock_expiring` from the start of the day its window first reaches
+  its date (`Calendar::start_of`, never by hand).
+- **Or from when it came onto the shelf, if later** — a delivery that lands
+  already inside its window was due from then. `LotRow` gained `recorded_at` for
+  this: `received_at` is the caller's, and a delivery entered today but dated
+  last week would have been due, by that, before anything could have told
+  anybody. **A return that puts units back on a lot that had emptied moves it**
+  (`put_back`, `modules/inventory/src/projections.rs:662`): that lot was off the
+  listing and nobody could have been told about it either.
+- **Or, going off, from when the window was last set, if later.** A window
+  widened this morning reaches lots nothing has had a visit to announce yet.
+  `erp_eventlog::configuration::Configured` gained `set_at`, which the
+  `configuration` table has always kept (`crates/erp-eventlog/src/config.rs:76`).
+  Passing a date does not depend on the window, so it does not move that.
+
+**The grace is argued from how often the announcer runs** (`bell_grace`,
+`:639`). It runs on every visit, so the ordinary wait between a lot falling due
+and being told is the wait for the next visit — at the longest, for a tenant
+doing nothing else, the schedule's ceiling plus the jitter spread across it. That
+bound had no name; it is `WorkSchedule::longest_idle_delay` now
+(`crates/erp-control/src/leases.rs:120`), computed from the same arithmetic
+`next_idle_delay` uses, and with the shipped schedule it is six hours of ceiling
+and two of jitter, less a millisecond. **One health interval on top**: the
+notification reaches the bell's read model the round after it is written and the
+check only looks every five minutes, so a finding means a whole visit came and
+went without it. Derived from the schedule the worker runs, not a constant beside
+it: raise the ceiling and the grace follows.
+
+**Silent without a bell.** A tenant with `inventory` and without
+`notifications` has no path to be broken, and the check says nothing — see
+*Left open*, where it is a question for the product owner.
+
+The value-on-hand invariant, `StockValueAgrees`, is untouched.
+
+#### D-A, recorded
+
+The open question in §76 is closed: **a named lot on a plain product refuses**
+when it cannot cover the line, as a tracked one does. It is the one way a plain
+sale is refused for stock, and deliberate — the line asked for that lot. No code
+changed. `a_named_lot_that_cannot_cover_the_line_refuses`
+(`modules/sales/tests/sales.rs:6657`) already pinned the plain case beside the
+tracked one; its doc now says it guards a product-owner decision, and the book's
+*What an invoice takes off the shelf* says the same.
+
+#### Costs
+
+**SQL**: `configuration::get` reads `set_at`; `inventory::lots` reads
+`recorded_at`; `inventory::lot` and `inventory::product` are new. `just prepare`
+regenerated `.sqlx`. **No install script changed shape**, so the pinned hash
+stands, but **`proj_inventory` moved to version 4** and `READ_MODELS` is re-pinned
+at it: a return reopening a lot now writes `recorded_at`, which a rebuild under
+the old projection would not. The module has not shipped, so no tenant rebuilds.
+**No route**, so `PERMISSIONS` is untouched. New notification kinds and a new
+topic are new values in string fields, and `notifications.in_system_only` is a
+new 400 for those new values only, which the compatibility test does not pin;
+`just openapi` regenerated the descriptions and no baseline was taken.
+`Announcing` gained a field and `announce_all` a parameter, so every caller —
+four worker jobs, the demo seed, the notifications tests and one `erp-api` test —
+passes `&[]` or `Vec::new()`. `erp-worker` depends on `erp-tenant` directly, for
+`Limits` and `facts_at`.
+
+**Tests.** Pure, in the worker binary:
+`whoever_may_write_stock_off_is_told_and_nobody_else`,
+`a_lot_due_a_notification_is_a_finding_until_its_own_one_exists`,
+`a_lot_is_silent_inside_the_grace_from_whenever_it_fell_due`; §76's
+`a_lot_warns_inside_the_window_and_not_outside_it` and
+`an_undated_or_emptied_lot_never_warns` stand, and its cap test went with the
+cap. **Against a tenant**, in the same binary — the harness §72 and §76 found
+missing: `a_lot_going_off_is_told_once_to_whoever_may_write_it_off` (owner and
+clerk told, viewer not; once; English and Arabic naming the product, batch,
+branch and date; a lot outside the window, an undated lot and one written off to
+nothing never told; ninety days reaching the next lot without telling the first
+again; the check silent),
+`a_lot_at_no_branch_or_an_unknown_one_is_told_in_a_whole_sentence` and
+`a_lot_past_its_date_nobody_was_told_about_is_a_finding` (a delivery entered
+now, two days past its date and dated three days back: silent inside the grace
+because it counts from when it was recorded, a finding past it naming the lot's
+id and not its batch, `stock_expired` once told, silent after). In
+`erp-control`: `no_tenant_waits_longer_than_the_longest_idle_delay`. In
+`notifications`: `a_kind_told_to_logins_takes_no_channel_but_in_system`. In
+`inventory`: `a_return_after_a_count_cleared_the_debt_puts_the_units_back` now
+also pins when a reopened lot and an open one came onto the shelf.
+
+**Falsified.** Each fix broken in Rust, the guard run and watched to fail, the
+file restored from a copy (sha256-identical, then touched) and the guard run
+again and watched to pass:
+
+| broke | failed |
+|---|---|
+| `who_may_write_off` stops skipping suspended logins | `whoever_may_write_stock_off_is_told_and_nobody_else`: *a suspended owner* among those told |
+| the role asked with no module instead of `inventory` | same: *a clerk who only views stock* told, *a viewer who is a clerk for stock* not |
+| the lot's branch left out of the facts | same, at Malaz: *left* every clerk, *right* `["owner", "accountant"]` — the limit never saw the branch |
+| `WritesOff` is `ManageAccounts` | same: *left* `["owner", "accountant"]` — the route's extractor changed and who is told followed |
+| `Limits::permit` stops adding the `role` fact | same, at Malaz: the limit on clerks never matched |
+| `facts_at` passes the branch as an empty string | same, at Malaz |
+| `unannounced` treats a lot already told as untold | `a_lot_due_a_notification_is_a_finding_until_its_own_one_exists`: a finding though the bell rang |
+| a lot past its date looked up as `stock_expiring` | same assertion |
+| no grace (`now >= due`) | `a_lot_is_silent_inside_the_grace_from_whenever_it_fell_due`: *the ordinary wait for a visit* |
+| the window's `set_at` ignored | same: a lot a window reached an hour ago is a finding |
+| due counted from `received_at` instead of `recorded_at` | same, at the delivery an hour old; and `a_lot_past_its_date_nobody_was_told_about_is_a_finding`: *recorded a moment ago, however long ago it says it arrived, so still inside the grace* |
+| the grace from the ceiling alone | same: *left* 21900s, *right* 29099.999s — *six hours of ceiling, two of jitter, five minutes of health interval* |
+| `longest_idle_delay` without the jitter | `no_tenant_waits_longer_than_the_longest_idle_delay`: *left* 21600s, *right* 28799.999s |
+| the job hands the bell nobody (`&to[..0]`) | `a_lot_going_off_is_told_once_to_whoever_may_write_it_off`: the first tick *left* `Idle`, *right* `Worked` |
+| `announce` reads `to` only when it is empty | same |
+| the window in the notification's subject | same: *left* `lot.….dn-soon.w30`, *right* `lot.….dn-soon` |
+| the window in the subject once it is not thirty days, and the cheap first pass skipped then | same, at ninety days: *left* 3, *right* 2 — `dn-soon` told a second time |
+| the check reads a lot as told `stock_expired` only when nothing was, and it was told `stock_expiring` | `a_lot_past_its_date_nobody_was_told_about_is_a_finding`: *told, and still a finding* |
+| `product.name` not bound | `a_lot_going_off_is_told_once_to_whoever_may_write_it_off`: *does not say* the product |
+| the Arabic sentence at a branch drops the branch | same: *ar does not say* العليا |
+| `told_by_caller` forgets `stock_expired` | `every_kind_is_addressed_to_an_audience_its_topic_has`: *stock_expired must name an audience or be told to whom the caller names* |
+| a plain line's short named lot falls back to the picking rule (D-A) | `a_named_lot_that_cannot_cover_the_line_refuses`: *two in a plain lot and three asked for of that lot* |
+
+**Prose the change made false, and fixed.** `inventory`'s module doc and
+`expiry.rs` said the worker's `stock_expiry` check reports; the expiry-window
+route's description said lots are *reported as health findings*; the book's
+*The expiry warning* described two health findings; §71's closed entry and §76's
+*The expiry warning* described `StockExpiry` as current. The notifications
+crate's layering diagram and its `Cargo.toml` listed `messaging`'s reads without
+`inventory`. The notification view's `kind` and `docs/RUNNING.md` listed five kinds, and
+every description of a topic listed four.
+
+#### What review found — a harness that never named a branch, and a hole frozen into the bell
+
+Seven findings: six fixed, one left to the product owner.
+
+- **The main guard had never passed.** `a_lot_going_off_is_told_once_to_whoever_may_write_it_off`
+  failed on its first wording assertion — *en does not say العليا: حليب طازج,
+  batch B-SOON at {{ branch.name }}* — because the harness projected `inventory`
+  and `notifications` and never `branches`. Everything after that line had not
+  run: the Arabic, the clerk, the viewer, the ninety-day window, the silent
+  check. The harness projects `branches` now, and the test is green for the
+  first time; every falsification of it above was run after the fix.
+- **That failure was a production bug, not only a harness one.** A lot at no
+  branch took the business's signing name as its `branch.name`, and that
+  defaults to empty and nothing outside `messaging` sets it; a lot at a branch
+  the read model lagged on had none either. Either way the bell recorded
+  `at {{ branch.name }}`, frozen, under a derived id no later run replaces. The
+  business fallback is gone; the stock kinds have a sentence without a branch,
+  chosen when the subject answers no branch; a lagging branch is named by its
+  key — see *Where the lot is, and never a hole*. Guard:
+  `a_lot_at_no_branch_or_an_unknown_one_is_told_in_a_whole_sentence`, with no
+  business name set and `branches` left unprojected.
+- **This section did not exist**, while §76, the D-A guard's doc and the check's
+  rustdoc cited it, and the departure from §47 was argued nowhere. It is written,
+  with that argument under *Who is told is who may write it off*.
+- **The book said operators do not see a tenant's lots**, and the finding logged
+  five lots' quantity, product, branch, batch and date at `error`. The finding
+  names ids only now (`describe_lots`), which is what D-C's objection was about;
+  the book says what an operator does see.
+- **`PUT /v1/notifications/preferences` saved SMS for a stock kind** and answered
+  204, though the people those kinds reach have no address (L6). Refused now,
+  in the command rather than at the route, so every writer meets it.
+- **A lot reopened by a return kept its receipt's `recorded_at`**, so a lot that
+  emptied before its window, came back after it and had never been told was due
+  from long ago, and the health job — registered ahead of the announcer — could
+  report it before the announcer's turn in the same visit. `put_back` moves
+  `recorded_at` when the lot had emptied; `proj_inventory` is at version 4.
+- **A tenant with `inventory` and without `notifications` is told by nobody**,
+  and the check is silent for it: the per-lot finding was the only thing that
+  spoke for such a tenant, and D-C replaced it with a check of a bell that tenant
+  does not have. **Decided 2026-09-14 (D-E): the summary is enough** — see
+  *Left open*.
+
+**And one the verification run found.** `erp-web`'s
+`every_declared_fact_is_assembled_somewhere` looked for `limits::BRANCH` and
+`limits::ROLE` at the code that supplies them, and with that code moved into
+`facts_at` and `Limits::permit` it found neither. The facts are still supplied;
+the scan was looking in the old place. It also reads `limits.rs`'s own code now
+(`crates/erp-web/tests/facts.rs`), above its tests, which build facts of their
+own.
+
+**Falsified**, the same way:
+
+| broke | failed |
+|---|---|
+| `copy::of` always takes a kind's first sentence | `a_lot_at_no_branch_or_an_unknown_one_is_told_in_a_whole_sentence`: *leaves a hole* — `{{ branch.name }}` for the lot at no branch |
+| a branch the read model lags on left unnamed rather than named by its key | same: *does not say BR-OLAYA* — the sentence without a branch, for a lot at one |
+| the finding names batch codes again | `a_lot_past_its_date_nobody_was_told_about_is_a_finding`: *…or the bell cannot record one: B-GONE* |
+| `set_preferences` refuses a stock kind's grid only when it is empty | `a_kind_told_to_logins_takes_no_channel_but_in_system`: *SMS for stock going off was saved, and could never be sent* |
+| `put_back` keeps a reopened lot's `recorded_at` | `a_return_after_a_count_cleared_the_debt_puts_the_units_back`: *the reopened batch still says it came onto the shelf with its receipt* |
+| `put_back` moves it for a lot still open too | same: *a unit joining a lot still open moved when that lot came onto the shelf* — *left* `…21.109778Z`, *right* `…21.051383Z` |
+| `facts_at` puts the branch in as `capability` | `every_declared_fact_is_assembled_somewhere`: *the registry declares `branch` and nothing anywhere supplies it* |
+| `Limits::permit` stops adding the `role` fact | same: *the registry declares `role` and nothing anywhere supplies it* |
+
+The harness fix is not in the table: its guard is the test it repaired, and every
+row above that names `a_lot_going_off_is_told_once_to_whoever_may_write_it_off`
+was run after it.
+
+**Left open.**
+
+- ~~**A tenant with `inventory` and without `notifications` is told by nobody.**~~
+  **Decided 2026-09-14 (D-E): the summary is enough, and the docs say so.** Such
+  a tenant is not pushed and `stock_bell` stays silent for it, but it sees every
+  expiring and expired lot in `GET /v1/inventory/summary`, counted against the
+  same window. `inventory` does not require `notifications`: nothing was built,
+  and the module doc (`modules/inventory/src/lib.rs`), the expiry-window
+  setting's description and the book page now state it.
+- **Enabling `notifications` on a tenant whose lots are already due** can raise
+  one `stock_bell` finding if the health job reaches the tenant before the
+  announcer does on that visit: when a module was enabled is not something a
+  `TenantDb` knows. It clears on the same visit.
+- **A tenant's own in-system template for a stock kind can still leave braces.**
+  The first-answered rule is for the compiled copy; a template is checked against
+  the vocabulary when it is saved, and `branch.name` is in the vocabulary,
+  though a lot at no branch has none. Refusing to announce until a template's
+  every name is answered would hold a notification for ever over an optional
+  name.
+- **Every open lot inside the window is read on every visit**, a page at a
+  time, by the announcer and by the check. Cheap for a café; a pharmacy with
+  thousands of dated lots and a six-month window may want a watermark.
+- **A lot whose id is not a valid `AggregateId`** — longer than 128 characters,
+  which a long product key and branch key together can make — cannot name a
+  notification. The announcer logs it and the check reports it; neither drops it
+  quietly. Capping what `lot_of` can produce is `inventory`'s, and nothing has
+  produced one.
+- **A member who has not enrolled a second factor the tenant requires** is told,
+  though they cannot sign in until they do. They are one enrolment from writing
+  the stock off, which is closer to *may* than to *may not*.
+
+### 76 · A line names its lot, a return names its units, and a lot going off is somebody's to act on
+
+**Built 2026-09-13**, after Phase 19's four boxes, from what they left open:
+§74's *a line that names a lot* and *naming which units come back*, §71's
+*nothing reads the expiry window* and *no book page*. Decision 9 had all of it —
+picking is earliest expiry first **and overridable**, a serial is an identity,
+expiry is **warned early and written off by hand** — and only the seams existed.
+
+#### A line may name its lot
+
+`pick` already honoured a named lot (`modules/inventory/src/picking.rs:290`):
+refused when it is not open on the shelf, refused when it holds fewer than was
+asked, never topped up from the next. Nothing on an invoice could say which.
+**`lot` is now on the draft line and on the stored line**
+(`modules/sales/src/invoice.rs:175`, `:280`), and `deplete` hands it to
+`consume_in` (`modules/sales/src/commands.rs:677`). On the stored line and not
+only the draft, because since §74's review `deplete` reads the lines off the
+`Issued` event the transaction wrote, never off the request; `#[serde(default)]`,
+so every line already written decodes as one that let the picking rule choose,
+which is what it did. It rides `issue_in`, so the till has it too — both wire
+lines carry it (`modules/sales/src/http.rs:211`, `modules/pos/src/http.rs:110`).
+
+- **The lot's id, not its code.** Codes repeat across deliveries (decision 19);
+  the id is what `GET /v1/inventory/lots` lists and what a write-off already
+  takes.
+- **A lot at another branch is refused by construction.** A shelf is one
+  aggregate per product per branch and only its own lots are in it, so Olaya's
+  batch named on a sale at head office is `inventory.no_such_lot` — even when
+  head office holds milk the line could have had. No new check; a test that says
+  so.
+- **A lot named with no product is refused** (`commands.rs:1782`,
+  `SalesError::LotWithoutAProduct`, `sales.lot_without_a_product`, new, en +
+  ar), in `priced_lines` beside the rule a line naming serials follows. Dropped,
+  nothing would take the units off that batch while the customer was promised
+  it (L6).
+- **A plain product that names a lot refuses when the lot is short**, like a
+  tracked one. Naming a lot is a claim about that lot whatever the tracking, and
+  `consume_in` already said so; only R1's shortfall is a plain product's, and it
+  is for the lines that name nothing. *That is the lead's reading of decision 9
+  against R1, not the product owner's — see What review found and Left open.*
+
+The invoice's read model stores its lines as columns and has none for `lot`, so
+the batch a line named is on the event and on the stock movement
+(`proj_inventory.stock_movement.lot`) and not in `GET /v1/sales/invoices/{id}`.
+No SQL changed, and no `VERSION` moved. See *Left open*.
+
+#### A return names the units that came back
+
+A return of part of a named-unit movement was refused, because which of three
+phones came back is not a thing to guess (decision 17), and a credit line had
+nowhere to say. **`CreditLine` gained `serials`** (`commands.rs:1961`), and so did
+both wire shapes (`modules/sales/src/http.rs:777`, `modules/pos/src/http.rs:192`)
+and `inventory::Restoration` (`modules/inventory/src/commands.rs:363`).
+
+**Only units this invoice sold, and each of them once.** The question is not
+whether the name is on the shelf — a unit sold again since is off the shelf as
+well, so a shelf check would let the first invoice bring it back a second time
+while the second customer is holding it. **It is whether that unit is still out
+on that sale**, and §74 already built the thing that answers it:
+`inventory::stock::Returning` follows the consumption through the whole stream,
+and `WentOut::give_back` takes each returned name off what is still out
+(`modules/inventory/src/stock.rs:332`). That line was written for whole returns
+and is load-bearing now. `named_back` (`commands.rs:958`) takes each name off the
+portion it went out on, at that portion's share of what the sale froze, and
+refuses a name that is not there — never taken, or already back — or given twice:
+**`InventoryError::NotOut`** (`:145`, `inventory.not_out`, new, en + ar, 422).
+Nothing is decided from the shelf's bounded window, which §74's review found
+wrong twice. The shelf's own `lands` check still runs after it.
+
+**Names come with their count.** `priced_for_credit` refuses names without a
+quantity of that many (`modules/sales/src/commands.rs:2269`): a credit line with
+names and no quantity is skipped by `came_back`, which only returns what a
+quantity says, so the money would credit and nothing would come back. It reuses
+`sales.named_units`, reworded to fit a credit line as well as an invoice line.
+`inventory` checks its own input the same way — names disagreeing with a
+`Restoration`'s quantity are `NeedsSerials` (`commands.rs:958`) — which is the
+split `deplete` already has with `leaving`: each layer refuses the shape it is
+handed. Only `sales` calls `restore_in`, so that one is pinned by a unit test on
+the pure function rather than through an invoice.
+
+Names on two credit lines against one invoice line add up with their quantities
+(`ComingBack`, `commands.rs:726`, now a quantity and the names), and trimmed the
+way a sale trimmed them (`restore_in`, `modules/inventory/src/commands.rs:767`),
+so a name matches itself. A return of named units by quantity alone still only
+works for the whole of what is out, and
+`inventory.named_units_come_back_whole` now says to name them.
+
+#### The expiry warning
+
+*Superseded by §77.* The warning is a notification for whoever may write stock
+off now (D-B), and `StockExpiry` is gone: what operators see is a check that the
+notification was raised (D-C). `going_off`, `warns_until` and `read_before`
+survive it unchanged — `warns_until` as `ExpiryWindow::warns_until` since §78. What follows is what this slice built.
+
+**`StockExpiry`** (`crates/erp-worker/src/bin/worker.rs:388`, registered at
+`:140`) is a health invariant in the shape `WorkDocumentExpiry` has: it reads the
+tenant's `ExpiryWindow`, the tenant's calendar and the open lots, and reports two
+findings — `stock_expired` for lots past their date and still on the shelf,
+`stock_expiring` for lots that reach their date within the window. Two and not
+one, for `hr`'s reason: stock past its date should be off the shelf today, and
+stock about to be is an order to rotate.
+
+**It posts nothing, writes nothing off and moves nothing.** A date is not a
+smell: a batch may go back to its supplier or sell at a markdown until its last
+good day, so what leaves the shelf leaves through a write-off somebody enters
+with a reason. The check holds a read connection, reads one setting, the
+calendar and one listing, and hands the rows to a pure function.
+
+**The rule is `going_off`** (`:429`), tested without a database, with the
+window's last day in `warns_until` (`:399`):
+
+- A lot with **no date never warns** — nothing on it spoils — and an **emptied**
+  lot never warns, whatever its date: nothing is left to throw away.
+- **Gone** is a date behind today. A batch dated today is still good today, the
+  reading `expiring_before` already takes.
+- **Soon** is a date no later than today plus the window. A window of none still
+  reports what has gone, and what goes today.
+- **Today is the tenant's day** (`erp_eventlog::configuration::calendar`), not
+  UTC's — at one in the morning on the 12th in Riyadh it is still the 11th in
+  UTC, so `Utc::now().date_naive()` would call a batch dated the 11th good for
+  three more hours after the shop's own day said it had gone.
+
+The listing is narrowed with `expiring_before` set to the day after
+`warns_until` (`read_before`, `:413`) and capped at 200 lots, soonest first
+(`EXPIRY_LOTS`, `:393`), reading one more so a finding can say whether the cap
+cut the list and where (`expiry_findings`, `:459`). `lots` already excludes
+emptied and, under `expiring_before`, undated lots — that narrowing is the
+listing's own, and `going_off` is still the rule, so a change to the query
+cannot start warning about either. It can stop warning, by reading less, which
+is why `read_before` has a test of its own (see *What review found*).
+
+**"Changes nothing" is by construction, not by test.** No command is reachable
+from the check, and the classifier takes borrowed rows. Proving it against a
+database would need a tenant harness in the worker binary, which §72 noted it
+does not have.
+
+#### The book page
+
+`docs/book/src/api/inventory.md` in the shape of the other module pages, listed
+in `SUMMARY.md` beside `ledger`, and an `inventory` entry in `modules.md` —
+above `sales`, because that page orders modules by what they depend on, and
+`sales` and `purchases` depend on this. It describes what is built: the tracking
+modes, lots and the picking rule, serials, receipts and `2010`, write-offs,
+counts, what an invoice takes and a credit note puts back, the expiry warning,
+the posting accounts, and what is not here. `module.md` still said the registry
+carried four modules, that three tests guarded it, and that `docs/ERRORS.md` is
+generated from the catalogue; it now shows one entry per module, says what the
+registry's tests guard, and names `erp_i18n::testing::assert_complete`
+(`crates/erp-api/src/catalog.rs:69`), which is what fails a code missing a
+language since `ERRORS.md` was retired.
+
+#### Costs
+
+No SQL changed and no `.sqlx` file moved: the sales read model has no column for
+a line's lot, and `proj_inventory` already stored a movement's lot and a unit's
+name. **No `VERSION` bump**, no `READ_MODELS` re-pin, no route, so `PERMISSIONS`
+is untouched. An `Issued` event's line may carry `lot`, and a `Restored` event's
+portions carried serials already. Four optional request fields —
+`NewInvoiceLine.lot`, the till's `NewLine.lot`, `NewCreditLine.serials`,
+`ReturnedLine.serials` — so the compatibility test passed untouched and no
+baseline was taken; `just openapi` regenerated them and the route descriptions.
+The credit-note and till-return handlers built their lines inline; each is now a
+function with a test at the seam (`credit_lines`, `modules/sales/src/http.rs:1676`;
+`returned`, `modules/pos/src/http.rs:837`), because §74 found a field dropped
+between JSON and a command is invisible to every test that calls the command.
+Every `DraftLine`, `InvoiceLine` and `CreditLine` literal in the workspace gained
+the new field.
+
+**Falsified.** Each fix broken in Rust, the guard run and watched to fail, the
+file restored from a copy (sha256-identical) and the guard run again and watched
+to pass:
+
+| broke | failed |
+|---|---|
+| `deplete` passes `lot: None` | `an_invoice_naming_a_lot_takes_from_that_lot`: *two came off the batch the line named — left `Some(3)`, right `Some(1)`*; and `a_named_lot_that_cannot_cover_the_line_refuses`: *three in the batch and four asked for: `Ok(…)`* — the invoice issued off the early batch |
+| the lot-without-product check removed from `priced_lines` | `a_named_lot_that_cannot_cover_the_line_refuses`: *a lot of nothing: `Ok(…)`* — issued with `product: None, lot: Some(…)` |
+| `from_one` falls back to picking when the named lot is not on the shelf | `a_lot_from_another_branch_refuses`: *Olaya's batch is not on head office's shelf: `Ok(…)`* |
+| `named_back` ignores a name no portion holds | `a_serial_return_names_only_what_the_invoice_sold_and_only_once`: *SN-3 went out on another invoice: `Ok(Numbered { … "CN-00001" })`* — the money credited, nothing came back |
+| `give_back` stops taking returned names off what is still out | same test: *SN-2 has already come back on that invoice: `Ok(Numbered { … "CN-00002" })`* — sold again, it came back a second time |
+| `came_back` drops the names on a credit line | same test: *`NamedUnitsComeBackWhole { taken: 2 }`* where `NotOut("SN-3")` was expected |
+| `priced_for_credit` stops requiring a quantity beside names | same test: *a name with no quantity would have credited the money and put nothing back: `Ok(…)`* |
+| `named_back` stops checking names against the quantity | `a_name_that_is_not_out_is_refused`: *three coming back and one named* |
+| `named_back` stops refusing a name given twice | same test: *one phone named twice is one phone* |
+| `going_off` stops skipping emptied lots | `an_undated_or_emptied_lot_never_warns`: *`["emptied-and-gone"]`* |
+| `going_off` counts an undated lot as soon | same test: *`["undated"]`* |
+| the window's last day falls outside (`<` for `<=`) | `a_lot_warns_inside_the_window_and_not_outside_it`: *inside the window — left `["today"]`, right `["today", "last-day"]`* |
+| a lot dated today counts as gone (`<=` for `<`) | same test: *past its date and on the shelf — left `["yesterday", "today"]`, right `["yesterday"]`* |
+| the sales route drops a credit line's `serials` | `a_credit_line_carries_its_units_to_the_command`: *left [], right ["SN-2"]* |
+| the sales route drops a line's `lot` | `a_line_carries_its_product_and_its_units_to_the_draft`: *left None, right Some("lot.x")* |
+| the till drops a line's `lot` | `a_till_line_carries_its_product_and_its_units_into_the_draft`: *left None, right Some("lot.x")* |
+| the till drops a return's `serials` | `a_till_return_carries_its_units_to_the_credit_line`: *left [], right ["SN-2"]* |
+
+**Prose the change made false, and fixed.** `inventory`'s module doc listed
+*naming which units come back* and *the expiry warning itself* as not here, and
+said nothing reads the window; `expiry.rs`'s module doc was headed *Nothing reads
+this yet*; the expiry-window route's description — in `docs/openapi.json` — said
+the check *"is a later slice"*. `restore_in`'s rustdoc and
+`NamedUnitsComeBackWhole` said part of a named movement cannot come back at all.
+The credit-note routes' and the till's descriptions now name `inventory.not_out`,
+the lot refusals and `sales.lot_without_a_product`, and the invoice route no
+longer says a plain product never refuses for stock without *"that names no
+lot"*. `sales.md` in the book said a stock line names a product and its serials
+and nothing about a lot or a credit line's units. §71's and §74's *Left open*
+entries are struck through and pointed here.
+
+#### What review found — two doors, a window's far end, and a call nobody signed
+
+Four findings, three fixed and one left to the product owner.
+
+- **The till answered a malformed line 422 while its own description said
+  400.** The till's `problem_for` sent every `PosError::Sale` to 422 but a
+  malformed *shelf* refusal, so `sales.lot_without_a_product` — added by this
+  slice and listed under the till sale's 400 — was a 422 at the till and a 400
+  at `/v1/sales`, and so were `sales.named_units` and `sales.not_a_quantity`.
+  The till return's descriptions named neither refusal its new `serials` made
+  reachable. **One decision now, `SalesError::is_malformed`**
+  (`modules/sales/src/commands.rs:314`): a quantity that is not one, names that
+  do not match their line, a lot with no product, or whatever
+  `InventoryError::is_malformed` says. `sales_problem`
+  (`modules/sales/src/http.rs:1723`) and the till's `problem_for`
+  (`modules/pos/src/http.rs:916`) both ask it, so neither door can answer the
+  same refusal differently; `/v1/sales` answers exactly what it did. Both till
+  routes' 400 descriptions name the codes, in `docs/openapi.json` too. Guard:
+  `a_malformed_sales_line_is_a_bad_request_at_the_till_too`
+  (`modules/pos/src/http.rs:1087`).
+- **Half of the window's last day was an expression nothing tested.** The
+  horizon was `warns_until(..).and_then(succ_opt)` inline in `check`. The
+  reviewer dropped the `succ_opt`: the listing stopped reading the last day's
+  lots, so they never warned, and all eleven worker tests passed. The section
+  said the boundary was in one place, and it was in two. It is `read_before`
+  now (`crates/erp-worker/src/bin/worker.rs:413`), asserted in
+  `a_lot_warns_inside_the_window_and_not_outside_it`.
+- **The cap's note was wrong both ways.** `Page::of` calls a page that fills
+  its limit one that *may* have more (`crates/erp-types/src/page.rs:116`), so a
+  tenant with exactly 200 dated lots was told the list was cut. And since every
+  lot already gone sorts before every lot going soon, 200 gone lots filled the
+  page and `stock_expiring` did not appear at all, which reads as nothing
+  expiring. The check reads 201 now, and `expiry_findings` (`:459`) looks at
+  the one past the cap: none, and nothing says it was cut; one going soon, and
+  the expiring finding says *and more*; one already gone, or the cap falling
+  exactly between the gone and the soon, and the expired finding says nothing
+  expiring within the window was looked at. Guard:
+  `the_expiry_cap_says_it_cut_only_when_it_did_and_where`.
+- **A plain product's named lot refuses when it is short or closed** —
+  plausible, and not changed. R1 lets a plain product go negative; this slice
+  made a plain line that names a lot refuse the invoice when that lot cannot
+  cover it, and wrote it down as settled. It stays because decision 9 lets a
+  line name a lot whatever the tracking, and a named lot is a claim about *that*
+  stock: topping it up from the next lot breaks the claim, and recording a
+  shortfall on it turns a wrong input into a wrong count (L6, and decision 17's
+  reasoning about identities). The other answer is refusing `lot` on a plain
+  line outright, which takes back something decision 9 gave. Neither is the
+  lead's to pick, so it is under *Left open* and in the book's *What an invoice
+  takes off the shelf*, and `a_named_lot_that_cannot_cover_the_line_refuses`
+  now pins the plain case beside the tracked one — it had only milk, which is
+  lot-tracked — so an answer the other way is a deliberate change.
+
+**Falsified**, each file restored sha256-identical and the guard watched to
+pass again:
+
+| broke | failed |
+|---|---|
+| the till's `problem_for` back to the shelf-only arm | `a_malformed_sales_line_is_a_bad_request_at_the_till_too`: *`sales.lot_without_a_product` — left 422, right 400* |
+| `SalesError::is_malformed` forgets `LotWithoutAProduct` | same test, same assertion |
+| `read_before` without `succ_opt` | `a_lot_warns_inside_the_window_and_not_outside_it`: *left `Some(2026-05-10)`, right `Some(2026-05-11)`* |
+| `expiry_findings` never looks past the cap | `the_expiry_cap_says_it_cut_only_when_it_did_and_where`, at the cut among the soon |
+| a full page read as a cut — `Page::of`'s reading | same test: *exactly the limit is not a cut* — *"1 lot expires within 30 days, and more (only the 2 soonest were read)"* |
+| the cap falling between gone and soon goes unsaid | same test, at the expired finding |
+| a plain line's short named lot falls back to the picking rule | `a_named_lot_that_cannot_cover_the_line_refuses`: *two in a plain lot and three asked for of that lot: `Ok(Committed { … "INV-00001" … })`* — issued, one bag short |
+
+**Left open.**
+
+- ~~**Whether a plain product's named lot may refuse.**~~ **Decided by the
+  product owner on 2026-09-14 (D-A), recorded in §77**: it refuses
+  (`inventory.lot_is_short`, `inventory.no_such_lot`) as a tracked one does, and
+  `a_named_lot_that_cannot_cover_the_line_refuses` says it guards that decision.
+- **`/v1/sales` and the till still answer four credit refusals differently.**
+  `sales.no_such_line`, `sales.credit_too_large`, `sales.already_credited` and
+  `sales.not_a_stock_line` are a 400 at `/v1/sales/invoices/{id}/credit-notes`
+  and a 422 at the till's return, under *the sale is not one that can be
+  credited*. They refuse on the state of the invoice, not the shape of the
+  request, so the till's is arguably right; they predate this slice, and moving
+  the sales routes' statuses is a compatibility question of its own.
+
+- **The lot a line named is not served back on the invoice.** It is on the
+  `Issued` event and on the stock movement, not in `proj_sales.invoice_line`.
+  A column, a response field, a `sales` group `VERSION` bump and a `READ_MODELS`
+  re-pin — additive, and deferred because nothing has asked to read it off the
+  invoice rather than off the movement.
+- ~~**An expiring lot is a health finding until somebody acts.**~~ **Closed by
+  §77**: the product owner put the warning on the tenant's bell (D-B) and gave
+  operators a check that the bell rang instead (D-C). The classifier did not
+  change.
+- ~~**No database test for the check.**~~ **Closed by §77**, which builds the
+  tenant harness in `erp-worker`'s binary for the announcer and for the check
+  that replaced this one.
+- **A credit line's names are not stored on the credit note.** Like its
+  quantity, they reach the shelf — `Restored` carries them — and not the
+  `Credited` event, which records money. A statement of which phone came back
+  reads the movement.
+- **A write-off or a count still cannot name a unit on another shelf**, and a
+  line still cannot take one invoice line from two branches. §74's transfer, not
+  this.
+- **Other book pages still cite `docs/ERRORS.md`** — `erp-web.md`, `http.md`,
+  `erp-i18n.md`, `erp-api.md` — and so does the rustdoc on
+  `crates/erp-api/src/modules.rs`'s catalogue field. Only `module.md` was this
+  slice's to fix.
+
+### 75 · A count counts the shelf, and settles what the shelf owes
+
+**Built 2026-09-13**, Phase 19's last box, on revision **R2**. Until this slice
+a count named one lot (§71): counting a shelf of four deliveries was four
+counts, a serial-tracked product could not be counted at all, and the debt a
+plain product's sale leaves (§74) sat on no lot, so no count could reach it. A
+business that oversold read a negative number nothing in the product could
+correct.
+
+**`Count.lot` is optional, and that is the interface change**
+(`modules/inventory/src/commands.rs:373`) — the one §73's review predicted. No lot
+counts the shelf; a lot counts that batch, which stays available for someone
+counting batches. `serials` is new. On the wire `lot` went from required to
+optional and `serials` arrived optional, so the compatibility test passed
+untouched and no baseline was taken.
+
+**One rule for a shelf and for a lot** (`counted`, `commands.rs:1594`). What was
+counted is the lots in scope — every open lot, or the one named — and they are
+taken to `declared`:
+
+- **A shortage goes through `pick`**, with `Wanted::Quantity`: the function a
+  sale takes stock by, so there is no second ordering to drift. Earliest expiry
+  first, undated oldest-first, each portion at its own lot's cost.
+- **An overage joins the lot that goes out last** — the far end of the order a
+  shortage walks (`earliest_first(scope).pop()`, `:1635`; *as built it was
+  `scope.last()`, the end of the list, which review found disagreeing with the
+  picking order — see below*), at that
+  lot's own unit cost, through `OpenLot::gives` — now `pub(crate)`
+  (`modules/inventory/src/picking.rs:92`), because the found units are one more
+  portion of that lot, only going on rather than off. **Why that cost, and not
+  the last unit cost or the shelf's average**: a lot carries a value for a
+  quantity, and joined at any other price its unit cost becomes a blend, so
+  every later portion off it is charged an average of two prices — the thing
+  lots exist not to do. The last-out lot's own cost and the last delivery's are
+  usually the same number; where they differ (an undated lot a return reopened
+  counts as the newest, or the lot has been drawn down to a rounded remainder)
+  the lot's own is the one that keeps it honest.
+- **More than the lots hold with no lot open is refused** (`NoLotToJoin`,
+  `commands.rs:151`, new, en + ar). The count would have to invent a lot: a found carton
+  has no delivery behind it to say what it cost, and on a lot-tracked product no
+  batch — R1's phantom unit. It comes in as a receipt. See *Left open*.
+
+**The event carries where the variance landed** (`modules/inventory/src/stock.rs:219`).
+`Counted` gained `taken`, `joined` and `settles`, and `lot` and `value` became
+optional; `apply` draws the portions down, puts the joined one back and settles
+the debt (`stock.rs:539`), so the aggregate replays what the decision froze and
+nothing is recomputed. `Stock::correct`, which set a lot to `declared`, is gone
+— it was a second way for a lot to move. **`taken` has no serde default, on
+purpose**: a count written before this slice, decoded as one with no portions,
+would replay as a count that moved nothing while the read model had moved the
+lot. It fails to decode instead (L6), and no tenant has one — the module has not
+shipped.
+
+#### What a count does to the debt, and to the books
+
+A plain product sold short owes units, and the sale credited `1300` for them at
+the last unit cost it knew (§74). **A count of the shelf clears the whole debt**
+(`settles`, `commands.rs:1604`): what is on the shelf is what was counted, and a
+shelf cannot hold less than nothing. `expected` is **on hand** — the open lots
+less the debt, which is `Stock::on_hand` and the number a screen showed the
+counter *(corrected by review: this said on hand less the debt, which is the
+debt taken off twice)* — and the value is what `joined` and
+`settles` put back less what `taken` was carried at. It posts through §72's
+entry unchanged: short `Dr 5900 / Cr 1300`, over the reverse, nothing on zero.
+**A count of one lot leaves the debt alone**; the debt is on no lot.
+
+Two cases, both in `a_count_settles_what_a_plain_product_owes`:
+
+- **The delivery that had not been typed in.** Ten croissants received at 3.00,
+  thirteen sold: the shelf owes three, charged out at 9.00, and `1300` reads
+  −9.00. The late delivery lands — five at 4.00 — and does not pay the debt
+  (§74). The tray holds two, which is what the books say, so the variance is
+  **zero** — and the count still settles the three at 9.00 and takes the three
+  they stood for off the real lot at 12.00. **It posts 3.00**, the gap between
+  the guess and the price. That is the price variance §72 and §74 both refused
+  to book on a receipt, because a delivery cannot know what the debt was; a
+  person standing at the tray can.
+- **The empty tray.** Sold short again — three at 4.00 — and counted at nothing:
+  the variance is +3, the count settles 12.00, `Dr 1300 / Cr 5900`, and the
+  asset stops being negative. The credit goes to the variance account and not
+  back to cost of goods sold: the invoice's cost is what that invoice cost, and
+  what a count finds is a control finding, which is §72's reason for the account.
+
+So **"a count equal to on hand posts nothing" holds for a shelf that owes
+nothing**. On a shelf that owes, a count that finds exactly on hand still clears
+the debt, and posts what the debt was charged out at against what the units
+covering it cost — zero when the two prices agree, and the right number when
+they do not.
+
+#### A serial-tracked product names what it found
+
+`tally` (`commands.rs:1559`) decides the request's shape before the shelf is loaded,
+as `delivery` does for a receipt: serials only on a serial-tracked product, and
+`declared` equal to the distinct names or `NeedsSerials` (400). Then `counted`
+refuses a name that is not on hand in scope — `NoSuchSerial`, 422, decision 17 —
+and what is **missing** is the scope's names that were not given, taken through
+`pick` with `Wanted::Serials`, each at its own lot's cost. The read model marks
+them `missing`, a new state (`modules/inventory/schema/install.sql:132`), because
+`written_off` says somebody threw a unit away and gave a reason. The count is a
+row per lot the names came off (`modules/inventory/src/projections.rs:447`).
+`SerialsAreNotCounted` and `inventory.serials_are_not_counted` are gone.
+
+#### One serial on a shelf once
+
+The low finding §74's review left open. `receive` refused a serial the shelf is
+holding, and **`restore_in` asked nothing**: a phone sold, received again under
+its own name — back from repair, bought back — and then its sale's credit note
+put a second `SN-1` on the shelf. Two copies of one identity, and the next
+write-off by name takes both off the lot's list while taking one off its
+quantity: §71's unnameable unit, by another door. **Fixed in one place**: `lands`
+(`commands.rs:1686`) is the check a named unit arriving on a shelf goes through, and
+both ways a unit arrives call it — `decide_receipt` (`:495`) and the
+restoration's decision (`:785`), after the retry check. The refusal is the one
+that already existed, `inventory.serial_already_held`, so no new message.
+
+#### Costs
+
+`proj_inventory` is at **version 2** for the `missing` state — **3** since
+review, below — (`projections.rs:43`, pinned at `crates/erp-worker/src/bin/migrator.rs:810`) — free, because
+no tenant has the group. `just prepare` changed no `.sqlx` file: no checked query
+moved. No route was added, so `PERMISSIONS` is untouched; `just openapi`
+regenerated the count's description, its body and its statuses. The HTTP
+walk-through now counts **the shelf**, naming no lot, and first sends a count
+naming the crate that was thrown out, which is refused `inventory.no_such_lot` —
+so both shapes are proven to reach the command over the wire; the demo still
+counts one lot. And the route's translation is a function with a test at the seam
+(`modules/inventory/src/http.rs:132`, `:1123`), which is §74's lesson from the till and the
+sales line: a field dropped between JSON and a command is invisible to every test
+that calls the command.
+
+**Falsified.** Each fix broken in Rust, the guard run and watched to fail, the
+file restored byte for byte (hash-checked) and the guards run again and watched
+to pass:
+
+| broke | failed |
+|---|---|
+| the shortage walks the lots in received order — `pick` over the lots with their dates stripped, a second ordering | `a_shelf_count_takes_a_shortage_off_the_lots_in_picking_order`: *left `[(rcv-1, -12, -6000), (rcv-2, -4, -2400)]`, right `[(rcv-2, -12, -7200), (rcv-1, -4, -2000)]`* |
+| `count`'s retry check dropped | same test: a third row, `(None, 0, 0, Some(20), Some(20))` — the retry counted again |
+| an overage joins the oldest lot (`.first()`) | `an_overage_joins_the_newest_lot_at_its_own_cost`: *left 71200, right 71600* — the found grams at 0.06, the older sack's price |
+| a count of the shelf settles nothing | `a_count_settles_what_a_plain_product_owes`: *the count cleared the debt — left `Some(Shortfall { quantity: 3, cost: 9.00 })`, right `None`* |
+| the value leaves out what the debt was charged out at | same test: *12.00 of croissants against the 9.00 guess they were sold at — left 1200, right 300* |
+| `Stock::apply` ignores a count's `settles` | same test: *the count cleared the debt* — the aggregate still owed three |
+| `Stock::apply` ignores a count's `joined` | `an_overage_joins_the_newest_lot_at_its_own_cost`: *a count that found the books right posted something — left 73200, right 71600*; the shelf forgot the grams and the level count found them again |
+| a named serial that is not on hand is accepted | `a_serial_count_names_what_it_found_and_the_rest_leave`: *a unit nobody received was counted into existence* |
+| a serial count takes nothing off for the units it did not name | same test: *left 3, right 1* |
+| a serial count's `declared` need not agree with its names | same test: `NeedsSerials { units: 2, named: 1 }` not returned |
+| a count of one lot counts the whole shelf | `what_a_count_found_is_frozen`: *left `Some(10000)`, right `Some(5000)`* |
+| an overage with no lot open lands nowhere instead of refusing | `a_count_settles_what_a_plain_product_owes`: `NoLotToJoin { found: 1 }` not returned |
+| `restore_in` stops asking `lands` | `a_restoration_cannot_put_a_serial_on_the_shelf_twice`: *a credit note put a second SN-1 on the shelf* |
+| `decide_receipt` stops asking `lands` | `a_serial_that_is_not_on_the_shelf_is_refused`: a second unit was received as `SN-3` |
+| the projection does not put an overage on the lot it joined | `an_overage_joins_the_newest_lot_at_its_own_cost`: *left `(rcv-2, 5000, 40000)`, right `(rcv-2, 5200, 41600)`* |
+| the projection writes no row for the debt a count settled | `a_count_settles_what_a_plain_product_owes`: *left `(None, 0, 0, Some(-3), Some(0))`, right `(None, 3, 1200, Some(-3), Some(0))`* |
+| the projection leaves a unit the count did not find `on_hand` | `a_serial_count_names_what_it_found_and_the_rest_leave`: *the read model still lists a machine the count did not find — left `[["SN-1", "SN-2"]]`* |
+| the zero filter removed from `two_sided` | `an_overage_joins_the_newest_lot_at_its_own_cost`: *counts: `Unbalanced(ZeroLine { index: 0 })`* — the level count |
+| the route's count drops `serials` | `a_count_carries_its_lot_and_its_serials_to_the_command`: *left [], right ["A-1", "A-2"]* |
+| the route's count drops `lot` | same test: *left None, right Some("lot.x")* |
+| the same, against the HTTP walk-through | `stock_is_declared_received_written_off_and_counted`: *left 201, right 422* — a count of the thrown-out crate counted the shelf instead |
+
+**Prose the change made false, and fixed.** `inventory`'s module doc said *"a
+count counts one lot — for now"* and listed the shelf-wide count and settling a
+debt as not here; the `count` command's rustdoc argued why a count took a lot
+and not yet the shelf; the route's description (in `docs/openapi.json`) said a
+shelf-wide count is *"decided and not built"* and a serial-tracked product is
+refused, and `NewStockCount.lot` that a count is of one batch. `MovementRow.lot`
+still said *"nothing writes"* a lot-less row, stale since §74, and `kind` did
+not name `consumed`. `install.sql` described `counted` as *"somebody counted a
+lot"*, and `entry_for_variance` valued a count *"at what that lot is carried
+at"*. The *Left open* entries in §71–§74 that waited on this slice are struck
+through and pointed here, and Phase 19's third box is ticked.
+
+#### What review found — a debt with two owners, and an order with two ends
+
+Three findings, all verified against the code before anything changed: two
+behavioural, one prose.
+
+**A return settled a debt a count had already cleared** (high). The shelf's
+debt, `Stock.owed`, and what each consumption still owes, `WentOut.shortfall`,
+are one number read two ways, and until this slice only a return moved them —
+both at once. A count of the shelf became a second way to clear `owed`, and
+`Returning`, the fold a return decides from, never heard it. So a credit note
+after a count *settled* units the shelf no longer owed: `Stock::settle` floors at
+nothing, the units vanished from the aggregate, and `1300` and `stock_item` still
+counted them. The reviewer's case: ten received at 30.00, thirteen sold, counted
+empty, the invoice credited whole — the aggregate held 10 at 30.00 while the
+books and the read model held 13 at 39.00, a rebuild reproduced it, and the next
+count of the thirteen real croissants booked the same 9.00 gain a second time.
+
+**Fixed in the fold.** `Returning::apply` (`modules/inventory/src/stock.rs:424`)
+now hears a count that settles: whatever the followed consumption still owed
+moves from `shortfall` to `WentOut::counted` (`stock.rs:301`). It is not a debt any
+more, because a count clears all of it, and it cannot become one again, because a
+shortfall is only ever added by the consumption itself. `coming_back`
+(`modules/inventory/src/commands.rs:856`) settles only what is still owed and
+**lands what a count cleared as stock** (`:918`): a portion on a lot of its own,
+`returned_lot_of(shelf, taken_on)` (`:1139`, prefixed `back.` so no receipt
+reference can name it), at what the sale charged those units out at.
+`WentOut::give_back` takes a return landing there off `counted`, so a second
+credit note can only return what the first left.
+
+**Why a lot, and not the refusal review offered.** The finding suggested capping
+what a return settles at what the shelf owes and refusing the rest (L6). That
+refuses the whole cancellation — `cancel_in` restores every product line — of
+every invoice whose short sale was later counted, for good: §74's finding about
+statutory cancellations, by another door, met by any shop that oversells, counts
+at close and then cancels an invoice. Dropping the cleared units from what is
+still out instead would restore ten of thirteen without saying so, which is the
+degrading L6 forbids. And the two reasons `NoLotToJoin` refuses a found carton do
+not hold here: these units have a frozen cost, and they are on a plain product —
+the only kind that can sell short (R1) — so there is no batch or date to invent.
+One lot per consumption, so two returns of one sale land at one unit cost and two
+sales never blend into an average.
+
+**Units nothing was ever paid for** come back at nothing: a product sold before
+anything was received carries a shortfall with no cost. On a shelf with no
+currency either — a bakery that bakes what it sells and never receives it — the
+zero is stated in the currency the inventory account is kept in
+(`ledger::posting_currency`, `commands.rs:775`), the only currency `receive` would
+ever let a delivery land in. That is one account load per return. Where the
+inventory account does not exist, such a unit is refused `NoSuchAccount`, which
+is what any posting to it says; nothing else is refused for it.
+
+**The read model follows** (`put_back`, `modules/inventory/src/projections.rs:658`).
+An `UPDATE` became an upsert, so the lot a return opens gets a row — positioned at
+the return, with the return's quantity — and a lot that exists keeps its receipt's.
+`proj_inventory` is at **version 3**. `install.sql`'s shape did not change, so the
+pinned hash stayed and only the version moved
+(`crates/erp-worker/src/bin/migrator.rs:810`); its comment on `lot` now names the
+one row no receipt makes.
+
+**An overage joined the end of the list, and the list has two orders** (low).
+`scope.last()` took the last lot in `Stock::lots`, which is received order —
+except that `Stock::put_back` pushes a lot a return reopens onto the end. So after
+a credit note reopened an older batch, a count's overage joined that batch: its
+code, and a date that may already have passed. **Fixed by giving the count the one
+order the module has.** `earliest_first` (`modules/inventory/src/picking.rs:249`,
+now `pub(crate)`) is what a shortage walks, and the overage takes its other end
+(`commands.rs:1635`). For dated stock that is the latest expiry, whatever the list
+says. For undated stock it is the last received — or a lot a return put back,
+which `put_back` already calls the newest on its shelf and which a sale reaches
+last. That half is a choice, not an accident; see *Left open*. `put_back`'s rustdoc
+said a reopened lot at the end *"changes nothing for a dated one"*, which the
+overage had made false; it is true again.
+
+**`expected` was documented as on hand less the debt** (low). `Stock::on_hand`
+already takes the debt off, so read literally that is the debt twice; the code
+takes it off once (`commands.rs:1605`). The event's doc (`stock.rs:227`) and the
+paragraph above now say what the code does.
+
+**Prose the fixes made false, and fixed.** `restore_in`'s rustdoc said a return
+takes *"the debt first"* and that this is *"what keeps the count and the books
+agreeing"*, and §74 said a returned unit settles what the shelf owes before it
+lands on a lot; both now say the debt is settled only while it is owed. The
+`commands` module doc said a return goes back *"on the lots it left"*. The count's
+rustdoc, `StockEvent::Counted::joined`, `inventory`'s module doc and the route's
+description (in `docs/openapi.json`) said *"the newest lot"*; they now name the
+far end of the picking order.
+
+**Falsified.** Each fix broken in Rust, the guard run and watched to fail, the
+file restored from a copy (byte-identical by `cmp`) and the guard run again and
+watched to pass:
+
+| broke | failed |
+|---|---|
+| `Returning::apply` leaves a cleared shortfall owed (`counted` never set) | `a_return_after_a_count_cleared_the_debt_puts_the_units_back`: *the units the customer brought back vanished from the shelf — left `[(rcv-1, 10, 3000)]`, right `[(back….inv-1.line-1, 3, 900), (rcv-1, 10, 3000)]`* |
+| `give_back` does not take a return landing on `lands_on` off `counted` | same test: *or came back twice — left `[(back…, 5, 1500), (rcv-1, 10, 3000)]`* |
+| the projection's `put_back` only updates a lot that exists, as before | same test: *projected: the read model's lots — left `[(rcv-1, 10, 3000)]`* |
+| no fallback to the inventory account's currency | same test: *three come back at nothing: `Ledger(NoSuchAccount("1300"))`* |
+| the overage joins `scope.last()` again | `an_overage_joins_the_lot_that_goes_out_last_after_a_return`: *the found bottle joined the batch expiring first — left `(Some(2), Some(12))`, right `(Some(1), Some(13))`* |
+
+**Left open.**
+
+- **An undated lot a return reopened goes out last, so a plain shelf's overage
+  joins it** at its old unit cost rather than the latest delivery's. Review asked
+  for received order. That means remembering the order of lots that have closed —
+  an ordinal frozen on every portion — and it would also change the order returned
+  stock is sold in, which §74 chose. The dated case, where the batch and the date
+  are the harm, is fixed.
+- **A count's price gap is not reversed by a return.** When a count settles a debt
+  that a late delivery covered, it books the gap between the guess and the price
+  (3.00 in the croissant case). A return of those units comes back at the guess,
+  on a lot of its own, and the gap stays booked.
+- **Found stock with no lot to join.** Refused. A tenant counting stock that
+  arrived with no receipt enters the receipt, which is right when there is
+  paperwork and awkward when there is none. The alternative is a lot derived
+  from the count at the last unit cost — and on a lot-tracked product that is a
+  batch with no code, which R1 refuses everywhere else.
+- **An overage on a lot-tracked shelf takes the code and date of the batch that
+  goes out last.**
+  That is what R2 says, and it is a guess about which batch the found bottles
+  came in. A counter who knows counts that lot.
+- **A serial count cannot find a unit the shelf never held.** Refused, not
+  received: a count does not invent identities, and the unit comes in as a
+  receipt with its cost.
+- **A delivery that names one serial twice for one unit** is accepted:
+  `delivery` counts distinct names against the quantity and keeps the list as
+  sent, so the lot carries the name twice. Found by reading while writing
+  `tally`, which dedupes; not tested and not fixed here — it is §71's class of
+  finding, and harmless today because a unit leaves by name.
+- **A count is not segregated** (§71), unchanged.
+
+### 74 · An invoice depletes the shelf, and books what it sold
+
+**Built 2026-09-13**, Phase 19 boxes 2 and 4. Everything before this slice was a
+shelf nobody could sell off: `inventory::consume_in` picked lot by lot and built
+a cost-of-goods-sold entry, and **no route reached it**, so every margin in the
+system was the invoice's net and the cost of the goods was zero.
+
+**The hook is in `sales::issue_in`** (`modules/sales/src/commands.rs:436`),
+which is decision 2 and is the whole of why it is one line of code rather than
+three. Every invoice this system issues goes through that function — the
+`/v1/sales` route, `pos::sell` at the till, `erp-api`'s booking bill,
+`payments`' deposit — so putting the depletion there means a till sale and a
+counter invoice cannot disagree about what came off a shelf, because there is no
+second place for them to disagree in. It runs **in the invoice's own
+transaction**, after the journal entry, for the same reason the entry is in that
+transaction: an invoice that exists without the movement that supplied it is not
+a state this system can reach. **And only off the `Issued` event that
+transaction wrote**, so a retried invoice depletes nothing — review found a retry
+reaching the shelf; see *What review found*, below.
+
+**A line names a product and a quantity, and both are optional.** A required
+field breaks every client that exists and would have demanded a new baseline; an
+optional one does not, and the compatibility test passed untouched. `DraftLine`
+and `InvoiceLine` gained `product`, `quantity`, `unit` and `serials`
+(`modules/sales/src/invoice.rs`), all `#[serde(default)]`, so every line ever
+written decodes as what it was: a bare total, quantity one.
+
+**The line total is computed and never divided back out**
+(`modules/sales/src/commands.rs:1736`, decision 3). Given a price and a
+quantity, `priced_lines` multiplies; the unit price is stored beside the
+quantity rather than recovered from the total later, because recovering it is a
+division that does not always land on a whole halala — and `cbc:PriceAmount` has
+to be exact or the tax document stops balancing.
+
+**Which is the other half of this slice.** `modules/tax_sa/src/zatca/ubl.rs:664`
+printed `<cbc:InvoicedQuantity>1</cbc:InvoicedQuantity>` on every line ever
+issued, and BT-131 —
+
+```text
+BT-131 = quantity × (BT-146 / base quantity) + charges − Σ BT-136
+```
+
+— balanced only because there was nothing to multiply by. The quantity is now
+the line's own and `cac:Price` is **one unit's**, so the rule holds for a line
+of three the way it did for a line of one
+(`modules/tax_sa/src/zatca/ubl.rs:734`). A line with no factors still renders as
+one unit at what it came to, which is byte-identical to what it rendered
+yesterday.
+
+#### What the shelf cannot cover: one branch, two answers
+
+Revision **R1**, at `modules/inventory/src/commands.rs:1546`. A **lot- or
+serial-tracked** product refuses: what is on that shelf is meant to be known
+exactly, a phantom carton has no batch and no expiry, and a named unit that is
+not there was never there. A **plain** product sells anyway — a till does not
+stop for a bad count — and what no lot could cover is recorded as a
+[`Shortfall`] at the shelf's last known unit cost (decision 16). The refusal
+takes the invoice with it, because it is raised inside the invoice's
+transaction.
+
+**The refusal sits after the already-heard check**, inside the decision
+(`modules/inventory/src/commands.rs:691`). This repo has been bitten by exactly
+the other order — it is where `sales::cancel_in` puts its claim and its limit —
+and the failure is ugly: a client whose request times out retries, and the
+second attempt is refused for stock the first attempt already took.
+*(Corrected by review.)* This paragraph named
+`the_same_invoice_sent_twice_takes_the_stock_once` as the test that pins the
+order, and said breaking it made the shelf read four instead of seven. It did
+not pin it: that test sells a plain product with stock to spare, which neither
+order refuses, and four is what *removing* the check does. The guard is now
+`a_retried_consumption_is_not_refused_for_the_stock_it_already_took`
+(`modules/inventory/tests/inventory.rs`), on a lot-tracked shelf the sale
+empties. `issue_in` no longer reaches `consume_in` on a retried invoice at all,
+so the order is `consume_in`'s promise to any caller rather than the invoice's
+only defence.
+
+**A shortfall is now in an event, and that needed a decision §72 declined to
+make.** `StockEvent::Consumed` gained `shortfall`, and `Stock` gained `owed`
+(`modules/inventory/src/stock.rs:460`) — which `on_hand` and `value` both come
+down by, because the books already have: the sale credited `1300 Inventory` for
+the shortfall when it sold it. A shelf that owed without saying so would
+disagree with that account for ever, and §72's own invariant would have reported
+it. The open question was what a later receipt does to the debt. **The answer is
+that it does nothing**: the shortfall was costed at a guess, and netting a real
+delivery against it would have to put the difference between the guess and what
+the delivery actually cost into a price-variance account nobody has opened. A
+count settles it, which is decision 16's own word for it.
+
+#### A return puts the goods back where they came from
+
+`inventory::restore_in` (`modules/inventory/src/commands.rs:756`), called from
+both credit-note roots: `credit_part_in` for the lines a client says came back,
+and `cancel_in` for the whole of an invoice it undoes.
+
+**Where it lands and at what was the question this slice had to answer**, and it
+had two rules against it: the read model may not be consulted (L3), and a cost
+may not be guessed (L6). The answer is the shelf's **own stream**:
+`inventory::stock::Returning` is the shelf seeded with the reference of the
+consumption being undone and folded through **the whole** stream, in the
+transaction that appends the return, so it reads the consumption event itself
+rather than a second record of it. *(As built, a return read the consumption
+out of the shelf's bounded window of movements heard; review found a sale older
+than the window could then never be returned or cancelled. See below.)* So a
+return puts
+back the lots that sale took, at what that sale froze — not at today's cost,
+which would restate a margin already reported, and never at a share of what was
+credited (decision 12), because the money and the goods are two statements and
+dividing one into the other does not always land.
+
+**A lot that the sale emptied reopens as itself.** `Portion` gained `code` and
+`expires_on` (`modules/inventory/src/picking.rs:137`), frozen at consumption for
+the same reason the cost already was: a lot that empties closes and leaves the
+aggregate, so by the time the customer brings the carton back there is nothing
+left to ask. Without them a returned batch would come back undated and go out
+*last*, which is the opposite of what an expiry rule is for.
+
+**The debt is paid before the shelf is refilled** (`coming_back`,
+`modules/inventory/src/commands.rs:856`): a returned unit settles what the shelf
+owes before it lands on a lot, because a phantom unit is not stock and the count
+and the books have to agree at the end of it. *(Corrected by §75's review: only
+while the shelf still owes it. Once a count of the shelf has cleared the debt,
+those units come back as stock on a lot of their own; settling them paid off
+nothing and lost them from the shelf.)* **Part of a movement whose units
+have names is refused** — which of three phones came back is not a thing to
+guess (decision 17). *(Since §76, unless the credit line names them.)*
+
+**A credit note's quantity is the client's and its amount is another statement.**
+`CreditLine` gained an optional `quantity`; a line without one puts nothing
+back (and since review, one of nothing, or one against a line that sold no
+product, is refused rather than dropped), which is what a goodwill credit means and what `credit_what_is_clear`
+means when it spreads a *refund* across lines — it knows the money and nothing
+about the goods.
+
+**And that is exactly why the goods need their own cap.** `credit_part_in`
+already refuses more *money* than a line has left, and a review of this slice
+found that cap does not stand in for the units: crediting 10.00 twice off a
+75.00 line is legal, and a client claiming three sacks each time would have got
+six back. So what a consumption still has out **shrinks as returns land against
+it** (`WentOut::give_back`, applied as `Returning` folds each `Restored` naming
+that consumption), and `StockEvent::Restored` carries the movement it undoes so
+the fold can find it.
+A second credit note can then only return what the first one left, and the
+refusal says which: *"1 of that movement is still out and 2 are coming back"*.
+
+#### Every other caller of `issue_in`, and what it passes
+
+- **`pos::sell`** (`modules/pos/src/commands.rs:725`) passes `basket.lines`
+  straight through: a till sale is a `sales` invoice and the till decides
+  nothing about stock. Its `NewLine` gained the same three optional fields and
+  `ReturnedLine` gained `quantity`, so a return at the counter restores.
+- **`erp-api::billing`** (`crates/erp-api/src/billing.rs:150`) passes `None`. A
+  booking charges for a slot, not for a thing; a room and an hour are not on a
+  shelf, and `booking`'s own lines have no product to carry.
+- **`payments`** (`modules/payments/src/commands.rs:391`) passes `None`. A
+  deposit is money taken **before** the supply and nothing leaves a shelf when
+  it is taken; the final invoice carries the product lines.
+
+#### Costs paid, and the one that was not
+
+**`sales` now depends on `inventory`.** The same edge `purchases` took a slice
+earlier, and the arrow only points one way: `inventory` depends on `ledger` and
+`branches` and on nothing that depends on it. `inventory` is added to `sales`'
+`reading(…)` set; a tenant without the module has no products, so no line can
+name one.
+
+**No `VERSION` bump and no fleet rebuild**, which is not luck. §71 declared the
+`consumed` kind, the `sold` state and the nullable `lot` a shortfall leaves
+empty a slice before anything wrote one, on the argument that a shape change
+after shipping is a rebuild and adding a field to an *event* is not. A
+restoration writes `kind = 'received'` — "bought in, or put back", which that
+file already said — so the whole of this slice landed inside the existing
+shape.
+
+**Falsified.** Each fix broken in Rust, the test watched to fail, the file
+restored, the test watched to pass:
+
+| broke | failed |
+|---|---|
+| `issue_in` stops calling `consume_in` | `an_invoice_takes_its_lines_off_the_shelf_and_books_what_they_cost`: *three sacks went out — left 10, right 7* |
+| ~~the already-heard check moves after the shelf is judged~~ | ~~`the_same_invoice_sent_twice_takes_the_stock_once`: *not four — left 4, right 7*~~ — **wrong, found by review**: moving the check leaves that test passing; see *What review found* |
+| R1's branch dropped, so a plain product refuses too | `a_plain_product_the_shelf_cannot_cover_sells_and_records_the_shortfall`: panicked on `.expect("a till does not stop")` |
+| the whole R1 guard dropped, so nothing refuses | `a_tracked_product_the_shelf_cannot_cover_refuses_and_leaves_no_invoice`: the short sale was accepted and the document exists |
+| `cost_of` ignores the shortfall | same test: *two off the lot and one at the last unit cost — left 20.00, right 30.00* |
+| `Stock::value` forgets what the shelf owes | same test: *and the value owes what it was charged out at — left Some(0.00), right Some(-10.00)* |
+| `priced_lines` stops multiplying price by quantity | `an_invoice_takes_its_lines_off_the_shelf…`: *left 25.00, right 75.00* |
+| `came_back` puts nothing back | `a_returned_line_puts_the_stock_back_and_the_cost_with_it`: *two sacks are back — left 0, right 2* |
+| a reopened lot loses its code and date | `a_returned_batch_comes_back_with_its_code_and_its_date`: *the batch it was — left None, right Some("B-2026-04")* |
+| a whole cancellation restores nothing | `cancelling_an_invoice_puts_everything_back_on_the_shelf`: *left 6, right 10* |
+| the ZATCA line goes back to quantity one | `a_line_priced_per_unit_states_both_factors_and_still_balances`: the `cbc:InvoicedQuantity` assertion, `ubl.rs:1732` |
+| `cbc:PriceAmount` prints the line total again | same test: *the price is one unit's, not the line's*, `ubl.rs:1736` |
+| the shelf stops taking a return off what the movement still has out | `a_second_credit_note_can_only_return_what_the_first_one_left`: *only one sack is still out: Ok(Numbered { … credit_note: "CN-00002" … })* — three sacks sold and four back |
+| the till stops carrying its lines' products into the draft | `a_till_sale_takes_the_stock_off_the_shelf_and_a_return_puts_it_back`: *three sacks left the shop — left 10, right 7* |
+| the till's **wire** line drops its product | `a_till_line_carries_its_product_and_its_units_into_the_draft`: *left None, right Some("f81d4fae-…")* |
+| the till's wire line drops its serials | same test: *left [], right ["A-1", "A-2", "A-3"]* |
+| the sales route drops the product off the draft line | `a_line_carries_its_product_and_its_units_to_the_draft`: *left None, right Some("f81d4fae-…")* |
+| the sales route drops the quantity off the draft line | same test: *left None, right Some(3)* |
+
+**The last four are there because a falsification did not falsify.** Breaking
+`modules/pos/src/http.rs`'s `lines` — the one that turns a till's JSON into a
+draft — left `a_till_sale_takes_the_stock_off_the_shelf_and_a_return_puts_it_back`
+**passing**, because that test calls `pos::sell` with a `Basket` and never goes
+near the wire. A grep then found that **nothing in the repo** had ever sent a
+`product`, a `quantity` or a `serials` on a sales or a till line over HTTP: not
+`crates/erp-api/tests/http.rs`, which has no `/v1/pos` test at all, and not the
+demo, whose till rings coffee and whose stock is bought rather than sold. Both
+translations were new, both were on the path a shop's stock actually takes, and
+both were unguarded. The guard is one test each at the seam itself
+(`modules/sales/src/http.rs:1774`, `modules/pos/src/http.rs:1001`) — the shape
+`purchases::http` and `pos::http` already use for their own translation
+decisions — asserting the three fields arrive and that `net` is still **one
+unit's**, because multiplying twice is a division nobody can undo. A second
+test each pins the line that names nothing: that is what every invoice issued
+before these fields existed is.
+
+#### What review found — one window doing two jobs, and a key only one invoice owned
+
+Nine findings, all verified against the code before anything changed, and they
+came from three roots.
+
+**Root one: the shelf's window of movements heard was answering two questions.**
+It was built for *has this movement already happened*, where forgetting is
+harmless because a client does not retry a request from two hundred movements
+ago. §74 then asked it *what did that sale take*, where forgetting is not
+harmless at all — and a busy product rolls its window in an afternoon.
+
+- **A retried invoice took the stock twice** (high). `issue_in` called
+  `deplete` on every retry, trusting the shelf's window to recognise the line.
+  The invoice is idempotent for ever through `try_create`; the window is not. A
+  reviewer received ten sacks, sold three, received two hundred more and sent
+  the same invoice again: `Ok` with no events, while the shelf went from 207 to
+  204 and the cost entry — whose id is derived — posted nothing, so the shelf
+  stopped agreeing with `1300 Inventory`. On a tracked product the same retry was
+  refused `not_enough_stock`. **Fixed in one place**: `deplete` takes what
+  `try_create` committed and reads the lines off the `Issued` event it wrote,
+  the way `came_back` reads `Credited` — no event, no depletion, so a retry
+  cannot reach a shelf by construction. (A first cut gated the call on
+  `committed.at.is_some()` in `issue_in`; clippy's line limit on that function
+  pushed it into the shape it has, which is the better one anyway.) Nothing
+  needed healing: no invoice has ever been written without its depletion,
+  because both are one transaction. `deplete`'s rustdoc, which said it ran on a
+  retry *"and the shelf recognises the movement's reference"*, now says the
+  opposite and why.
+- **An invoice for a busy product could never be cancelled** (high). A return
+  read the consumption out of the window (`Stock::taken_on`), and `cancel_in`
+  restores every product line, so this was not *"a return older than the
+  window"* — as *Left open* put it — but the statutory cancellation refused for
+  good with `inventory.not_consumed`. **Fixed by taking the second job away from
+  the window.** `inventory::stock::Returning` is the shelf plus one followed
+  consumption: seeded with the reference being undone, it folds the **whole**
+  stream, records that consumption when it meets it and takes each later
+  `Restored` naming it off what is still out. `restore_in` decides from it
+  through `erp_eventlog::try_execute_from`, a new seam that is `try_execute` with
+  a seed instead of `Default` — `try_execute` is now that call with
+  `A::default()` — so the load, the decision and the optimistic append are still
+  one pass and what the decision saw is what the append is checked against. It
+  costs nothing a load was not already paying: a load reads the whole stream.
+  The window is back to references only (`Heard` and `Stock::taken_on` are
+  gone), which is also what decision 20 wanted of it.
+- **The guard for "the refusal sits after the retry check" did not guard it**
+  (medium). The reviewer moved the check below the shelf's judgement and
+  `the_same_invoice_sent_twice_takes_the_stock_once` still passed: a plain
+  product with stock to spare is refused by neither order. The falsification
+  table above claimed otherwise; that row is struck through. The guard is now
+  `a_retried_consumption_is_not_refused_for_the_stock_it_already_took`, at
+  `consume_in` itself, because after the first fix no invoice retry reaches it.
+
+**Root two: a return was keyed on something that was not unique where it
+landed.**
+
+- **Two credit notes with one client reference on two invoices shared a return**
+  (high). `return_reference` was `r.{client reference}.{line}`, and a client
+  reference is only unique per invoice — `has_credit` lives on the invoice, and
+  the credit entry's id carries the invoice beside it. Invoice B's unit was
+  heard as a retry of invoice A's and never came back, while B's money credited
+  in full. The same held for `cancel_in` and for a till return's `reference`.
+  **Fixed by keying on the credit note's number** (`r.CN-00001.0`), the
+  tenant's own gapless series, which cannot repeat. Adding the invoice id
+  instead, as the finding suggested, would not have fitted: a UUID invoice, a
+  UUID reference and a branch beside a UUID product overrun `AggregateId`'s 128
+  characters. Stock only moves in the transaction that issues the credit note,
+  so the number is final whenever it is used.
+- **Two lines of one credit note against one invoice line put back one**
+  (medium). `priced_for_credit` allows it; each became a return under the same
+  reference and the second was a silent no-op (L6). **Fixed** by making what
+  comes back a `BTreeMap` keyed by product and invoice line
+  (`sales::commands::ComingBack`): quantities add up, one invoice line is one
+  return by construction, and iterating the map is the product order decision
+  14 already asked for. Summing rather than keying on the credit line's own
+  position also means two lines returning one phone each of a two-phone sale is
+  the whole line coming back, not two refused halves.
+
+**Root three: the shelf was the request's, not the sale's** (medium, *plausible*
+in review and confirmed by its test). `restore_in` took the branch off the
+credit note's request, so a cancellation raised at head office for a sale rung
+at Olaya looked for the consumption on head office's shelf and was refused.
+**Fixed**: `Restoration` carries `branch`, and `sales::restore` reads it off the
+invoice's own `Issued` event metadata — the branch the sale happened at, which
+is the shelf it depleted. The cost reversal still posts under the credit note's
+request, exactly as `ledger::reverse_in` does for the money.
+
+**And three on their own.**
+
+- **A quantity on a line that sold no product was dropped** (low), and a
+  quantity of nothing was never checked. `priced_for_credit` now refuses both,
+  inside the decision and after the retry check: `sales.not_a_stock_line` (new,
+  en + ar) and `sales.not_a_quantity`.
+- **The documented statuses did not name the stock refusals** (low), and the
+  till answered `inventory.needs_serials` with 422 where `/v1/sales/invoices`
+  answers 400. `pos::http::problem_for` now sends a malformed stock refusal to
+  400 through `InventoryError::is_malformed`, the same split the sales and
+  inventory routes use. The `utoipa` descriptions on the invoice, both credit
+  note routes and the till's sale and return name the stock codes. **Two of the
+  descriptions being rewritten were already false**: the partial credit-note
+  route documented `409` for an invoice already cancelled and `422` for no such
+  line and more than is left, and `sales_problem` answers all three with 400;
+  they say so now. *Not done:* the till still answers every other `sales`
+  refusal with 422 where the sales routes split 400 from 422, which predates this
+  slice and would change statuses nobody reported. *(Since §76's review a
+  malformed sales refusal is a 400 at the till too, through
+  `SalesError::is_malformed`; four credit refusals still differ — §76's
+  Left open.)*
+- **`zatca::Line`'s rustdoc** (low). `units()` and `price()` had been inserted
+  between `before_allowances`' doc comment and its function, so `units()`
+  documented BT-146 and `before_allowances` had none. Moved back.
+
+**Costs.** `erp-eventlog` gains `try_execute_from`; `inventory` stops exporting
+`Heard` and exports `Returning` and `WentOut`; `sales` takes `branches` as a
+dev-dependency for the cross-branch test. No event changed shape, no SQL
+changed, no `VERSION` bump. A return's movement reference is now the credit
+note's number, which is also what a manager reading the movement list would
+look for.
+
+**Falsified.** Each fix broken in Rust, the guard watched to fail, the file
+restored (hash-checked) and the guard watched to pass:
+
+| broke | failed |
+|---|---|
+| `issue_in` hands `deplete` an `Issued` built from the draft whether or not one was written | `a_retried_invoice_takes_nothing_once_the_shelf_has_moved_on`: *the sale took its three once — left 204, right 207* |
+| `Returning` forgets a consumption once it leaves the window — the old bound, reproduced | `an_invoice_can_be_cancelled_long_after_its_shelf_has_moved_on`: *cancels: `Rejected(Stock(NotConsumed("INV-OLD-CANCEL.0")))`* |
+| a partial return keyed on the client's reference again | `one_client_reference_on_two_invoices_puts_both_back`: *one back from each — left 7, right 8* |
+| a second credit line against one invoice line overwrites the first instead of adding | `two_credit_lines_against_one_invoice_line_put_both_back`: *both units are back — left 8, right 9* |
+| `restore_in` takes the shelf from the request's branch | `a_cancellation_from_another_branch_puts_the_goods_back_where_they_were_sold`: *head office cancels a sale rung at Olaya: `Rejected(Stock(NotConsumed("INV-OLAYA.0")))`* |
+| `sales::restore` drops the branch it read off `Issued` | same test, same refusal |
+| both credit-line quantity checks dropped | `units_coming_back_that_cannot_land_are_refused`: *an hour of consultancy has no shelf: `Ok(Numbered { … credit_note: "CN-00001" … })`* |
+| `consume_in` judges the shelf before the retry check | `a_retried_consumption_is_not_refused_for_the_stock_it_already_took`: *`NotEnoughStock { held: 0, wanted: 3 }`* |
+| the till's malformed-stock arm removed | `a_malformed_stock_line_is_a_bad_request_at_the_till_too`: *left 422, right 400* |
+| only the `quantity <= 0` check dropped | same test: *nothing coming back is not a quantity: `Err(… Stock(NotAQuantity))`* — still refused, but by the shelf after the credit note was decided, rather than inside the decision |
+
+**Prose the change made false, and fixed.** `inventory`'s module doc, its
+`commands` and `posting` docs, `stock.rs`'s event docs and `schema/install.sql`
+all said in four places that nothing called `consume_in`; `install.sql` also
+said what is on hand could never go below zero and that no event could carry a
+shortfall, and `StockEvent::Received` still said a receipt posts nothing, which
+§73 had already made untrue. `MovementView.lot`, `StockView.on_hand` and
+`StockView.value` reach `docs/openapi.json` and said the same things. The book's
+`sales.md` said there is no quantity or unit price and that adding them would be
+an upcaster; it was neither, because both fields default. And `sales::http`'s
+`drafted`, split out of `issue_invoice` in this slice, had been given
+`sales_problem`'s doc comment along with its own — a function that parses lines
+does not *"map a command failure onto a status"*; the paragraph is back where it
+belongs.
+
+**Left open.**
+
+- ~~**Settling what a shelf owes.**~~ **Closed by §75**: a count of the shelf
+  clears the debt at what the sale charged it out at, and takes the units it
+  stood for off the lots at theirs. As it stood here: a plain product sold below
+  zero carried the debt until a **shelf-wide** count cleared it, and only a
+  per-lot count existed. Counting the lot the units came off did not help: the
+  debt is not on a lot.
+- ~~**Naming which units come back.**~~ **Closed by §76**: a credit line and a
+  till return carry `serials`, and each name has to be still out on the sale
+  being undone. As it stood here: a return of *part* of a movement whose units
+  have names was refused rather than guessed at, and `CreditLine` had no field
+  for serials.
+- ~~**A return older than the window.**~~ **Closed by review, and it was worse
+  than this said:** `cancel_in` restores every product line, so it was not an
+  old return that was refused but the statutory cancellation of any invoice
+  whose shelf had moved on. A return now follows the sale through the whole
+  stream.
+- ~~**A line that names a lot.**~~ **Closed by §76**: a sales line and a till
+  line carry `lot`, and `deplete` hands it to `consume_in`. As it stood here:
+  `Consumption` took an optional `lot` and `pick` honoured it, and no sales line
+  could say so.
+- **Two branches, one document.** A line depletes the shelf at *the request's*
+  branch, which is right for a till and wrong for a warehouse shipping one
+  invoice out of two places. That is a transfer, which is its own command.
+
+### 73 · Receiving posts, and the supplier's bill clears it
+
+**Built 2026-09-13**, Phase 19 slice 3, on decision **R3** — which supersedes
+decision 8. §72 shipped a check that was correct and unusable: it compared what
+the shelves are worth against `1300 Inventory`, and because a receipt posted
+nothing and the *bill* debited the asset, every delivery made the two disagree
+until somebody typed the invoice in. `HealthJob` logged `invariant violated` at
+error level every five minutes for the length of that window, which is the
+ordinary state of a business. An alert that fires on the normal case is the one
+that gets muted.
+
+**So the model moved, not the alert.** A receipt debits inventory and credits a
+new liability, and the supplier's bill relieves that liability instead of the
+asset:
+
+```text
+delivery  Dr 1300 Inventory              Cr 2010 Goods received, not invoiced
+bill      Dr 2010 Goods received…        Cr 2000 Accounts payable  (+ 1200 input VAT)
+```
+
+Between the two, `2010` is exactly what has arrived and nobody has billed for.
+After both it is zero. And **the stock is on the balance sheet from the moment
+it lands**, which is the accounting answer as well as the operational one: the
+goods are in the building, they can be sold and they can spoil.
+
+**One code, three charts, and it is a liability.** `2010` sits beside `2000
+Accounts payable` in `services`, `retail` and `real_estate`, in both languages
+(`modules/ledger/src/charts.rs:172`, `:357`, `:573`) — the way `1300` and `5010`
+went in a slice earlier. `the_conventional_accounts_exist_in_every_shipped_chart`
+catches a chart that is missing it, and a second test catches the subtler
+mistake: `what_is_received_and_not_invoiced_is_owed`
+(`modules/inventory/src/posting.rs:309`) asserts the account is a **Liability**
+in every chart, because a code that landed in the 1000s would put a negative
+asset on the balance sheet and still balance — invisible to `TrialBalance`,
+which is the same argument `money_that_is_held_rather_than_earned_is_a_liability`
+makes for the property chart.
+
+**`receive` grew the loop the other three movements already had**
+(`modules/inventory/src/commands.rs:431`): `begin` / `try_execute` / `post` /
+`settle`, the shape `pos::close_shift` has, because a transaction spanning this
+module's event and the ledger's cannot leave the retry inside either. It was the
+one command that did not need it and now it is not. The decision moved out into
+`decide_receipt` (`:495`) only because the retry borrows the receipt on every
+attempt and a closure that moved it could run once. The entry is named `ir.` plus
+the shelf and the movement's own reference, derived like the other three (L8) —
+so re-posting a retried delivery is the ledger's no-op as well as the shelf's,
+which `a_delivery_debits_the_shelf_and_credits_what_is_not_yet_invoiced` asserts
+by receiving the same key twice.
+
+**`PostingAccounts` grew a fifth field, and that is a config shape change**
+(`modules/inventory/src/posting.rs:94`). A tenant who had stored the §72
+shape gets a `ConfigError` from `resolve` rather than a silent default, which is
+what every module does and the right answer (L6) — and nobody has that shape,
+because `inventory` has not shipped to a tenant. `GET`/`PUT
+/v1/inventory/posting-accounts` carry it; no route was added, so `PERMISSIONS`
+and its count are untouched. The `PUT` body gained a **required** field, which
+would break clients — it does not, because `inventory`'s operations are not in
+`docs/openapi.baseline.json` yet: they are new operations, which the
+compatibility test treats as additive. Nothing was accepted by hand.
+
+**A bill line names a product, and the product is optional.** `BillLine.product`
+(`modules/purchases/src/bill.rs`) is `Option<AggregateId>`, `#[serde(default)]`
+on the wire — a **required** field there would have turned every existing
+client's request into a 400, and the compatibility test would have demanded
+`just baseline` for a change nobody asked for. Absent, everything behaves
+exactly as it did; `a_line_with_no_product_on_it_is_untouched` is the test that
+fails if the substitution ever leaks into rent.
+
+**The arrow points `purchases` → `inventory`, and it had to.** The bill is the
+document that posts, so the decision has to be taken where the entry is built —
+`inventory` cannot reach in and change it. `inventory` depends on `ledger` and
+`branches` and on nothing that depends on it, so there is no cycle for cargo to
+refuse, and `sales` will need the same edge the day a line depletes a shelf. The
+seam is `inventory::accepts_movements`, already public and written for exactly
+this, asked of the **log** and inside the bill's transaction, the way `sales`
+asks `crm::accepts_documents`: the read model lags, and a product declared a
+moment ago would otherwise be reported as not existing. Nothing new was
+published from `inventory`; `PostingAccounts::resolve` was already public too.
+
+The edge costs one thing and it is the system's own rule: `reads` is what a
+route is refused on, so `/v1/purchases` now answers 503 while `proj_inventory`
+is older than the build. That is named in the `Cargo.toml` beside the dependency
+rather than discovered later.
+
+**A line that names a product nobody declared is refused**
+(`purchases::PurchaseError::NoSuchProduct`, with its own message in English and
+Arabic). A product id is one typo away from another one, and falling back to the
+account the line named would leave the stock account and the shelves disagreeing
+until somebody reconciled a year of them (L6). What is **not** required is a
+delivery: a bill that beats its goods is recorded, `2010` sits as a debit, and
+that reads as *invoiced, not yet received* —
+`an_invoice_that_arrives_before_its_goods_is_recorded_anyway` receives the goods
+a week later and watches the account come back to zero. Nothing blocks entering
+a supplier invoice.
+
+**The stored line records where it posted, not what the request asked for**
+(`modules/purchases/src/commands.rs:353`, `stocked`). The substitution happens
+once, before the event and the entry are built from the same list, so
+`proj_purchases.bill_line.account` and the journal cannot disagree about where
+the money went. `entry_for_bill` is untouched: it is still summation over the
+accounts it is handed. **Review found this claim unguarded** — the balances
+alone cannot tell a substituted line from a substituted *entry* — so
+`a_bill_line_that_names_a_stocked_product_clears_what_the_delivery_owed` now
+reads the line back out of `proj_purchases` and asserts the account it stored.
+
+**`usable_shelf` stayed, and two thirds of it are now belt-and-braces.** It asks
+three things of a shelf before a delivery lands — a branch nobody opened, a name
+too long to be an `AggregateId`, a currency the inventory account is not kept in.
+A receipt posts now, so the first two would be refused by `post_entry_in` a
+moment later **with the same error**: `NoSuchBranch` is the ledger's own, and the
+receipt builds its own entry id anyway. The currency is the one that stays load-
+bearing — from a posting it comes back as `MixedCurrencies`, which names neither
+the shelf nor the cause, which is the finding §72 wrote down. Deleting the other
+two would also delete `inventory`'s `branches` dependency and the prose around
+it; it is one door, three questions, and the diff for splitting it is bigger than
+the thing it removes.
+
+**`StockValueAgrees` kept its name and changed its meaning**
+(`crates/erp-worker/src/bin/worker.rs:245-283`). It no longer compares two modules'
+halves: `inventory` writes `1300` at both ends, so a difference means a movement
+that did not post, an entry somebody made against the stock account by hand, or a
+read model behind the log. The doc says that, and says what it used to say and
+why it was wrong, because the next person to read it will be reading it after an
+alert.
+
+**And its blind spot is closed.** `value_on_hand` groups `stock_item` rows, so a
+tenant with a balance on the stock account and nothing on any shelf produced no
+row and therefore no finding — precisely the case the finding's own text names,
+*a debit that never reached a shelf*. The comparison is now
+`stock_disagreements` (`worker.rs:292`), a pure function over the two sides that
+adds the account's own currency when no shelf holds it, and it is **unit-tested
+in the worker binary** — `a_stock_account_with_no_shelf_behind_it_is_a_finding`
+and `a_shelf_the_account_cannot_be_compared_with_is_still_reported`. §72 said
+this wanted a harness these invariants do not have; it wanted a pure function
+instead.
+
+**The demo buys its stock by product now.** `ap-2260`'s four lines name
+`PROD-BEANS`, `PROD-MILK`, `PROD-PASTRY` and `PROD-GRINDER`
+(`crates/erp-demo/src/lib.rs`), so each debits `2010` back to zero against the
+deliveries that credited it. `seed_bills` moved **after** `seed_inventory`,
+because a line naming a product nobody has declared is refused — the delivery
+still need not exist, only the product. `the_shelf_was_counted` asserts `2010` is
+zero beside its existing `1300`-against-the-shelves assertion: the café was
+billed for exactly what it received, and that is one account to read rather than
+a health finding to interpret.
+
+**Review found four things; three are fixed here and the fourth is older than
+this slice.**
+
+1. **A typo'd product answered 400 and the route's own description promised
+   422.** `purchase_problem` maps the rejections it names and defaults the rest
+   to `BAD_REQUEST`, so `NoSuchProduct` — added a few lines above in the same
+   diff — fell through the catch-all while the regenerated `docs/openapi.json`
+   listed it under 422. A client that retries never on a 400 and shows a 422 as
+   a business refusal put a malformed-request error in front of somebody who had
+   mistyped a product id. The refusal is well formed and the *product* is what
+   is missing, which is how `inventory` reads the identical error
+   (`InventoryError::is_malformed`, `modules/inventory/src/commands.rs:262`), so
+   the variant joined the 422 arm beside `NotRecorded` and `Ledger`
+   (`modules/purchases/src/http.rs:533`). Pinned by a pure unit test on the
+   mapping (`:580`) — the shape `payments` already uses for the one status a
+   route test would not explain.
+2. **The stored account was unguarded**, above.
+3. **`product` is write-only, deliberately.** See *Left open*.
+4. **A count still counts one lot** (revision R2; *built by §75*), and the prose said an
+   allocation rule was one "nobody has agreed to" — which stopped being true the
+   day R2 agreed to it. Nothing about counting changed in this slice; the module
+   doc, the `count` operation's description and the Phase 19 box did, because
+   all three were arguing from the superseded position. The box is open again.
+   The same correction went to the negative-stock paragraph, which cited
+   decision 7 after R1 had narrowed it to plain products.
+
+**Falsified.** Each fix broken in Rust, the test watched to fail, the file
+restored, the test watched to pass:
+
+| broke | failed |
+|---|---|
+| `2010` ships as an `Asset` in the charts | `what_is_received_and_not_invoiced_is_owed`: *chart "services" makes 2010 a Asset, and goods arrived and not billed are owed for* |
+| `receive` stops posting its pair | `a_delivery_debits_the_shelf_and_credits_what_is_not_yet_invoiced`: *onto the shelf — left 0, right 30000* |
+| `entry_for_receipt` credits `variance` instead of the holding account | `a_closed_holding_account_refuses_the_delivery`: *a delivery with nowhere to put what it owes: ()* — it was accepted, and the goods landed with the liability unrecorded |
+| `stocked` returns the lines unchanged | `a_bill_line_that_names_a_stocked_product_clears_what_the_delivery_owed`: *the bill cleared what the delivery owed — left -70000, right 0* |
+| `stocked` substitutes the account on a line with no product on it | `a_line_with_no_product_on_it_is_untouched`: *rent is not stock and lands where the line said — left 0, right 150000* |
+| the `accepts_movements` check dropped from `stocked` | `a_line_naming_a_product_nobody_declared_is_refused`: *got Ok(Committed … account: AggregateId("2010"), product: Some(AggregateId("PROD-BEENS")))* — a typo posted to the holding account |
+| the account's own side dropped from `stock_disagreements` | `a_stock_account_with_no_shelf_behind_it_is_a_finding`: *left [], right [(0.00, Some(700.00))]* — the blind spot, reported by nothing |
+| the demo's beans line stops naming its product and debits `1300` again | `the_demo_passes_every_invariant`: *the demo's books and its shelves disagree about what the stock is worth — left 277100, right 207100* — exactly the 700.00 of beans debited twice |
+| **(review)** `NoSuchProduct` dropped back out of the 422 arm | `a_line_naming_a_product_nobody_declared_is_refused_on_the_state_of_the_world`: *left 400, right 422* |
+| **(review)** the event keeps `draft.lines` while the entry posts the substituted ones | `a_bill_line_that_names_a_stocked_product_clears_what_the_delivery_owed`: *the stored line records where it posted — left ["5010"], right ["2010"]* — the balances all still passed, which is the blind spot |
+
+**Left open.**
+
+- ~~**Nothing consumes, still.**~~ **Closed by §74**: `sales::issue_in` calls
+  `consume_in` for every invoice line that names a product.
+- **`2010` is one account for every product**, exactly as `1300` is. Account
+  determination by item group is the Phase 6 seam `sales::PostingAccounts`
+  already names, and it is not this module's to open.
+- **Nothing reconciles the holding account line by line.** A non-zero `2010` says
+  *some* delivery is unbilled or *some* bill has no goods behind it; which one
+  takes a screen nobody has asked for, and `reports` is where it would go. The
+  account balance is at least a number a bookkeeper already knows how to read,
+  which the health finding was not.
+- **A bill line is not matched to a receipt.** Nothing says which delivery a
+  line pays for: four receipts and one line for 700.00 net off against each other
+  in the account balance and nowhere else. Matching needs the receipt named on
+  the bill line, which is the goods-receipt document this build does not have.
+- **A partial or over-billed delivery leaves a balance and nobody is told.** A
+  supplier who bills 720.00 for goods received at 700.00 leaves 20.00 sitting in
+  `2010` for ever. That is visible on the balance sheet and in no alert; the
+  check above compares the *stock* account, and this is the other one.
+- **A tenant who re-points `goods_received` mid-stream strands what is in the old
+  account.** The same shape every posting-account change has (entries keep the
+  accounts they were posted to, L5), and worth knowing before somebody changes it
+  between a delivery and its bill.
+- **`product` never comes back out.** A bill line accepts it, it decides where
+  the money posts, and then `bill_line` does not store it and `BillLineView`
+  does not serve it: a client POSTs `PROD-BEANS`, gets 201, and reads back
+  `account: "2010"` with nothing saying which product made it so. The account
+  itself is the signal, and it is a thin one. Storing the product is a column, a
+  response field, a `purchases` group `VERSION` bump and a `READ_MODELS`
+  re-pin — additive and cheap, and deferred because nothing has asked to read
+  it. It is also what the line-by-line reconciliation above would be built on:
+  no query today can list the lines that were treated as stock.
+- ~~**A count counts one lot, and R2 says it should count a shelf.**~~ **Closed
+  by §75**, which made `Count.lot` optional as predicted here. As it stood: §72
+  closed that Phase 19 box and this slice's review re-opened it. The rule is decided —
+  a shortage through `pick`'s order, an overage onto the newest lot, a
+  serial-tracked count naming the serials found — and `picking.rs` already
+  implements the ordering half, so this is a command that makes `Count.lot`
+  optional rather than a design question. Until it ships a counter files one
+  count per lot, and a serial-tracked product cannot be counted at all.
+- **`purchases` is refused while `proj_inventory` rebuilds.** New, correct by the
+  system's own rule, and a cost nobody has felt yet because no tenant has the
+  module. §72's *Left open* said the same about `pos` and `sales`; this is the
+  first edge that actually exists.
+
+### 72 · Stock costs money: what a shelf posts, and the account it has to agree with
+
+**Built 2026-09-13**, Phase 19 slice 2. §71 built the shelf and posted
+nothing; this books everything that leaves one. A count's discrepancy, a
+write-off's loss and a document's cost of goods sold are journal entries now,
+each written **in the transaction that writes the movement** — so a shelf that
+came down without its entry is not a state this system can reach.
+
+**The accounts were already in all three charts, and were not the work.** §71
+put `1300 Inventory` and `5010 Cost of goods sold` into `services` and
+`real_estate` beside the ones retail already carried, with retail's codes and
+names in both languages (`modules/ledger/src/charts.rs:151`, `:343`, `:544`).
+Decision 4 was closed before this slice opened. What was missing was anything
+that posted to them.
+
+**Four accounts, and two of them default to the same code.** `PostingAccounts`
+(`modules/inventory/src/posting.rs:86`) is `inventory`, `cogs`, `variance` and
+`waste`. The last two are separate fields because they are two numbers a
+manager acts on differently: a write-off is somebody standing in front of the
+goods saying *this is spoiled*, a cost of doing business the buyer controls; a
+count variance is stock that left without anybody saying so, which is a control
+failure and a different meeting. Netting them makes both unreadable, which is
+`pos`'s argument for keeping `5910` out of `5900`.
+
+They default to the same `5900` anyway, and that is not a contradiction. The
+shipped charts have one general loss account between them, and adding a second
+code to charts every tenant installs would be a guess about businesses nobody
+has asked — a guess that fails on the first posting, which is exactly what
+`the_conventional_accounts_exist_in_every_shipped_chart` catches. So the *seam*
+is two and the *default* is one: a tenant who wants spoilage apart from
+shrinkage splits them in one `PUT` with no code change, and a tenant who does
+not gets one number that is still correct. The HTTP test does that split
+(`crates/erp-api/tests/http.rs`, the `posting-accounts` block) rather than
+leaving the claim to a comment.
+
+**This renames a stored configuration.** `shrinkage` became `variance` and
+`waste`, so a tenant who had stored the slice-1 shape gets a `ConfigError` from
+`resolve` rather than a silent default — which is the behaviour every module
+already has and the right one (L6). Nobody has that shape: §71 shipped the same
+day and no tenant has the module.
+
+**Everything posts through `ledger::post_entry_in`, inside the movement's own
+transaction**, and the accounts are read inside it too, with the configuration
+generation stamped on the metadata (`commands.rs:1235`, the shape
+`sales::resolve_accounts` has). Reading them outside would be marginally
+cheaper and would let an account be closed between the check and the append.
+`write_off` (`commands.rs:560`) and `count` (`commands.rs:1052`) grew the
+`begin`/`try_execute`/`post`/`settle` loop `pos::close_shift` has, because a
+transaction spanning this module's event and the ledger's cannot leave the
+retry inside either.
+
+**A count that found exactly what the books said posts nothing.** Not a pair of
+zero lines and not a refusal: `two_sided` returns `None` on zero
+(`posting.rs:242`) before `BalancedLines` is built, because the ledger refuses a
+zero line and a count that balanced is not an error. Filtered before the lines
+exist, as `sales::entry_for_issue` filters its tax line.
+
+**The consumption path is written and nothing calls it.** *(Superseded by §74:
+`sales::issue_in` calls it for every line that names a product. What follows
+describes the build as it stood here.)* `consume_in`
+(`commands.rs:661`) takes the caller's connection rather than a `TenantDb`,
+because the sale that will call it owns the transaction its invoice commits in
+— `pos` composes `sales::issue_in` the same way. **No route in this build
+reaches it.** It is said in the module doc, in `posting.rs`'s header, in
+`schema/install.sql` beside the `consumed` kind and the `sold` serial state, and
+in the function's own doc, because a module whose `consume_in` exists reads as a
+module that depletes on a sale. It does not. The cost of goods sold a margin
+needs is still zero for every line rung.
+
+It was written now because the posting is the hard half and it is cheaper to
+test against a shelf than against a shelf and an invoice —
+`a_consumption_posts_exactly_what_the_lots_it_took_cost`
+(`modules/inventory/tests/inventory.rs:1489`) takes six hundred grams across two
+roasts at two prices and asserts 38.00, naming the 36.67 an average would have
+charged. That is the whole argument for per-lot costing, in one entry.
+
+**The COGS entry is named by a published function** and the other two are not.
+`cost_entry_of` (`commands.rs:1198`) is public for the reason
+`sales::issue_entry_of` is: a consumption belongs to a *document*, so a report
+asked *which postings did this invoice line make* has to name the entry without
+reimplementing the prefix. A write-off and a count belong to nothing outside
+this module. All three are derived from the shelf and the movement's own
+reference and never minted (L8), and a shelf and reference that will not fit in
+one `AggregateId` are **refused** rather than truncated — two movements sharing
+a truncated name would share an entry and the second would post nothing.
+
+**A shortfall is still refused, on both paths.** *(Superseded by §74: a plain
+product's sale records it (R1) and a count, not a delivery, settles it; a
+write-off still refuses it.)* Decision 16 says a sale may
+take a shelf below zero at the last known unit cost; recording one means
+deciding what the next receipt does to the units the shelf owes, and nobody has
+decided. `taken` (`commands.rs:1521`) is the one place both ways out refuse it,
+so that decision has one place to land. Guessing now would be writing the answer
+down before the question was asked — §71's own *Left open*, unchanged.
+
+**The check decision 8 makes load-bearing.** *(Superseded by §73 the same day:
+receiving posts now, and the bill clears a holding account. What follows
+describes the build as it stood here.)* Receiving does not post: the supplier's
+bill debits `1300` on the line that bought the goods and this module only ever
+credits it. So the asset account is written by two modules that cannot see each
+other, and nothing but a comparison says the two halves still agree.
+`inventory::value_on_hand` (`modules/inventory/src/projections.rs:1098`) is this
+module's half; `StockValueAgrees` (`crates/erp-worker/src/bin/worker.rs:283`) is
+the other, and it lives in the composition root for the reason `TrialBalance`
+and `ReportsReconcile` do — the comparison needs `proj_ledger` beside
+`proj_inventory`, and L3 forbids a module from reading across projection groups.
+It resolves the *tenant's* inventory account rather than the conventional code,
+so a business that pointed stock at `1310` is not reported broken for ever.
+
+**The demo buys its own stock.** A bill from a coffee supplier
+(`crates/erp-demo/src/lib.rs:1252`) debits `1300` line for line with what
+arrives in `stock_arrives`; the crate of milk, the damaged grinder and the three
+missing croissants credit it. `the_shelf_was_counted` asserted `1300` was zero
+and now asserts it equals what the shelves are worth
+(`crates/erp-demo/tests/demo.rs:958`), and `the_demo_passes_every_invariant`
+makes the same comparison, because its own first line claims to be every
+invariant the platform checks.
+
+**A posting is dated to a branch, and that changed a test.** Stock is per branch,
+so every movement carries one, and `ledger::post_entry_in` checks it against the
+log — so a write-off at a branch nobody opened is now refused. The HTTP test
+opens `BRANCH-OLAYA` through `/v1/branches` before receiving into it. That is
+the right answer and it is new: in §71 nothing inventory did reached the ledger.
+Review then found the other half of it, below: a *receipt* has to ask the same
+question, and `branches` is a dependency of the module rather than of its tests.
+
+**No new route.** The `GET`/`PUT /v1/inventory/posting-accounts` pair §71
+shipped grew two fields; the permissions table and its count are untouched.
+
+**Falsified.** Each fix broken in Rust, the test watched to fail, the file
+restored, the test watched to pass:
+
+| broke | failed |
+|---|---|
+| `entry_for_write_off` debits the count's account | `a_write_off_and_a_count_can_land_in_different_accounts`: *left 0, right 1200* |
+| the zero filter removed from `two_sided` | `nothing_that_moved_nothing_posts`: `balances: ZeroLine { index: 0 }` — the ledger refuses the pair of zeroes the filter exists to avoid |
+| `waste` defaulted to `5920` | `the_conventional_accounts_exist_in_every_shipped_chart`: *chart "services" has no account 5920* |
+| `count` stops posting its variance | `a_count_books_what_it_found_and_nothing_when_it_found_nothing`: *the loss is booked — left 0, right 900* |
+| `cost_of` sums only the first portion | `a_consumption_posts_exactly_what_the_lots_it_took_cost`: *left 3000, right 3800* — one roast's cost for a movement that took two |
+| `post` swallows the ledger's refusal | `a_closed_account_refuses_the_movement_rather_than_posting_elsewhere`: the write-off committed against a closed account |
+| `entry_for_write_off` credits `cogs` instead of `inventory` | `the_value_on_hand_agrees_with_the_inventory_account`: *left 6400, right 5600* |
+| the demo's bill buys beans as an expense, not an asset | `every_module_is_enabled_and_answering`: *left 137100, right 207100* — exactly the 700.00 of beans that never reached the asset |
+| the branch check dropped from `usable_shelf` | `a_shelf_no_movement_could_ever_leave_takes_no_delivery`: *a delivery to a branch that was never opened: ()* — it was accepted |
+| the account-currency check dropped from `usable_shelf` | same test: *a delivery priced in a currency the books do not keep: ()* |
+| the `entry_id` check dropped from `usable_shelf` | same test: *a delivery onto a shelf no entry could be named for: ()* |
+| `NotAReference` carries an empty shelf | same test: *the refusal has to name the shelf that overflowed, not only the key: NotAReference { shelf: "", reference: "rcv-3" }* |
+
+**What review found, and what changed.** Five findings, two roots. Four of them
+are one root — **a receipt posts nothing, so it accepted shelves that nothing
+could ever post off** — and it is the shape §71's review had too: a name or a
+guard that was supposed to identify one thing and covered less than it looked
+like it did.
+
+- **Stock could land where it could never leave.** Three ways. A branch nobody
+  opened: `erp-web` deliberately does not validate `X-Branch`
+  (`crates/erp-web/src/extract.rs:783-785`) because *"`ledger::post_entry_in`
+  refuses one that names no open branch, and every posting in the system arrives
+  there"* — and a receipt is the one movement that arrives nowhere, so
+  `WAREHOUSE-2` took a delivery and every write-off, count and consumption at it
+  was then refused for ever. A currency the inventory account is not kept in:
+  `receive` compared the delivery against the *shelf*, so the first USD delivery
+  onto a fresh shelf under a SAR chart was accepted and `post_entry_in` refused
+  every line off it afterwards with `MixedCurrencies`, which names neither the
+  shelf nor the cause. And a branch id long enough that `iw.{shelf}.{reference}`
+  cannot be an `AggregateId` at all: receipts succeeded because `lot_of` returns
+  a plain `String` with no length rule, while every exit was refused before its
+  loop opened. All three are the same mistake and they are fixed in one place —
+  `usable_shelf` (`modules/inventory/src/commands.rs:1719`), asked by `receive`
+  because a receipt is the only door onto a shelf. The currency question is
+  `ledger::posting_currency` (`modules/ledger/src/commands.rs:535`), new and
+  public for the reason `accepts_postings` is: a module told the account's
+  currency before it accepts a document can refuse the document, rather than
+  leaving the refusal to a posting days later. The branch answer is
+  `ledger`'s own `NoSuchBranch` rather than a message of this module's: a check
+  that answers differently from the command it guards is worse than no check.
+  `branches` moved from a dev-dependency to a dependency, the arrow pointing the
+  way `ledger`'s does, and `setup()` reads it.
+- **And the refusal blamed the wrong half.** `inventory.not_a_reference` read
+  *"{reference} is too long … use a shorter key"* when a branch id can eat the
+  whole budget on its own and the key may already be one character.
+  `NotAReference` now carries the shelf **and** the reference and the message
+  names both in English and Arabic (`messages.rs:374-387`). `consume_in` builds its
+  entry through the same `entry_id` as the other two rather than its own
+  `AggregateId::new` (`modules/inventory/src/commands.rs:677`), so the name a caller can predict from
+  `cost_entry_of` is the name that posts.
+- **The doc on `setup()` said `ledger` was checked and not posted to.** *"which
+  is the one thing this module does with `ledger` today"* — true when §71 shipped
+  and false the moment this slice did, while the `Cargo.toml` beside it had
+  already been corrected. Rewritten (`modules/inventory/src/lib.rs:256-260`): every movement out books an
+  entry in the transaction that writes it, so a closed account or a closed period
+  refuses the stock movement itself.
+- **Two route descriptions still said the count and the write-off post
+  nothing**, and they are the half of the module a caller reads rather than
+  compiles: `count_stock` ended *"Posts nothing yet. Booking the discrepancy is
+  the next slice"* and `write_off_stock` *"the ledger has not been told"*, both
+  shipped in `docs/openapi.json`. The module doc, `posting.rs` and the command
+  docs had all been rewritten; these two had not, and a client integrating
+  against the published document would have built around a ledger that is
+  written. Both now say what posts and in which transaction
+  (`modules/inventory/src/http.rs:484`, `:557`), their `422` descriptions name
+  the ledger's refusal beside the module's, and `just openapi` regenerated the
+  document — `the_document_matches_the_router` is what would have caught the
+  regeneration being skipped, not the staleness itself.
+- **`StockValueAgrees` treated the receive-to-invoice window as a violation**
+  — *the finding §73 closed, and the reason it exists*;
+  and it is the ordinary state of a business between a delivery arriving and the
+  supplier's invoice being entered — decision 8 puts the debit on the bill, so
+  the two differ for those days by exactly what has been received and not billed,
+  and `HealthJob` logs `invariant violated` at error level every five minutes for
+  the whole window. Closing it properly takes a goods-received-not-invoiced
+  account that the bill relieves, which is a chart decision this build has not
+  taken and `purchases` would have to post; it is **not** taken here. What
+  changed is that the check stops implying otherwise: the finding names the
+  window as one of its three causes and the doc says the check is expected to
+  fire during it (`crates/erp-worker/src/bin/worker.rs:261-270`). The alert that
+  fires on the normal case is the one that gets muted, so this is on the product
+  owner's desk rather than closed.
+- **And it hid a currency it could not compare.** The check filtered out any
+  shelf whose currency was not the account's, so a tenant holding stock the books
+  had no room for produced no finding at all. The filter is gone: a shelf in a
+  second currency is stock somebody has to be told about. Untested, and said out
+  loud — the invariant needs a tenant database and the worker binary has no
+  harness for one, and the state now takes two `PUT`s and two receipts to reach
+  rather than one mistake.
+
+**Left open.**
+
+- ~~**Nothing consumes.**~~ **Closed by §74**: the hook is in `sales::issue_in`,
+  so a till sale, a booking bill and a `/v1/sales` invoice all deplete through
+  one path, with the products in a fixed order (sorted by id — decision 14).
+- ~~**Negative stock, still.**~~ **Closed by §74** for a plain product's sale: it
+  records the shortfall and a count settles it, not a delivery. As it stood here:
+  both ways out refused a shortfall. The sale that
+  records one decides what the next receipt does to the units the shelf owes: is
+  the delivery costed against the debt, or does a count settle it? The second
+  answer did not work then, because a count counted one lot and a shortfall has
+  no lot — which is §71's first *Left open* becoming load-bearing rather than
+  tidy. *(§75 built the count of the shelf that does it.)*
+- **A write-off's reason does not choose an account.** Expired and damaged both
+  land in `waste`; the reason is on the movement and in the entry's memo. A
+  tenant who wants spoilage and breakage as separate expense lines needs a third
+  field, and nobody has asked for one.
+- **No route reads an entry's memo**, so `a_write_off_books_its_loss_and_keeps_its_reason`
+  asserts the account and the movement's reason rather than the memo it posted
+  under. A reader for `proj_ledger.posting.memo` is the ledger's to add.
+- ~~**The invariant compares rows, so an empty shelf is not compared.**~~
+  **Closed by §73**, which drove the comparison from both sides through a pure
+  `stock_disagreements` and unit-tested it in the worker binary.
+- **The invariant is a finding, not a report.** `StockValueAgrees` says a tenant
+  is unhealthy and names the two numbers. Which delivery is missing a bill, or
+  which bill pointed at the wrong account, takes a reconciliation screen nobody
+  has asked for — `reports` is where it would go.
+- ~~**A consumption of a serial marks it `sold`** and nothing can reach that
+  state yet.~~ **Reachable since §74**, from an invoice line that names its
+  serials.
+- **`1300` is one account for every product.** Account determination by item
+  group — beans to one asset, equipment to another — is the Phase 6 seam
+  `sales::PostingAccounts` already names, and it is not this module's to open.
+- ~~**Goods received and not yet invoiced have nowhere to sit.**~~ **Closed by
+  §73 the same day.** The product owner took it (decision R3): `2010 Goods
+  received, not invoiced` ships in all three charts, a receipt credits it and a
+  bill line naming a stocked product debits it back.
+- **Closing a branch strands the stock on its shelves.** A receipt now refuses a
+  branch nobody opened, but a branch closed *after* the stock arrived refuses
+  every write-off and count at it — `post_entry_in`'s rule, which `sales` and
+  `pos` live under too. Reopening clears it. What a business actually wants is a
+  transfer between branches, and no verb moves stock from one shelf to another.
+- **A count that finds exactly what the books said still posts nothing**, so it
+  is the one movement that does not reach the ledger and the one that a closed
+  branch or account does not refuse. Harmless — it records that somebody counted
+  — and the asymmetry is worth knowing about before a report is built on it.
+  *(Since §75, only on a shelf that owes nothing: a count of a shelf that owes
+  clears the debt, and may post.)*
+
+### 71 · The shelf exists: `modules/inventory`, lots, and stock that moves by hand
+
+**Built 2026-09-13**, Phase 19 slice 1. The first of the phase's four boxes and
+none of the other three: products, lots and movements are events now; **nothing
+posted to the ledger and nothing depleted on a sale.** Both were said out loud —
+in the module doc, in the file a reader opens expecting entries
+(`modules/inventory/src/posting.rs`), and in the route descriptions — because a
+module that looks finished and is not is how a tenant discovers a gap at an
+audit. §72 closed the first half the same day and §73 the rest of it — receiving posts
+too now — and §74 closed the second: an invoice line that names a product
+depletes its shelf.
+
+**Costing is per lot, and that replaced a weighted average that was already
+written.** A first version of this module carried two integers per shelf and
+drew every movement at `value ÷ on hand`; the product owner's revision added
+lots, expiry and serials, and a weighted average cannot answer *which delivery
+is this*, which is the whole of expiry and the whole of a recall. The two
+integers went; `OpenLot` (`modules/inventory/src/picking.rs:57`) came.
+
+**Every receipt is a lot, whatever the tracking mode.** A product declares how
+closely it is watched — `none | lot | serial`, frozen at declaration beside the
+unit (`modules/inventory/src/product.rs:39-70`) — and the mode decides what a
+delivery must *say*, not whether lots exist. An untracked product's lots are
+FIFO layers nobody names, which is what lets one costing method serve all three
+and stops a second one being needed the day somebody wants batches.
+
+**The picking rule is one pure function** (`modules/inventory/src/picking.rs:225`)
+and everything that leaves a shelf leaves through it. Dated lots before undated,
+earlier date first, received order among equals — so a pharmacy's stock goes out
+in the order it will spoil and a hardware shop's goes out in the order it
+arrived, **down the same path**. The sort is three lines
+(`picking.rs:249-253`): `(expires_on.is_none(), expires_on)`, stable over a
+received-order list. Naming a lot overrides it, and a named lot that cannot
+cover what was asked is **refused** rather than topped up from the next — naming
+one is a claim about that lot, and the caller is holding the goods.
+
+**A portion costs what its own lot cost.** `value × units ÷ quantity` through
+`Money::apportioned` (`picking.rs:81`), which is exact at `n/n`, so the movement
+that empties a lot takes whatever is left and the lot closes on exactly zero
+rather than stranding a halala. Pinned by
+`the_last_portion_of_a_lot_takes_the_remainder` (`picking.rs:483`) and by
+`each_portion_costs_what_its_own_lot_cost` (`modules/inventory/src/stock.rs:812`),
+which is the test that would have passed under the old design and now names the
+number an average would have charged.
+
+**Open lots only live in the aggregate** (`stock.rs:442-443`). A lot that empties
+leaves; a café receiving beans every morning for three years carries the four it
+can still pour from. The window of references already heard is bounded the same
+way `conversations::Thread` bounds its. The read model keeps the history: `lot`
+holds every delivery ever made, closed or not
+(`modules/inventory/schema/install.sql:54`).
+
+**A serial is an identity and is never invented.** It comes from the caller at
+receipt (L8), one per unit; a movement names the units it takes; and a serial
+that is unknown, already gone, or named twice in one movement is **refused**
+(`picking.rs:312-339`). A *delivery* giving two units one name is refused too, and
+separately — the serials are counted distinct in `delivery`
+(`modules/inventory/src/commands.rs:1407-1429`), before the shelf is loaded,
+because a name repeated inside the incoming list is a fact about the request and
+no shelf can see it. Review found that gap; see below. That is the one place
+this module refuses for stock, and
+the reason is written down where the split is made
+(`modules/inventory/src/picking.rs:314-317`): decision 7's *"a sale never
+refuses for stock"* governs quantities, and a count corrects a quantity. Nothing
+corrects a unit that was never on the shelf. *(R1 later narrowed decision 7 to
+plain products: a lot- or serial-tracked sale the shelf cannot cover refuses
+too. See §74.)*
+
+**A count counts one lot, and a serial-tracked product is not counted at all.**
+The smaller honest thing, and the argument was in `count`'s rustdoc until
+§75 rewrote it: a shelf-wide variance has to be put
+somewhere, and putting it somewhere is an allocation rule nobody has agreed to —
+three kilos missing off four deliveries did not go missing evenly, and charging
+them to the batch the picking rule would take next is a guess dressed as
+arithmetic. A lot is the smallest thing a person can stand in front of and
+count; `GET /v1/inventory/lots` is what they read first. For a serial-tracked
+product a quantity that came up one short cannot say *which* name is gone, so
+the count is refused and the correction is a write-off that names the unit.
+`expected`, `declared`, the variance and what the variance was worth are frozen
+into the event (`stock.rs:207-255`), exactly as `pos::ShiftEvent::Closed` freezes
+the drawer's.
+
+**Corrected 2026-09-13, later: the rule was agreed.** Revision R2 says a count
+takes a shelf and the shortage comes off the lots in picking order — so "nobody
+has agreed to one" was true when this was written and stopped being true that
+afternoon. The code is unchanged and the Phase 19 box is open again; §73's review
+carries it. *(Superseded by §75: a count takes the shelf, a serial-tracked product
+is counted by naming what was found, and `SerialsAreNotCounted` is gone.)*
+
+**A write-off exists and, in this slice, did not post** — §72 books its loss.
+A reason — `expired` or `damaged`, not
+free text, because a reason nobody can group by is a reason nobody reads
+(`stock.rs:71-83`) — and more than the shelf holds is **refused**
+(`commands.rs:1521`). This is somebody holding the goods, not a till: a till may
+not stop for a bad count, and a person looking at a shelf may be told the shelf
+says otherwise. `Shortfall` (`picking.rs:150`) is computed and carries the last
+known unit cost, and the only caller in this build refuses it — so it is a
+reason to refuse and nothing else. **No event carried one** *(§74 gave `Consumed` one, for a plain product's sale)*. The first draft put
+the field on `WrittenOff` "so the sale slice does not reshape the event"; review
+showed the claim was hollow in both directions, and it is gone (`stock.rs:195-206`).
+See below.
+
+**A shelf is per branch**, keyed `{product}.{branch}` from the request's own
+metadata (`stock.rs:714`), with `parts` (`stock.rs:727`) taking the halves back
+out so no event repeats what its key already says. The seam is the first `.`,
+unambiguous because a product's id is its `Idempotency-Key` and therefore a
+UUID — and a product id carrying a dot is refused there rather than guessed at.
+
+**And a lot id carries its shelf too**: `lot.{shelf}.{reference}`
+(`commands.rs:1128`). An idempotency key is only promised to be unique to the
+client that sent it, and `lot.id` is a primary key across the whole tenant —
+review found the two facts meeting. See below.
+
+**Twelve operations across nine paths under `/v1/inventory`**, taking `PERMISSIONS`
+(`crates/erp-api/tests/http.rs:2156`) from 247 to 259. Reading the shelf, the
+lots and the movements is every role's. Receiving, counting and **writing off**
+are `PostEntries` — the person who finds the milk past its date is the person
+holding it, and a loss nobody may record is a loss that goes in the bin
+unrecorded. Declaring a product is the owner's, because the unit and the
+tracking mode are frozen at declaration.
+
+**The lots listing is the order stock goes out in**, and that is not decorative.
+`lots` (`modules/inventory/src/projections.rs:914`) sorts by
+`COALESCE(expires_on, '9999-12-31'), position` — the sentinel is how *undated
+last* survives a keyset page, and `position` is the receipt's log position and
+therefore the received order. Which is why a count **does not** bump a lot's
+`position` (`projections.rs:492`, `schema/install.sql:83-88`): a screen that
+reordered itself after a stocktake would stop matching the rule it exists to
+preview. The index is built on the same expression (`install.sql:102-104`).
+`expiring_before` is **exclusive** (`projections.rs:946`) — a batch dated the day
+asked about is still good that day — which is what the parameter's own name says
+and is not what it did.
+
+**`1300 Inventory` and `5010 Cost of goods sold` are in all three shipped charts
+now** (`modules/ledger/src/charts.rs:151`, `:250`, `:343`, `:433`, `:544`,
+`:676`). They were in `retail` alone, and the demo installs `services`. The
+precedent is `2300 Zakat payable`, which ships everywhere for a calculation
+nothing performs. `PostingAccounts::conventional()`
+(`modules/inventory/src/posting.rs:127`) names them plus `5900 Other expenses` for
+shrinkage — **not** `5910`, which is the drawer's. The chart test
+(`posting.rs:286`) is worth having before anything posts, because the first
+posting is otherwise where a missing account is discovered, by the tenant.
+
+**Both settings ship with writers, and in this slice nothing read either** —
+§72's postings read the accounts.
+`purchases` and `payments` each ship a `PostingAccounts` with no route, which
+strands a tenant who closes one of the accounts it names. This one has
+`GET`/`PUT /v1/inventory/posting-accounts`, ETag-guarded, `ManageAccounts` for
+the write the way `sales` argues it, and each code is checked with
+`ledger::accepts_postings` against the **log** before it is stored
+(`modules/inventory/src/http.rs:898`). The expiry warning window
+(`modules/inventory/src/expiry.rs`) is the same bet a slice earlier: a tenant who
+has chosen their window before the first warning arrives never sees a wrong one.
+`GET /v1/inventory/lots?expiring_before=` takes a day per request and
+deliberately does **not** fall back to the setting — a listing that hid lots by
+default is a listing nobody could trust, and the check that reads the window is
+not built *(§76 built it)*.
+
+**One event can be several movement rows.** A write-off off two lots is two
+portions costed on their own lots, and flattening them would lose exactly the
+fact this module exists to keep — so `seq` completes the movement key
+(`install.sql:188-245`) and the projection writes one row per portion
+(`projections.rs:252-342`). Each row is a **signed delta**, never a running
+total, because a running total is a read and a projection may not read while
+applying (L2). Which makes the canary a property rather than a reconciliation:
+**what is on hand is the sum of the movements that produced it, lot by lot** —
+asserted against a real tenant
+(`modules/inventory/tests/inventory.rs:505`, projected *and* rebuilt), over HTTP
+(`crates/erp-api/tests/http.rs:15354`) and in the demo
+(`crates/erp-demo/tests/demo.rs:1022`).
+
+**Cross-module existence reads the log.** `accepts_movements`
+(`commands.rs:1151`) loads the `Product` aggregate rather than reading
+`proj_inventory.product`, three lines, the way `crm::accepts_documents` is
+written — and it is public because the invoice slice has to ask the same
+question the same way. `tracking_of` (`commands.rs:1160`) asks on its own
+connection rather than inside the movement's transaction, and says why: a
+product is declared once and nothing un-declares one, so the answer is
+monotonic and a check that passed cannot stop being true while the movement
+commits.
+
+**Every registration place.** `REGISTERED` (`crates/erp-api/src/modules.rs:135`,
+after `ledger`), the catalogue (`crates/erp-api/src/catalog.rs:50`),
+`module_jobs` (`crates/erp-worker/src/bin/worker.rs:2188`), the migrator's
+`rebuild` arm (`crates/erp-worker/src/bin/migrator.rs:543`), `READ_MODELS`
+(`:810`), `REBUILDABLE` (`:982`), the demo's seed and projection run
+(`crates/erp-demo/src/lib.rs:283`, `:394`, `:1882`) and its replay witness
+(`crates/erp-demo/tests/demo.rs:452`), plus the two source-scan allowlists
+(`crates/erp-eventlog/tests/write_side.rs:56`,
+`crates/erp-control/tests/pooler.rs:42`). The demo seeds one product of each
+tracking mode — two roasts of beans, a crate of milk that went off and was
+thrown out, a tray of pastry counted three short, and two grinders of which one
+arrived damaged and left **by name** — because the three modes are three
+products and a demo with only the middle one leaves expiry and identity with
+nothing behind them.
+
+**Re-pinned at version 1** (`migrator.rs:810`). The module has not shipped, so no
+tenant has `proj_inventory` to rebuild and a shape change costs one line. After
+it ships the same edit is a fleet rebuild, which is why every table the next
+slices need is already in `install.sql` — including the `consumed` kind, the
+`sold` serial state, and the nullable `lot` a shortfall would leave empty. The
+`serial` key gained the shelf under review, and re-pinning it was the same one
+line (`migrator.rs:810`).
+
+**What review found, and what changed.** Five findings, four roots. Every one of
+them is a name that was supposed to identify one thing and did not, or a doc
+sentence the code did not back.
+
+- **A delivery could give two units one serial.** `delivery` checked only that
+  the count of names matched the quantity, and `receive`'s shelf guard looks for
+  names *already on the shelf* — neither can see a repeat inside the incoming
+  list. `["SN-1", "SN-1"]` for two units was accepted; writing `SN-1` off then
+  took **both** copies off the lot (`Stock::draw_down` retains by name) while
+  taking one off the quantity, leaving a unit with no name that nothing can ever
+  move: not by name, not by quantity — a serial product refuses a quantity
+  write-off — and not by counting, which a serial product refuses outright. The
+  fix is one line where the shape of a delivery is already decided: count the
+  names **distinct**, trimmed the way `label` trims (`commands.rs:1407-1429`). The
+  refusal is the one that already existed and already reads right — *two units,
+  one named* — so no new message code, and it is a 400 because it is a fact
+  about the request.
+- **A lot id was derived from the idempotency key alone.** `lot.{reference}`,
+  while `lot.id` is `PRIMARY KEY` across the tenant. A key is unique only to the
+  client that sent it; one that keys a retry loop on a batch rather than on a
+  row sends the same key for two rows, and two shelves each hear it for the
+  first time and both record a delivery. The read model's `ON CONFLICT (id) DO
+  NOTHING` then dropped the second lot, and the next write-off on it decremented
+  the **first** one — the canary, silently, on the other product. The shelf is
+  now in the id (`commands.rs:1128`), which is what tells the two apart; within
+  one shelf the reference already did. `lot_of` takes the pair the way
+  `sales::credit_entry_of` does.
+- **The `serial` row was first-write-wins, and tenant-wide.** `ON CONFLICT
+  (product, serial) DO NOTHING`, but `receive` refuses only a serial the shelf is
+  **holding** — so a machine that comes back from repair is a legitimate second
+  delivery, and the screen went on saying `written_off` on a closed lot while the
+  log said the unit was on hand in a new one. The insert now updates
+  (`projections.rs:180-199`): a receipt is the newest fact about a named unit,
+  and a replay re-applies events in order so the last one still wins. The key
+  gained the shelf (`schema/install.sql:147`) for the same reason `Stock` is per
+  branch — two aggregates, neither able to see the other's serials, so a
+  read-model uniqueness across the tenant would have been claiming something no
+  command enforces — and `gone` is scoped to the stream to match
+  (`projections.rs:724`), so Olaya throwing a machine away no longer takes
+  Malaz's off the screen.
+- **`WrittenOff::shortfall` was a field nothing could write.** The write side's
+  `apply` ignored it, the projection subtracted it, and when its cost was `None`
+  with no portions beside it the projection dropped the **whole event** — no
+  movement row to explain a number that had moved. It is deleted, not repaired
+  (`stock.rs:195-206`, `projections.rs:265-278`). The doc said it was there "so the
+  sale slice does not reshape the event", and that was never load-bearing: an
+  `Option` behind `#[serde(default)]` costs nothing to add later, and the slice
+  that adds it has to decide what a later receipt does to units the shelf owes —
+  a decision nobody has taken. Writing the field now was writing the answer down
+  before the question was asked.
+- **`expiring_before` filtered inclusively.** `expires_on <= $4` under a name and
+  a description that both say *before*. Harmless on a screen, and a day early on
+  every dated lot in the tenant the moment the expiry worker reads the same
+  function. Now `<` (`projections.rs:946`), with the boundary in the test.
+
+The longer id and the new `serial` key ripple exactly three places and each one
+failed loudly rather than quietly: the HTTP walk-through asserts the lot it was
+given (`crates/erp-api/tests/http.rs:15189`), the demo names the lot it counts
+(`crates/erp-demo/src/lib.rs:2031`), and the read-model pin is the same one line
+it always was (`migrator.rs:810`, version still 1 — the module has not shipped,
+so nothing rebuilds).
+
+**Falsified.** Each break, the failure it produced, then the file restored and
+the test watched to pass again.
+
+| broke | failed |
+|---|---|
+| `earliest_first` stops sorting | `the_earliest_expiry_goes_out_first`: *left `[l1, l2, l3]`, right `[l2, l3, l1]`* — received order, not expiry order |
+| undated lots sorted by plain `Option` ordering | `an_undated_lot_waits_and_then_goes_oldest_first`: the undated lots came out before the dated one |
+| a named lot no longer capped at what it holds | `naming_a_lot_overrides_the_order`: *left `Ok(Picked { … quantity: 11 … })`, right `Err(LotIsShort { held: 10, wanted: 11 })`* |
+| a portion costs the whole lot (`apportioned(1, 1)`) | `the_last_portion_of_a_lot_takes_the_remainder`: *left 10000, right 3333* |
+| the shortfall arm removed | `what_the_lots_cannot_cover_is_a_shortfall`: *left None, right `Some(Shortfall { quantity: 3, cost: Some(75.00) })`* |
+| the repeated-serial check removed | `a_serial_is_found_or_refused`: `["SN-1", "SN-1"]` took two units off a lot holding one of them |
+| an emptied lot stays in the aggregate | `a_depleted_lot_closes_and_the_rest_stays`: *left 2 lots, right 1* |
+| the already-held serial check removed from `receive` | `a_serial_that_is_not_on_the_shelf_is_refused`: a second unit was received under a name already on the shelf |
+| the `NotEnoughStock` guard removed from `write_off` | `a_write_off_takes_no_more_than_is_there`: 2,500 came off a shelf of 2,000 |
+| a serial-tracked product allowed to be counted | the same test: the count committed instead of being refused |
+| `count`'s already-heard check removed | `a_movement_is_recorded_once_however_often_it_is_sent`: *left 4 movements, right 3* |
+| `shelf_of` ignores the request's branch | `a_shelf_belongs_to_a_branch`: Olaya's shelf held nothing |
+| a lot-tracked delivery no longer needs its batch code | `a_delivery_has_to_look_like_the_product_it_is_of`: the codeless crate committed |
+| the count event freezes `declared` as `expected` | `what_a_count_found_is_frozen`: *left `Some(4800)`, right `Some(5000)`* |
+| a count values its variance at the whole lot | the same test: *left 30000, right -1200* |
+| the projection records a count's `declared` instead of its variance | `a_quantity_on_hand_agrees_with_the_movements`: *left 58, right 40* |
+| a write-off stops drawing its lot's remainder down | the same test: *the emptied batch should have closed, left 3 right 2* |
+| a count bumps its lot's `position` | `what_a_count_found_is_frozen`: *left `["lot.rcv-2", "lot.rcv-1"]`, right `["lot.rcv-1", "lot.rcv-2"]`* — the listing stopped matching the picking order |
+| the lot id stops being derived from the receipt | `stock_goes_out_of_the_lot_that_expires_first`: two deliveries landed on one lot |
+| `1300` taken out of the `services` chart | `the_conventional_accounts_exist_in_every_shipped_chart`: named the chart and the code |
+| the Arabic for `serials_are_not_counted` replaced by a second English entry | `every_crates_messages_render_through_the_composite` |
+| a shape change to `install.sql` without a re-pin | `a_read_model_change_bumps_its_version`, with the tuple to paste |
+| `module_jobs` entry removed | `every_module_has_a_projection_job`: *a module is offered and never projected. Missing: `["inventory"]`* — and nothing else in the workspace noticed |
+| `REBUILDABLE` entry removed | `every_module_can_be_rebuilt` |
+| `write_side.rs` allowlist entry removed | `an_aggregate_is_loaded_only_while_handling_a_command` |
+| `pooler.rs` allowlist entry removed | `no_session_scoped_set_outside_a_ddl_path` |
+| a `fetch_optional` added inside `apply` | `a_projection_does_not_read_while_applying` |
+| the demo's replay witness removed | `the_demo_replays_to_exactly_what_is_live`: *a projection group is not covered by shadow replay* |
+| the demo's `advance::<Inventory>` removed | `every_module_is_enabled_and_answering`: *inventory has its products, left 0 right 4* |
+| `declare_product` relaxed to `ALL_ROLES` in the table | `every_role_against_every_endpoint`: the accountant's 403 named `manage_tenant` |
+| `list_lots` taken out of the table | the same test: *served and untabled: `["list_lots"]`* |
+
+And the five review fixes, the same way:
+
+| broke | failed |
+|---|---|
+| `delivery` counts the serials it was sent instead of the distinct ones | `a_delivery_has_to_look_like_the_product_it_is_of`: `["SN-1", "SN-1"]` for two units committed instead of refusing `NeedsSerials { units: 2, named: 1 }` |
+| `lot_of` ignores the shelf and derives from the reference alone | `a_shelf_belongs_to_a_branch`: *left `[("lot.rcv-1", 5000)]`, right `[("lot.rcv-1", 5000), ("lot.rcv-1", 1000)]`* — one key at two branches made one lot, and the read model kept the first |
+| the `serial` insert back to `DO NOTHING` | `a_named_unit_that_comes_back_is_on_hand_again`: the lot the machine came back onto listed no serials — *left `[…("…OLAYA.rcv-3", [])]`, right `[…("…OLAYA.rcv-3", ["SN-1"])]`* |
+| `gone` matches on the product alone, not on the shelf | the same test: *left `[(Some("BRANCH-MALAZ"), 1, [])]`, right `[(Some("BRANCH-MALAZ"), 1, ["SN-1"])]`* — Olaya's write-off took Malaz's machine off the screen |
+| `expiring_before` back to `expires_on <= $4` | `stock_goes_out_of_the_lot_that_expires_first`: *left 1, right 0* — the batch that goes off **on** the day asked about came back as already gone |
+
+Deleting `WrittenOff::shortfall` has no guard test and cannot have one: nothing
+could write the field, so no behaviour changed and the compiler is the check.
+What it bought is that the three docs describing it are now true.
+
+**Left open.**
+
+- **Nothing posts.** ~~A write-off's loss and a count's discrepancy are the next
+  slice.~~ **Closed by §72 the same day**: both post now, in the transaction
+  that writes the movement, and the demo asserts `1300 Inventory` against what
+  the shelves are worth rather than against zero. **And the receipt by §73**,
+  which is the one this section said would never post: it debits the asset and
+  credits `2010 Goods received, not invoiced`, and the supplier's bill clears
+  that account instead of the asset.
+- ~~**Nothing consumes.**~~ **Half closed by §72** — `consume_in` picks lot by
+  lot and posts cost of goods sold — **and closed by §74**, which calls it from
+  `sales::issue_in` for every line that names a product.
+- ~~**Negative stock is unreachable, and no event can record it.**~~ **Closed by
+  §74** for a plain product's sale, which records the shortfall on `Consumed`;
+  a count settles it, not a delivery. As it stood here: decision 7 says
+  a sale never refuses for stock and `pick` already computes what the lots
+  cannot cover — but the only movement out in this build is a write-off, which is
+  refused rather than taken below zero, so `Shortfall` is a reason to refuse and
+  nothing else. The slice that records one adds the field (or its own variant)
+  once it has decided what the next receipt does to the units the shelf owes: is
+  the delivery costed against the debt, or does the count settle it? Nobody has
+  chosen, and the earlier draft's field was that choice made silently.
+- ~~**A shelf-wide count.**~~ **Closed by §75.** Counting *all the milk* without
+  saying which batch needs an allocation rule for the variance, and nobody had
+  agreed to one. *(Revision R2 agreed to one later the same day — picking order
+  for a shortage, the newest lot for an overage — and §75 built it.)*
+- ~~**Nothing reads the expiry window.**~~ **Closed by §76**: the worker's
+  `stock_expiry` check reads it, reports lots past their date and lots inside
+  the window, and changes nothing — and §77 turned that report into a
+  notification for whoever may write stock off. As it stood here: the setting and its route
+  shipped, and the check that warns did not exist.
+- **A lot-tracked delivery may leave the expiry empty.** The code is required
+  and the date is not, because a batch with no shelf life is a real thing and
+  the picking rule already has a rule for undated lots. If a tenant wants dates
+  compulsory that is a per-product flag, and nobody has asked.
+- **A count is not segregated.** `inventory:approve_count` beside
+  `sales:approve_credit_note` is the auditor's answer for a tenant who wants the
+  duties split; it costs a claim, a check in the root and a two-step flow.
+- **Two lots of one product cannot be merged or transferred**, and neither can
+  stock between branches. Both are additive over the three events here.
+- **A serial is unique to its shelf, not to the tenant.** Two branches are two
+  `Stock` aggregates and neither can see the other's names, so the same number
+  may be on hand at Olaya and at Malaz — and the read model is keyed to say so
+  rather than to claim otherwise. Refusing it tenant-wide means a second stream
+  read inside the decision (L3) or an index nothing writes; the honest version is
+  a transfer command, and nobody has asked for one.
+- **A reference repeated on one shelf after it has fallen out of the heard
+  window** still lands on one lot id. The window is 200 movements and the repeat
+  is a client bug; what it costs is a lot row the projection keeps rather than
+  replaces. Narrowing it further means an id that no caller could derive, which
+  is what `lot_of` exists to avoid.
+- **Rebuilding `inventory` takes the counter down**, now that `sales` reads it
+  (§74): the group is in the read-model closure of `sales` and `pos`, so a stale
+  `proj_inventory` answers 503 on their routes. Correct by design.
+- ~~**Two tills on one basket can deadlock.**~~ **Closed by §74**: `deplete`
+  takes the movements in a fixed order, sorted by product id, after
+  `sales::issue_in` has reserved the numbering counter.
+- ~~**No book page.**~~ **Closed by §76**, with `module.md`'s correction. As it
+  stood here: `docs/book/src/api/inventory.md`, `SUMMARY.md` and `modules.md`
+  were the paperwork slice's, and `module.md` said the registry carried four
+  modules and cited a retired `docs/ERRORS.md`.
+
 ### 70 · One rule everywhere for the credit-note claim
 
 **Built 2026-09-12**, Round 3c decision. §68's own *Left open* said it: a till
@@ -8178,12 +10675,103 @@ tree are chart-of-accounts entries — `1300 Inventory` and `Cost of goods sold`
 in the **retail** chart, which anticipate this module without implementing any
 of it. That the accounts are already there is convenient and is not progress.
 
+**2026-09-13: the first box is closed and the other three are not.** §71 built
+the module — products, lots, movements, counts and the read model behind them —
+and deliberately posts nothing and depletes nothing. Both accounts are now in
+all three shipped charts, which was the thing blocking the first posting rather
+than progress towards it.
 
-- [ ] Products, quantities, and stock movements as events
-- [ ] Consumption on sale, so a POS line depletes stock
-- [ ] Counts and the discrepancy a count finds, which is the number that matters
-- [ ] Cost of goods sold, posted to `ledger`. Without it a restaurant's margin
-      is a guess
+**The product owner's revision landed the same day**: costing is **per lot**,
+not weighted average, and expiry and serial tracking are in scope. A lot answers
+*which delivery is this*, which is the whole of expiry and the whole of a
+recall; an average cannot.
+
+**2026-09-13, later: two of the four boxes are closed and two are half.** §72
+booked everything that leaves a shelf — a count's discrepancy, a write-off's
+loss and a document's cost of goods sold — each in the transaction that writes
+the movement, and added the invariant that proves the inventory account still
+agrees with what the shelves are worth. The two open boxes are one piece of
+work: **nothing calls `consume_in`**, so no sale depletes a shelf and no cost of
+goods sold is ever posted. Both wait on the hook in `sales::issue_in`.
+
+**2026-09-13, later still: receiving posts** (§73, decision R3 superseding
+decision 8). A delivery debits `1300` and credits a new `2010 Goods received,
+not invoiced`; the supplier's bill line that names a stocked product debits
+`2010` back instead of the account it carries. Stock is on the balance sheet
+from the moment it lands, and the value-on-hand check stops calling the ordinary
+gap between a delivery and its invoice a violation. It closes no box on its own
+— the two open ones are still the `sales::issue_in` hook — and it makes the
+fourth one honest: the account those postings are checked against is now written
+by this module at both ends.
+
+**And its review re-opened the counting box.** Revision R2 says a count takes a
+shelf, with the shortage allocated through the picking rule; only a per-lot count
+exists, and the module's prose was still arguing that no such rule had been
+agreed. The prose is corrected and the box is open again — **one box closed,
+three open**. Nothing about counting changed in the code.
+
+**2026-09-13, last: the invoice hook lands** (§74), and with it boxes 2 and 4.
+`sales::issue_in` calls `inventory::consume_in` for every line that names a
+product, in the invoice's own transaction and with the products sorted by id, so
+a till sale, a booking bill and a `/v1/sales` invoice all deplete through one
+path and cost of goods sold is posted lot by lot as the goods leave. A
+lot- or serial-tracked product that the shelf cannot cover **refuses and takes
+the document with it** (R1); a plain one sells and records the shortfall. A
+credit note's returned line goes back onto the lots it left, at what the
+consumption froze — read out of the shelf's own stream, because the read model
+may not be consulted (L3) and a cost may not be guessed (L6). The ZATCA document
+carries the real quantity and unit price, which BT-131 had been getting away
+without. **Three boxes closed, one open**: the shelf-wide count.
+
+**2026-09-13, and the last box: a count counts the shelf** (§75, revision R2).
+The counter enters what is there; a shortage comes off the lots through `pick`,
+the order a sale takes stock in, and an overage joins the newest lot at that
+lot's own cost. A serial-tracked product is counted by naming the units found,
+and a name that is not on hand is refused. A count of the shelf is also what
+clears a plain product's debt, which §74 left for it. Counting one lot still
+works. **All four boxes closed.**
+
+**2026-09-13, and what the boxes left open** (§76). A sales or till line may
+name the lot it takes from; a credit note or a till return of serial-tracked
+stock names the units that came back, and each has to be still out on that sale
+— followed through the stream, not read off the shelf; the worker warns about
+lots past or near their date and changes nothing; and the module has its book
+page.
+
+- [x] **Products, quantities, and stock movements as events.** Built 2026-09-13
+      (§71): `modules/inventory`, two aggregates and three events, **per-lot
+      costing behind one pure picking rule** (earliest expiry first, undated
+      last, oldest received among equals), expiry and serials, stock per product
+      per branch, and a read model whose movements sum to what is on hand **lot
+      by lot**
+- [x] **Consumption on sale, so a POS line depletes stock.** Built 2026-09-13
+      (§74): the hook is in `sales::issue_in`, so every invoice this system
+      issues depletes through one path — the till, the booking bill, the
+      `/v1/sales` route. Products in a fixed order (decision 14), the refusal
+      after the already-heard check, R1's split between a tracked product that
+      refuses and a plain one that records a shortfall, and a credit note that
+      puts back what the client says came back, onto the lots it left and at
+      what the consumption froze (decision 12). What the next receipt does to
+      the units a shelf owes is decided and it is **nothing**: the debt was
+      costed at a guess, so a count settles it rather than a delivery
+- [x] **Counts and the discrepancy a count finds, which is the number that
+      matters.** Built 2026-09-13 (§72, §75): short books the loss against
+      inventory, over books the reverse, and a count that moved no value posts
+      nothing. Since §75 a count takes a **shelf** (R2) — a shortage off the lots
+      in picking order at each lot's cost, an overage onto the newest lot at its
+      cost, a serial-tracked count naming the units found — and clears what a
+      plain product sold short owes. Counting one named lot still works, for
+      someone counting batches. *(As it stood after §73's review: half done, one
+      lot per count and no serial count at all.)*
+- [x] **Cost of goods sold, posted to `ledger`.** Built 2026-09-13 (§72, §73,
+      §74): valued lot by lot, with a write-off's loss beside it under its own
+      account, and now **triggered** — by the invoice that sold the goods, in
+      that invoice's transaction. A plain product sold below zero books the
+      shortfall too, at the last unit cost the shelf saw, so the goods that left
+      the building are in the books whatever the count says; a credit note
+      reverses the entry at what the consumption froze. The check that the
+      inventory account and the shelves still agree is a comparison of like with
+      like at both ends
 
 ---
 

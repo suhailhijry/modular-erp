@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 # **One module dependency, and the arrow only points this way.** `messaging`
-# resolves an audience against `booking`, `crm`, `hr` and `sales`; this module
+# resolves an audience against `booking`, `crm`, `hr`, `inventory` and `sales`; this module
 # asks it who a notification reaches and renders the wording with its bindings.
 #
 # The consequence is the layering rule in the crate docs: a domain module can

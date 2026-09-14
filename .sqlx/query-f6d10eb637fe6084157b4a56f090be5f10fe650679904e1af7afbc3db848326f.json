@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT value, version FROM configuration WHERE key = $1",
+  "query": "SELECT value, version, set_at FROM configuration WHERE key = $1",
   "describe": {
     "columns": [
       {
@@ -24,6 +24,17 @@
             "name": "version"
           }
         }
+      },
+      {
+        "ordinal": 2,
+        "name": "set_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "configuration",
+            "name": "set_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -33,8 +44,9 @@
     },
     "nullable": [
       false,
+      false,
       false
     ]
   },
-  "hash": "380776e78f6cb5ea015e58abe7ee443a409b99458110d1c7e1091e2041e8f43c"
+  "hash": "f6d10eb637fe6084157b4a56f090be5f10fe650679904e1af7afbc3db848326f"
 }

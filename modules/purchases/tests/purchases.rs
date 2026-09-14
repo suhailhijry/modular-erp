@@ -46,6 +46,7 @@ fn line(account: &str, net: Money, category: VatCategory, tax: Money) -> BillLin
     BillLine {
         description: format!("something from {account}"),
         account: code(account),
+        product: None,
         net,
         category,
         rate_bp: ledger::Rates::saudi_arabia().of(category),
@@ -80,8 +81,11 @@ impl Fixture {
         for (account, kind) in [
             ("1010", AccountKind::Asset),     // Bank
             ("1200", AccountKind::Asset),     // Input VAT
+            ("1300", AccountKind::Asset),     // Inventory
             ("2000", AccountKind::Liability), // Accounts payable
+            ("2010", AccountKind::Liability), // Goods received, not invoiced
             ("5000", AccountKind::Expense),   // Cost of sales
+            ("5010", AccountKind::Expense),   // Cost of goods sold
             ("5100", AccountKind::Expense),   // Rent
             ("5200", AccountKind::Expense),   // Other
         ] {
@@ -153,6 +157,16 @@ impl Fixture {
         ensure_group_schema::<hr::Hr>(&mut conn)
             .await
             .expect("hr checkpoint");
+        // **`inventory` too, because a bill line may name a stocked product.**
+        // The predicate reads the log, but `value_on_hand` — the half of the
+        // canary that makes "the books agree with the shelf" checkable — reads
+        // `proj_inventory`.
+        inventory::install(&mut conn)
+            .await
+            .expect("inventory schema");
+        ensure_group_schema::<inventory::Inventory>(&mut conn)
+            .await
+            .expect("inventory checkpoint");
         drop(conn);
 
         Self {
@@ -193,6 +207,13 @@ impl Fixture {
             .await
             .expect("purchases projects");
 
+        let owned = inventory::projections();
+        let refs: Vec<&dyn Projection<Group = inventory::Inventory>> =
+            owned.iter().map(AsRef::as_ref).collect();
+        run_to_head::<inventory::Inventory>(&pool, &refs, inventory::upcasters(), 200)
+            .await
+            .expect("inventory projects");
+
         pool.close().await;
     }
 
@@ -211,6 +232,71 @@ impl Fixture {
             .into_iter()
             .find(|a| a.code == account)
             .map_or_else(|| money(0), |a| a.balance)
+    }
+
+    /// What every shelf is carried at — `inventory`'s half of the canary the
+    /// stock account has to agree with. One currency here, so one number.
+    async fn value_on_hand(&self) -> Money {
+        self.project().await;
+        let mut conn = self.db.acquire().await.expect("connection");
+        inventory::value_on_hand(&mut conn)
+            .await
+            .expect("reads")
+            .first()
+            .copied()
+            .unwrap_or_else(|| money(0))
+    }
+
+    /// A product `inventory` knows, and a delivery of it onto the shelf.
+    ///
+    /// The delivery is what makes the holding account a credit; the bill is
+    /// what clears it. Both are ordinary commands — nothing here reaches a
+    /// state the product cannot produce.
+    async fn stock(&self, product: &str) {
+        inventory::declare(
+            &self.db,
+            &code(product),
+            "حبوب إسبريسو",
+            "gram",
+            inventory::Tracking::None,
+            on("2026-02-01"),
+            &Metadata::default(),
+        )
+        .await
+        .expect("declares");
+    }
+
+    async fn delivered(&self, product: &str, value: Money, reference: &str) {
+        inventory::receive(
+            &self.db,
+            &code(product),
+            &inventory::Receipt {
+                quantity: 5_000,
+                value,
+                code: None,
+                expires_on: None,
+                serials: Vec::new(),
+                reference: reference.to_owned(),
+                at: on("2026-02-02"),
+            },
+            &Metadata::default(),
+        )
+        .await
+        .expect("receives");
+    }
+
+    /// The accounts the bill's lines were *stored* against, in order — the read
+    /// model's answer, which is also what `GET /v1/purchases/bills/{id}` serves.
+    async fn stored_accounts(&self, id: &str) -> Vec<String> {
+        let mut conn = self.db.acquire().await.expect("connection");
+        purchases::bill(&mut conn, id)
+            .await
+            .expect("reads")
+            .expect("the bill is there")
+            .lines
+            .into_iter()
+            .map(|line| line.account)
+            .collect()
     }
 
     async fn balances(&self) -> Vec<ledger::TrialBalance> {
@@ -1007,6 +1093,185 @@ async fn somebody_with_no_employee_record_is_refused() {
         ),
         "no employee record means no claim can reach them, got {refused:?}"
     );
+
+    fixture.cleanup().await;
+}
+
+/// **The delivery and its invoice, in the order they usually happen** — and the
+/// canary is quiet the whole way through (decision R3).
+///
+/// The receipt debits `1300` and credits `2010 Goods received, not invoiced`;
+/// the bill line that names the product debits `2010` back, leaving input VAT
+/// and the payable exactly where they always were. So the stock account agrees
+/// with the shelf from the moment the goods land — which is the window that
+/// used to make `StockValueAgrees` cry wolf for as long as the paperwork took.
+#[tokio::test]
+async fn a_bill_line_that_names_a_stocked_product_clears_what_the_delivery_owed() {
+    let fixture = Fixture::new().await;
+    fixture.stock("PROD-BEANS").await;
+    fixture.delivered("PROD-BEANS", riyals(700), "RCV-1").await;
+    fixture.project().await;
+
+    assert_eq!(fixture.balance("1300").await, riyals(700), "on the shelf");
+    assert_eq!(
+        fixture.balance("2010").await,
+        money(-70_000),
+        "received and not invoiced"
+    );
+    assert_eq!(
+        fixture.balance("1300").await,
+        fixture.value_on_hand().await,
+        "the books and the shelf agree before any invoice exists"
+    );
+
+    let mut beans = line("5010", riyals(700), VatCategory::Standard, riyals(105));
+    beans.product = Some(code("PROD-BEANS"));
+    record(&fixture, "BILL-1", vec![beans])
+        .await
+        .expect("records");
+    fixture.project().await;
+
+    assert_eq!(
+        fixture.balance("2010").await,
+        money(0),
+        "the bill cleared what the delivery owed"
+    );
+    assert_eq!(
+        fixture.balance("5010").await,
+        money(0),
+        "and it did not land in the account the line named: the goods are an \
+         asset until something consumes them"
+    );
+    // **And the document says the same thing the journal does.** The stored
+    // line records where it *posted*, not what the request carried: a bill that
+    // reads `5010` while the entry debits `2010` is a document and a set of
+    // books disagreeing about where the money went, and the disagreement only
+    // surfaces the day somebody reconciles them.
+    assert_eq!(
+        fixture.stored_accounts("BILL-1").await,
+        vec!["2010".to_owned()],
+        "the stored line records where it posted"
+    );
+    assert_eq!(
+        fixture.balance("1300").await,
+        fixture.value_on_hand().await,
+        "and still agree afterwards"
+    );
+    assert_eq!(
+        fixture.balance("1200").await,
+        riyals(105),
+        "input tax is untouched by any of this"
+    );
+    assert_eq!(
+        fixture.balance("2000").await,
+        money(-80_500),
+        "as is the payable"
+    );
+
+    fixture.cleanup().await;
+}
+
+/// **Everything that is not stock posts exactly as it always did.**
+///
+/// The test that would fail if the substitution leaked. One bill, two lines:
+/// rent, which names no product, and beans, which names one. The rent lands on
+/// `5100` to the halala, and only the stocked line moves.
+#[tokio::test]
+async fn a_line_with_no_product_on_it_is_untouched() {
+    let fixture = Fixture::new().await;
+    fixture.stock("PROD-BEANS").await;
+
+    let mut beans = line("5010", riyals(700), VatCategory::Standard, riyals(105));
+    beans.product = Some(code("PROD-BEANS"));
+    let rent = line("5100", riyals(1_500), VatCategory::Exempt, money(0));
+
+    record(&fixture, "BILL-1", vec![rent, beans])
+        .await
+        .expect("records");
+    fixture.project().await;
+
+    assert_eq!(
+        fixture.balance("5100").await,
+        riyals(1_500),
+        "rent is not stock and lands where the line said"
+    );
+    assert_eq!(
+        fixture.balance("2010").await,
+        riyals(700),
+        "only the beans moved"
+    );
+    assert_eq!(fixture.balance("5010").await, money(0));
+    assert_eq!(fixture.balance("1200").await, riyals(105));
+    assert_eq!(fixture.balance("2000").await, money(-230_500));
+
+    fixture.cleanup().await;
+}
+
+/// **An invoice that beats its delivery is not refused, and it is readable.**
+///
+/// Nothing about entering a supplier's invoice waits for goods to turn up. The
+/// holding account simply sits the other way round — a debit, which is
+/// *invoiced, not yet received* — until the delivery credits it back. A
+/// business that refuses to record an invoice it has been sent is not an
+/// accounting system.
+#[tokio::test]
+async fn an_invoice_that_arrives_before_its_goods_is_recorded_anyway() {
+    let fixture = Fixture::new().await;
+    fixture.stock("PROD-BEANS").await;
+
+    let mut beans = line("5010", riyals(700), VatCategory::Standard, riyals(105));
+    beans.product = Some(code("PROD-BEANS"));
+    record(&fixture, "BILL-1", vec![beans])
+        .await
+        .expect("a supplier invoice is never blocked by a delivery");
+    fixture.project().await;
+
+    assert_eq!(
+        fixture.balance("2010").await,
+        riyals(700),
+        "a debit: invoiced, not yet received"
+    );
+
+    // And the goods turn up a week later.
+    fixture.delivered("PROD-BEANS", riyals(700), "RCV-1").await;
+    fixture.project().await;
+    assert_eq!(
+        fixture.balance("2010").await,
+        money(0),
+        "which is the same account, from the other side"
+    );
+    assert_eq!(fixture.balance("1300").await, fixture.value_on_hand().await);
+
+    fixture.cleanup().await;
+}
+
+/// **A product nobody declared is refused, not posted somewhere else** (L6).
+///
+/// A product id is one typo away from another one, and quietly falling back to
+/// the account the line named leaves the stock account and the shelves
+/// disagreeing until somebody reconciles a year of them. What is *not* required
+/// is a delivery — see above.
+#[tokio::test]
+async fn a_line_naming_a_product_nobody_declared_is_refused() {
+    let fixture = Fixture::new().await;
+
+    let mut beans = line("5010", riyals(700), VatCategory::Standard, riyals(105));
+    beans.product = Some(code("PROD-BEENS"));
+    let refused = record(&fixture, "BILL-1", vec![beans]).await;
+    fixture.project().await;
+    assert!(
+        matches!(
+            refused,
+            Err(CommandError::Execute(ExecuteError::Rejected(
+                PurchaseError::NoSuchProduct(ref product)
+            ))) if product == "PROD-BEENS"
+        ),
+        "got {refused:?}"
+    );
+
+    // And nothing was written: not the bill, not a posting.
+    assert_eq!(fixture.balance("2000").await, money(0));
+    assert_eq!(fixture.balance("5010").await, money(0));
 
     fixture.cleanup().await;
 }

@@ -1,0 +1,44 @@
+[package]
+name = "inventory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "What is on the shelf: products declared once, stock received into lots, and every movement an event."
+
+[lints]
+workspace = true
+
+[dependencies]
+# **Two module dependencies, and the arrow only points this way.** `ledger`
+# because the accounts every movement posts to are checked against the chart
+# before a tenant can store them, and because every movement — a receipt
+# included — posts through `post_entry_in`. `branches` because that posting
+# refuses a branch nobody opened, and a receipt asks the same question first so
+# stock never lands on a shelf it can never leave. Nothing else: `sales` and
+# `purchases` call *into* this module, so an edge back to either would be the
+# cycle cargo refuses.
+ledger = { workspace = true }
+branches = { workspace = true }
+erp-web = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+erp-tenant = { workspace = true }
+erp-eventlog = { workspace = true }
+erp-i18n = { workspace = true }
+erp-projection = { workspace = true }
+erp-types = { workspace = true, features = ["sqlx"] }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+erp-control = { workspace = true }
+erp-testkit = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

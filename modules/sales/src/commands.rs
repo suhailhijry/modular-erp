@@ -145,6 +145,12 @@ pub enum SalesError {
     /// A credit note naming a line the invoice does not have.
     #[error("invoice {invoice} has no line {line}")]
     NoSuchLine { invoice: String, line: u16 },
+    /// A credit line saying units came back, against an invoice line that sold
+    /// no product — an hour of consultancy, or a line issued before products
+    /// existed. **Refused rather than ignored** (L6): there is no shelf for
+    /// them to land on.
+    #[error("line {line} of invoice {invoice} sold no product, so no units can come back on it")]
+    NotAStockLine { invoice: String, line: u16 },
     /// A credit note against an invoice that has already been cancelled
     /// outright, or a cancellation of one that has been partly credited. Both
     /// would credit the same supply twice.
@@ -152,6 +158,29 @@ pub enum SalesError {
     AlreadyCredited(String),
     #[error("a credit note must credit something")]
     NothingToCredit,
+    /// A line priced per unit whose quantity is not one.
+    #[error("a quantity is a whole number of units, and more than nothing")]
+    NotAQuantity,
+    /// A line that names units without saying what they are units of, or
+    /// without a quantity of that many — on an invoice and on a credit note.
+    ///
+    /// **Refused rather than reconciled** (L6). A line naming three serials and
+    /// charging for one would take three units off the shelf and print a
+    /// document saying one went out, and neither number is safe to believe over
+    /// the other.
+    #[error("this line names {named} units; it must name the product and charge for {named}")]
+    NamedUnits { named: i64 },
+    /// A line naming a lot and no product. **Refused rather than dropped**
+    /// (L6): nothing would take the units off that lot, and whoever named it
+    /// was promised that batch.
+    #[error("this line names lot {lot} and no product")]
+    LotWithoutAProduct { lot: String },
+    /// **What the shelf said**, carried whole. A product nobody declared, a
+    /// serial that is not there, or a tracked product the shelf cannot cover
+    /// (R1) — every one of them names the thing the person has to fix, and
+    /// flattening them into "could not take the stock" would throw that away.
+    #[error(transparent)]
+    Stock(#[from] inventory::InventoryError),
     /// The prepayment invoice does not fit the supply it is deducted from.
     #[error(transparent)]
     Prepaid(#[from] crate::vat::PrepaidError),
@@ -229,11 +258,22 @@ impl erp_i18n::Localize for SalesError {
             Self::NoSuchLine { invoice, line } => Message::new(messages::NO_SUCH_LINE)
                 .with("invoice", MessageArg::text(invoice.clone()))
                 .with("line", MessageArg::Count(i64::from(*line))),
+            Self::NotAStockLine { invoice, line } => Message::new(messages::NOT_A_STOCK_LINE)
+                .with("invoice", MessageArg::text(invoice.clone()))
+                .with("line", MessageArg::Count(i64::from(*line))),
             Self::CreditTooLarge { amount } => Message::new(messages::CREDIT_TOO_LARGE)
                 .with("amount", MessageArg::text(amount.to_string())),
             Self::AlreadyCredited(invoice) => Message::new(messages::ALREADY_CREDITED)
                 .with("invoice", MessageArg::text(invoice.clone())),
             Self::NothingToCredit => Message::new(messages::NOTHING_TO_CREDIT),
+            Self::NotAQuantity => Message::new(messages::NOT_A_QUANTITY),
+            Self::NamedUnits { named } => {
+                Message::new(messages::NAMED_UNITS).with("named", MessageArg::Count(*named))
+            }
+            Self::LotWithoutAProduct { lot } => Message::new(messages::LOT_WITHOUT_A_PRODUCT)
+                .with("lot", MessageArg::text(lot.clone())),
+            // Already says the right thing in both languages.
+            Self::Stock(e) => e.message(),
             Self::Prepaid(why) => Message::new(messages::PREPAID_DOES_NOT_FIT)
                 .with("why", MessageArg::text(why.to_string())),
             Self::InvalidReference(reference) => Message::new(messages::INVALID_REFERENCE)
@@ -262,6 +302,21 @@ impl SalesError {
     #[must_use]
     pub const fn refuses_the_caller(&self) -> bool {
         matches!(self, Self::NotApproved(_) | Self::OverDocumentLimit { .. })
+    }
+
+    /// **A line of the wrong shape**, whichever document and whichever door
+    /// carried it: a quantity that is not one, names that do not match their
+    /// line, a lot named with no product, or a line the shelf cannot read
+    /// ([`inventory::InventoryError::is_malformed`]). A 400 at the sales routes
+    /// and at the till alike; deciding it once is what keeps the same refusal
+    /// from being two statuses depending on which door raised it.
+    #[must_use]
+    pub const fn is_malformed(&self) -> bool {
+        match self {
+            Self::NotAQuantity | Self::NamedUnits { .. } | Self::LotWithoutAProduct { .. } => true,
+            Self::Stock(stock) => stock.is_malformed(),
+            _ => false,
+        }
     }
 }
 
@@ -550,7 +605,195 @@ pub async fn issue_in(
     .await
     .map_err(lift)?;
 
+    deplete(conn, id, &committed, draft.issued_on, &metadata).await?;
+
     Ok(Numbered { committed, number })
+}
+
+/// **Takes off the shelf what this invoice sold**, in the invoice's own
+/// transaction.
+///
+/// Every invoice this system issues goes through [`issue_in`], so this is the
+/// one place a document depletes stock: a till sale, a booking bill and a
+/// `/v1/sales` invoice all reach it (decision 2). Cost of goods sold posts
+/// there too, lot by lot, in `inventory`.
+///
+/// # Sorted by product
+///
+/// Decision 14, and the same argument the counter-before-stream comment above
+/// makes: two tills selling the same two products in opposite orders would take
+/// the two shelves' locks the other way round and deadlock. One order, fixed
+/// here, and two lines naming one product still take that shelf once each — in
+/// line order, which their references already keep apart.
+///
+/// # Never on a retry
+///
+/// **The lines come off the `Issued` event this transaction wrote**, the way
+/// `came_back` reads the `Credited` one, so a retried invoice — which writes no
+/// event — depletes nothing by construction. The invoice is idempotent for
+/// ever; the shelf's own retry check is a bounded window, and a review found a
+/// retry reaching the shelf after that window had rolled took the stock a
+/// second time while the cost entry, whose id is derived, posted nothing.
+/// Nothing needs healing: no invoice has been written without its depletion,
+/// because both are one transaction. The movement reference is still derived
+/// from the invoice and the line's position (L8), which is what lets a credit
+/// note name the consumption it is undoing.
+async fn deplete(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    committed: &Committed<InvoiceEvent>,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<SalesError>> {
+    let Some(InvoiceEvent::Issued { lines, .. }) = committed.events.first() else {
+        return Ok(());
+    };
+    let mut sold: Vec<(usize, &InvoiceLine)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.product.is_some())
+        .collect();
+    if sold.is_empty() {
+        return Ok(());
+    }
+    sold.sort_by(|(a, one), (b, two)| one.product.cmp(&two.product).then_with(|| a.cmp(b)));
+
+    for (at_line, line) in sold {
+        let Some(product) = &line.product else {
+            continue;
+        };
+        inventory::consume_in(
+            &mut *conn,
+            product,
+            &inventory::Consumption {
+                // **Named units or a quantity, never both** — that is
+                // `inventory`'s own shape, and a serial-tracked line always
+                // names them. A line with a product and no quantity is one
+                // unit, the same reading the document takes of
+                // `cbc:InvoicedQuantity`.
+                quantity: line.serials.is_empty().then(|| line.quantity.unwrap_or(1)),
+                // The lot the line named, overriding the picking rule. A lot
+                // that is not open on this shelf, or is short, refuses.
+                lot: line.lot.clone(),
+                serials: line.serials.clone(),
+                reference: line_reference(invoice, at_line),
+                at,
+            },
+            metadata,
+        )
+        .await
+        .map_err(lift_stock)?;
+    }
+    Ok(())
+}
+
+/// **The movement reference one invoice line's stock moves under.**
+///
+/// Derived from the document and the line's position, never minted (L8), which
+/// is what makes a retried invoice deplete once and a credit note able to name
+/// the consumption it is undoing.
+fn line_reference(invoice: &AggregateId, line: usize) -> String {
+    format!("{invoice}.{line}")
+}
+
+/// The same for what a credit note puts back. **Its own key and not the
+/// sale's**: keyed on the consumption's reference, the shelf would hear a retry
+/// of the sale and put nothing back.
+///
+/// # The credit note's *number*, not the client's reference
+///
+/// A client reference is only unique per invoice — `has_credit` sits on the
+/// invoice, and the credit entry's id carries the invoice beside it. Two credit
+/// notes called `RET-1` on two invoices of the same product would share a
+/// return reference on one shelf, and the second would be heard as a retry of
+/// the first and put nothing back while its money posted in full. A review
+/// found exactly that. The number is the tenant's own gapless series, so it
+/// cannot repeat, and it is short enough that the entry id it names still fits
+/// beside a shelf. Stock only moves in the transaction that issues the credit
+/// note, so the number is final whenever this is called.
+fn return_reference(credit_note_number: &str, line: usize) -> String {
+    format!("r.{credit_note_number}.{line}")
+}
+
+/// What comes back, keyed by the invoice line's product and its position on the
+/// invoice: how many units, or `None` for all of them, and which by name.
+///
+/// **A map, so one invoice line is one return.** Two lines of one credit note
+/// may name the same invoice line, and as two entries they would share a return
+/// reference and the second would be heard as a retry and put nothing back.
+/// Keyed by product first, so iterating it is the sorted order [`deplete`]
+/// takes shelves in.
+type ComingBack = std::collections::BTreeMap<(AggregateId, usize), (Option<i64>, Vec<String>)>;
+
+/// **Puts back what a credit note says came back**, one invoice line at a time.
+///
+/// **Never a share of what was credited** (decision 12): the amount on a credit
+/// line and the units on it are two different statements, and dividing one into
+/// the other is the guess L6 refuses.
+///
+/// # Onto the shelf the sale took it from
+///
+/// A shelf is a product at a branch, and the branch is the one the invoice was
+/// **issued** at — read off the `Issued` event's metadata, because a credit
+/// note raised at head office, or at another till, is still undoing that sale.
+/// Asked of this request's branch, it would look for the consumption on a shelf
+/// that never saw it and refuse the cancellation.
+async fn restore(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    credit_note_number: &str,
+    back: &ComingBack,
+    at: Timestamp,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<SalesError>> {
+    if back.is_empty() {
+        return Ok(());
+    }
+    let stream = erp_types::StreamId::new(
+        <Invoice as erp_eventlog::Aggregate>::domain(),
+        invoice.clone(),
+    );
+    let branch = erp_eventlog::read_stream(&mut *conn, &stream)
+        .await
+        .map_err(|e| ExecuteError::Load(e.into()))?
+        .into_iter()
+        .find(|event| event.event_name.as_str() == InvoiceEvent::NAMES[0])
+        .and_then(|issued| issued.metadata.branch().map(str::to_owned));
+
+    for ((product, line), (quantity, serials)) in back {
+        inventory::restore_in(
+            &mut *conn,
+            product,
+            &inventory::Restoration {
+                taken_on: line_reference(invoice, *line),
+                branch: branch.clone(),
+                quantity: *quantity,
+                serials: serials.clone(),
+                reference: return_reference(credit_note_number, *line),
+                at,
+            },
+            metadata,
+        )
+        .await
+        .map_err(lift_stock)?;
+    }
+    Ok(())
+}
+
+/// Carries a stock failure into this module's error with its kind intact, so
+/// the retry loops still recognise a conflict. The shape [`lift`] has.
+fn lift_stock(error: ExecuteError<inventory::InventoryError>) -> ExecuteError<SalesError> {
+    match error {
+        ExecuteError::Rejected(e) => ExecuteError::Rejected(SalesError::Stock(e)),
+        ExecuteError::Load(e) => ExecuteError::Load(e),
+        ExecuteError::Append(e) => ExecuteError::Append(e),
+        ExecuteError::Enqueue(e) => ExecuteError::Enqueue(e),
+        ExecuteError::Database(e) => ExecuteError::Database(e),
+        ExecuteError::Contended { stream, attempts } => {
+            ExecuteError::Contended { stream, attempts }
+        }
+        ExecuteError::AlreadyExists { stream } => ExecuteError::AlreadyExists { stream },
+    }
 }
 
 /// Records money received against an invoice, and moves it in the ledger.
@@ -1017,6 +1260,13 @@ fn spread_over_lines(state: &Invoice, net: Money) -> Vec<CreditLine> {
         lines.push(CreditLine {
             against,
             net: Money::from_minor(part, net.currency()),
+            // **Nothing comes back on the shelf.** This spreads a *refund* over
+            // the lines, and money handed back says nothing about goods handed
+            // back — deriving units from an amount is exactly decision 12's
+            // "never a proportion". A customer returning the goods raises the
+            // credit note that says so.
+            quantity: None,
+            serials: Vec::new(),
         });
         left -= part;
     }
@@ -1451,9 +1701,25 @@ async fn cancel_in(
         erp_eventlog::numbering::consume(&mut *conn, crate::CREDIT_NOTE_SERIES)
             .await
             .map_err(|e| ExecuteError::Rejected(SalesError::Numbering(e)))?;
-        ledger::reverse_in(conn, entry_id, credit_id, on, memo, metadata)
+        ledger::reverse_in(&mut *conn, entry_id, credit_id, on, memo, metadata)
             .await
             .map_err(lift)?;
+        // **The whole supply is undone, so the whole of it comes back.** Not a
+        // proportion of anything: the quantity on each line is the one it was
+        // sold at, which is what the line itself records. Read back off the
+        // aggregate, because the decision above returns the event and not the
+        // state it was taken from — one load, on the path that has already
+        // reversed a journal entry.
+        let sold = erp_eventlog::load::<Invoice>(&mut *conn, invoice, crate::upcasters())
+            .await?
+            .aggregate
+            .lines;
+        let back: ComingBack = sold
+            .iter()
+            .enumerate()
+            .filter_map(|(at, line)| Some(((line.product.clone()?, at), (None, Vec::new()))))
+            .collect();
+        restore(&mut *conn, invoice, &credit_note, &back, on, metadata).await?;
         credit_note
     };
 
@@ -1491,10 +1757,44 @@ fn priced_lines(
                     crate::vat::TaxError::NotADiscount,
                 )));
             }
+            // **Multiplied out here, and never divided back.** A line given as
+            // a price and a quantity comes to their product; the total is what
+            // the tax, the bands, the posting and the document are all built
+            // from, and working the price back out of it is a division that
+            // does not always land on a halala (decision 3).
+            let quantity = match line.quantity {
+                Some(quantity) if quantity <= 0 => {
+                    return Err(ExecuteError::Rejected(SalesError::NotAQuantity));
+                }
+                other => other,
+            };
+            // **A line that names units says how many, and of what.** Without
+            // the quantity the document would print one unit while three left
+            // the shelf; without the product nothing would take them off it at
+            // all, and a serial silently dropped is how a phone leaves the shop
+            // with no record of which one.
+            if !line.serials.is_empty() {
+                let named = i64::try_from(line.serials.len()).unwrap_or(i64::MAX);
+                if line.product.is_none() || quantity != Some(named) {
+                    return Err(ExecuteError::Rejected(SalesError::NamedUnits { named }));
+                }
+            }
+            if let (Some(lot), None) = (&line.lot, &line.product) {
+                return Err(ExecuteError::Rejected(SalesError::LotWithoutAProduct {
+                    lot: lot.clone(),
+                }));
+            }
+            let charged = match quantity {
+                Some(quantity) => line
+                    .net
+                    .checked_mul_int(quantity)
+                    .map_err(|e| ExecuteError::Rejected(SalesError::Tax(e.into())))?,
+                None => line.net,
+            };
             let net = line
                 .allowances
                 .iter()
-                .try_fold(line.net, |running, a| running.checked_sub(a.amount))
+                .try_fold(charged, |running, a| running.checked_sub(a.amount))
                 .map_err(|e| ExecuteError::Rejected(SalesError::Tax(e.into())))?;
             if !line.allowances.is_empty() && !net.is_positive() {
                 return Err(ExecuteError::Rejected(SalesError::Tax(
@@ -1503,6 +1803,11 @@ fn priced_lines(
             }
             Ok(InvoiceLine {
                 description: line.description.clone(),
+                product: line.product.clone(),
+                quantity,
+                unit: quantity.map(|_| line.net),
+                serials: line.serials.clone(),
+                lot: line.lot.clone(),
                 net,
                 vat: crate::vat::Vat::at(rates, line.category),
                 allowances: line.allowances.clone(),
@@ -1639,6 +1944,21 @@ pub struct CreditLine {
     /// stated the way the invoice stated it rather than as a negative. It may
     /// be less than the line — part of a line can come back.
     pub net: Money,
+    /// **How many units came back onto the shelf**, when the line sold stock.
+    ///
+    /// Sent by the client and never derived from [`Self::net`] (decision 12):
+    /// the money and the goods are two statements, and a partial credit is as
+    /// often a price adjustment as a returned carton. `None` puts nothing back,
+    /// which is what a goodwill credit means and what a refund spread across
+    /// lines by `credit_what_is_clear` means — it knows the money and nothing
+    /// about the goods.
+    pub quantity: Option<i64>,
+    /// **Which units came back**, on a line that sold named units: one name
+    /// per unit, as many as [`Self::quantity`]. Each has to be one this
+    /// invoice's line sold and that has not come back already — `inventory`
+    /// follows the sale through its shelf's stream to say so. Empty returns
+    /// by quantity, which for named units only the whole line can.
+    pub serials: Vec<String>,
 }
 
 /// A credit note against part of an invoice.
@@ -1852,7 +2172,49 @@ pub async fn credit_part_in(
     .await
     .map_err(lift)?;
 
+    came_back(&mut *conn, invoice, note, &number, &committed, &metadata).await?;
+
     Ok(Numbered { committed, number })
+}
+
+/// **What a partial credit note put back on the shelf.**
+///
+/// The product is the *invoice's*, carried onto the credited line by
+/// [`priced_for_credit`], so a credit note cannot return something the invoice
+/// never sold. The quantity is the caller's, and a line that gives none puts
+/// nothing back — which is what a goodwill credit and a refund spread over
+/// lines both mean (decision 12).
+///
+/// **Two lines against one invoice line add up**: the credit note as a whole
+/// says that many came back, and which. `priced_for_credit` has already refused
+/// a quantity that is not one, one against a line that sold no product, and
+/// names that do not agree with it.
+async fn came_back(
+    conn: &mut sqlx::PgConnection,
+    invoice: &AggregateId,
+    note: &CreditNote,
+    number: &str,
+    committed: &Committed<InvoiceEvent>,
+    metadata: &Metadata,
+) -> Result<(), ExecuteError<SalesError>> {
+    let Some(InvoiceEvent::Credited { lines, .. }) = committed.events.first() else {
+        return Ok(());
+    };
+    let mut back = ComingBack::new();
+    for (credited, asked) in lines.iter().zip(&note.lines) {
+        let (Some(product), Some(quantity)) = (&credited.line.product, asked.quantity) else {
+            continue;
+        };
+        let (units, named) = back
+            .entry((product.clone(), usize::from(credited.against)))
+            .or_insert((Some(0), Vec::new()));
+        *units = units
+            .and_then(|so_far| so_far.checked_add(quantity))
+            .map(Some)
+            .ok_or(ExecuteError::Rejected(SalesError::NotAQuantity))?;
+        named.extend(asked.serials.iter().cloned());
+    }
+    restore(conn, invoice, number, &back, note.on, metadata).await
 }
 
 /// Resolves each credit line against the invoice line it names.
@@ -1883,6 +2245,31 @@ fn priced_for_credit(
             };
             let against = state.lines.get(line.against as usize).ok_or_else(nowhere)?;
             let slot = taken.get_mut(line.against as usize).ok_or_else(nowhere)?;
+            // **Units that came back are refused, not dropped, when they cannot
+            // go anywhere** (L6). A quantity of nothing is not one, and units
+            // against a line that sold no product have no shelf to land on —
+            // silently ignoring either tells the client stock came back when
+            // none did.
+            if let Some(quantity) = line.quantity {
+                if quantity <= 0 {
+                    return Err(SalesError::NotAQuantity);
+                }
+                if against.product.is_none() {
+                    return Err(SalesError::NotAStockLine {
+                        invoice: invoice.as_str().to_owned(),
+                        line: line.against,
+                    });
+                }
+            }
+            // **Names come with their count**, the rule a draft line follows:
+            // three names and a quantity of two are two statements that
+            // disagree, and names with no quantity would put nothing back.
+            if !line.serials.is_empty() {
+                let named = i64::try_from(line.serials.len()).unwrap_or(i64::MAX);
+                if line.quantity != Some(named) {
+                    return Err(SalesError::NamedUnits { named });
+                }
+            }
 
             // What is left of this line, counting earlier credit notes and the
             // rest of this one.
@@ -1900,6 +2287,19 @@ fn priced_for_credit(
                     // **The invoice's words, not the caller's.** A credit note
                     // that could describe anything described nothing.
                     description: against.description.clone(),
+                    // **The invoice's product**, so a credit note cannot put
+                    // back something the invoice never sold. The client sends
+                    // how many, not what.
+                    product: against.product.clone(),
+                    // **Not the invoice's quantity or unit price.** A credit
+                    // note credits an *amount* off a line, and stating a
+                    // quantity beside it would make the document claim
+                    // `net = quantity × price` for a division that need not
+                    // land. What came back is on the shelf's own movement.
+                    quantity: None,
+                    unit: None,
+                    serials: Vec::new(),
+                    lot: None,
                     net: line.net,
                     // And the invoice's rate: one issued at 5% is credited at
                     // 5% for ever (L5).

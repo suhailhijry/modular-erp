@@ -1,0 +1,187 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT product as \"product!\", branch, lot, kind as \"kind!\", reason,\n                  quantity as \"quantity!\", value as \"value!\", currency,\n                  expected, declared, reference as \"reference!\",\n                  moved_at as \"moved_at!\", position as \"position!\", seq as \"seq!\"\n             FROM proj_inventory.stock_movement\n            WHERE (position, seq) < ($1, $2)\n              AND ($3::TEXT IS NULL OR product = $3)\n            ORDER BY position DESC, seq DESC\n            LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "product!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "product"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "lot",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "lot"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "quantity!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "quantity"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "value!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "value"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "expected",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "expected"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "declared",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "declared"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "reference!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "reference"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "moved_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "moved_at"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "position!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "seq!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_movement",
+            "name": "seq"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b9ae522b9858321123d61c2d3b295620ca02b0aceefe6a9f61d7104a6d6dec2a"
+}

@@ -95,7 +95,7 @@ struct OutwardMessage {
 #[derive(Debug, Deserialize, ToSchema)]
 #[schema(example = json!({ "topic": "reservation", "id": "BK-1" }))]
 struct Assignment {
-    /// `reservation`, `invoice`, `customer` or `employee`.
+    /// `reservation`, `invoice`, `customer`, `employee` or `lot`.
     topic: String,
     /// The record's own id.
     id: String,
@@ -117,7 +117,7 @@ struct Written {
     tag = "conversations",
     params(
         ("Host" = String, Header, description = "The tenant's subdomain."),
-        ("topic" = String, Path, description = "`reservation`, `invoice`, `customer` or `employee`."),
+        ("topic" = String, Path, description = "`reservation`, `invoice`, `customer`, `employee` or `lot`."),
         ("subject" = String, Path, description = "The record's own id."),
         ("limit" = Option<i64>, Query, description = "Up to 200. Defaults to 50."),
         ("after" = Option<String>, Query, description = "The `next` from the previous page."),
@@ -167,7 +167,7 @@ async fn read_conversation(
     tag = "conversations",
     params(
         ("Host" = String, Header, description = "The tenant's subdomain."),
-        ("topic" = String, Path, description = "`reservation`, `invoice`, `customer` or `employee`."),
+        ("topic" = String, Path, description = "`reservation`, `invoice`, `customer`, `employee` or `lot`."),
         ("subject" = String, Path, description = "The record's own id."),
     ),
     request_body = NewNote,
@@ -217,7 +217,7 @@ async fn add_note(
     tag = "conversations",
     params(
         ("Host" = String, Header, description = "The tenant's subdomain."),
-        ("topic" = String, Path, description = "`reservation`, `invoice`, `customer` or `employee`."),
+        ("topic" = String, Path, description = "`reservation`, `invoice`, `customer`, `employee` or `lot`."),
         ("subject" = String, Path, description = "The record's own id."),
     ),
     request_body = OutwardMessage,

@@ -9,6 +9,7 @@
 //! notifications::announce(&mut tx, &Announcing {
 //!     kind: Kind::BookingReserved,
 //!     subject: Subject::new(Topic::Reservation, booking),
+//!     to: Vec::new(),
 //!     at: now,
 //! }, &metadata).await?;
 //! ```
@@ -19,7 +20,7 @@
 //! # The layering rule, which is not negotiable
 //!
 //! ```text
-//! notifications  →  messaging  →  booking, crm, hr, sales
+//! notifications  →  messaging  →  booking, crm, hr, inventory, sales
 //!         ↑
 //! erp-api, bin/worker.rs   (the composition roots)
 //! ```

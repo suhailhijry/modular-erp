@@ -69,6 +69,11 @@ impl erp_i18n::Localize for ConfigError {
 pub struct Configured<T> {
     pub value: T,
     pub version: i64,
+    /// **When it took this value.** For a reader that has to allow for a
+    /// change taking effect — the worker's check that expiring stock was
+    /// announced does not hold a lot the tenant's new window just reached
+    /// against a notification nothing has had a chance to raise yet.
+    pub set_at: erp_types::Timestamp,
 }
 
 /// Reads a configured value, decoded into the type that gives it meaning.
@@ -81,7 +86,7 @@ pub async fn get<T: DeserializeOwned>(
     key: &str,
 ) -> Result<Option<Configured<T>>, ConfigError> {
     let row = sqlx::query!(
-        "SELECT value, version FROM configuration WHERE key = $1",
+        "SELECT value, version, set_at FROM configuration WHERE key = $1",
         key,
     )
     .fetch_optional(&mut *conn)
@@ -99,6 +104,7 @@ pub async fn get<T: DeserializeOwned>(
     Ok(Some(Configured {
         value,
         version: row.version,
+        set_at: row.set_at,
     }))
 }
 

@@ -10,6 +10,7 @@ pub const UNKNOWN_KIND: MessageCode = MessageCode::new("notifications.unknown_ki
 pub const UNKNOWN_CHANNEL: MessageCode = MessageCode::new("notifications.unknown_channel");
 pub const NOT_YOURS: MessageCode = MessageCode::new("notifications.not_yours");
 pub const UNREACHABLE: MessageCode = MessageCode::new("notifications.unreachable");
+pub const IN_SYSTEM_ONLY: MessageCode = MessageCode::new("notifications.in_system_only");
 pub const DATABASE: MessageCode = MessageCode::new("notifications.database");
 
 pub const CODES: &[MessageCode] = &[
@@ -17,6 +18,7 @@ pub const CODES: &[MessageCode] = &[
     UNKNOWN_CHANNEL,
     NOT_YOURS,
     UNREACHABLE,
+    IN_SYSTEM_ONLY,
     DATABASE,
 ];
 
@@ -64,6 +66,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         UNREACHABLE,
         Locale::Arabic,
         Template::Simple("لا يوجد من يُبلَّغ عن {kind}، فلم يُعلن شيء."),
+    ),
+    (
+        IN_SYSTEM_ONLY,
+        Locale::English,
+        Template::Simple(
+            "{kind} is told in the system only: it goes to logins, which have no email address or phone number. Use in_system.",
+        ),
+    ),
+    (
+        IN_SYSTEM_ONLY,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يُبلَّغ عن {kind} إلا داخل النظام: فهو موجَّه إلى حسابات الدخول، ولا بريد إلكتروني لها ولا رقم هاتف. استخدم in_system.",
+        ),
     ),
     (
         DATABASE,

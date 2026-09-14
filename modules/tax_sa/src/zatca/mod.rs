@@ -206,6 +206,23 @@ pub struct Line {
     /// Basis points, as stamped on the invoice. Never today's rate.
     pub rate_bp: i32,
     pub tax: Money,
+    /// **BT-129**, the invoiced quantity — how many units this line charges
+    /// for.
+    ///
+    /// `None` on a line given as a single amount, which renders as one: that is
+    /// what every document issued before `sales` stored the factors says, and
+    /// it is a true statement about a line with no quantity on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<i64>,
+    /// **BT-146**, the item net price — what one unit was charged at, before
+    /// this line's own allowances.
+    ///
+    /// Present exactly when [`Self::quantity`] is, and taken from `sales`
+    /// rather than divided out of the net: BT-131 is `quantity × BT-146` less
+    /// the allowances, and a price worked back out of a total does not always
+    /// land on a whole halala, so the rule would fail on the rounding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_price: Option<Money>,
     /// Why this line carries no tax, as stamped at issue time. See
     /// [`Band::exemption_reason`] — the band's is taken from its lines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,8 +243,26 @@ impl Line {
         self.net.checked_add(self.tax).ok()
     }
 
-    /// **BT-146**, the item net price: what the line came to before its own
-    /// allowances, and the base the allowances were taken from.
+    /// **What this line charges for**, as `cbc:InvoicedQuantity`. One on a line
+    /// given as a single amount, which is what a line with no factors on it is.
+    pub fn units(&self) -> i64 {
+        self.quantity.unwrap_or(1)
+    }
+
+    /// **BT-146**, the item net price: what *one unit* was charged at, before
+    /// this line's own allowances.
+    ///
+    /// The standard defines BT-131 as `quantity × BT-146` less the line's
+    /// allowances, so a document that printed the line total here would fail
+    /// the rule the moment a line carried an allowance or more than one unit.
+    /// A line with no factors is one unit, and then the two coincide — which is
+    /// what every document issued before `sales` stored them printed.
+    pub fn price(&self) -> Option<Money> {
+        self.unit_price.or_else(|| self.before_allowances())
+    }
+
+    /// **The line's amount before its own allowances**: BT-131 with the
+    /// allowances added back, and the base they were taken from.
     ///
     /// The standard defines BT-131 as this less the line's allowances, so a
     /// document that printed the same figure for both would fail the rule the

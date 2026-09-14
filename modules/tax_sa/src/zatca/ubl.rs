@@ -654,9 +654,16 @@ fn invoice_line(
 
     let _ = writeln!(out, "  <{element}>");
     let _ = writeln!(out, "    <cbc:ID>{}</cbc:ID>", index + 1);
-    // One, always. `sales` records what a line comes to, not the factors it was
-    // computed from — see `sales::InvoiceLine`.
-    let _ = writeln!(out, "    <{quantity} unitCode=\"PCE\">1</{quantity}>");
+    // **The real quantity**, from what `sales` recorded. It used to be one
+    // always, which made BT-131 balance by never having anything to multiply;
+    // now it is the line's own and `cac:Price` below is one unit's, so the rule
+    // holds for a line of three as it did for a line of one. A line given as a
+    // single amount still has no factors and is still one.
+    let _ = writeln!(
+        out,
+        "    <{quantity} unitCode=\"PCE\">{}</{quantity}>",
+        line.units()
+    );
     money(
         out,
         2,
@@ -714,15 +721,17 @@ fn invoice_line(
     out.push_str("      </cac:ClassifiedTaxCategory>\n");
     out.push_str("    </cac:Item>\n");
 
-    // **The price is what the line came to *before* its allowances**, because
-    // the standard defines the line net amount as the price less them:
+    // **The price is what *one unit* came to before its allowances**, because
+    // the standard defines the line net amount from it:
     //
     //   BT-131 = quantity × (BT-146 / base quantity) + charges − Σ BT-136
     //
-    // With quantity one that reads `LineExtensionAmount = PriceAmount − Σ
-    // allowances`, so printing the same figure for both would fail the rule the
-    // moment a line carried one.
-    let priced = line.before_allowances().unwrap_or(line.net);
+    // `sales` computes the line the same way round — unit × quantity, less the
+    // allowances — and stores both factors, so this is read and never divided
+    // back out of the total. A line with no factors is one unit and the price
+    // is what it came to before its allowances, which is what this printed
+    // before quantities were real.
+    let priced = line.price().unwrap_or(line.net);
     out.push_str("    <cac:Price>\n");
     money(out, 3, "cbc:PriceAmount", &amount(priced), currency);
     out.push_str("    </cac:Price>\n");
@@ -909,6 +918,8 @@ pub(crate) mod tests {
                 category: VatCategory::Standard,
                 rate_bp: 1_500,
                 tax,
+                quantity: None,
+                unit_price: None,
             }],
             allowances: Vec::new(),
             totals: Totals {
@@ -1598,6 +1609,8 @@ pub(crate) mod tests {
             category: VatCategory::Standard,
             rate_bp: 1_500,
             tax: Money::from_minor(1_350, sar()),
+            quantity: None,
+            unit_price: None,
             allowances: vec![super::super::LineAllowance {
                 reason: "خصم الولاء".to_owned(),
                 amount: Money::from_minor(1_000, sar()),
@@ -1648,6 +1661,8 @@ pub(crate) mod tests {
             category: VatCategory::Standard,
             rate_bp: 1_500,
             tax: Money::from_minor(1_350, sar()),
+            quantity: None,
+            unit_price: None,
             allowances: vec![super::super::LineAllowance {
                 reason: "خصم".to_owned(),
                 amount: Money::from_minor(1_000, sar()),
@@ -1669,6 +1684,75 @@ pub(crate) mod tests {
             xml.contains("<cbc:Amount currencyID=\"SAR\">10.00</cbc:Amount>"),
             "{xml}"
         );
+    }
+
+    /// **Three at 25.00, and BT-131 still balances.**
+    ///
+    /// The quantity used to be hard-coded to one, which made the line-level
+    /// arithmetic true by having nothing to multiply:
+    ///
+    ///   BT-131 = quantity × BT-146 − Σ BT-136
+    ///
+    /// Now the quantity is the line's own and `cbc:PriceAmount` is **one
+    /// unit's**, so the rule holds for a line of three the way it did for a
+    /// line of one — and `cbc:LineExtensionAmount`, the tax on it and the
+    /// document's own `LineExtensionAmount` all agree with it.
+    #[test]
+    fn a_line_priced_per_unit_states_both_factors_and_still_balances() {
+        let currency = sar();
+        let net = Money::from_minor(7_500, currency);
+        let tax = Money::from_minor(1_125, currency);
+        let mut document = document();
+        document.lines = vec![Line {
+            exemption_reason: None,
+            allowances: Vec::new(),
+            description: "بن".to_owned(),
+            net,
+            category: VatCategory::Standard,
+            rate_bp: 1_500,
+            tax,
+            quantity: Some(3),
+            unit_price: Some(Money::from_minor(2_500, currency)),
+        }];
+        document.totals = Totals {
+            net,
+            tax,
+            gross: Money::from_minor(8_625, currency),
+            before_discount: None,
+            bands: vec![Band {
+                exemption_reason: None,
+                category: VatCategory::Standard,
+                rate_bp: 1_500,
+                net,
+                tax,
+            }],
+        };
+        let xml = render(&document).expect("renders");
+
+        assert!(
+            xml.contains("<cbc:InvoicedQuantity unitCode=\"PCE\">3</cbc:InvoicedQuantity>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<cbc:PriceAmount currencyID=\"SAR\">25.00</cbc:PriceAmount>"),
+            "the price is one unit's, not the line's: {xml}"
+        );
+        assert!(
+            xml.contains(
+                "<cbc:LineExtensionAmount currencyID=\"SAR\">75.00</cbc:LineExtensionAmount>"
+            ),
+            "{xml}"
+        );
+        // **BT-131 = quantity × BT-146**, read back out of the document rather
+        // than asserted from the fixture: 3 × 25.00 is what 75.00 has to be.
+        let line = &document.lines[0];
+        assert_eq!(
+            line.price().expect("a price").minor() * line.units(),
+            line.net.minor(),
+        );
+        // And the document's own total is the lines', which is what ZATCA
+        // checks `cac:LegalMonetaryTotal` against.
+        assert_eq!(document.lines_came_to(), net);
     }
 
     /// A line with none is byte-identical to what it was before line

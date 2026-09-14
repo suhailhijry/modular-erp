@@ -1,0 +1,179 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT l.id as \"id!\", l.product as \"product!\", p.name as \"name?\", l.branch,\n                  l.code, l.expires_on,\n                  l.quantity as \"quantity!\", l.remaining as \"remaining!\",\n                  l.value as \"value!\", l.currency as \"currency!\",\n                  l.received_at as \"received_at!\", l.recorded_at as \"recorded_at!\",\n                  l.position as \"position!\",\n                  COALESCE(\n                      ARRAY(SELECT s.serial FROM proj_inventory.serial s\n                             WHERE s.lot = l.id AND s.state = 'on_hand'\n                             ORDER BY s.serial),\n                      '{}'\n                  ) as \"serials!: Vec<String>\"\n             FROM proj_inventory.lot l\n             LEFT JOIN proj_inventory.product p ON p.id = l.product\n            WHERE l.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "product!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "product"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.product",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "expires_on",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "expires_on"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "quantity!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "quantity"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "remaining!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "remaining"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "value!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "value"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "received_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "received_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "recorded_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "recorded_at"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "position!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "serials!: Vec<String>",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "bda82c240413e1616bd1fa7b5ad8b4cfc5bd4f234f086464b15cf2e9af6563c5"
+}

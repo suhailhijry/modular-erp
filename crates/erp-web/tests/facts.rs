@@ -84,13 +84,25 @@ fn sources() -> Vec<std::path::PathBuf> {
 /// **Every declared fact is supplied by somebody.**
 ///
 /// The edge supplies what a request knows before its body is read —
-/// `capability`, `branch` — and `TenantDb::permits` adds `role`, which only it
-/// knows. A handler that has parsed a body supplies the rest — `amount`, from
+/// `capability` and `branch`, through `limits::facts_at` — and
+/// `Limits::permit` adds `role`, which only the person's access knows. A handler
+/// that has parsed a body supplies the rest — `amount`, from
 /// `ledger::post_entry`. All count; none alone does.
+///
+/// **`facts_at` and `Limits::permit` live beside the registry**, so the scan
+/// also reads `limits.rs`'s own code for a fact put in by its bare name — the
+/// code above its tests only, which build facts of their own and supply
+/// nobody's request.
 #[test]
 fn every_declared_fact_is_assembled_somewhere() {
     let limits_src =
         std::fs::read_to_string("../erp-tenant/src/limits.rs").expect("limits is readable");
+    let limits_code: String = limits_src
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
     let corpus: String = sources()
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
@@ -100,6 +112,7 @@ fn every_declared_fact_is_assembled_somewhere() {
     for fact in declared() {
         let ident = constant_for(&fact, &limits_src);
         let assembled = corpus.contains(&format!("limits::{ident}"))
+            || limits_code.contains(&format!(".with({ident},"))
             // `capability` is put in by `facts_for`, which every caller uses.
             || (fact == "capability" && corpus.contains("facts_for("));
         assert!(

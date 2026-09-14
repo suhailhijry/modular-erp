@@ -87,7 +87,27 @@ struct NewLine {
     /// Before tax, in the sale's currency. **The rate is not yours to send**:
     /// it is the tenant's configured one, resolved inside the write, so an
     /// invoice cannot be stamped with a rate that was never current.
+    ///
+    /// **Per unit when `quantity` is given**, and the whole line otherwise —
+    /// the till rings a price and says how many.
     net: i64,
+    /// The product this rings off the shelf, when the till sells stock.
+    /// Optional: the shelf comes down and the cost is booked in the same write
+    /// as the sale, and a line without one behaves exactly as before.
+    #[serde(default)]
+    product: Option<String>,
+    /// How many. Optional; one when it is left out.
+    #[serde(default)]
+    quantity: Option<i64>,
+    /// Which units, on a serial-tracked product — one name per unit. A line
+    /// that names any must also name the `product` and ring exactly that many.
+    #[serde(default)]
+    serials: Vec<String>,
+    /// Which lot the units come off, when the till overrides the picking rule
+    /// — a scanned batch. The lot's `id`; a line that names one must also name
+    /// the `product`, and a lot that is not open here or is short is refused.
+    #[serde(default)]
+    lot: Option<String>,
     /// `standard`, `zero` or `exempt`.
     vat: String,
 }
@@ -158,6 +178,18 @@ struct ReturnedLine {
     /// How much of that line is coming back, excluding tax, as a positive
     /// amount. Its tax follows from the line's own rate.
     net: Amount,
+    /// **How many units are physically coming back onto the shelf**, when that
+    /// line sold stock. Optional, and never worked out from `net`: the money
+    /// and the goods are two statements. Leave it out and only the money goes
+    /// back.
+    #[serde(default)]
+    quantity: Option<i64>,
+    /// Which units are coming back, on a line that sold serial-tracked stock —
+    /// one name per unit, as many as `quantity`, each one this sale took and
+    /// that has not come back already. Leave it out and a line of named units
+    /// can only come back whole.
+    #[serde(default)]
+    serials: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -449,9 +481,9 @@ async fn shift_takings(
     request_body = NewSale,
     responses(
         (status = CREATED, body = SaleRung),
-        (status = BAD_REQUEST, description = "Nothing on the sale, or a value that did not parse", body = Problem),
+        (status = BAD_REQUEST, description = "Nothing on the sale, a value that did not parse, or a line of the wrong shape: a quantity that is not one (`sales.not_a_quantity`, `inventory.not_a_quantity`), serials that do not match their line (`sales.named_units`, `inventory.needs_serials`), a lot named with no product (`sales.lot_without_a_product`), or a product id that cannot be one (`inventory.not_a_product_id`)", body = Problem),
         (status = NOT_FOUND, description = "No such shift", body = Problem),
-        (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the tenders do not come to the sale, or the ledger refused it", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the tenders do not come to the sale, the ledger refused it, or the shelf refuses a line: a product nobody declared (`inventory.no_such_product`), a serial that is not on the shelf (`inventory.no_such_serial`), a named lot that is not open here (`inventory.no_such_lot`) or is short (`inventory.lot_is_short`), or more of a lot- or serial-tracked product than the shelf holds (`inventory.not_enough_stock`)", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, description = "Not a role that may, or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
@@ -527,9 +559,9 @@ async fn ring_sale(
     request_body = NewReturn,
     responses(
         (status = OK, body = PosAccepted),
-        (status = BAD_REQUEST, description = "Nothing handed back, or a value that did not parse", body = Problem),
+        (status = BAD_REQUEST, description = "Nothing handed back, a value that did not parse, or a returned line of the wrong shape: a quantity that is not one (`sales.not_a_quantity`), or names that do not agree with the quantity (`sales.named_units`, `inventory.needs_serials`)", body = Problem),
         (status = NOT_FOUND, description = "No such shift", body = Problem),
-        (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the sale is not one that can be credited, the tenders do not come to what the lines credit, or the ledger refused it", body = Problem),
+        (status = UNPROCESSABLE_ENTITY, description = "The till is shut, the sale is not one that can be credited, the tenders do not come to what the lines credit, the ledger refused it, or the shelf refuses the units coming back (`inventory.not_consumed`, `inventory.more_than_was_taken`, `inventory.named_units_come_back_whole`, `inventory.not_out`)", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, description = "Not a role that may, without the `sales:approve_credit_note` claim once the tenant uses claims (`sales.not_approved`), or over the tenant's document limit (`sales.over_document_limit`)", body = Problem),
         (status = SERVICE_UNAVAILABLE, description = "Backpressure. Retryable.", body = Problem),
@@ -549,16 +581,7 @@ async fn take_back(
     let returning = Return {
         reference: body.reference,
         tenders: tenders(&body.tenders, locale)?,
-        lines: body
-            .lines
-            .iter()
-            .map(|l| {
-                Ok(sales::CreditLine {
-                    against: l.against,
-                    net: amount(&l.net, locale)?,
-                })
-            })
-            .collect::<Result<Vec<_>, Problem>>()?,
+        lines: returned(&body.lines, locale)?,
         why: body.why,
         at: body.at.unwrap_or_else(chrono::Utc::now),
     };
@@ -791,6 +814,34 @@ fn lines(
                 description: line.description.clone(),
                 net: Money::from_minor(line.net, currency),
                 category: category(&line.vat, locale)?,
+                // **Straight through to `sales`.** A till sale is an invoice
+                // issued through `sales::issue_in` like any other, so what
+                // depletes the shelf is the same code — nothing here decides
+                // anything about stock.
+                product: line
+                    .product
+                    .as_deref()
+                    .map(|id| parse_id(id, locale))
+                    .transpose()?,
+                quantity: line.quantity,
+                serials: line.serials.clone(),
+                lot: line.lot.clone(),
+            })
+        })
+        .collect()
+}
+
+/// What a till return says came back, as the credit lines `sales` takes: the
+/// money parsed, and how many units and which carried straight through — the
+/// till decides nothing about which units are out.
+fn returned(sent: &[ReturnedLine], locale: Locale) -> Result<Vec<sales::CreditLine>, Problem> {
+    sent.iter()
+        .map(|line| {
+            Ok(sales::CreditLine {
+                against: line.against,
+                net: amount(&line.net, locale)?,
+                quantity: line.quantity,
+                serials: line.serials.clone(),
             })
         })
         .collect()
@@ -859,6 +910,10 @@ fn problem_for(error: &CommandError<PosError>, locale: Locale) -> Problem {
                 PosError::NoSuchShift(_) => StatusCode::NOT_FOUND,
                 // The till's operator, over the document limit.
                 PosError::Sale(refused) if refused.refuses_the_caller() => StatusCode::FORBIDDEN,
+                // **A line of the wrong shape**, as `/v1/sales` answers it: a
+                // quantity that is not one, names that do not match, a lot with
+                // no product, or a line the shelf cannot read.
+                PosError::Sale(refused) if refused.is_malformed() => StatusCode::BAD_REQUEST,
 
                 // Well-formed, and refused on the state of the world.
                 PosError::Closed(_)
@@ -937,9 +992,122 @@ mod tests {
         assert_eq!(problem.code, "sales.not_approved");
     }
 
+    /// **A till line carries its product, its quantity and its serials into
+    /// the draft**, because the till decides nothing about stock: what
+    /// depletes a shelf is `sales::issue_in`, and a field dropped in this
+    /// translation is a shop that sells the beans and never takes them off.
+    /// The `net` stays **one unit's** — `sales` multiplies.
+    #[test]
+    fn a_till_line_carries_its_product_and_its_units_into_the_draft() {
+        let sent: Vec<NewLine> = serde_json::from_value(serde_json::json!([{
+            "description": "بن",
+            "net": 2_500,
+            "vat": "standard",
+            "product": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "quantity": 3,
+            "serials": ["A-1", "A-2", "A-3"],
+            "lot": "lot.x"
+        }]))
+        .expect("a line");
+        let sar = CurrencyCode::new("SAR").expect("a currency");
+        let drafted = lines(&sent, sar, Locale::English).expect("a draft");
+        let line = &drafted[0];
+        assert_eq!(
+            line.product.as_ref().map(erp_types::AggregateId::as_str),
+            Some("f81d4fae-7dec-11d0-a765-00a0c91e6bf6")
+        );
+        assert_eq!(line.quantity, Some(3));
+        assert_eq!(line.serials, ["A-1", "A-2", "A-3"]);
+        assert_eq!(line.lot.as_deref(), Some("lot.x"));
+        assert_eq!(line.net, Money::from_minor(2_500, sar), "one unit's");
+    }
+
+    /// A line without them is what every till line was before stock: a price
+    /// rung once, off no shelf.
+    #[test]
+    fn a_till_line_without_them_is_a_bare_price() {
+        let sent: Vec<NewLine> = serde_json::from_value(serde_json::json!([
+            { "description": "قهوة", "net": 1_500, "vat": "standard" }
+        ]))
+        .expect("a line");
+        let sar = CurrencyCode::new("SAR").expect("a currency");
+        let drafted = lines(&sent, sar, Locale::English).expect("a draft");
+        assert_eq!(drafted[0].product, None);
+        assert_eq!(drafted[0].quantity, None);
+        assert!(drafted[0].serials.is_empty());
+        assert_eq!(drafted[0].lot, None);
+    }
+
+    /// **A till return carries which units came back**, not just how many:
+    /// `sales` and `inventory` decide whether those names were sold, and a
+    /// field dropped here is a phone back in the drawer and not on the shelf.
+    #[test]
+    fn a_till_return_carries_its_units_to_the_credit_line() {
+        let sent: Vec<ReturnedLine> = serde_json::from_value(serde_json::json!([{
+            "against": 0,
+            "net": { "minor": 50_000, "currency": "SAR" },
+            "quantity": 1,
+            "serials": ["SN-2"]
+        }]))
+        .expect("a line");
+        let credited = returned(&sent, Locale::English).expect("parses");
+        assert_eq!(credited[0].quantity, Some(1));
+        assert_eq!(credited[0].serials, ["SN-2"]);
+    }
+
+    /// **A till line whose units do not match it is a 400**, the status
+    /// `/v1/sales/invoices` answers the same refusal with — not the 422 a
+    /// refusal on the state of the shelf gets.
+    #[test]
+    fn a_malformed_stock_line_is_a_bad_request_at_the_till_too() {
+        let malformed = CommandError::Execute(ExecuteError::Rejected(PosError::Sale(
+            sales::SalesError::Stock(inventory::InventoryError::NeedsSerials {
+                units: 3,
+                named: 1,
+            }),
+        )));
+        let problem = problem_for(&malformed, Locale::English);
+        assert_eq!(problem.status, 400);
+        assert_eq!(problem.code, "inventory.needs_serials");
+
+        let short = CommandError::Execute(ExecuteError::Rejected(PosError::Sale(
+            sales::SalesError::Stock(inventory::InventoryError::NotEnoughStock {
+                held: 0,
+                wanted: 3,
+            }),
+        )));
+        assert_eq!(problem_for(&short, Locale::English).status, 422);
+    }
+
+    /// **A sales line of the wrong shape is a 400 at the till too** — §76's
+    /// review found `sales.lot_without_a_product`, `sales.named_units` and
+    /// `sales.not_a_quantity` answered 400 by `/v1/sales` and 422 here, while
+    /// this route's own description said 400.
+    #[test]
+    fn a_malformed_sales_line_is_a_bad_request_at_the_till_too() {
+        for (refused, code) in [
+            (
+                sales::SalesError::LotWithoutAProduct {
+                    lot: "lot.x".to_owned(),
+                },
+                "sales.lot_without_a_product",
+            ),
+            (
+                sales::SalesError::NamedUnits { named: 1 },
+                "sales.named_units",
+            ),
+            (sales::SalesError::NotAQuantity, "sales.not_a_quantity"),
+        ] {
+            let malformed = CommandError::Execute(ExecuteError::Rejected(PosError::Sale(refused)));
+            let problem = problem_for(&malformed, Locale::English);
+            assert_eq!(problem.code, code);
+            assert_eq!(problem.status, 400, "{code}");
+        }
+    }
+
     /// **The till's operator over the document limit is a 403**, the status
     /// the sales routes and the booking desk answer the same refusal with —
-    /// not the 422 every other sales refusal at the till gets.
+    /// not the 422 a sales refusal on the state of the world gets at the till.
     #[test]
     fn the_document_limit_refuses_the_caller_at_the_till_too() {
         let sar = CurrencyCode::new("SAR").expect("a currency");

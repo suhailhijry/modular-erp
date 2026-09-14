@@ -231,6 +231,14 @@ pub fn vocabulary(topic: Topic) -> Vec<&'static str> {
             "customer.email",
         ],
         Topic::Employee => &["employee.id", "employee.name", "employee.branch"],
+        Topic::Lot => &[
+            "lot.id",
+            "lot.code",
+            "lot.expires_on",
+            "lot.remaining",
+            "product.name",
+            "branch.name",
+        ],
     };
     EVERYWHERE.iter().chain(own.iter()).copied().collect()
 }

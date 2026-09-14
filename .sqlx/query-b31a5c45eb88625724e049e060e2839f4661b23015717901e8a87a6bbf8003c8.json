@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT currency as \"currency!\", SUM(value)::BIGINT as \"held!\"\n             FROM proj_inventory.stock_item\n            WHERE currency IS NOT NULL\n            GROUP BY currency\n            ORDER BY currency",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "currency!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "held!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "b31a5c45eb88625724e049e060e2839f4661b23015717901e8a87a6bbf8003c8"
+}

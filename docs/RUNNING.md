@@ -1020,7 +1020,9 @@ curl -X PUT $API/v1/notifications/preferences -H "$H" -H "$A" -H 'content-type: 
 ```
 
 The kinds are `booking_reserved`, `payments_settled`, `payments_failed`,
-`tax_refused` and `document_expiring`. A tenant that wants its own words for one
+`tax_refused`, `document_expiring`, `stock_expiring` and `stock_expired`. The two
+stock kinds go to logins, which have no address, so they take `in_system` and
+nothing else. A tenant that wants its own words for one
 saves a `messaging` template **named after the kind** on the `in_system`
 channel; its bindings are checked when it is saved, like every other template.
 

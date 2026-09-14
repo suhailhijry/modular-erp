@@ -15,6 +15,7 @@ pub const NEGATIVE_TAX: MessageCode = MessageCode::new("purchases.negative_tax")
 pub const NO_SUPPLIER_VAT_NUMBER: MessageCode =
     MessageCode::new("purchases.no_supplier_vat_number");
 pub const INVALID_REFERENCE: MessageCode = MessageCode::new("purchases.invalid_reference");
+pub const NO_SUCH_PRODUCT: MessageCode = MessageCode::new("purchases.no_such_product");
 
 pub static CODES: &[MessageCode] = &[
     NOTHING_ON_IT,
@@ -28,9 +29,24 @@ pub static CODES: &[MessageCode] = &[
     NEGATIVE_TAX,
     NO_SUPPLIER_VAT_NUMBER,
     INVALID_REFERENCE,
+    NO_SUCH_PRODUCT,
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NO_SUCH_PRODUCT,
+        Locale::English,
+        Template::Simple(
+            "There is no product {product}, so this line cannot be a delivery of one. Declare it first, or leave the product off the line.",
+        ),
+    ),
+    (
+        NO_SUCH_PRODUCT,
+        Locale::Arabic,
+        Template::Simple(
+            "لا يوجد صنف {product}، لذا لا يمكن أن يكون هذا السطر توريدًا له. عرّف الصنف أولًا أو احذفه من السطر.",
+        ),
+    ),
     (
         NOTHING_ON_IT,
         Locale::English,

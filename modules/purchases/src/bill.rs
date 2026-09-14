@@ -58,7 +58,29 @@ pub struct BillLine {
     pub description: String,
     /// The expense or asset account this line lands in. Named per line, because
     /// one bill routinely covers rent and stationery.
+    ///
+    /// **Where the line actually posted**, not what the client asked for: a
+    /// line that names a stocked [`product`](Self::product) lands in
+    /// `inventory`'s goods-received-not-invoiced account, and this records that
+    /// rather than the account the request carried. A journal entry and the
+    /// document it came from must not disagree about where the money went.
     pub account: erp_types::AggregateId,
+    /// **The stocked product this line bought**, when it bought one.
+    ///
+    /// Optional, and absent on everything that is not stock — rent, freight,
+    /// a consultant's day. When it is there and names a product `inventory`
+    /// knows, the line posts to the goods-received-not-invoiced account that
+    /// the delivery credited, instead of [`account`](Self::account): the
+    /// delivery already put the goods on the balance sheet, and this is the
+    /// invoice catching up with it. A product nobody declared is **refused**
+    /// rather than posted to the account the line named — that is a typo, and
+    /// silently booking it somewhere else is how a stock account drifts for a
+    /// year (L6).
+    ///
+    /// Optional because required would have been a new mandatory field on
+    /// every existing client's request. Nothing else about a bill changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<erp_types::AggregateId>,
     /// Excluding tax.
     pub net: Money,
     pub category: VatCategory,

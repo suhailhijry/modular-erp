@@ -25,6 +25,15 @@ ledger = { workspace = true }
 # anything other than a request is still a credit note.
 hr = { workspace = true }
 
+# **Stock, because an invoice depletes the shelf it sold from.** `issue_in`
+# calls `inventory::consume_in` in the invoice's own transaction and a credit
+# note calls `restore_in` in its own, so a sale that exists without the movement
+# that supplied it is not a state this system can reach. The arrow points
+# `sales` → `inventory` and not back: `inventory` depends on `ledger` and
+# `branches` and on nothing that depends on it, which is the same edge
+# `purchases` took for a stocked bill line.
+inventory = { workspace = true }
+
 # The module ships its own routes; `erp-web` is what they are built from.
 erp-web = { workspace = true }
 tracing = { workspace = true }
@@ -43,6 +52,8 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# A branch to ring a sale at, for the test that cancels it from another one.
+branches = { workspace = true }
 erp-control = { workspace = true }
 erp-testkit = { workspace = true }
 chrono = { workspace = true }

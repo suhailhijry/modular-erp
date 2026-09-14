@@ -152,7 +152,10 @@ impl TenantDb {
         module: Option<&ModuleId>,
         facts: &erp_rules::Facts,
     ) -> Result<bool, erp_eventlog::ConfigError> {
-        let allowed = self.allows_in(capability, module);
+        let Some(access) = &self.access else {
+            return Ok(false);
+        };
+        let allowed = access.allows(capability, module);
         if !allowed || !crate::limits::narrows(capability) {
             // **The role already said no**, and a limit cannot widen. Skipping
             // the read here is not just an optimisation: it is why a refusal
@@ -172,14 +175,7 @@ impl TenantDb {
                 .await?
                 .map_or_else(crate::Limits::default, |configured| configured.value);
         drop(conn);
-        let mut facts = facts.clone();
-        if let Some(access) = &self.access {
-            facts = facts.with(
-                crate::limits::ROLE,
-                erp_rules::Value::Text(access.role_in(module).as_str().to_owned()),
-            );
-        }
-        Ok(limits.narrow(allowed, &facts))
+        Ok(limits.permit(access, capability, module, facts))
     }
 
     #[must_use]

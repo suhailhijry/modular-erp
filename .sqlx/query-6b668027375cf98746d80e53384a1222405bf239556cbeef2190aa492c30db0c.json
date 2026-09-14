@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT branch,\n                  COUNT(*) FILTER (WHERE expires_on < $2) as \"expired!\",\n                  COUNT(*) FILTER (WHERE expires_on >= $2\n                                     AND ($3::DATE IS NULL OR expires_on <= $3)) as \"expiring!\"\n             FROM proj_inventory.lot\n            WHERE remaining > 0 AND expires_on IS NOT NULL\n              AND ($1::TEXT IS NULL OR branch = $1)\n            GROUP BY branch",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.lot",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "expired!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "expiring!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "6b668027375cf98746d80e53384a1222405bf239556cbeef2190aa492c30db0c"
+}

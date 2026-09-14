@@ -99,6 +99,35 @@ impl WorkSchedule {
     /// once. Doubling from there, capped at [`Self::max_idle_interval`].
     #[must_use]
     pub fn next_idle_delay(&self, tenant: TenantId, idle_visits: i32) -> Duration {
+        let (backed_off, window) = self.backed_off(idle_visits);
+        let Some(window) = window else {
+            return backed_off;
+        };
+        // The low bits of a v7 UUID are random — the timestamp lives in the high
+        // ones — so a modulus over the whole value spreads evenly.
+        let spread = tenant.as_uuid().as_u128() % window;
+        backed_off + Duration::from_millis(u64::try_from(spread).unwrap_or(0))
+    }
+
+    /// **The longest a quiet tenant waits for its next visit**, whoever it is:
+    /// the ceiling, plus the widest jitter spread across it.
+    ///
+    /// What a job that runs on every visit can promise about how soon it runs,
+    /// and so what anything watching that job has to allow before it calls a
+    /// missing result a fault — the worker's check that expiring stock was
+    /// announced is the first (`bin/worker.rs`).
+    #[must_use]
+    pub fn longest_idle_delay(&self) -> Duration {
+        let (backed_off, window) = self.backed_off(i32::MAX);
+        backed_off
+            + window.map_or(Duration::ZERO, |window| {
+                Duration::from_millis(u64::try_from(window - 1).unwrap_or(u64::MAX))
+            })
+    }
+
+    /// The interval after so many quiet visits, and the jitter window across
+    /// it in milliseconds — `None` when there is no jitter.
+    fn backed_off(&self, idle_visits: i32) -> (Duration, Option<u128>) {
         // Saturating rather than wrapping: a tenant idle for a month has a large
         // count, and `1 << 40` is not a duration anybody meant.
         let doublings = u32::try_from(idle_visits.max(0))
@@ -110,12 +139,9 @@ impl WorkSchedule {
             .min(self.max_idle_interval);
 
         if self.jitter.is_zero() {
-            return backed_off;
+            return (backed_off, None);
         }
 
-        // The low bits of a v7 UUID are random — the timestamp lives in the high
-        // ones — so a modulus over the whole value spreads evenly.
-        //
         // Jitter scales with the interval it spreads. A fixed ten seconds across
         // a six-hour interval leaves five thousand tenants landing in the same
         // ten-second window every six hours, which is a thundering herd with a
@@ -128,8 +154,7 @@ impl WorkSchedule {
             )
             .as_millis()
             .max(1);
-        let spread = tenant.as_uuid().as_u128() % window;
-        backed_off + Duration::from_millis(u64::try_from(spread).unwrap_or(0))
+        (backed_off, Some(window))
     }
 }
 
@@ -164,6 +189,32 @@ mod tests {
             "got {} distinct delays",
             distinct.len()
         );
+    }
+
+    /// **Nobody waits longer than the longest wait.** Every tenant, at every
+    /// streak, lands at or under it — and with the shipped schedule it is the
+    /// six-hour ceiling plus two hours of spread, which is what a check that
+    /// waits on a job running every visit has to allow.
+    #[test]
+    fn no_tenant_waits_longer_than_the_longest_idle_delay() {
+        let schedule = WorkSchedule::default();
+        let longest = schedule.longest_idle_delay();
+        assert_eq!(
+            longest,
+            Duration::from_hours(8) - Duration::from_millis(1),
+            "the ceiling, plus ten seconds of jitter for every thirty of it"
+        );
+        for streak in [0, 1, 5, 10, 24, 1_000, i32::MAX] {
+            for _ in 0..64 {
+                let delay = schedule.next_idle_delay(TenantId::new(), streak);
+                assert!(delay <= longest, "{delay:?} after {streak} quiet visits");
+            }
+        }
+        let still = WorkSchedule {
+            jitter: Duration::ZERO,
+            ..schedule
+        };
+        assert_eq!(still.longest_idle_delay(), still.max_idle_interval);
     }
 
     #[test]

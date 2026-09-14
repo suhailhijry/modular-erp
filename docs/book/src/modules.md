@@ -53,6 +53,26 @@ It ships with ready-made charts of accounts in Arabic and English. Installing a
 chart in English and asking a Saudi accountant to rename every account would be
 technically correct and completely useless.
 
+## inventory
+
+What is on the shelf, which delivery it came in, and what it cost.
+
+**Every delivery is a lot**, with its own cost and, for a product tracked that
+way, its batch code and expiry date. Stock leaves the lot that expires first, at
+that lot's cost — never at an average, because an average cannot say which
+delivery a unit came in, and that is the whole of expiry and the whole of a
+recall. A product is tracked by quantity, by lot or by serial, and a serial is
+the caller's own name for a unit: one that is not on the shelf is refused rather
+than invented.
+
+A shelf is a product at a branch. Receiving posts to the inventory account and
+to *goods received, not invoiced*, which the supplier's bill clears; every
+invoice line that names a product takes its units off the shelf and books what
+they cost, in the invoice's own transaction; a credit note puts back what the
+customer says came back, at what it left at. A count corrects the shelf and
+books the difference. Expiry is warned about and nothing more: throwing stock
+away is a write-off somebody enters with a reason.
+
 ## sales
 
 Invoices, credit notes and the money customers pay.

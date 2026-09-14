@@ -49,6 +49,7 @@
 - [crm](./api/crm.md)
 - [hr](./api/hr.md)
 - [ledger](./api/ledger.md)
+- [inventory](./api/inventory.md)
 - [sales](./api/sales.md)
 - [purchases](./api/purchases.md)
 - [tax_sa](./api/tax_sa.md)

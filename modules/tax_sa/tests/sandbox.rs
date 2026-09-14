@@ -151,6 +151,8 @@ fn document(kind: Kind, type_code: TypeCode, link: Link) -> Document {
             category: VatCategory::Standard,
             rate_bp: 1_500,
             tax,
+            quantity: None,
+            unit_price: None,
         }],
         allowances: Vec::new(),
         totals: Totals {

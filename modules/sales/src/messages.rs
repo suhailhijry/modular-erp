@@ -25,9 +25,15 @@ pub const CREDIT_WITHOUT_A_BAND: MessageCode = MessageCode::new("sales.credit_wi
 pub const CREDIT_TOO_LARGE: MessageCode = MessageCode::new("sales.credit_too_large");
 pub const ALREADY_CREDITED: MessageCode = MessageCode::new("sales.already_credited");
 pub const NOTHING_TO_CREDIT: MessageCode = MessageCode::new("sales.nothing_to_credit");
+pub const NOT_A_QUANTITY: MessageCode = MessageCode::new("sales.not_a_quantity");
+pub const NAMED_UNITS: MessageCode = MessageCode::new("sales.named_units");
+/// A line naming a lot without naming the product the lot is of.
+pub const LOT_WITHOUT_A_PRODUCT: MessageCode = MessageCode::new("sales.lot_without_a_product");
 pub const PREPAID_DOES_NOT_FIT: MessageCode = MessageCode::new("sales.prepaid_does_not_fit");
 
 pub const NO_SUCH_LINE: MessageCode = MessageCode::new("sales.no_such_line");
+/// Units coming back against an invoice line that sold no product.
+pub const NOT_A_STOCK_LINE: MessageCode = MessageCode::new("sales.not_a_stock_line");
 
 /// An invoice, credit note or refund over the tenant's document limit.
 pub const OVER_DOCUMENT_LIMIT: MessageCode = MessageCode::new("sales.over_document_limit");
@@ -45,10 +51,14 @@ pub static CODES: &[MessageCode] = &[
     NO_EXEMPTION_REASON,
     PREPAID_DOES_NOT_FIT,
     NO_SUCH_LINE,
+    NOT_A_STOCK_LINE,
     CREDIT_WITHOUT_A_BAND,
     CREDIT_TOO_LARGE,
     ALREADY_CREDITED,
     NOTHING_TO_CREDIT,
+    NOT_A_QUANTITY,
+    NAMED_UNITS,
+    LOT_WITHOUT_A_PRODUCT,
     NOTHING_TO_INVOICE,
     NOT_ISSUED,
     OVERPAYMENT,
@@ -67,6 +77,46 @@ pub static CODES: &[MessageCode] = &[
 ];
 
 pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
+    (
+        NOT_A_QUANTITY,
+        Locale::English,
+        Template::Simple(
+            "A quantity is a whole number of units, and more than nothing. Leave it out for a \
+             line given as a single amount.",
+        ),
+    ),
+    (
+        NOT_A_QUANTITY,
+        Locale::Arabic,
+        Template::Simple(
+            "الكمية عدد صحيح من الوحدات وأكبر من الصفر. اتركها فارغة إذا كان السطر مبلغًا واحدًا.",
+        ),
+    ),
+    (
+        NAMED_UNITS,
+        Locale::English,
+        Template::Simple(
+            "This line names {named} units, so it must be for the product they are units of, \
+             with a quantity of {named}.",
+        ),
+    ),
+    (
+        NAMED_UNITS,
+        Locale::Arabic,
+        Template::Simple(
+            "يسمّي هذا السطر {named} وحدة، فعليه أن يكون للصنف التابعة له وأن تكون كميته {named}.",
+        ),
+    ),
+    (
+        LOT_WITHOUT_A_PRODUCT,
+        Locale::English,
+        Template::Simple("This line names lot {lot}, so it must name the product the lot is of."),
+    ),
+    (
+        LOT_WITHOUT_A_PRODUCT,
+        Locale::Arabic,
+        Template::Simple("يحدد هذا السطر التشغيلة {lot}، فعليه أن يحدد الصنف الذي تتبعه."),
+    ),
     (
         PREPAID_DOES_NOT_FIT,
         Locale::English,
@@ -330,6 +380,20 @@ pub static ENTRIES: &[(MessageCode, Locale, Template)] = &[
         NO_SUCH_LINE,
         Locale::Arabic,
         Template::Simple("الفاتورة {invoice} لا تحتوي على البند {line}."),
+    ),
+    (
+        NOT_A_STOCK_LINE,
+        Locale::English,
+        Template::Simple(
+            "Line {line} of invoice {invoice} sold no product, so no units can come back on it. Leave the quantity out.",
+        ),
+    ),
+    (
+        NOT_A_STOCK_LINE,
+        Locale::Arabic,
+        Template::Simple(
+            "البند {line} من الفاتورة {invoice} لم يبع صنفًا مخزنيًا، فلا يمكن إرجاع وحدات عليه. اترك الكمية فارغة.",
+        ),
     ),
     (
         OVER_DOCUMENT_LIMIT,

@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT branch, currency, COUNT(*) as \"products!\", SUM(value)::BIGINT as \"value!\"\n             FROM proj_inventory.stock_item\n            WHERE ($1::TEXT IS NULL OR branch = $1)\n            GROUP BY branch, currency\n            ORDER BY branch, currency",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proj_inventory.stock_item",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "products!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "value!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "f2a3a8194e4e3000d30b7ae098136e892a9f99135a8bbe5ad7775002e3d545ee"
+}

@@ -84,7 +84,8 @@ struct BodyView {
 }))]
 struct TemplateView {
     channel: String,
-    /// What it is about — `reservation`, `invoice`, `customer` or `employee`.
+    /// What it is about — `reservation`, `invoice`, `customer`, `employee` or
+    /// `lot`.
     /// Decides which bindings and which audiences are allowed.
     topic: String,
     /// Who it goes to — `client`, `worker`, `branch_manager` or `operator`.

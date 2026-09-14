@@ -58,10 +58,10 @@ const MAX_PAGE: i64 = 100;
 struct NotificationView {
     id: String,
     /// One of `booking_reserved`, `payments_settled`, `payments_failed`,
-    /// `tax_refused` or `document_expiring`.
+    /// `tax_refused`, `document_expiring`, `stock_expiring` or `stock_expired`.
     kind: String,
-    /// What it is about: `reservation`, `invoice`, `customer` or `employee`,
-    /// and which one. Fetch the record itself through its own route.
+    /// What it is about: `reservation`, `invoice`, `customer`, `employee` or
+    /// `lot`, and which one. Fetch the record itself through its own route.
     topic: String,
     subject_id: String,
     /// In the language this request asked for.
@@ -336,7 +336,7 @@ async fn get_preferences(
     request_body = SetPreferences,
     responses(
         (status = NO_CONTENT, description = "Saved. The same grid again is the same answer."),
-        (status = BAD_REQUEST, description = "No such kind, or no such channel", body = Problem),
+        (status = BAD_REQUEST, description = "No such kind, no such channel, or a channel other than `in_system` for `stock_expiring` or `stock_expired` — those are told to logins, which have no address (`notifications.in_system_only`)", body = Problem),
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, body = Problem),
         (status = NOT_FOUND, body = Problem),
@@ -430,10 +430,16 @@ fn database(error: &sqlx::Error, locale: Locale) -> Problem {
 
 fn refused(error: &CommandError<NotificationError>, locale: Locale) -> Problem {
     let (status, message) = match error {
-        // **The only refusal, and it is a 404.** See `crate::commands::read`.
-        CommandError::Execute(ExecuteError::Rejected(rejection)) => {
-            (StatusCode::NOT_FOUND, rejection.message())
-        }
+        // **A 404 for a notification**, whether it is somebody else's or not
+        // there — see `crate::commands::read` — **and a 400 for a grid** that
+        // asks a kind for a channel it cannot reach.
+        CommandError::Execute(ExecuteError::Rejected(rejection)) => (
+            match rejection {
+                NotificationError::NotYours => StatusCode::NOT_FOUND,
+                NotificationError::InSystemOnly { .. } => StatusCode::BAD_REQUEST,
+            },
+            rejection.message(),
+        ),
         CommandError::Pool(e @ erp_tenant::PoolError::Overloaded { .. }) => {
             (StatusCode::SERVICE_UNAVAILABLE, e.message())
         }

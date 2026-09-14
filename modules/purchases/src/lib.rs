@@ -37,6 +37,21 @@
 //! irrecoverable, so it is a cost of the purchase and rides on the line's own
 //! account.
 //!
+//! # The one line that does not land where it says
+//!
+//! A line may name a **stocked product**, and then it posts to `inventory`'s
+//! goods-received-not-invoiced account rather than to the account on the line:
+//! the delivery already debited the stock and credited that account, and the
+//! bill is what clears it. Either document may arrive first, and neither waits
+//! for the other — a bill with no delivery behind it leaves the account a
+//! debit, which is *invoiced, not yet received*. The product is optional, and
+//! everything without one behaves exactly as it always did.
+//!
+//! That is the module's one edge to a sibling above `ledger`, and it points
+//! this way because the **bill** is the document that posts. `inventory` is
+//! asked, through [`inventory::accepts_movements`], in the bill's own
+//! transaction.
+//!
 //! # What is deliberately absent
 //!
 //! Supplier credit notes, supplier records, purchase orders and goods receipts.
@@ -112,7 +127,7 @@ pub fn setup() -> erp_tenant::ModuleSetup {
         upcasters,
     )
     .requiring(&["ledger"])
-    .reading(&["hr", "ledger"])
+    .reading(&["hr", "inventory", "ledger"])
 }
 
 /// This module's entitlement name.

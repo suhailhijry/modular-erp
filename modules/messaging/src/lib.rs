@@ -138,7 +138,7 @@ pub async fn install(_conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> 
 pub fn setup() -> erp_tenant::ModuleSetup {
     erp_tenant::ModuleSetup::new(module_id(), "", &[], upcasters)
         .requiring(&["crm"])
-        .reading(&["booking", "branches", "crm", "hr", "sales"])
+        .reading(&["booking", "branches", "crm", "hr", "inventory", "sales"])
 }
 
 /// This module's entitlement name.
@@ -173,7 +173,7 @@ mod tests {
     /// declaration exists to prevent.
     ///
     /// Checked by source rather than by running: resolving needs a database and
-    /// four modules' read models, and the property here is that the *names*
+    /// the domain modules' read models, and the property here is that the *names*
     /// agree.
     #[test]
     fn every_binding_in_the_vocabulary_can_be_resolved() {

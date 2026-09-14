@@ -13,10 +13,25 @@ A project I'm working on to test Rust, and try different architectures and desig
 
 | Module | Role |
 |---|---|
-| `ledger` | Double-entry accounting. |
+| `ledger` | Double-entry accounting, with ready-made charts of accounts. |
 | `sales` | Invoices, credit notes and payments. |
 | `purchases` | Bills and input tax. |
 | `tax_sa` | Saudi VAT returns and ZATCA e-invoicing integration (submodule of sales and purchases). |
+| `inventory` | Stock per branch, kept in lots with expiry dates or serial numbers. Counts, write-offs and cost of goods sold. |
+| `pos` | Point of sale: shifts, till sales, returns and the cash count. |
+| `payments` | Taking money through Moyasar, Tabby or Tamara, with saved cards and refunds. |
+| `prepaid` | What a customer already paid for: packages, courses, deposits and subscriptions. |
+| `booking` | Reservations, availability and pricing. |
+| `crm` | Customers, with custom fields a business can add. |
+| `branches` | The places a business works from. Every document is reported by branch. |
+| `hr` | The org chart, and the permissions (claims) that pass up it. |
+| `hr_sa` | Saudi employer rules, starting with GOSI. |
+| `payroll` | Pay runs and the journal entries they make. |
+| `reports` | Figures checked against the books. |
+| `messaging` | Sending to people by email, SMS, WhatsApp or push. |
+| `conversations` | Message threads on a reservation, invoice, customer, employee or stock lot. |
+| `notifications` | The notification bell inside the app. |
+| `files` | Documents attached to records. |
 
 ## Running
 

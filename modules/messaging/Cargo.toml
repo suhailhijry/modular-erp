@@ -21,6 +21,7 @@ hr = { workspace = true }
 branches = { workspace = true }
 booking = { workspace = true }
 sales = { workspace = true }
+inventory = { workspace = true }
 
 erp-web = { workspace = true }
 erp-links = { workspace = true }
