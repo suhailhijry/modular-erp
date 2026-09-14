@@ -483,6 +483,7 @@ async fn platform_audit_trail(
         (status = UNAUTHORIZED, body = Problem),
         (status = FORBIDDEN, description = "Not support or superadmin — `access.not_permitted` naming `reset_second_factors` — or without a second factor. Also what support gets for a staff account: `access.not_permitted` naming `manage_staff`", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "`second_factor.reset_yourself`, or `second_factor.reset_no_login` when there is no account with an email login by that id", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "This person has been reset three times in the last hour, by anybody, here or in their company — `request.too_many_requests`, and `args.seconds` says how long to wait", body = Problem),
     ),
 )]
 async fn reset_any_second_factor(
@@ -492,6 +493,10 @@ async fn reset_any_second_factor(
     Path(identity): Path<IdentityId>,
     Json(body): Json<ResetReason>,
 ) -> Result<StatusCode, Problem> {
+    // The same budget the tenant route charges: the harm lands on the target,
+    // whoever asked.
+    erp_web::charge_for_a_reset(&state, identity, locale).await?;
+
     let link_base = format!("https://{}/second-factor/", state.domain);
     state
         .control

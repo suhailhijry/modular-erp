@@ -52,7 +52,7 @@ pub use extract::{
     Allowed, Anonymous, Authenticated, BRANCH_HEADER, Capability, FORWARDED_FOR, HandleDeadLetters,
     IdempotencyKey, IfMatch, Language, ManageAccounts, ManageStaff, ManageTenant, ManagesTenant,
     PostEntries, Power, Public, Read, ReadAuditTrail, ResetSecondFactors, Staff, SuspendTenants,
-    Tenant, not_a_person, not_permitted, tenant_of_host,
+    Tenant, charge_for_a_reset, not_a_person, not_permitted, tenant_of_host,
 };
 pub use problem::Problem;
 pub use state::AppState;

@@ -1,0 +1,63 @@
+# What `cargo deny check` refuses, and why.
+#
+# Four questions about the dependency tree, none of which the compiler asks:
+# does anything in it have a published vulnerability, is every crate under a
+# licence this product may ship, did a second copy of a crate slip in, and does
+# every crate come from crates.io. CI runs it as its own job (`.github/
+# workflows/check.yml`), so a new advisory fails the next push rather than the
+# next audit. Locally: `just deny`, with `cargo install cargo-deny --locked`.
+
+[graph]
+# Every feature, so a crate pulled in only by a feature nobody builds locally
+# is still checked.
+all-features = true
+
+[advisories]
+version = 2
+# An advisory that cannot be fixed here is listed **with its id and the
+# reason**, and removed when the fix lands upstream.
+ignore = [
+    # `paste` is a proc-macro `utoipa-axum` expands its route tables with. Its
+    # author archived it; there is no vulnerability, only nobody at the wheel,
+    # and `utoipa-axum` is what would have to move off it. Revisit on its next
+    # release.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled in by utoipa-axum; nothing to move to yet" },
+]
+
+[licenses]
+version = 2
+# What a dependency of a BUSL-1.1 product may be under. Permissive only: a
+# copyleft dependency would reach into what the product's own licence says,
+# and that is a question for counsel, not for a config file. The workspace's
+# own crates are not published and are not checked here.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+private = { ignore = true }
+
+[bans]
+# A second copy of a crate is a warning, not a refusal: the tree has several
+# today, all pulled in by dependencies this workspace does not control, and
+# refusing them would block every upgrade until the whole ecosystem agrees.
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own crates reference each other by path with no version,
+# which is not the wildcard this rule is about.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -32,7 +32,7 @@ pub enum PurchaseError {
     NothingOnIt,
     #[error("bill {0} has not been recorded")]
     NotRecorded(String),
-    /// **Approving a payment is a claim, once this tenant uses claims.**
+    /// **Approving a payment is a claim, once this tenant grants it.**
     ///
     /// `purchases:approve_payment` is one of `hr::SEGREGATED` — raising a
     /// document and approving the money for it must not land in one pair of
@@ -444,8 +444,8 @@ async fn pay_in(
 ) -> Result<Committed<BillEvent>, ExecuteError<PurchaseError>> {
     // **Before anything is written.** Paying a supplier is the approval half of
     // the classic segregated pair, and `hr::may` answers three things at once:
-    // whether this tenant uses claims at all, whether the caller owns the
-    // tenant, and whether they hold the claim in the branch they named.
+    // whether this tenant has granted this claim at all, whether the caller
+    // owns the tenant, and whether they hold the claim in the branch they named.
     if !hr::may(&mut *conn, APPROVE_PAYMENT, metadata, access)
         .await
         .map_err(ExecuteError::Database)?

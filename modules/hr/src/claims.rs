@@ -306,24 +306,28 @@ pub async fn holds(
     Ok(found.is_some())
 }
 
-/// **Whether the claim system is switched on in this tenant.**
+/// **Whether this claim is switched on in this tenant.**
 ///
 /// A tenant that has never granted a claim is not asking for the control, and
 /// enforcing one against them would refuse work nobody was refusing before.
-/// The first `place` anywhere turns it on for every module that checks — which
-/// is what "grant a claim and it starts mattering" has to mean if the grant is
-/// not to be decorative.
+/// The first `place` of **this** claim turns it on — and only it. Until
+/// 2026-09-14 the first grant of *any* claim armed every claim at once, so a
+/// café that granted `hr:approve_timesheet` found its till refusing returns to
+/// staff with no employee record. Decided by the product owner: claims switch
+/// on per claim, and granting one must not arm the others.
 ///
 /// # Errors
 /// If the database does.
-pub async fn any_claim_placed(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
+pub async fn claim_placed(conn: &mut PgConnection, claim: &str) -> Result<bool, sqlx::Error> {
     // **`org_claim_granted`, the grants themselves** — not
     // `org_claim_effective`, which is the union derived from them. A grant that
     // reaches nobody because the org chart is empty is still a tenant saying
     // they want the control.
-    let found: Option<i32> = sqlx::query_scalar("SELECT 1 FROM org_claim_granted LIMIT 1")
-        .fetch_optional(&mut *conn)
-        .await?;
+    let found: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM org_claim_granted WHERE claim = $1 LIMIT 1")
+            .bind(claim)
+            .fetch_optional(&mut *conn)
+            .await?;
     Ok(found.is_some())
 }
 
@@ -364,10 +368,10 @@ pub async fn may_for(
     metadata: &erp_eventlog::Metadata,
     access: Option<&erp_tenant::Access>,
 ) -> Result<Approval, sqlx::Error> {
-    if !any_claim_placed(&mut *conn).await? {
+    if !claim_placed(&mut *conn, claim).await? {
         return Ok(Approval::Permitted);
     }
-    if access.is_some_and(|a| a.role == erp_tenant::Role::Owner) {
+    if access.is_some_and(erp_tenant::Access::is_owner) {
         return Ok(Approval::Permitted);
     }
     if metadata.actor.is_none() {
@@ -394,8 +398,9 @@ pub async fn may_for(
 ///
 /// Three answers, in order:
 ///
-/// 1. **Nobody has granted a claim in this tenant** — the control is not on,
+/// 1. **Nobody has granted this claim in this tenant** — the control is not on,
 ///    and everything is permitted exactly as it was before claims existed.
+///    Granting another claim changes nothing here.
 /// 2. **The caller owns the tenant** — exempt. See below.
 /// 3. **Otherwise** the caller must be an employee who holds the claim, in the
 ///    branch the request named. No employee record means no claim can reach
@@ -410,7 +415,9 @@ pub async fn may_for(
 ///
 /// So the exemption is **by role, not by whether a record exists**.
 /// `Role::Owner` is documented as "everything", and a control an owner cannot
-/// lift is a support call.
+/// lift is a support call. By role held by a *person*: an API key issued the
+/// owner's role is not the owner (`Access::is_owner`), and a machine is on no
+/// org chart, so it holds no claim and is refused here.
 ///
 /// This is the third control in this system to land on the same rule, and it is
 /// worth naming as one: **switching a control on must not be the act that
@@ -437,8 +444,8 @@ pub async fn may(
 /// **Whether the person behind this request holds a claim here**, and nothing
 /// else.
 ///
-/// [`may`] without its two passes. It asks whether the tenant has granted any
-/// claim, but reads "none" as "not held" rather than as a pass, and a request
+/// [`may`] without its two passes. It asks whether the tenant has granted this
+/// claim, but reads "no" as "not held" rather than as a pass, and a request
 /// with no actor holds nothing. That is the question for
 /// a control something *other* than a grant switches on — `sales`' document
 /// limit is set by the owner, and a claim is the way past it — where "nobody
@@ -457,7 +464,7 @@ pub async fn actor_holds(
     claim: &str,
     metadata: &erp_eventlog::Metadata,
 ) -> Result<bool, sqlx::Error> {
-    if !any_claim_placed(&mut *conn).await? {
+    if !claim_placed(&mut *conn, claim).await? {
         return Ok(false);
     }
     match claimant(&mut *conn, metadata).await? {

@@ -150,6 +150,10 @@ pub struct Access {
     /// Where the tenant said something different. Small — the exception, not
     /// the rule — so a `Vec` scan beats a map.
     pub overrides: Vec<(ModuleId, Role)>,
+    /// **An API key, not a person.** The role still answers every capability
+    /// — a key is issued one on purpose — but nothing that exempts *the owner*
+    /// exempts a key issued the owner's role: see [`Self::is_owner`].
+    pub machine: bool,
 }
 
 impl Access {
@@ -158,7 +162,27 @@ impl Access {
         Self {
             role,
             overrides: Vec::new(),
+            machine: false,
         }
+    }
+
+    /// The same access, held by a machine.
+    #[must_use]
+    pub const fn as_machine(mut self) -> Self {
+        self.machine = true;
+        self
+    }
+
+    /// **A person holding the owner's role** — the one member every control
+    /// in the system exempts: the document limit, the claims, the second-factor
+    /// reset. A key issued the owner's role is not that person, and until
+    /// 2026-09-14 it walked past all three, because each of them read the
+    /// role alone. Decided by the product owner: a key is judged as an
+    /// ordinary member wherever "the owner" is exempt, and a machine can hold
+    /// no claim, so it is refused wherever a claim is the way past.
+    #[must_use]
+    pub const fn is_owner(&self) -> bool {
+        matches!(self.role, Role::Owner) && !self.machine
     }
 
     /// The role that applies in a module, or tenant-wide when `module` is

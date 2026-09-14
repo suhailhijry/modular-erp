@@ -12669,7 +12669,7 @@
   "info": {
     "description": "A multi-tenant ERP. Every tenant has its own database; every write is an event; every read model is derived and can be rebuilt.\n\n## Authentication\n\n`POST /v1/sessions` returns a bearer token. Send it as `Authorization: Bearer <token>`. Operations documented without the `session` requirement are deliberately open — the module catalogue and the chart-of-accounts catalogue are product information a signup form needs before anyone has an account, and an invitation's token *is* its credential.\n\n## Errors\n\nEvery failure is `application/problem+json` (RFC 9457) carrying a stable `code`. **Branch on the code, never on `detail`**, which is prose in whichever language the request asked for. `args` carries the values the message names, typed, so a client can render its own sentence. `docs/ERRORS.md` lists every code.\n\nTwo exceptions, and they are the honest kind: **413** (a body over 1 MB) and **504** (a request still running after 30 seconds) are refused at the edge, before anything in this document runs, and carry no body at all. Every operation below can answer either.\n\n## Language\n\n`Accept-Language` is honoured on every response, including failures. Arabic and English are first-class; anything else falls back to English rather than failing.\n\n## Reading your own write\n\nRead models are driven by a worker, so a read taken immediately after a write can legitimately not see it. Every write returns the log `position` it landed at; pass it back as `?consistent_after=<position>` and the read waits for the projection to reach it. Without it, reads are served as they are.\n\n## Money\n\nMinor units and an explicit currency, never a decimal string and never a float. `{ \"minor\": 1050, \"currency\": \"SAR\" }` is 10.50 SAR.",
     "license": {
-      "name": "AGPL-3.0-or-later"
+      "name": "BUSL-1.1"
     },
     "title": "ERP",
     "version": "0.1.0"
@@ -32301,6 +32301,16 @@
             },
             "description": "Refused on who they are: `second_factor.reset_yourself`, `second_factor.reset_the_owner`, `second_factor.reset_platform_staff`, `second_factor.reset_another_company` (contact support), or `second_factor.reset_no_login` when the account has no email login to send to"
           },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This person has been reset three times in the last hour, by anybody, here or by support — `request.too_many_requests`, and `args.seconds` says how long to wait"
+          },
           "500": {
             "content": {
               "application/json": {
@@ -38442,6 +38452,16 @@
               }
             },
             "description": "`second_factor.reset_yourself`, or `second_factor.reset_no_login` when there is no account with an email login by that id"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "This person has been reset three times in the last hour, by anybody, here or in their company — `request.too_many_requests`, and `args.seconds` says how long to wait"
           },
           "500": {
             "content": {

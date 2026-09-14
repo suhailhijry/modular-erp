@@ -545,6 +545,7 @@ fn who_may_write_off(
                 &erp_control::Access {
                     role: member.role,
                     overrides: member.module_roles.clone(),
+                    machine: false,
                 },
                 inventory::http::WRITE_OFF,
                 Some(&module),

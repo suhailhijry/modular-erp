@@ -248,6 +248,7 @@ async fn set_second_factor_policy(
         (status = FORBIDDEN, description = "Not the owner and not holding `hr:reset_second_factor` — `access.not_permitted` naming `manage_tenant`; or an API key, which may never do this — `keys.not_a_person`", body = Problem),
         (status = NOT_FOUND, description = "Not a member here", body = Problem),
         (status = UNPROCESSABLE_ENTITY, description = "Refused on who they are: `second_factor.reset_yourself`, `second_factor.reset_the_owner`, `second_factor.reset_platform_staff`, `second_factor.reset_another_company` (contact support), or `second_factor.reset_no_login` when the account has no email login to send to", body = Problem),
+        (status = TOO_MANY_REQUESTS, description = "This person has been reset three times in the last hour, by anybody, here or by support — `request.too_many_requests`, and `args.seconds` says how long to wait", body = Problem),
     ),
 )]
 async fn reset_member_second_factor(
@@ -273,14 +274,17 @@ async fn reset_member_second_factor(
     // is above it. `manage_tenant` is what the 403 names: it is what lets the
     // owner through without a claim, so it is what somebody refused should ask
     // for — or ask to be granted the claim.
-    if tenant.db.role() != Some(erp_tenant::Role::Owner)
-        && !holds_the_claim(&tenant, locale).await?
-    {
+    if !tenant.db.is_owner() && !holds_the_claim(&tenant, locale).await? {
         return Err(erp_web::not_permitted(
             erp_control::Capability::ManageTenant,
             locale,
         ));
     }
+
+    // **After the caller has proved they may**, so a stranger's refusal costs
+    // the target nothing; before the control plane, so a refused attempt ends
+    // no session and sends no mail.
+    erp_web::charge_for_a_reset(&state, identity, locale).await?;
 
     // Where the link points is decided here, because only this layer knows the
     // deployment's public domain — as `request_password_reset` does.
@@ -302,7 +306,7 @@ async fn reset_member_second_factor(
 
 /// Whether the person behind this request holds `hr:reset_second_factor` here.
 ///
-/// `hr::actor_holds` and not `hr::may`: "nobody has granted a claim in this
+/// `hr::actor_holds` and not `hr::may`: "nobody has granted this claim in this
 /// tenant" must read as *not held* rather than as a pass, or a tenant that uses
 /// no claims would let every clerk reset every colleague. It asks the grants,
 /// which live in the tenant's own migration chain, before it asks `hr`'s read

@@ -53,8 +53,8 @@ mod employee;
 mod projections;
 
 pub use claims::{
-    Approval, Claim, ClaimError, Held, RESET_SECOND_FACTOR, SEGREGATED, actor_holds,
-    any_claim_placed, effective, holds, is_segregated, may, may_for,
+    Approval, Claim, ClaimError, Held, RESET_SECOND_FACTOR, SEGREGATED, actor_holds, claim_placed,
+    effective, holds, is_segregated, may, may_for,
 };
 pub use commands::{
     APPROVE_TIMESHEET, Hire, HrError, amend_employee, eligible_for, exists, grant_claim, hire,

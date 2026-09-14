@@ -142,18 +142,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "api listening");
 
-    // Same drain discipline as the worker: stop accepting, let in-flight
-    // requests finish. A request killed mid-transaction rolls back, so this
-    // costs latency rather than correctness — but a 502 to a customer mid-deploy
-    // is still a 502.
+    // Same drain discipline as the worker, on the same signal: stop accepting,
+    // let in-flight requests finish. A request killed mid-transaction rolls
+    // back, so this costs latency rather than correctness — but a 502 to a
+    // customer mid-deploy is still a 502. It listened for Ctrl-C alone until
+    // 2026-09-14, and an orchestrator sends SIGTERM, so every deploy was that
+    // 502; `tests/shutdown.rs` keeps it on the shared signal.
     // `with_connect_info` is what gives the rate limiter a peer address when no
     // trusted proxy supplies one. Without it every caller shares one bucket.
+    let shutdown = erp_control::shutdown_signal();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
+    .with_graceful_shutdown(async move {
+        shutdown.cancelled().await;
         tracing::info!("shutting down");
     })
     .await?;

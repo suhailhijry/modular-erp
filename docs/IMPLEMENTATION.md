@@ -26,7 +26,7 @@ on good grounds — the WPS file below being the sharpest case, where guessing a
 an unverifiable specification is the *worst* available option and two other
 documents said so while this one did not.
 
-**Where this stands:** 1,753 tests green as of 2026-09-14, clippy and fmt clean. The per-phase test
+**Where this stands:** 1,759 tests green as of 2026-09-14, clippy, fmt and `cargo deny` clean. The per-phase test
 counts below are the numbers *at the time that phase was met* and are left as
 written; they are history, not status. What is not yet true is collected under
 [What needs work now](#what-needs-work-now) at the end, and what blocks selling
@@ -83,13 +83,34 @@ drift with every change.
   records (invoices, contracts and the like) and erases the rest.
 - **Recurring invoicing lives in `sales`**, beside the other invoices. **A rental
   unit is a booking unit** (a `booking::Resource`).
+- **BSL everywhere.** The API document said `AGPL-3.0-or-later`; it says `BUSL-1.1`
+  now, as `LICENSE` and `Cargo.toml` always did.
+- **Suspension drains before it stops.** A tenant being suspended keeps having its
+  issued documents signed and reported to ZATCA until none is pending, and only
+  then is nothing run for it. The 2026-09-11 rule that nothing runs while
+  suspended stands for everything else.
+- **An API key issued with the owner's role is an ordinary member**: held to the
+  document limit, and refused credit notes and payment approvals wherever the
+  tenant uses claims, because a machine can hold no claim. No keys have been
+  issued yet.
+- **Signup is closed unless the deployment says `SIGNUP=open`.** Platform staff
+  create a tenant after it has paid, and the owner is mailed the confirmation link.
+  **Modules are not what a tenant pays for** — seats are — so the owner keeps
+  switching modules on and off, and no trial exists: the public demo is the trial.
+- **A second-factor reset is limited to three per target an hour**, counted
+  through the shared limiter.
+- **Cluster capacity is required**: the migrator refuses to declare the primary
+  cluster without `PRIMARY_CLUSTER_CAPACITY`.
+- **Branch membership is a list on the membership**, in the control plane beside
+  the per-module roles; no list means every branch. A member with one branch need
+  not send `X-Branch`; with several, they must. It bounds what a request reads as
+  well as what it writes, and API keys are bound like people. Designed so a
+  self-hosted deployment, which runs its own control plane, carries it.
+- **Dependency scanning is `cargo-deny`.**
 
 ### Waiting on the product owner
 
 - **The legal entity** — being registered. It fills `LICENSE` and signs the terms.
-- **BSL or AGPL.** `LICENSE` says Business Source License 1.1, and the API document
-  declares `AGPL-3.0-or-later` (`crates/erp-api/src/routes.rs`). This can be decided
-  before the entity exists.
 - **Seat types:** which features a POS seat, a service-provider seat and a worker
   seat each get.
 - **Retention periods per country.** Counsel confirms Saudi Arabia's.
@@ -106,44 +127,53 @@ drift with every change.
       even says "the claim is branch-scoped already". Needs a record of which
       branches each person belongs to. 1–2 weeks, and more urgent because branches
       are sold at launch
-- [ ] **An owner-role API key counts as the owner.** `sales::Authority::of` reads the
+- [x] **An owner-role API key counts as the owner.** `sales::Authority::of` reads the
       handle's role, so an integration key walks past the document limit and the
-      credit-note claim. Half a day
+      credit-note claim. Half a day. **Done 2026-09-14** (§79): `Access::is_owner`
+      is the one question, and it is false for a machine
 - [ ] **Suspending a tenant stops its ZATCA reporting**, so a suspension of more than
-      a day can push the customer past the 24-hour reporting window. 1–2 days
-- [ ] **Claims switch on per claim** (decided above). Today the first grant of any
+      a day can push the customer past the 24-hour reporting window. Decided: a
+      `suspending` state that drains signing and reporting, then stops. 1–2 days
+- [x] **Claims switch on per claim** (decided above). Today the first grant of any
       claim arms all of them, so till staff with no employee record lose returns.
-      Hours
-- [ ] **Behind the proxy, every anonymous rate limit is one bucket for the whole
+      Hours. **Done 2026-09-14** (§79): `hr::claim_placed` asks about one claim
+- [x] **Behind the proxy, every anonymous rate limit is one bucket for the whole
       internet.** `TRUST_X_FORWARDED_FOR` is off and compose does not set it, so
       sign-in, signup, one-time codes and public booking all key on the proxy's
       address. Document `PRIMARY_CLUSTER_CAPACITY`, `FLEET_CONCURRENCY` and `DEMO_*`
-      at the same time. Hours
-- [ ] **Cluster capacity silently defaults to 10,000** when it is not set, so
-      placement overfills the cluster. Refuse a missing value. Hours
-- [ ] **The API ignores SIGTERM**: it waits on Ctrl-C only, so every deploy cuts
-      requests in flight. Hours
-- [ ] **The request path accepts a read model newer than the build** (`<` where the
+      at the same time. Hours. **Done 2026-09-14** (§79)
+- [x] **Cluster capacity silently defaults to 10,000** when it is not set, so
+      placement overfills the cluster. Refuse a missing value. Hours. **Done
+      2026-09-14** (§79): `erp_control::declared_capacity`, and `bin/demo` no
+      longer re-declares the cluster at its own placeholder
+- [x] **The API ignores SIGTERM**: it waits on Ctrl-C only, so every deploy cuts
+      requests in flight. Hours. **Done 2026-09-14** (§79): one
+      `erp_control::shutdown_signal` for both processes
+- [x] **The request path accepts a read model newer than the build** (`<` where the
       projection runner uses `!=`), so old pods serve new-shaped tables during a
-      rolling deploy. 1 hour
+      rolling deploy. 1 hour. **Done 2026-09-14** (§79)
 - [ ] **Audit entries are written after the commit**, so a crash between the two
       loses the record. 1 day at the root
-- [ ] **The second-factor reset has no rate limit.** Each call ends the target's
-      sessions and sends mail. Under an hour
-- [ ] **Anyone can sign up and enable every module for free.** A switch to close
-      signup, modules granted by staff, and a source scan that every module route
-      calls `require_module`. 3–5 days
-- [ ] **Two documents promise what the code does not do.** ARCHITECTURE.md says the
+- [x] **The second-factor reset has no rate limit.** Each call ends the target's
+      sessions and sends mail. Under an hour. **Done 2026-09-14** (§79): three per
+      target an hour, both routes on one budget
+- [ ] **Anyone can sign up and run the system for free.** `SIGNUP=open|closed`,
+      closed when unset; a staff route that creates a tenant after payment and mails
+      the owner the confirmation link, which then asks for a password; and a source
+      scan that every module route calls `require_module`. Modules stay the owner's
+      to switch on — seats are what is paid for. 3–5 days
+- [x] **Two documents promise what the code does not do.** ARCHITECTURE.md says the
       migrator enforces a backup before upgrade, and it has no backup code;
       `docs/book/src/deployment.md` says a customer-hosted tenant keeps running
       without our control plane, and every request checks sessions against it.
-      Correct both. Minutes
-- [ ] **No dependency vulnerability scanning in CI** (`cargo audit` or `cargo deny`).
-      Hours
+      Correct both. Minutes. **Done 2026-09-14** (§79)
+- [x] **No dependency vulnerability scanning in CI** (`cargo audit` or `cargo deny`).
+      Hours. **Done 2026-09-14** (§79): `cargo-deny`, `deny.toml`, a CI job and
+      `just deny`
 
 ### Priority 2 · Needed to sell
 
-- [ ] **Legal**, once the entity exists: settle BSL or AGPL and fill `LICENSE`; terms
+- [ ] **Legal**, once the entity exists: fill `LICENSE` (BSL, decided); terms
       of service, privacy notice, data processing agreement, sub-processor list,
       records of processing, a breach procedure, and an exit clause promising the
       compressed export. Record terms acceptance at signup (half a day of
@@ -1167,6 +1197,137 @@ It is also the thing that unblocks Phase 5b honestly — see §53.
       `sales/commands.rs:46` (from both credit paths, as they stood then; §70
       moved that check into the credit-note roots, and it is `:69` now) and
       `hr/commands.rs:732`
+
+### 79 · The stop-ship holes that were hours
+
+**Built 2026-09-14**, from the product owner's answers to the Road to selling
+decisions the same day, in the order agreed: everything in Priority 1 sized in
+hours or a half-day, first. The four larger items — the branch record, the
+suspension drain, audit entries inside their transaction, and closed signup —
+follow in their own sections. Nothing here changed an event, a projection or a
+migration, and no route moved. References name files and functions; nothing
+checks a line number in this document.
+
+#### The licence is BSL everywhere
+
+`crates/erp-api/src/routes.rs` declared the API under `AGPL-3.0-or-later` while
+`LICENSE` and `Cargo.toml` said Business Source License 1.1. It says `BUSL-1.1`
+now, and `just openapi` rewrote `docs/openapi.json` to match.
+`docs/openapi.baseline.json` still carries the old name until `just baseline` is
+run deliberately, which nothing here does. `crates/erp-rules/Cargo.toml` was the
+one crate with no `license` field at all, which `cargo-deny` found first.
+
+#### A claim switches on when *it* is granted
+
+`hr::any_claim_placed` asked whether the tenant had granted *any* claim, and
+`may_for` and `actor_holds` read a yes as "this control is on". So a café that
+granted `hr:approve_timesheet` to a supervisor found `sales:approve_credit_note`
+asked at the till the same afternoon, and a clerk with no employee record could
+no longer take a return. It is `hr::claim_placed(conn, claim)` now
+(`modules/hr/src/claims.rs`), one claim at a time, and both callers pass the
+claim they are about to judge. `granting_one_claim_does_not_arm_another`
+(`modules/hr/tests/hr.rs`) grants the credit-note claim and asks about the
+timesheet one. The prose that said "some claim" — `docs/RUNNING.md`,
+`docs/book/src/api/pos.md`, the doc comments on `may_credit` and
+`pay_bill` — says "that claim".
+
+#### A key issued the owner's role is not the owner
+
+Three controls exempt "the owner", and each read the role off the handle:
+`sales::Authority::of`, `hr::may_for`, and the second-factor reset route. An
+integration key issued `role: owner` therefore walked past the document limit,
+the credit-note claim and the payment-approval claim. The fix is one question
+in one place: `Access::is_owner` (`crates/erp-tenant/src/roles.rs`) is true for
+a person holding the owner's role and false for a machine, `Access::machine`
+records which, and `Tenant::from_request_parts` (`crates/erp-web/src/extract.rs`)
+— the one door every key comes through — marks the handle with
+`TenantDb::acting_as_machine`. The three controls ask `is_owner`. A machine is
+on no org chart, so wherever a claim is the way past a control it is refused.
+Confirmed by the product owner: no keys have been issued yet.
+`a_clerk_over_the_document_limit_is_refused_and_the_worker_is_not`
+(`crates/erp-api/tests/http.rs`) now issues an owner-role key and watches the
+limit refuse it; `a_key_with_the_owners_role_is_not_the_owner`
+(`modules/hr/tests/hr.rs`) does the same to `may_for`.
+
+#### Three resets of one person an hour
+
+`POST /v1/members/{identity}/second-factor-reset` and
+`POST /v1/platform/identities/{identity}/second-factor-reset` each end every
+session the target holds and mail them, with no bound. `RESETS_PER_TARGET`
+(`crates/erp-web/src/rate.rs`) is three an hour, and `charge_for_a_reset`
+(`crates/erp-web/src/extract.rs`) charges it **on the target**, so the owner's
+three and support's fourth are one budget. Charged after the caller has proved
+they may — a stranger's refusal costs the target nothing — and before the control
+plane, so the fourth ends no session. Through the shared limiter when Redis is
+there, per node when it is not, like every other limit. The fourth answers 429
+`request.too_many_requests` with the seconds, and both routes document it.
+`a_persons_factor_is_reset_at_most_three_times_an_hour` runs the owner out and
+then watches support refused.
+
+#### Behind the proxy, every caller is themselves
+
+`compose.yaml` runs nginx in front of two API replicas and nginx appends the
+caller to `X-Forwarded-For`, but nothing set `TRUST_X_FORWARDED_FOR`, so every
+anonymous rate limit keyed on the proxy's address: one budget for sign-in, signup,
+one-time codes and public booking, shared by the whole internet. The `api`
+service sets it now, and only it. `docs/RUNNING.md` documents the variable, why it
+is dangerous anywhere but behind a proxy you run, and the three that were
+undocumented: `PRIMARY_CLUSTER_CAPACITY`, `FLEET_CONCURRENCY` and the `DEMO_*`
+family.
+
+#### The cluster's capacity is a number somebody chose
+
+`bin/migrator`'s `register_primary` defaulted `PRIMARY_CLUSTER_CAPACITY` to a
+placeholder of ten thousand — and worse, `bin/demo` re-registered the cluster
+afterwards at its own ten thousand through `ON CONFLICT … DO UPDATE`, so even a
+deployment that set the variable lost it the first time somebody built a demo.
+`erp_control::declared_capacity` (`crates/erp-control/src/placement.rs`) is the
+one rule: unset, blank, zero, negative or not a number is refused with a message
+naming D13. The migrator and the demo both call it; `erp_demo::bootstrap` takes
+the capacity as an argument and a test passes a number. `compose.yaml` and
+`just demo` declare 100, which is room for a demo on one box and says so.
+`the_capacity_is_required_and_a_count` pins the rule.
+
+#### The API drains on SIGTERM
+
+`bin/api.rs` waited on `tokio::signal::ctrl_c` alone. An orchestrator stops a
+pod with SIGTERM, which that future never resolves on, so every deploy killed the
+API with requests in flight while the worker beside it drained politely.
+`shutdown_signal` moved from `erp-worker` to `erp-control`
+(`crates/erp-control/src/shutdown.rs`), which both binaries depend on; the worker
+re-exports it and the API's graceful shutdown waits on its token.
+`the_api_drains_on_the_shared_shutdown_signal` (`crates/erp-api/tests/shutdown.rs`)
+is a source scan — the property is one line, and a test that sends a real
+SIGTERM to a spawned API needs a database and a race.
+
+#### A read model newer than the build is refused too
+
+`ControlPlane::read_model_behind` compared with `<`, so during a rolling deploy
+a pod still on the old build served tables the migrator had already swapped to
+the next release's shape, by rules that no longer described them. The projection
+runner always used `!=`; the request path does now.
+`a_module_whose_read_model_is_newer_than_the_build_answers_503_too` stamps a
+group one version ahead and watches the 503.
+
+#### Two documents say what the code does
+
+`docs/ARCHITECTURE.md` §1.17 said backup before upgrade "is enforced by the
+migrator"; the migrator has no backup code, and the sentence now says so and
+points at the go-live item. `docs/book/src/deployment.md` said the control plane
+can go down without stopping a tenant; every request checks its session against
+it, and the page now says that, and that the licence handshake it describes does
+not exist yet.
+
+#### The dependency tree is checked on every push
+
+`cargo-deny`, configured in `deny.toml`: advisories, dependency licences against
+an allow list of permissive ones, duplicate crates as a warning, and crates.io as
+the only source. A `deny` job in `.github/workflows/check.yml` runs it beside
+`check`, and `just deny` runs it locally. One advisory is ignored with its id and
+reason — `paste`, an unmaintained proc-macro `utoipa-axum` expands with, no
+vulnerability and nothing to move to — and one warning stands: `chacha20 0.10.1`
+is yanked, reachable through `hickory-resolver`, and `cargo update -p chacha20`
+is the operator's call, not this section's.
 
 ### 78 · A tenant reads its shelves at a glance, and the lists say what they list
 

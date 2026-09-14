@@ -152,6 +152,18 @@ jobs:
       - name: just check
         run: just check
 
+  # Separate, because it needs no database and answers a question the suite
+  # cannot: does anything in the dependency tree have a published
+  # vulnerability, a licence this product may not ship, or a source that is not
+  # crates.io. `deny.toml` says what is refused. A new advisory fails the next
+  # push, which is the only time anybody would look.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   # Separate, because it needs `sqlx-cli` and answers a different question:
   # not "does this build" but "is the committed offline data what these
   # migrations would produce". A stale `.sqlx` builds fine right up until

@@ -98,8 +98,13 @@ just demo my-password
 Or directly:
 
 ```bash
-CONTROL_DATABASE_URL=… PRIMARY_CLUSTER_URL=… DEMO_PASSWORD=… cargo run --bin demo
+CONTROL_DATABASE_URL=… PRIMARY_CLUSTER_URL=… PRIMARY_CLUSTER_CAPACITY=… \
+  DEMO_PASSWORD=… cargo run --bin demo
 ```
+
+`PRIMARY_CLUSTER_CAPACITY` is the migrator's rule applied here: the demo declares
+the cluster it lands on, and a declared capacity is a number somebody chose, never
+a placeholder. `just demo` passes 100 unless the variable is set.
 
 It prints the credentials it created. **Nothing here reads a default password.** A
 demo is usually the most reachable thing a deployment exposes, and a credential

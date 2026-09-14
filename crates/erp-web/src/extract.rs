@@ -8,7 +8,7 @@ use erp_i18n::Locale;
 
 use crate::error::ApiError;
 use crate::problem::Problem;
-use erp_types::{AggregateId, ModuleId, TenantId};
+use erp_types::{AggregateId, IdentityId, ModuleId, TenantId};
 
 use crate::state::AppState;
 
@@ -253,11 +253,19 @@ impl FromRequestParts<AppState> for Tenant {
         // why the same 404 covers "no such tenant" and "not yours".
         let tenant = tenant_of(parts, state, locale).await?;
 
-        let db = state
+        let mut db = state
             .control
             .enter(auth.session.identity, tenant.id, Lane::Interactive)
             .await
             .map_err(|e| ApiError::Access(e).into_problem(locale, &crate::CATALOG))?;
+        // **Here, because this is the one place that knows.** The control plane
+        // was handed an identity and sees a membership; only the bearer said it
+        // was a key. Every owner exemption downstream — the document limit,
+        // the claims, the reset — asks the handle, so a key issued the owner's
+        // role is judged as the member it is and not as the person it is not.
+        if auth.key.is_some() {
+            db.acting_as_machine();
+        }
         read_models_current(parts, state, &db, locale).await?;
 
         Ok(Self {
@@ -540,6 +548,28 @@ impl FromRequestParts<AppState> for Anonymous {
         }
         Ok(Self { address, locale })
     }
+}
+
+/// **One more reset of this person's second factor is about to happen.**
+///
+/// Keyed on the target, not the caller: the harm — sessions ended, mail sent
+/// — lands on the person being reset, whoever asked, so the tenant route and
+/// the platform route charge the same budget
+/// ([`crate::rate::RESETS_PER_TARGET`]). Call it after the caller has proved
+/// they may, so a stranger's refused attempt costs the target nothing.
+pub async fn charge_for_a_reset(
+    state: &AppState,
+    target: IdentityId,
+    locale: Locale,
+) -> Result<(), Problem> {
+    if let Err(seconds) = state
+        .limiter
+        .charge(&format!("reset:{target}"), crate::rate::RESETS_PER_TARGET)
+        .await
+    {
+        return Err(too_many_requests(seconds, locale));
+    }
+    Ok(())
 }
 
 /// The two bounds on sending a code: this address's, and the platform's.

@@ -5118,8 +5118,8 @@ async fn a_retry_answers_with_its_credit_note_after_the_claim_is_revoked() {
         .expect("khalid holds the claim");
 
     // **The claim moves to somebody else.** Sara is granted it so the tenant
-    // still uses claims — without that the control would switch itself off and
-    // this would prove nothing.
+    // still grants this claim — without that the control would switch itself
+    // off and this would prove nothing.
     hr::revoke_claim(&fixture.db, &code("EMP-KHALID"), &claim())
         .await
         .expect("revokes");

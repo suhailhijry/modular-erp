@@ -41,6 +41,11 @@ x-app: &app
     # points past it — and provisioning, migrations and schema installs keep
     # working, because they ask for this one. See `Role::Direct`.
     PRIMARY_DIRECT_URL: ""
+    # How many tenants `primary` may hold. **Required** — the migrator refuses to
+    # declare the cluster without it, because a default that placed tenants on a
+    # cluster nobody measured is the overfill D13 warns about. A hundred is room
+    # for a demo and a few signups on one box, not a production number.
+    PRIMARY_CLUSTER_CAPACITY: ${PRIMARY_CLUSTER_CAPACITY:-100}
     REDIS_URL: redis://redis:6379/
     # **Lane budgets sized against this stack's 200 connections.**
     #
@@ -330,6 +335,15 @@ services:
   api:
     <<: *app
     command: ["api"]
+    environment:
+      <<: *app-env
+      # **Only because `proxy` is in front.** nginx appends the caller to
+      # `X-Forwarded-For`, and without this every caller behind it is the
+      # proxy's address: one rate-limit bucket for sign-in, signup, one-time
+      # codes and public booking, shared by the whole internet. Never set it on
+      # a process reachable without that proxy — the header is then whatever
+      # the caller writes.
+      TRUST_X_FORWARDED_FOR: "true"
     # **Two of them.** One API process never disagrees with itself, so a single
     # replica would test none of what `REDIS_URL` is for.
     deploy:

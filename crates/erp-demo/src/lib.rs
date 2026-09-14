@@ -142,8 +142,14 @@ pub enum DemoError {
 
 /// Prepares a database that has never run anything.
 ///
-/// Migrates the control schema and registers the cluster tenants are placed on.
-/// Both idempotent, so running it against a live deployment is a no-op.
+/// Migrates the control schema and registers the cluster tenants are placed on,
+/// at `capacity` tenants. Both idempotent, so running it against a live
+/// deployment re-declares the same thing — which is why the capacity is an
+/// argument and not a constant here: this used to re-register the cluster at a
+/// placeholder of ten thousand, quietly overwriting whatever the migrator had
+/// declared a moment before. `bin/demo` reads
+/// [`erp_control::declared_capacity`], the migrator's rule; a test passes a
+/// number.
 ///
 /// # Why this lives here and not in `bin/api`
 ///
@@ -155,6 +161,7 @@ pub async fn bootstrap(
     control: &ControlPlane,
     cluster: &str,
     url_variable: &str,
+    capacity: i32,
 ) -> Result<(), DemoError> {
     control.migrate().await?;
     control
@@ -162,17 +169,13 @@ pub async fn bootstrap(
             cluster,
             url_variable,
             None,
-            DEFAULT_CAPACITY,
-            DEFAULT_CAPACITY,
+            capacity,
+            capacity,
             erp_control::Actor::system(),
         )
         .await?;
     Ok(())
 }
-
-/// Room for a demo and whatever else is on the box. Not a production number —
-/// a real cluster's capacity is sized from measurement (architecture D13).
-const DEFAULT_CAPACITY: i32 = 10_000;
 
 /// Builds the demo tenant and everything in it.
 ///

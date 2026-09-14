@@ -201,8 +201,14 @@ trail.
 ```bash
 CONTROL_DATABASE_URL   # the control plane
 PRIMARY_CLUSTER_URL    # the tenant cluster named `primary` in the control plane
+PRIMARY_CLUSTER_CAPACITY   # how many tenants it holds; the migrator refuses to
+                       #   declare the cluster without it — size it from
+                       #   measurement (architecture D13), never from a guess
 PUBLIC_DOMAIN          # tenants are subdomains of this; defaults to `localhost`
 BIND                   # the API's address; defaults to 0.0.0.0:8080
+TRUST_X_FORWARDED_FOR  # `true` only behind a proxy you run that appends the
+                       #   caller to X-Forwarded-For; otherwise every caller
+                       #   behind it shares one rate-limit bucket — see below
 SEALING_KEY            # <id>:<64 hex>[,<id>:<64 hex>…]; the first seals — see below
 PRIMARY_REPLICA_URL    # reads that tolerate lag; blank or unset means no replica
 PRIMARY_DIRECT_URL     # the route that bypasses a connection pooler — see below
@@ -219,8 +225,24 @@ SMS_RELAY_URL          # any channel with no gateway can use a relay instead
 PUSH_RELAY_URL         #   `<CHANNEL>_RELAY_URL` + `<CHANNEL>_RELAY_TOKEN`
 WHATSAPP_RELAY_URL     #   CHANNEL is SMS, PUSH or WHATSAPP
 WORKER_NAME            # for logs; defaults to $HOSTNAME
+FLEET_CONCURRENCY      # tenants the migrator walks at once; defaults to 16
+DEMO_PASSWORD          # `bin/demo` only: the demo owner's password; no default
+DEMO_SLUG              # `bin/demo` only: the tenant's name; defaults to `demo`
+DEMO_TTL_DAYS          # `bin/demo` only: days until the reaper destroys it;
+                       #   defaults to 7, and 0 keeps it for ever
 RUST_LOG               # e.g. info,erp_worker=debug
 ```
+
+**`TRUST_X_FORWARDED_FOR` decides whose address a rate limit counts.** Every
+unauthenticated route — sign-in, signup, invitation acceptance, one-time codes,
+the public booking site — is bounded per caller address. Behind a proxy the
+socket's peer is the proxy, so without this every caller in the world is one
+address and one budget: the first person to mistype a password five times locks
+sign-in for everybody. Set it to `true` when, and only when, a proxy this
+deployment controls terminates connections and appends the client to
+`X-Forwarded-For`; `compose.yaml` sets it on `api` because `proxy` does exactly
+that. With it on and no such proxy, the header is whatever the caller sends, and
+the limit is nothing.
 
 **`PRIMARY_DIRECT_URL` is only needed once there is a pooler.** Leave it unset
 or blank and it *is* the primary, which is right for every deployment that talks
@@ -711,9 +733,9 @@ Cancelling an invoice, crediting part of one, a refund that clears one, **taking
 a return at the till**, and asking a gateway for a refund that will leave one
 owing all end in a credit note, and all of them need the
 `sales:approve_credit_note` claim on your org chart — but only once your company
-has granted **some** claim. A company that has never granted one is asked
-nothing, which is where every company starts and is why nothing changes for you
-until you decide it should.
+has granted **that** claim to somebody. A company that has never granted it is
+asked nothing, whatever other claims it has granted, which is where every
+company starts and is why nothing changes for you until you decide it should.
 
 ```bash
 # Sara may approve credit notes.

@@ -95,6 +95,14 @@ pub const AUTH_PER_HANDLE: Limit = Limit::per_minute(5);
 /// somebody pays for, and a legitimate caller needs one or two.
 pub const CODES_PER_CALLER: Limit = Limit::per_hour(5);
 
+/// Times **one person's** second factor may be reset in an hour, whoever asks
+/// — their company's owner, a colleague holding the claim, or platform
+/// support, all charging the same key. Each reset ends every session the
+/// person holds and sends them mail, so an unlimited route was a way to keep
+/// somebody signed out and to fill their inbox. Three is a lost phone, a
+/// mistyped address and one more.
+pub const RESETS_PER_TARGET: Limit = Limit::per_hour(3);
+
 /// One-time codes the whole platform sends in an hour. **A circuit breaker,
 /// not a budget**: the attack this stops is a caller with a block of premium
 /// numbers, each receiving codes at the per-number cooldown, and the only

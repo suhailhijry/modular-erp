@@ -1638,6 +1638,109 @@ async fn approving_a_timesheet_needs_the_claim_once_the_tenant_uses_claims() {
     fixture.cleanup().await;
 }
 
+/// **Granting one claim does not arm the others.** Decided 2026-09-14: until
+/// then the first grant of *any* claim switched every claim on, so a café that
+/// granted `hr:approve_timesheet` found its till refusing returns to staff with
+/// no employee record, because `sales:approve_credit_note` was suddenly asked.
+#[tokio::test]
+async fn granting_one_claim_does_not_arm_another() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-SUP", "خالد", None, None).await;
+    hr::grant_claim(
+        &fixture.db,
+        &code("EMP-SUP"),
+        &claim("sales:approve_credit_note"),
+        false,
+    )
+    .await
+    .expect("granted");
+
+    // Somebody with a login that names no employee — a till clerk.
+    let nobody = Metadata {
+        actor: Some("nobody-linked".to_owned()),
+        ..Metadata::default()
+    };
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    assert!(
+        hr::may(&mut conn, hr::APPROVE_TIMESHEET, &nobody, None)
+            .await
+            .expect("asks"),
+        "a claim nobody has granted was asked because another one was"
+    );
+    assert!(
+        !hr::may(&mut conn, "sales:approve_credit_note", &nobody, None)
+            .await
+            .expect("asks"),
+        "the claim that was granted is asked, and a stranger does not hold it"
+    );
+    // The same rule where "not granted" reads as "not held".
+    assert!(
+        !hr::actor_holds(&mut conn, hr::APPROVE_TIMESHEET, &nobody)
+            .await
+            .expect("asks"),
+        "an ungranted claim is held by nobody"
+    );
+    drop(conn);
+
+    fixture.cleanup().await;
+}
+
+/// **A key issued the owner's role is not the owner.** The exemption is for a
+/// person; until 2026-09-14 `may_for` read the role alone, so an integration
+/// key with the owner's role approved payments no claim reached it for. A
+/// machine is on no org chart, so it holds nothing and is refused.
+#[tokio::test]
+async fn a_key_with_the_owners_role_is_not_the_owner() {
+    let fixture = Fixture::new().await;
+    fixture.hire("EMP-SUP", "خالد", None, None).await;
+    hr::grant_claim(
+        &fixture.db,
+        &code("EMP-SUP"),
+        &claim(hr::APPROVE_TIMESHEET),
+        false,
+    )
+    .await
+    .expect("granted");
+
+    let request = Metadata {
+        actor: Some("integration-key".to_owned()),
+        ..Metadata::default()
+    };
+    let owner = erp_tenant::Access::new(erp_tenant::Role::Owner);
+    let mut conn = fixture.db.acquire().await.expect("connection");
+
+    assert_eq!(
+        hr::may_for(
+            &mut conn,
+            hr::APPROVE_TIMESHEET,
+            None,
+            &request,
+            Some(&owner)
+        )
+        .await
+        .expect("asks"),
+        hr::Approval::Permitted,
+        "the owner is exempt"
+    );
+    assert_eq!(
+        hr::may_for(
+            &mut conn,
+            hr::APPROVE_TIMESHEET,
+            None,
+            &request,
+            Some(&owner.as_machine())
+        )
+        .await
+        .expect("asks"),
+        hr::Approval::NoClaim,
+        "a key with the owner's role was treated as the owner"
+    );
+    drop(conn);
+
+    fixture.cleanup().await;
+}
+
 /// **Holding the claim is not enough when the hours are your own.**
 ///
 /// Segregation of duties is not about authority; it is about two people. The

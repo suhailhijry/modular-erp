@@ -1,7 +1,8 @@
 //! Builds the demo tenant against a running deployment's databases.
 //!
 //! ```text
-//! CONTROL_DATABASE_URL=… PRIMARY_CLUSTER_URL=… DEMO_PASSWORD=… cargo run --bin demo
+//! CONTROL_DATABASE_URL=… PRIMARY_CLUSTER_URL=… PRIMARY_CLUSTER_CAPACITY=… \
+//!   DEMO_PASSWORD=… cargo run --bin demo
 //! ```
 //!
 //! Prints the credentials it created. Nothing here reads a default password:
@@ -51,8 +52,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ));
 
     // A demo is usually the first thing pointed at a database, so it bootstraps
-    // rather than assuming one has been prepared for it.
-    erp_demo::bootstrap(&control, "primary", "PRIMARY_CLUSTER_URL").await?;
+    // rather than assuming one has been prepared for it — at the capacity the
+    // deployment declares, by the migrator's rule, so a demo run after the
+    // migrator re-declares the same number rather than a placeholder.
+    let capacity = erp_control::declared_capacity()?;
+    erp_demo::bootstrap(&control, "primary", "PRIMARY_CLUSTER_URL", capacity).await?;
 
     let seeded = erp_demo::seed(
         &erp_demo::with_deployment(AppState::new(control))?,

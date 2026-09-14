@@ -20,9 +20,13 @@ A customer hosting the system opens no inbound port for us. Their deployment
 asks for its licence and reports the version it's running, and nothing ever
 reaches into their network.
 
-The practical result is that our control plane can go down without stopping a
+The intended result is that our control plane can go down without stopping a
 single tenant, which is the property that makes the self-hosted tier worth
-selling at all.
+selling at all. **It is not true yet.** Every request checks its session and its
+membership against the control plane, so a customer-hosted deployment today runs
+its own control plane beside its tenant database, and the licence handshake
+above does not exist. Both are self-hosting items in the implementation plan's
+Road to selling.
 
 ## Why we still share
 

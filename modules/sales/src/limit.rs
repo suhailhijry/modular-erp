@@ -61,8 +61,10 @@ pub const EXCEED_DOCUMENT_LIMIT: &str = "sales:exceed_document_limit";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Authority {
     /// Somebody signed in to this tenant — a person, or an API key acting with
-    /// a role (§22). `owner` exempts them; anybody else is judged by the org
-    /// chart, through the request's actor and branch.
+    /// a role (§22). `owner` exempts them, and only a *person* holding the
+    /// owner's role is one (`TenantDb::is_owner`; decided 2026-09-14): a key
+    /// issued that role is judged like anybody else, by the org chart, through
+    /// the request's actor and branch — and a machine is on no org chart.
     Member { owner: bool },
     /// Nobody: a customer's own payment, a worker's pass, a gateway's answer.
     /// **Never the default for anything**; the callers that pass it say why.
@@ -77,7 +79,7 @@ impl Authority {
     #[must_use]
     pub fn of(db: &erp_tenant::TenantDb) -> Self {
         Self::Member {
-            owner: db.role() == Some(erp_tenant::Role::Owner),
+            owner: db.is_owner(),
         }
     }
 }

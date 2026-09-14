@@ -44,6 +44,8 @@ pub mod shared;
 pub use second_factor::{
     ENROLMENT_LIFETIME_SECONDS, Enrolled, Enrolment, FactorRequiredBy, RECOVERY_CODES, ResetError,
 };
+mod shutdown;
+pub use shutdown::shutdown_signal;
 mod signup;
 mod staff;
 pub use staff::{PlatformPower, PlatformRole, StaffError, StaffMember};
@@ -85,7 +87,9 @@ pub use passwords::{
     MAX_ATTEMPTS as RESET_MAX_ATTEMPTS, PasswordError, RESET_INTERVAL_SECONDS,
     RESET_LIFETIME_SECONDS,
 };
-pub use placement::{ClusterLoad, ClusterStatus, PlacementPolicy};
+pub use placement::{
+    CapacityError, ClusterLoad, ClusterStatus, PlacementPolicy, declared_capacity,
+};
 pub use pools::{ClusterRegistry, PoolConfig, TenantPools};
 pub use provision::SignedUp as ProvisionedTenant;
 pub use provision::{
@@ -1247,14 +1251,15 @@ impl ControlPlane {
         Ok(fresh)
     }
 
-    /// **The first of `wanted`'s groups whose tables in this tenant are older
-    /// than the version beside it**, with the version they are, or `None`.
+    /// **The first of `wanted`'s groups whose tables in this tenant are not at
+    /// the version beside it** — older, or newer than this build — with the
+    /// version they are, or `None`.
     ///
     /// For the request path, which refuses a module's routes while this says
     /// anything (decision 7 of 2026-09-11): numbers served from a shape this
-    /// build no longer projects are numbers nobody can vouch for. A group with
-    /// no checkpoint row has no tables to be stale; the route that needs them
-    /// fails on its own, loudly.
+    /// build does not project are numbers nobody can vouch for, and a newer
+    /// shape is one it never has. A group with no checkpoint row has no tables
+    /// to be stale; the route that needs them fails on its own, loudly.
     ///
     /// # Why only "current" is cached
     ///
@@ -1300,7 +1305,13 @@ impl ControlPlane {
                 continue;
             }
             match rows.iter().find(|row| row.group_name == *group) {
-                Some(row) if row.read_model_version < *version => {
+                // **`!=`, not `<`** — the projection runner's rule, for the
+                // request path. It was `<`, so during a rolling deploy a pod
+                // still on the old build served tables the migrator had
+                // already swapped to the new shape, by rules that no longer
+                // described them. Newer is as unservable as older; only this
+                // build's own version is.
+                Some(row) if row.read_model_version != *version => {
                     behind.get_or_insert((*group, row.read_model_version));
                 }
                 _ => self.read_models.put((tenant, *group), ()),

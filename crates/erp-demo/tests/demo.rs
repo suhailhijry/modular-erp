@@ -687,11 +687,11 @@ async fn the_demo_bootstraps_a_database_nobody_prepared() {
         TenantPools::new(clusters, PoolConfig::default()),
     ));
 
-    erp_demo::bootstrap(&control, "primary", "ERP_CLUSTER_PRIMARY_URL")
+    erp_demo::bootstrap(&control, "primary", "ERP_CLUSTER_PRIMARY_URL", 100)
         .await
         .expect("bootstraps");
     // Twice, because a demo is often re-run against a live deployment.
-    erp_demo::bootstrap(&control, "primary", "ERP_CLUSTER_PRIMARY_URL")
+    erp_demo::bootstrap(&control, "primary", "ERP_CLUSTER_PRIMARY_URL", 100)
         .await
         .expect("bootstrapping is idempotent");
 

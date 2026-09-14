@@ -3171,6 +3171,62 @@ async fn a_second_factor_a_company_requires_is_replaced_never_removed() {
     fixture.cleanup().await;
 }
 
+/// **A person's factor is reset at most three times an hour, whoever asks.**
+///
+/// Every reset ends every session the person holds and mails them, so an
+/// unlimited route was a way to keep a colleague signed out and fill their
+/// inbox — by their owner, or by support. One budget per target, charged by
+/// the tenant route and the platform route alike; the fourth is 429 with the
+/// seconds to wait.
+#[tokio::test]
+async fn a_persons_factor_is_reset_at_most_three_times_an_hour() {
+    let mut fixture = Fixture::new().await;
+    let acme = fixture.provision("acme").await;
+    let owner = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    fixture.join(owner, acme).await;
+    let (owner_token, _) = fixture.enrolled_token(owner, "owner@acme.test").await;
+    let clerk = fixture.user("clerk@acme.test", "hunter2hunter2").await;
+    fixture.join_as(clerk, acme, "clerk").await;
+    let (_, _paper) = fixture.enrolled_token(clerk, "clerk@acme.test").await;
+
+    let reset = format!("/v1/members/{clerk}/second-factor-reset");
+    for attempt in 1..=3 {
+        let (status, body) = fixture.as_caller(&owner_token, "POST", &reset, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "reset {attempt}: {body}");
+    }
+    let (status, body) = fixture.as_caller(&owner_token, "POST", &reset, None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["code"], "request.too_many_requests", "{body}");
+    assert!(
+        body["args"]["seconds"]["value"]
+            .as_i64()
+            .is_some_and(|s| s > 0),
+        "the refusal does not say how long: {body}"
+    );
+
+    // **The same budget from the platform.** Support resetting the same person
+    // a moment later is the fourth reset of that person, not the first of
+    // support's.
+    let (_, support, _) = fixture
+        .staff("support@erp.test", erp_control::PlatformRole::Support)
+        .await;
+    let (status, body) = fixture
+        .as_caller(
+            &support,
+            "POST",
+            &format!("/v1/platform/identities/{clerk}/second-factor-reset"),
+            Some(serde_json::json!({ "reason": "Ticket 4472: still cannot sign in." })),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the platform route has its own budget for the same person: {body}"
+    );
+
+    fixture.cleanup().await;
+}
+
 /// **The owner resets a member who lost both phone and paper, and the emailed
 /// link is the only way back.**
 ///
@@ -14682,26 +14738,77 @@ async fn a_conversation_holds_both_kinds_and_reaches_an_open_screen() {
 // Read-model versions
 // ---------------------------------------------------------------------------
 
-/// Marks one of `tenant`'s projection groups as built before read-model
-/// versions were recorded.
+/// Stamps one of `tenant`'s projection groups at a read-model version that is
+/// not this build's.
 ///
 /// **Raw SQL, and it has to be.** This build stamps only its own version, so
-/// nothing in it can make a tenant's tables older than itself. What this
-/// simulates is what the tenant chain's `0016` leaves on every tenant built
-/// before it, and what a restore of an older backup brings back: a checkpoint
-/// at 0.
-async fn built_before_versions(fixture: &Fixture, tenant: TenantId, group: &str) {
+/// nothing in it can make a tenant's tables another version than itself. `0`
+/// is what the tenant chain's `0016` leaves on every tenant built before it,
+/// and what a restore of an older backup brings back; a version *above* the
+/// build's is what the migrator of the next release leaves while this one is
+/// still serving.
+async fn stamped(fixture: &Fixture, tenant: TenantId, group: &str, version: i16) {
     let db = fixture
         .control
         .enter_for_maintenance(tenant)
         .await
         .expect("maintenance entry");
     let mut conn = db.acquire().await.expect("connection");
-    sqlx::query("UPDATE projection_checkpoint SET read_model_version = 0 WHERE group_name = $1")
+    sqlx::query("UPDATE projection_checkpoint SET read_model_version = $2 WHERE group_name = $1")
         .bind(group)
+        .bind(version)
         .execute(&mut *conn)
         .await
         .expect("stamps");
+}
+
+/// Marks one of `tenant`'s projection groups as built before read-model
+/// versions were recorded.
+async fn built_before_versions(fixture: &Fixture, tenant: TenantId, group: &str) {
+    stamped(fixture, tenant, group, 0).await;
+}
+
+/// **A read model newer than the build is as unservable as an older one.**
+///
+/// During a rolling deploy the migrator swaps a group's tables to the next
+/// release's shape while pods on this release are still answering. The
+/// request path compared with `<` until 2026-09-14, so those pods served the
+/// new tables by this build's rules — numbers nobody could vouch for, from the
+/// one window in which nothing else was looking. The projection runner always
+/// refused with `!=`; now both do.
+#[tokio::test]
+async fn a_module_whose_read_model_is_newer_than_the_build_answers_503_too() {
+    let mut fixture = Fixture::new().await;
+    let user = fixture.user("owner@acme.test", "hunter2hunter2").await;
+    let tenant = fixture.provision("acme").await;
+    fixture.join(user, tenant).await;
+    fixture.enable_ledger(tenant).await;
+    fixture.enable_module(tenant, files::setup()).await;
+    let token = fixture.token("owner@acme.test", "hunter2hunter2").await;
+
+    let files = "/v1/files?owner_kind=tenant&owner_id=SELF";
+    let (status, body) = fixture.as_caller(&token, "GET", files, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let next_release = <files::Files as erp_projection::ProjectionGroup>::VERSION + 1;
+    stamped(&fixture, tenant, files::GROUP_NAME, next_release).await;
+    fixture.control.clear_caches();
+
+    let (status, body) = fixture.as_caller(&token, "GET", files, None).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "tables the next release owns were served by this one: {body}"
+    );
+    assert_eq!(body["code"], "request.read_model_rebuilding", "{body}");
+
+    // Another module's route, on the same tenant, is untouched.
+    let (status, body) = fixture
+        .as_caller(&token, "GET", "/v1/ledger/accounts", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    fixture.cleanup().await;
 }
 
 /// **A module whose read model is older than the build answers 503, and
@@ -14955,6 +15062,29 @@ async fn a_clerk_over_the_document_limit_is_refused_and_the_worker_is_not() {
         StatusCode::CREATED,
         "the owner is never limited: {body}"
     );
+
+    // **A key issued the owner's role is not the owner.** Until 2026-09-14
+    // `Authority::of` read the role alone, so an integration key walked past
+    // the limit the owner is exempt from. A machine is an ordinary member.
+    let (status, key) = fixture
+        .as_caller(
+            &owner,
+            "POST",
+            "/v1/keys",
+            Some(serde_json::json!({ "name": "Integration", "scopes": ["*:post_entries"], "role": "owner" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{key}");
+    let secret = key["secret"].as_str().expect("a secret").to_owned();
+    let (status, body, _) = fixture
+        .send(posting(&secret, "/v1/sales/invoices", &invoice))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a key with the owner's role walked past the document limit: {body}"
+    );
+    assert_eq!(body["code"], "sales.over_document_limit", "{body}");
 
     // A booking priced at 200, completed.
     let (status, body, _) = fixture

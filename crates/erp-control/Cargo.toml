@@ -27,6 +27,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 argon2 = "0.5.3"
 sha2 = "0.11.0"

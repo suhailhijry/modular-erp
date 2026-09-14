@@ -642,8 +642,11 @@ now, while logs are short.
 **Two obligations follow.** CI must upgrade a *realistic* N-1 database, never an
 empty one — the classic failure is a migration clean against a fresh schema that
 breaks on a `NOT NULL` added where five years of rows hold nulls. And backup
-before upgrade is enforced by the migrator, not documented: a failed upgrade on
-tier-3 infrastructure cannot be fixed remotely, by anyone, ever.
+before upgrade must be enforced by the migrator, not documented: a failed upgrade
+on tier-3 infrastructure cannot be fixed remotely, by anyone, ever. **Not built
+yet** — the migrator has no backup code, and taking one is a step in
+`docs/RUNNING.md` that a person follows. Enforcing it is a go-live item in the
+implementation plan's Road to selling.
 
 ### 1.18 Source-available; production use is sold (D18)
 

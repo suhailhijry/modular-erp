@@ -29,6 +29,48 @@ use serde::{Deserialize, Serialize};
 
 use crate::AccessError;
 
+/// **How many tenants the primary cluster is declared to hold**, from
+/// `PRIMARY_CLUSTER_CAPACITY`.
+///
+/// Required, and refused rather than defaulted. It defaulted to ten thousand
+/// until 2026-09-14 — a number nobody had measured — so a fresh deployment
+/// placed tenants on a cluster whose limit was a guess, which is the overfill
+/// the module docs above warn about. Whoever declares the cluster, the
+/// migrator or `bin/demo` on a box with no migrator, needs the number, and
+/// there is one rule for both.
+///
+/// # Errors
+/// Unset or blank, or set to anything but a positive whole number.
+pub fn declared_capacity() -> Result<i32, CapacityError> {
+    capacity_from(std::env::var("PRIMARY_CLUSTER_CAPACITY").ok().as_deref())
+}
+
+/// [`declared_capacity`] with the environment already read, so the rule can be
+/// tested without `set_var` — the reason `ClusterRegistry::from_urls` gives.
+fn capacity_from(raw: Option<&str>) -> Result<i32, CapacityError> {
+    let raw = raw
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .ok_or(CapacityError::Unset)?;
+    match raw.parse::<i32>() {
+        Ok(count) if count > 0 => Ok(count),
+        _ => Err(CapacityError::NotACount(raw.to_owned())),
+    }
+}
+
+/// `PRIMARY_CLUSTER_CAPACITY` is not a number of tenants.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CapacityError {
+    #[error(
+        "PRIMARY_CLUSTER_CAPACITY is not set; size the primary cluster from measurement \
+         (architecture D13) and declare it — there is no default, because a guessed \
+         capacity is an overfilled cluster"
+    )]
+    Unset,
+    #[error("PRIMARY_CLUSTER_CAPACITY is {0:?}, not a positive whole number of tenants")]
+    NotACount(String),
+}
+
 /// Whether a cluster will accept new tenants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -173,6 +215,27 @@ impl PlacementPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **No number, no cluster.** The placeholder this replaced was the bug.
+    #[test]
+    fn the_capacity_is_required_and_a_count() {
+        assert_eq!(capacity_from(None), Err(CapacityError::Unset));
+        assert_eq!(capacity_from(Some("")), Err(CapacityError::Unset));
+        assert_eq!(capacity_from(Some("   ")), Err(CapacityError::Unset));
+        assert_eq!(
+            capacity_from(Some("0")),
+            Err(CapacityError::NotACount("0".to_owned()))
+        );
+        assert_eq!(
+            capacity_from(Some("-5")),
+            Err(CapacityError::NotACount("-5".to_owned()))
+        );
+        assert_eq!(
+            capacity_from(Some("lots")),
+            Err(CapacityError::NotACount("lots".to_owned()))
+        );
+        assert_eq!(capacity_from(Some(" 250 ")), Ok(250));
+    }
 
     fn cluster(name: &str, active: i64, live: i64) -> ClusterLoad {
         ClusterLoad {

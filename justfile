@@ -53,6 +53,12 @@ redis:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Advisories, licences, duplicate crates and sources, per `deny.toml`. CI runs
+# it as its own job; not part of `check` because it needs `cargo-deny`
+# installed (`cargo install cargo-deny --locked`) and a fresh advisory database.
+deny:
+    cargo deny check
+
 fmt:
     cargo fmt --all
 
@@ -104,6 +110,7 @@ prepare:
 # saves a card sealed under it. See RUNNING.md.
 demo password:
     CONTROL_DATABASE_URL="{{base_url}}" PRIMARY_CLUSTER_URL="{{base_url}}" \
+      PRIMARY_CLUSTER_CAPACITY="${PRIMARY_CLUSTER_CAPACITY:-100}" \
       DEMO_PASSWORD="{{password}}" cargo run --quiet --bin demo
 
 # Bring every tenant database up to the migrations this build expects, and

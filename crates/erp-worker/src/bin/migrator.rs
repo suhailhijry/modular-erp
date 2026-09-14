@@ -628,15 +628,6 @@ async fn unreadable_events(
     Ok(findings)
 }
 
-/// How many tenants and databases the primary cluster is declared to hold.
-///
-/// **A placeholder, not a measurement.** D13 says capacity is sized from
-/// observation, and nothing here has observed anything. It exists so that a
-/// fresh deployment can accept its first signup instead of answering
-/// `no cluster has capacity (0 at their limit)` — which is what it did, and
-/// which tells an operator nothing about what to do next.
-const PLACEHOLDER_CAPACITY: i32 = 10_000;
-
 /// Declares the primary cluster if the control plane has never heard of it.
 ///
 /// # Why this is here
@@ -653,14 +644,15 @@ const PLACEHOLDER_CAPACITY: i32 = 10_000;
 /// The **variable names** are stored, never the credentials (D13). What is
 /// recorded is "this cluster's DSN comes from `PRIMARY_CLUSTER_URL`", so a
 /// control-plane backup carries no passwords.
+///
+/// **The capacity is required.** It defaulted to a placeholder of ten thousand
+/// until 2026-09-14, so a deployment that never set
+/// `PRIMARY_CLUSTER_CAPACITY` — and none did — overfilled its cluster by
+/// exactly the guess D13 forbids. Refused now, before anything is applied.
 async fn register_primary(
     control: &ControlPlane,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let capacity = std::env::var("PRIMARY_CLUSTER_CAPACITY")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<i32>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(PLACEHOLDER_CAPACITY);
+    let capacity = erp_control::declared_capacity()?;
 
     let replica_variable = std::env::var("PRIMARY_REPLICA_URL")
         .ok()
@@ -681,8 +673,7 @@ async fn register_primary(
     tracing::info!(
         capacity,
         replica = replica_variable.is_some(),
-        "cluster `primary` declared. The capacity is a placeholder — size it \
-         from measurement and set PRIMARY_CLUSTER_CAPACITY (architecture D13)."
+        "cluster `primary` declared at the capacity PRIMARY_CLUSTER_CAPACITY names"
     );
     Ok(())
 }

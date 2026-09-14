@@ -82,7 +82,7 @@ reach it. Without it, reads are served as they are.
 Minor units and an explicit currency, never a decimal string and never a float. \
 `{ \"minor\": 1050, \"currency\": \"SAR\" }` is 10.50 SAR.",
         version = "0.1.0",
-        license(name = "AGPL-3.0-or-later"),
+        license(name = "BUSL-1.1"),
     ),
     // The default, so a route that says nothing is documented as needing a
     // session. Forgetting must never be the permissive option — the same rule

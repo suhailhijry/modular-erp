@@ -74,6 +74,24 @@ impl TenantDb {
         self.access = access;
     }
 
+    /// **An API key is behind this handle**, not a person. Called by the one
+    /// place that knows — the extractor that authenticated the key — so every
+    /// owner exemption below it sees a machine. See [`crate::Access::is_owner`].
+    pub fn acting_as_machine(&mut self) {
+        if let Some(access) = &mut self.access {
+            access.machine = true;
+        }
+    }
+
+    /// Whether **the owner** — a person holding the owner's role — is behind
+    /// this handle. `false` for a key issued that role, for background work,
+    /// and for support. The question every owner exemption asks; none of them
+    /// reads the role alone any more.
+    #[must_use]
+    pub fn is_owner(&self) -> bool {
+        self.access.as_ref().is_some_and(crate::Access::is_owner)
+    }
+
     /// The caller's role, if a person is behind this handle.
     ///
     /// `None` for maintenance and provisioning, which act on the system's

@@ -64,8 +64,9 @@ pub const APPROVE_CREDIT_NOTE: &str = "sales:approve_credit_note";
 /// already read that same role off it.
 ///
 /// `hr::may` answers the rest, and the first of its answers is what keeps this
-/// opt-in: a tenant that has never granted a claim is permitted, so a till that
-/// worked yesterday works today.
+/// opt-in: a tenant that has never granted **this** claim is permitted, so a
+/// till that worked yesterday works today — and granting some other claim does
+/// not change that.
 async fn may_credit(
     conn: &mut sqlx::PgConnection,
     authority: Authority,
@@ -83,7 +84,7 @@ async fn may_credit(
 pub enum SalesError {
     #[error("an invoice needs at least one line that comes to something")]
     NothingToInvoice,
-    /// **Crediting an invoice is a claim, once this tenant uses claims.**
+    /// **Crediting an invoice is a claim, once this tenant grants it.**
     ///
     /// See §52: until 2026-09-09 this claim could be granted, displayed and
     /// relied on while nothing consulted it.

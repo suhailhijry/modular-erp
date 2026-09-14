@@ -40,50 +40,6 @@ pub use retention::{
 };
 pub use worker::{Shutdown, Worker, WorkerConfig};
 
-use tokio_util::sync::CancellationToken;
-
-/// A token cancelled by SIGTERM or SIGINT.
-///
-/// SIGTERM is what an orchestrator sends; SIGINT is Ctrl-C. Both mean the same
-/// thing here, and treating them differently is how a local run behaves unlike
-/// production.
-///
-/// A **second** signal aborts immediately. An operator pressing Ctrl-C twice
-/// means it, and a drain that will not finish must not be the only way out.
-#[must_use]
-pub fn shutdown_signal() -> CancellationToken {
-    let token = CancellationToken::new();
-    let listener = token.clone();
-
-    tokio::spawn(async move {
-        let mut terminate =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(stream) => stream,
-                Err(e) => {
-                    tracing::error!(error = %e, "could not install the SIGTERM handler");
-                    return;
-                }
-            };
-
-        tokio::select! {
-            _ = terminate.recv() => tracing::info!("SIGTERM received; draining"),
-            result = tokio::signal::ctrl_c() => match result {
-                Ok(()) => tracing::info!("interrupt received; draining"),
-                Err(e) => {
-                    tracing::error!(error = %e, "could not listen for interrupts");
-                    return;
-                }
-            },
-        }
-        listener.cancel();
-
-        tokio::select! {
-            _ = terminate.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
-        }
-        tracing::warn!("second signal; exiting without finishing the drain");
-        std::process::exit(130);
-    });
-
-    token
-}
+/// The signal this and the API both drain on. It lived here until 2026-09-14,
+/// when the API turned out to be listening for Ctrl-C alone.
+pub use erp_control::shutdown_signal;

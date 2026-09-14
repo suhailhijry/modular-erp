@@ -150,8 +150,9 @@ asked for *there* rather than in the two `sales` wrappers — so the counter and
 the same `403 sales.not_approved`. **This is a deliberate behaviour change at
 the till**, decided by the product owner: the till used to be the one door that
 did not ask, so a clerk refused on the sales screen could hand the same money
-back at the counter. A tenant that has never granted a claim is asked nothing,
-which is where every tenant starts; the owner is never asked; and a credit note
+back at the counter. A tenant that has never granted *this* claim is asked
+nothing — granting some other claim changes nothing here — which is where every
+tenant starts; the owner is never asked; and a credit note
 with `Authority::System` behind it is not claim-judged at all.
 
 ## Returns, and the change to `sales` they needed first
